@@ -5,15 +5,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from drakkar.config import KafkaConfig
+from drakkar.config import KafkaConfig, KafkaSourceConfig
 from drakkar.consumer import CONSUMER_MAX_WORKERS, LAG_QUERY_TIMEOUT_SECONDS, KafkaConsumer
 
 
 @pytest.fixture
 def kafka_config() -> KafkaConfig:
-    return KafkaConfig(
-        brokers='localhost:9092',
-        source_topic='test-source',
+    return KafkaConfig(brokers='localhost:9092')
+
+
+@pytest.fixture
+def kafka_source_config() -> KafkaSourceConfig:
+    return KafkaSourceConfig(
+        enabled=True,
+        topic='test-source',
         consumer_group='test-group',
         max_poll_records=10,
     )
@@ -40,8 +45,8 @@ def make_error_message(error_code):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-def test_consumer_creation(mock_cls, kafka_config):
-    _consumer = KafkaConsumer(kafka_config)
+def test_consumer_creation(mock_cls, kafka_config, kafka_source_config):
+    _consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     mock_cls.assert_called_once()
     call_args = mock_cls.call_args[0][0]
     assert call_args['bootstrap.servers'] == 'localhost:9092'
@@ -51,11 +56,11 @@ def test_consumer_creation(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_consumer_subscribe(mock_cls, kafka_config):
+async def test_consumer_subscribe(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.subscribe()
 
     mock_inner.subscribe.assert_called_once()
@@ -64,7 +69,7 @@ async def test_consumer_subscribe(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_batch_returns_messages(mock_cls, kafka_config):
+async def test_poll_batch_returns_messages(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_mock_message(partition=0, offset=10, value=b'msg1'),
@@ -72,7 +77,7 @@ async def test_poll_batch_returns_messages(mock_cls, kafka_config):
     ]
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     messages = await consumer.poll_batch(max_messages=10, timeout=0.1)
 
     assert len(messages) == 2
@@ -83,18 +88,18 @@ async def test_poll_batch_returns_messages(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_batch_empty(mock_cls, kafka_config):
+async def test_poll_batch_empty(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.consume.return_value = []
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     messages = await consumer.poll_batch(timeout=0.1)
     assert messages == []
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_batch_skips_partition_eof(mock_cls, kafka_config):
+async def test_poll_batch_skips_partition_eof(mock_cls, kafka_config, kafka_source_config):
     from confluent_kafka import KafkaError
 
     mock_inner = AsyncMock()
@@ -104,14 +109,14 @@ async def test_poll_batch_skips_partition_eof(mock_cls, kafka_config):
     ]
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     messages = await consumer.poll_batch(timeout=0.1)
     assert len(messages) == 1
     assert messages[0].value == b'valid'
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_batch_logs_errors(mock_cls, kafka_config):
+async def test_poll_batch_logs_errors(mock_cls, kafka_config, kafka_source_config):
     from confluent_kafka import KafkaError
 
     mock_inner = AsyncMock()
@@ -120,7 +125,7 @@ async def test_poll_batch_logs_errors(mock_cls, kafka_config):
     ]
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     with capture_logs() as cap:
         messages = await consumer.poll_batch(timeout=0.1)
 
@@ -131,11 +136,11 @@ async def test_poll_batch_logs_errors(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_commit_offsets(mock_cls, kafka_config):
+async def test_commit_offsets(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.commit({0: 100, 1: 200})
 
     mock_inner.commit.assert_called_once()
@@ -145,12 +150,14 @@ async def test_commit_offsets(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_on_assign_callback(mock_cls, kafka_config):
+async def test_on_assign_callback(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
     assigned = []
-    consumer = KafkaConsumer(kafka_config, on_assign=lambda parts: assigned.extend(parts))
+    consumer = KafkaConsumer(
+        connection=kafka_config, source=kafka_source_config, on_assign=lambda parts: assigned.extend(parts)
+    )
     await consumer.subscribe()
 
     # get the async callback registered with subscribe
@@ -163,7 +170,7 @@ async def test_on_assign_callback(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_on_revoke_callback(mock_cls, kafka_config):
+async def test_on_revoke_callback(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
@@ -174,7 +181,7 @@ async def test_on_revoke_callback(mock_cls, kafka_config):
     async def on_revoke(parts):
         revoked.extend(parts)
 
-    consumer = KafkaConsumer(kafka_config, on_revoke=on_revoke)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config, on_revoke=on_revoke)
     await consumer.subscribe()
 
     call_kwargs = mock_inner.subscribe.call_args[1]
@@ -186,11 +193,11 @@ async def test_on_revoke_callback(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_pause_partitions(mock_cls, kafka_config):
+async def test_pause_partitions(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.pause([0, 3])
 
     mock_inner.pause.assert_called_once()
@@ -201,11 +208,11 @@ async def test_pause_partitions(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_resume_partitions(mock_cls, kafka_config):
+async def test_resume_partitions(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.resume([1, 5])
 
     mock_inner.resume.assert_called_once()
@@ -214,15 +221,15 @@ async def test_resume_partitions(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag(mock_cls, kafka_config):
+async def test_get_total_lag(mock_cls, kafka_config, kafka_source_config):
     from confluent_kafka import TopicPartition
 
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
     # committed returns TopicPartitions with offsets
-    tp0 = TopicPartition(kafka_config.source_topic, 0, 90)
-    tp1 = TopicPartition(kafka_config.source_topic, 1, 80)
+    tp0 = TopicPartition(kafka_source_config.topic, 0, 90)
+    tp1 = TopicPartition(kafka_source_config.topic, 1, 80)
     mock_inner.committed.return_value = [tp0, tp1]
 
     # watermarks: (low, high)
@@ -234,25 +241,25 @@ async def test_get_total_lag(mock_cls, kafka_config):
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     total = await consumer.get_total_lag([0, 1])
     assert total == 25  # 10 + 15
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_empty_partitions(mock_cls, kafka_config):
+async def test_get_total_lag_empty_partitions(mock_cls, kafka_config, kafka_source_config):
     """get_total_lag returns 0 immediately when partition list is empty."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     total = await consumer.get_total_lag([])
     assert total == 0
     mock_inner.committed.assert_not_called()
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_config):
+async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_config, kafka_source_config):
     """Both lag RPCs must pass a timeout — librdkafka blocks forever without one.
 
     These calls share one small executor pool with ``consume`` and ``commit``.
@@ -265,7 +272,7 @@ async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_confi
 
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
-    mock_inner.committed.return_value = [TopicPartition(kafka_config.source_topic, 0, 5)]
+    mock_inner.committed.return_value = [TopicPartition(kafka_source_config.topic, 0, 5)]
 
     async def fake_watermarks(tp, *, timeout=None):
         assert timeout == LAG_QUERY_TIMEOUT_SECONDS
@@ -273,7 +280,7 @@ async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_confi
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.get_total_lag([0])
     await consumer.get_partition_lag([0])
 
@@ -282,41 +289,41 @@ async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_confi
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_consumer_pool_is_larger_than_the_two_thread_default(mock_cls, kafka_config):
+async def test_consumer_pool_is_larger_than_the_two_thread_default(mock_cls, kafka_config, kafka_source_config):
     """AIOConsumer's 2-thread default is shared by every consumer operation.
 
     The UI's watermark fan-out submits one work item per assigned partition,
     so the default leaves ``consume``/``commit`` waiting behind UI traffic.
     """
     mock_cls.return_value = AsyncMock()
-    KafkaConsumer(kafka_config)
+    KafkaConsumer(connection=kafka_config, source=kafka_source_config)
 
     assert mock_cls.call_args.kwargs['max_workers'] == CONSUMER_MAX_WORKERS
     assert CONSUMER_MAX_WORKERS > 2
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_committed_exception(mock_cls, kafka_config):
+async def test_get_total_lag_committed_exception(mock_cls, kafka_config, kafka_source_config):
     """get_total_lag returns 0 when committed() raises."""
     mock_inner = AsyncMock()
     mock_inner.committed.side_effect = RuntimeError('broker unreachable')
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     total = await consumer.get_total_lag([0, 1])
     assert total == 0
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_watermark_exception(mock_cls, kafka_config):
+async def test_get_total_lag_watermark_exception(mock_cls, kafka_config, kafka_source_config):
     """Watermark exception for one partition yields 0 lag for that partition only."""
     from confluent_kafka import TopicPartition
 
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    tp0 = TopicPartition(kafka_config.source_topic, 0, 50)
-    tp1 = TopicPartition(kafka_config.source_topic, 1, 80)
+    tp0 = TopicPartition(kafka_source_config.topic, 0, 50)
+    tp1 = TopicPartition(kafka_source_config.topic, 1, 80)
     mock_inner.committed.return_value = [tp0, tp1]
 
     async def fake_watermarks(tp, *, timeout=None):
@@ -327,13 +334,13 @@ async def test_get_total_lag_watermark_exception(mock_cls, kafka_config):
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     total = await consumer.get_total_lag([0, 1])
     assert total == 20  # partition 0 = 0 (exception), partition 1 = 20
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag(mock_cls, kafka_config):
+async def test_get_partition_lag(mock_cls, kafka_config, kafka_source_config):
     """get_partition_lag returns per-partition committed, high_watermark, lag."""
     from confluent_kafka import TopicPartition
 
@@ -348,11 +355,11 @@ async def test_get_partition_lag(mock_cls, kafka_config):
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    tp0_committed = TopicPartition(kafka_config.source_topic, 0, 90)
-    tp1_committed = TopicPartition(kafka_config.source_topic, 1, 150)
+    tp0_committed = TopicPartition(kafka_source_config.topic, 0, 90)
+    tp1_committed = TopicPartition(kafka_source_config.topic, 1, 150)
     mock_inner.committed.return_value = [tp0_committed, tp1_committed]
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0, 1])
 
     assert result[0] == {'committed': 90, 'high_watermark': 100, 'lag': 10}
@@ -360,20 +367,20 @@ async def test_get_partition_lag(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag_exception_returns_zeros(mock_cls, kafka_config):
+async def test_get_partition_lag_exception_returns_zeros(mock_cls, kafka_config, kafka_source_config):
     """get_partition_lag returns zeros for a partition when an exception occurs."""
     mock_inner = AsyncMock()
     mock_inner.get_watermark_offsets.side_effect = RuntimeError('connection lost')
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0])
 
     assert result[0] == {'committed': 0, 'high_watermark': 0, 'lag': 0}
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config):
+async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config, kafka_source_config):
     """Partitions with negative committed offset (no commit yet) use 0 as baseline."""
     from confluent_kafka import TopicPartition
 
@@ -381,7 +388,7 @@ async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config):
     mock_cls.return_value = mock_inner
 
     # offset -1001 means no committed offset
-    tp0 = TopicPartition(kafka_config.source_topic, 0, -1001)
+    tp0 = TopicPartition(kafka_source_config.topic, 0, -1001)
     mock_inner.committed.return_value = [tp0]
 
     async def fake_watermarks(tp, *, timeout=None):
@@ -390,14 +397,14 @@ async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config):
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     total = await consumer.get_total_lag([0])
     # no committed offset → committed_map has no entry → lag = max(0, 50 - 0) = 50
     assert total == 50
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_config):
+async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_config, kafka_source_config):
     """Partition with negative committed offset uses 0."""
     from confluent_kafka import TopicPartition
 
@@ -410,22 +417,22 @@ async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_confi
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
 
-    tp_committed = TopicPartition(kafka_config.source_topic, 0, -1001)
+    tp_committed = TopicPartition(kafka_source_config.topic, 0, -1001)
     mock_inner.committed.return_value = [tp_committed]
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0])
 
     assert result[0] == {'committed': 0, 'high_watermark': 100, 'lag': 100}
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_on_assign_without_callback(mock_cls, kafka_config):
+async def test_on_assign_without_callback(mock_cls, kafka_config, kafka_source_config):
     """_handle_assign with no callback still logs and increments metrics."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)  # no on_assign callback
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)  # no on_assign callback
     await consumer.subscribe()
 
     call_kwargs = mock_inner.subscribe.call_args[1]
@@ -437,12 +444,12 @@ async def test_on_assign_without_callback(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_on_revoke_without_callback(mock_cls, kafka_config):
+async def test_on_revoke_without_callback(mock_cls, kafka_config, kafka_source_config):
     """_handle_revoke with no callback still logs and increments metrics."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)  # no on_revoke callback
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)  # no on_revoke callback
     await consumer.subscribe()
 
     call_kwargs = mock_inner.subscribe.call_args[1]
@@ -451,3 +458,13 @@ async def test_on_revoke_without_callback(mock_cls, kafka_config):
 
     # should not raise even without callback
     await revoke_cb(mock_inner, [TopicPartition('test-source', 2)])
+
+
+@patch('drakkar.consumer.AIOConsumer')
+def test_consumer_reads_group_and_topic_from_source_config(mock_cls):
+    consumer = KafkaConsumer(
+        connection=KafkaConfig(brokers='b:9092'),
+        source=KafkaSourceConfig(enabled=True, topic='t', consumer_group='g', max_poll_records=7),
+    )
+    assert consumer.source_topic == 't'
+    assert consumer.consumer_group == 'g'

@@ -105,7 +105,7 @@ colors first, then one per rule). The swatches carry no text; hover one to read 
 ### Implicit fallback
 
 When no configured rule matches, the bar falls back to a status color: **HTTP-origin tasks**
-(`origin == 'http'`, from the [synchronous webapp pipeline](webapp.md)) draw `#9c27b0` — a
+(`origin == 'http'`, from the [HTTP source](webapp.md)) draw `#9c27b0` — a
 different purple than the named `purple` above, carried over from the timeline's previous
 hardcoded styling — then everything else falls to a plain status color: green (`completed`),
 red (`failed`), yellow (`running`).

@@ -275,7 +275,9 @@ def test_env_override_does_not_reach_hyphenated_instance_name(tmp_path, monkeypa
     from drakkar.config import load_config
 
     config_file = tmp_path / 'drakkar.yaml'
-    config_file.write_text('sinks:\n  postgres:\n    main-db:\n      dsn: "postgresql://orig"\n')
+    config_file.write_text(
+        'sources:\n  kafka:\n    enabled: true\nsinks:\n  postgres:\n    main-db:\n      dsn: "postgresql://orig"\n'
+    )
     monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN_DB__DSN', 'postgresql://overridden')
 
     cfg = load_config(str(config_file))
@@ -359,7 +361,7 @@ def test_type_field_uses_simple_json_type_names():
     by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
 
     assert by_path['kafka.brokers'].type == 'string'
-    assert by_path['kafka.max_poll_records'].type == 'integer'
+    assert by_path['sources.kafka.max_poll_records'].type == 'integer'
     assert by_path['sinks.circuit_breaker.cooldown_seconds'].type == 'number'
     assert by_path['metrics.enabled'].type == 'boolean'
     assert by_path['ui.expose_env_vars'].type == 'array'

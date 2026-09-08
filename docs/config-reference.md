@@ -32,29 +32,15 @@ cluster_name_env: ''               # env: DK_CLUSTER_NAME_ENV  · reasonable: K8
 
 ---
 
-## Kafka source (`kafka:`)
+## Kafka connection (`kafka:`)
 
-📚 [Deep details](configuration.md#kafka-source-kafka) · [Staggered startup](configuration.md#staggered-startup-alignment)
+📚 [Deep details](configuration.md#kafka-connection-kafka)
 
-The Kafka consumer that reads input messages. `brokers` doubles as the fallback for sink and DLQ brokers when those are left empty.
+Kafka cluster connection settings: brokers, transport security, raw client properties, Kafka-UI links. Shared by the Kafka source, the Kafka sinks, and the DLQ — `brokers` doubles as their fallback when their own `brokers` field is left empty.
 
 ```yaml
 kafka:
   brokers: localhost:9092          # bootstrap servers, comma-separated. env: DK_KAFKA__BROKERS  · reasonable: kafka-1:9092,kafka-2:9092
-  source_topic: input-events       # topic to consume from. env: DK_KAFKA__SOURCE_TOPIC
-  consumer_group: drakkar-workers  # consumer-group ID; workers sharing it split partitions. env: DK_KAFKA__CONSUMER_GROUP
-
-  max_poll_records: 100            # messages per poll batch; ↑ throughput / ↓ latency. env: DK_KAFKA__MAX_POLL_RECORDS  · reasonable: 50–500
-  max_poll_interval_ms: 300000     # max ms between polls before broker kicks us out. env: DK_KAFKA__MAX_POLL_INTERVAL_MS  · raise for slow tasks
-  session_timeout_ms: 45000        # group-membership heartbeat window. env: DK_KAFKA__SESSION_TIMEOUT_MS
-  heartbeat_interval_ms: 3000      # heartbeat frequency; should be ≤ session_timeout_ms / 3. env: DK_KAFKA__HEARTBEAT_INTERVAL_MS
-
-  # Policy for messages whose value fails input_model parsing. env: DK_KAFKA__ON_PARSE_ERROR
-  #   skip  — message reaches arrange() with payload=None and msg.parse_error set (default)
-  #   dlq   — message is excluded from arrange() and written to the DLQ topic as a
-  #           ParseFailurePayload; the offset commits only after the DLQ write is confirmed
-  #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
-  on_parse_error: skip
 
   # Transport security. Default PLAINTEXT emits no client properties at all, so a worker
   # that configures nothing here connects exactly as it always did. Kafka sinks and the DLQ
@@ -87,12 +73,62 @@ kafka:
   # icon next to every <partition:offset>. Both empty = feature disabled silently.
   ui_url: ''                       # env: DK_KAFKA__UI_URL  · example: http://kafka-ui:8080
   ui_cluster_name: ''              # cluster name registered in Kafka-UI. env: DK_KAFKA__UI_CLUSTER_NAME
-
-  # Rolling-deploy alignment: serialize fleet-wide consumer-group rebalances.
-  startup_align_enabled: true      # disable for snappy single-process dev. env: DK_KAFKA__STARTUP_ALIGN_ENABLED
-  startup_min_wait_seconds: 4.0    # min sleep before alignment (buffer for slow init). env: DK_KAFKA__STARTUP_MIN_WAIT_SECONDS
-  startup_align_interval_seconds: 10  # wake at next time%interval==0 boundary. env: DK_KAFKA__STARTUP_ALIGN_INTERVAL_SECONDS
 ```
+
+---
+
+## Input sources (`sources:`)
+
+📚 [Deep details](configuration.md#input-sources-sources) · [Input Sources](sources.md) · [Staggered startup](configuration.md#staggered-startup-alignment) · [Webapp page](webapp.md)
+
+The Kafka consumer and the synchronous HTTP ingress, as peers. Each is optional and enabled explicitly, but at least one of `sources.kafka.enabled` / `sources.http.enabled` must be true.
+
+```yaml
+sources:
+  kafka:
+    enabled: false                   # consume the Kafka topic; off = no consumer group joined, arrange() never called. env: DK_SOURCES__KAFKA__ENABLED
+    topic: input-events              # topic to consume from. env: DK_SOURCES__KAFKA__TOPIC
+    consumer_group: drakkar-workers  # consumer-group ID; workers sharing it split partitions. env: DK_SOURCES__KAFKA__CONSUMER_GROUP
+
+    max_poll_records: 100            # messages per poll batch; ↑ throughput / ↓ latency. env: DK_SOURCES__KAFKA__MAX_POLL_RECORDS  · reasonable: 50–500
+    max_poll_interval_ms: 300000     # max ms between polls before broker kicks us out. env: DK_SOURCES__KAFKA__MAX_POLL_INTERVAL_MS  · raise for slow tasks
+    session_timeout_ms: 45000        # group-membership heartbeat window. env: DK_SOURCES__KAFKA__SESSION_TIMEOUT_MS
+    heartbeat_interval_ms: 3000      # heartbeat frequency; should be ≤ session_timeout_ms / 3. env: DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL_MS
+
+    # Policy for messages whose value fails input_model parsing. env: DK_SOURCES__KAFKA__ON_PARSE_ERROR
+    #   skip  — message reaches arrange() with payload=None and msg.parse_error set (default)
+    #   dlq   — message is excluded from arrange() and written to the DLQ topic as a
+    #           ParseFailurePayload; the offset commits only after the DLQ write is confirmed
+    #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
+    on_parse_error: skip
+
+    # Rolling-deploy alignment: serialize fleet-wide consumer-group rebalances.
+    startup_align_enabled: true      # disable for snappy single-process dev. env: DK_SOURCES__KAFKA__STARTUP_ALIGN_ENABLED
+    startup_min_wait_seconds: 4.0    # min sleep before alignment (buffer for slow init). env: DK_SOURCES__KAFKA__STARTUP_MIN_WAIT_SECONDS
+    startup_align_interval_seconds: 10  # wake at next time%interval==0 boundary. env: DK_SOURCES__KAFKA__STARTUP_ALIGN_INTERVAL_SECONDS
+
+  http:
+    enabled: false                   # master switch; false = no FastAPI server. env: DK_SOURCES__HTTP__ENABLED
+    host: '0.0.0.0'                  # uvicorn bind interface. env: DK_SOURCES__HTTP__HOST
+    port: 8090                       # uvicorn bind port. env: DK_SOURCES__HTTP__PORT
+    path: '/process'                 # single POST route; must start with '/'. env: DK_SOURCES__HTTP__PATH
+    sinks_enabled: false             # when true, route on_message_complete payloads through SinkManager. env: DK_SOURCES__HTTP__SINKS_ENABLED
+    request_timeout_seconds: 30.0    # per-request budget; > 0. env: DK_SOURCES__HTTP__REQUEST_TIMEOUT_SECONDS
+    max_concurrent: 64               # per-worker in-flight cap; > 0. 65th concurrent request 503s. env: DK_SOURCES__HTTP__MAX_CONCURRENT
+    max_body_bytes: 10485760         # request-body cap in bytes; > 0 (413 beyond). env: DK_SOURCES__HTTP__MAX_BODY_BYTES
+
+    # Configured tenants. At least one entry is required; default is one
+    # anonymous client with rpm=4 so the HTTP source works out of the box.
+    clients:
+      - name: anonymous              # tenant name; non-empty string
+        token: ''                    # bearer token; '' = anonymous slot (at most one client)
+        rpm: 4                       # per-client requests/minute cap; > 0
+      - name: tenant-a
+        token: 'secret-tenant-a-token'
+        rpm: 60
+```
+
+When `sources.http.enabled=true`, the handler must declare `HttpRequestT` / `HttpResponseT` as the third and fourth generic parameters of `BaseDrakkarHandler`.
 
 ---
 
@@ -309,7 +345,9 @@ Failed sink deliveries (after retries are exhausted, or when a circuit breaker i
 
 ```yaml
 dlq:
-  topic: ''                        # empty = auto-derive "{source_topic}_dlq". env: DK_DLQ__TOPIC
+  topic: ''                        # empty = auto-derive "{sources.kafka.topic}_dlq". env: DK_DLQ__TOPIC
+                                   #   empty AND sources.kafka.enabled=false = no DLQ producer is
+                                   #   built; DLQ sends are dropped and counted
   brokers: ''                      # empty = inherit kafka.brokers AND kafka.security. env: DK_DLQ__BROKERS
   security: {}                     # only consulted when `brokers` is set above; same fields as
                                    #   kafka.security (env: DK_DLQ__SECURITY__<FIELD>).
@@ -620,36 +658,6 @@ cache:
 
 ---
 
-## Webapp (`webapp:`)
-
-📚 [Deep details](configuration.md#webapp-webapp) · [Webapp page](webapp.md)
-
-Optional synchronous-HTTP entry point. **Disabled by default**. When `enabled=true`, the handler must declare `HttpRequestT` / `HttpResponseT` as the third and fourth generic parameters of `BaseDrakkarHandler`.
-
-```yaml
-webapp:
-  enabled: false                   # master switch; false = no FastAPI server. env: DK_WEBAPP__ENABLED
-  host: '0.0.0.0'                  # uvicorn bind interface. env: DK_WEBAPP__HOST
-  port: 8090                       # uvicorn bind port. env: DK_WEBAPP__PORT
-  path: '/process'                 # single POST route; must start with '/'. env: DK_WEBAPP__PATH
-  sinks_enabled: false             # when true, route on_message_complete payloads through SinkManager. env: DK_WEBAPP__SINKS_ENABLED
-  request_timeout_seconds: 30.0    # per-request budget; > 0. env: DK_WEBAPP__REQUEST_TIMEOUT_SECONDS
-  max_concurrent: 64               # per-worker in-flight cap; > 0. 65th concurrent request 503s. env: DK_WEBAPP__MAX_CONCURRENT
-  max_body_bytes: 10485760         # request-body cap in bytes; > 0 (413 beyond). env: DK_WEBAPP__MAX_BODY_BYTES
-
-  # Configured tenants. At least one entry is required; default is one
-  # anonymous client with rpm=4 so the webapp works out of the box.
-  clients:
-    - name: anonymous              # tenant name; non-empty string
-      token: ''                    # bearer token; '' = anonymous slot (at most one client)
-      rpm: 4                       # per-client requests/minute cap; > 0
-    - name: tenant-a
-      token: 'secret-tenant-a-token'
-      rpm: 60
-```
-
----
-
 ## App config
 
 The reserved top-level `app:` section carries **user-defined application
@@ -670,8 +678,10 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 |-------|---------------|
 | Top-level | `cluster_name` → `DK_CLUSTER_NAME` |
 | One level deep | `kafka.brokers` → `DK_KAFKA__BROKERS` |
+| Section, sub-section, field | `sources.kafka.topic` → `DK_SOURCES__KAFKA__TOPIC` |
 | Two levels deep | `cache.peer_sync.interval_seconds` → `DK_CACHE__PEER_SYNC__INTERVAL_SECONDS` |
 | Map key (sink instance) | `sinks.postgres.main-db.dsn` → `DK_SINKS__POSTGRES__MAIN_DB__DSN` |
+| List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |
 | List value | `ui.expose_env_vars` → `DK_UI__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
 | Dict value | `executor.env` → `DK_EXECUTOR__ENV='{"FOO":"bar"}'` (JSON) |
 

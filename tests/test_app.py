@@ -25,13 +25,14 @@ from drakkar.config import (
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
+    DeliveryAction,
     ExecutorTask,
     KafkaPayload,
     PostgresPayload,
     SourceMessage,
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
@@ -71,13 +72,25 @@ class WebCapableHandler(BaseDrakkarHandler[_D, _D, _D, _D]):
         return _D()
 
 
+class HttpOnlyHandler(BaseDrakkarHandler[_D, _D, _D, _D]):
+    """Serves the HTTP source only — it deliberately leaves ``arrange`` at its default.
+
+    Constructing an app with this handler therefore requires
+    ``sources.kafka.enabled=false``; see ``validate_handler_for_sources``.
+    """
+
+    async def arrange_http_request(self, req, pending):
+        return []
+
+    async def on_http_request_complete(self, group):
+        return _D()
+
+
 @pytest.fixture
 def test_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(
-            brokers='localhost:9092',
-            source_topic='test-in',
-        ),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
@@ -96,7 +109,8 @@ def test_config() -> DrakkarConfig:
 @pytest.fixture
 def test_config_no_sinks() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),
@@ -167,6 +181,7 @@ def test_app_worker_id_custom_env_var(monkeypatch):
     monkeypatch.setenv('MY_SVC_NAME', 'svc-alpha')
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
         worker_name_env='MY_SVC_NAME',
     )
     app = DrakkarApp(handler=SimpleHandler(), config=config)
@@ -205,7 +220,8 @@ def test_app_build_dlq_custom_topic():
     from drakkar.config import DLQConfig
 
     config = DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='input'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'input'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         dlq=DLQConfig(topic='custom-dlq'),
     )
@@ -223,10 +239,10 @@ async def test_app_on_assign_creates_processors(test_config):
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = MagicMock()
+    wire_kafka_source(app, MagicMock())
     app._consumer.commit = AsyncMock()
 
-    app._lifecycle._on_assign([0, 1, 2])
+    app.kafka_source.on_assign([0, 1, 2])
     assert len(app.processors) == 3
 
     for proc in app.processors.values():
@@ -239,12 +255,12 @@ async def test_app_on_revoke_removes_processors(test_config):
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
-    app._lifecycle._on_assign([0, 1, 2])
+    app.kafka_source.on_assign([0, 1, 2])
     assert len(app.processors) == 3
 
-    await app._lifecycle._on_revoke([1])
+    await app.kafka_source.on_revoke([1])
     await wait_for(lambda: 1 not in app.processors)
     assert len(app.processors) == 2
 
@@ -364,9 +380,9 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
 
 async def test_app_handle_commit(test_config):
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
-    await app._handle_commit(partition_id=3, offset=100)
+    await app.kafka_source._handle_commit(partition_id=3, offset=100)
     app._consumer.commit.assert_called_once_with({3: 100})
 
 
@@ -434,7 +450,6 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
         '_start_ui_and_recorder',
         '_start_cache',
         '_connect_sinks',
-        '_start_webapp',
     ):
         monkeypatch.setattr(lifecycle, name, _noop)
     for name in (
@@ -446,10 +461,14 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
     ):
         monkeypatch.setattr(lifecycle, name, lambda *args, **kwargs: None)
 
+    # ``_build_executor_pool`` is stubbed above, so stand the pool in:
+    # binding the sources reads it.
+    app._executor_pool = MagicMock(active_count=0, max_executors=1)
+
     async def _boom(*args, **kwargs):
         raise RuntimeError('broker unreachable')
 
-    monkeypatch.setattr(lifecycle, '_start_consumer', _boom)
+    monkeypatch.setattr(lifecycle, '_start_sources', _boom)
 
     with pytest.raises(RuntimeError, match='broker unreachable'):
         await lifecycle._async_run()
@@ -464,7 +483,7 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
 
 async def test_app_shutdown_closes_sinks(test_config):
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
@@ -481,14 +500,14 @@ async def test_app_shutdown_closes_sinks(test_config):
 async def test_app_shutdown_drains_executors(test_config):
     """Graceful shutdown gives executors up to 5s to finish."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await asyncio.sleep(0.1)
 
     msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
@@ -516,14 +535,14 @@ async def test_stop_processor_handles_arrange_error(test_config):
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
-    await app._lifecycle._on_revoke([0])
+    await app.kafka_source.on_revoke([0])
     await wait_for(lambda: 0 not in app.processors)
 
 
@@ -541,11 +560,11 @@ async def test_safe_call_catches_handler_errors(test_config):
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = MagicMock()
+    wire_kafka_source(app, MagicMock())
     app._consumer.commit = AsyncMock()
 
     with capture_logs() as cap:
-        app._lifecycle._on_assign([0])
+        app.kafka_source.on_assign([0])
         await asyncio.sleep(0.2)
 
     failures = [entry for entry in cap if entry['event'] == 'async_callback_failed']
@@ -564,6 +583,7 @@ def test_app_cluster_name_from_env(monkeypatch):
     monkeypatch.setenv('MY_CLUSTER', 'env-cluster')
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
         cluster_name='config-cluster',
         cluster_name_env='MY_CLUSTER',
     )
@@ -576,6 +596,7 @@ def test_app_cluster_name_falls_back_to_config(monkeypatch):
     monkeypatch.delenv('MY_CLUSTER', raising=False)
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
         cluster_name='fallback-cluster',
         cluster_name_env='MY_CLUSTER',
     )
@@ -587,6 +608,7 @@ def test_app_cluster_name_no_env_var_configured():
     """When cluster_name_env is empty, config.cluster_name is used directly."""
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
         cluster_name='direct-cluster',
     )
     app = DrakkarApp(handler=SimpleHandler(), config=config)
@@ -622,26 +644,26 @@ def test_app_get_worker_state_no_pool(test_config):
     assert state['pool_max'] == 0
 
 
-# --- _total_queued ---
+# --- total_queued ---
 
 
 async def test_app_total_queued_with_processors(test_config):
-    """_total_queued sums queue sizes and inflight counts across processors."""
+    """total_queued sums queue sizes and inflight counts across processors."""
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = MagicMock()
+    wire_kafka_source(app, MagicMock())
     app._consumer.commit = AsyncMock()
 
-    app._lifecycle._on_assign([0, 1])
-    assert app._total_queued() == 0
+    app.kafka_source.on_assign([0, 1])
+    assert app.kafka_source.total_queued() == 0
 
     msg0 = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     msg1 = SourceMessage(topic='t', partition=1, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg0)
     app.processors[1].enqueue(msg1)
-    assert app._total_queued() >= 2
+    assert app.kafka_source.total_queued() >= 2
 
     for proc in app.processors.values():
         await proc.stop()
@@ -662,12 +684,12 @@ async def test_newly_assigned_partition_is_paused_when_backpressure_active(test_
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
     # Simulate the poll loop having already entered the paused state.
     app._paused = True
-    app._lifecycle._on_assign([0])
-    app._lifecycle._on_assign([5, 7])
+    app.kafka_source.on_assign([0])
+    app.kafka_source.on_assign([5, 7])
 
     # Let the background pause task run, then confirm the second assign
     # triggered a pause on the new partitions.
@@ -685,10 +707,10 @@ async def test_newly_assigned_partition_not_paused_when_unpaused(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
     assert not app._paused
-    app._lifecycle._on_assign([0, 1])
+    app.kafka_source.on_assign([0, 1])
     await asyncio.sleep(0.05)
 
     # Pause must NOT have been invoked for these assignments.
@@ -704,7 +726,7 @@ async def test_newly_assigned_partition_not_paused_when_unpaused(test_config):
 async def test_shutdown_cancels_periodic_tasks(test_config):
     """Shutdown cancels periodic tasks."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -733,9 +755,9 @@ async def test_shutdown_final_commit_failure_is_logged(test_config):
 
     mock_consumer = AsyncMock()
     mock_consumer.commit.side_effect = RuntimeError('commit failed during rebalance')
-    app._consumer = mock_consumer
+    wire_kafka_source(app, mock_consumer)
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
 
     # Force a committable offset
     app.processors[0]._offset_tracker.register(0)
@@ -775,7 +797,7 @@ async def test_shutdown_awaits_background_tasks_before_closing_consumer(test_con
 
     mock_consumer.commit = slow_commit
     mock_consumer.close = record_close
-    app._consumer = mock_consumer
+    wire_kafka_source(app, mock_consumer)
 
     # Simulate a background task like _stop_processor would be:
     # it awaits commit and must complete before consumer.close().
@@ -811,7 +833,7 @@ async def test_stop_processor_skips_commit_on_drain_timeout(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
     # Build a processor with a stuck drain: non-empty queue, _running stays False
     # but the offset tracker holds a pending offset so drain() never exits.
@@ -824,7 +846,7 @@ async def test_stop_processor_skips_commit_on_drain_timeout(test_config):
     # register an offset and never complete it — drain() will spin until timeout
     proc._offset_tracker.register(42)
 
-    await app._lifecycle._stop_processor(proc)
+    await app.kafka_source._stop_processor(proc)
 
     # After a drain timeout, commit MUST NOT have been called for this partition.
     # (Consumer may have been called for other reasons earlier — but not commit.)
@@ -841,11 +863,11 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     # register an offset without completing — drain will hang until timeout
     app.processors[0]._offset_tracker.register(99)
 
@@ -863,7 +885,7 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
 async def test_shutdown_stops_recorder_and_ui_server(test_config):
     """Shutdown stops the recorder and debug server if they exist."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -887,10 +909,9 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
-    app._running = True
+    wire_kafka_source(app, AsyncMock())
 
-    app._lifecycle._on_assign([0, 1])
+    app.kafka_source.on_assign([0, 1])
     await asyncio.sleep(0.01)
 
     msg0 = SourceMessage(topic='t', partition=0, offset=10, value=b'x', timestamp=0)
@@ -902,7 +923,7 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
         call_count += 1
         if call_count == 1:
             return [msg0, msg1]
-        app._running = False
+        app.kafka_source.signal_stop()
         return []
 
     app._consumer.poll_batch = _poll_once
@@ -919,7 +940,7 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
 
         proc.enqueue = _spy
 
-    await app._lifecycle._poll_loop()
+    await app.kafka_source.run()
 
     assert enqueued[0] == [msg0]
     assert enqueued[1] == [msg1]
@@ -934,8 +955,7 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
-    app._running = True
+    wire_kafka_source(app, AsyncMock())
 
     # Create processor but don't start it — messages stay in queue
     from drakkar.partition import PartitionProcessor
@@ -959,12 +979,12 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            app._running = False
+            app.kafka_source.signal_stop()
         return []
 
     app._consumer.poll_batch = _poll_then_stop
 
-    await app._lifecycle._poll_loop()
+    await app.kafka_source.run()
 
     app._consumer.pause.assert_called()
     assert app._paused
@@ -977,8 +997,7 @@ async def test_poll_loop_consumer_idle_metric(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
-    app._running = True
+    wire_kafka_source(app, AsyncMock())
 
     # no partitions assigned = empty queues
     call_count = 0
@@ -987,13 +1006,13 @@ async def test_poll_loop_consumer_idle_metric(test_config):
         nonlocal call_count
         call_count += 1
         if call_count >= 3:
-            app._running = False
+            app.kafka_source.signal_stop()
         return []
 
     app._consumer.poll_batch = _empty_poll
 
     before = consumer_idle._value.get()
-    await app._lifecycle._poll_loop()
+    await app.kafka_source.run()
     after = consumer_idle._value.get()
 
     assert after > before
@@ -1006,10 +1025,9 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
-    app._running = True
+    wire_kafka_source(app, AsyncMock())
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await asyncio.sleep(0.01)
 
     # put messages in queue, keep executor idle (active_count=0)
@@ -1022,13 +1040,13 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
         nonlocal call_count
         call_count += 1
         if call_count >= 3:
-            app._running = False
+            app.kafka_source.signal_stop()
         return []
 
     app._consumer.poll_batch = _empty_poll
 
     before = executor_idle_waste._value.get()
-    await app._lifecycle._poll_loop()
+    await app.kafka_source.run()
     after = executor_idle_waste._value.get()
 
     assert after > before
@@ -1290,9 +1308,9 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
         task_timeout_seconds=10,
     )
     mock_consumer = AsyncMock()
-    app._consumer = mock_consumer
+    wire_kafka_source(app, mock_consumer)
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     processor = app.processors[0]
 
     # Enqueue 3 messages; arrange will schedule 3 subprocess tasks.
@@ -1320,7 +1338,7 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
 
     # Fire revoke. _on_revoke pops the processor from app.processors
     # synchronously, then schedules _stop_processor as a background task.
-    await app._lifecycle._on_revoke([0])
+    await app.kafka_source.on_revoke([0])
     assert 0 not in app.processors, 'processor must be popped from app.processors immediately on revoke'
 
     # Wait for the background _stop_processor task to finish draining,
@@ -1393,9 +1411,9 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
         task_timeout_seconds=10,
     )
     mock_consumer = AsyncMock()
-    app._consumer = mock_consumer
+    wire_kafka_source(app, mock_consumer)
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     processor = app.processors[0]
 
     for offset in (200, 201, 202):
@@ -1403,7 +1421,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
 
     await wait_for(lambda: processor.inflight_count >= 1)
 
-    await app._lifecycle._on_revoke([0])
+    await app.kafka_source.on_revoke([0])
     await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
 
     # Processor removed, no zombie.
@@ -1466,9 +1484,9 @@ async def test_revoke_while_arrange_running(test_config):
         task_timeout_seconds=10,
     )
     mock_consumer = AsyncMock()
-    app._consumer = mock_consumer
+    wire_kafka_source(app, mock_consumer)
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     processor = app.processors[0]
 
     processor.enqueue(SourceMessage(topic='t', partition=0, offset=50, value=b'x', timestamp=0))
@@ -1479,7 +1497,7 @@ async def test_revoke_while_arrange_running(test_config):
     assert processor._arranging is True, 'processor must be mid-arrange when revoke fires'
 
     # Fire revoke mid-arrange.
-    await app._lifecycle._on_revoke([0])
+    await app.kafka_source.on_revoke([0])
     assert 0 not in app.processors
 
     # The background _stop_processor must complete — processor stops
@@ -1517,11 +1535,10 @@ async def test_shutdown_continues_when_an_optional_subsystem_refuses_to_stop(tes
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
     app._running = True
-    app.is_ready = True
 
     class _RefusesToStop:
         """Stands in for any subsystem whose stop path can raise."""
@@ -1565,16 +1582,16 @@ async def test_lifecycle_shutdown_drains_and_flips_ready(test_config):
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    # Pretend we're already running and ready — _shutdown must flip both off.
+    # Pretend we're already running — _shutdown must flip _running off and
+    # take readiness with it (is_ready reads the _stopping flag it sets).
     app._running = True
-    app.is_ready = True
 
     # Spin up one processor so the drain path actually has work to do.
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     assert 0 in app.processors
 
     # Construct a fresh AppLifecycle around the same app instance and
@@ -1624,7 +1641,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_clean_drain(test_confi
     test_config.ui.recorder.db_dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
     app._running = True
@@ -1656,18 +1673,18 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
     test_config.executor.drain_timeout_seconds = 1
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
     lifecycle = AppLifecycle(app)
 
-    # Force ``_drain_all_processors`` to time out. Patch on the
-    # instance so other tests are unaffected.
-    async def _slow_drain() -> None:
+    # Force the Kafka source's drain to time out. Patch on the instance so
+    # other tests are unaffected.
+    async def _slow_drain(_processors) -> None:
         await asyncio.sleep(10)  # well past drain_timeout_seconds
 
-    monkeypatch.setattr(lifecycle, '_drain_all_processors', _slow_drain)
+    monkeypatch.setattr(app.kafka_source, '_drain_all_processors', _slow_drain)
 
     watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
     watchdog.write()
@@ -1689,7 +1706,7 @@ async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
     test_config.ui.recorder.db_dir = ''  # disk-less mode
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -1702,7 +1719,7 @@ async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
 
 
 async def test_lifecycle_shutdown_drain_exception_still_runs_teardown(test_config, tmp_path, monkeypatch):
-    """A non-TimeoutError out of ``_drain_all_processors`` must NOT skip
+    """A non-TimeoutError out of the source drain must NOT skip
     the rest of shutdown. The watchdog must still be marked clean (it's
     not an OOM kill) and every subsystem teardown call must still run.
     Without the try/finally restructure in ``_shutdown``, a drain bug
@@ -1716,17 +1733,17 @@ async def test_lifecycle_shutdown_drain_exception_still_runs_teardown(test_confi
     test_config.ui.recorder.db_dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
     lifecycle = AppLifecycle(app)
 
     # Force the drain coroutine to raise something other than TimeoutError.
-    async def _exploding_drain() -> None:
+    async def _exploding_drain(_processors) -> None:
         raise RuntimeError('drain bug — processor invariant violated')
 
-    monkeypatch.setattr(lifecycle, '_drain_all_processors', _exploding_drain)
+    monkeypatch.setattr(app.kafka_source, '_drain_all_processors', _exploding_drain)
 
     # Pre-populate a watchdog file so we can verify ``mark_clean`` ran.
     watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
@@ -1785,7 +1802,7 @@ async def test_lifecycle_claim_watchdog_slot_tolerates_oserror(test_config, tmp_
     assert lifecycle._watchdog is None
 
     # And mark_clean during shutdown is now a no-op (idempotent guard).
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
     await lifecycle._shutdown()  # must not raise
@@ -1816,16 +1833,14 @@ async def test_lifecycle_claim_watchdog_slot_no_op_when_disabled(test_config):
 # documented failure-tolerance contract.
 
 
-async def test_boot_connects_sinks_before_subscribing_the_consumer(test_config, monkeypatch):
-    """Subscribing before sinks are up would accept messages nothing can deliver."""
+async def test_boot_connects_sinks_before_starting_the_sources(test_config, monkeypatch):
+    """Starting a source before sinks are up would accept input nothing can deliver."""
     cfg = test_config.model_copy(deep=True)
-    # Skip the wall-clock alignment sleep between _start_consumer and subscribe.
-    cfg.kafka.startup_align_enabled = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
     calls: list[str] = []
 
     def recorder(name):
-        async def _step():
+        async def _step(*args, **kwargs):
             calls.append(name)
 
         return _step
@@ -1836,47 +1851,47 @@ async def test_boot_connects_sinks_before_subscribing_the_consumer(test_config, 
         '_start_observability',
         '_start_ui_and_recorder',
         '_start_cache',
-        '_start_webapp',
     ):
         monkeypatch.setattr(app._lifecycle, step, recorder('other'))
     monkeypatch.setattr(app._lifecycle, '_connect_sinks', recorder('sinks'))
-
-    # _async_run calls app._consumer.subscribe() AFTER _start_consumer returns,
-    # so the stub must leave a usable consumer behind or that line raises
-    # AttributeError on None.
-    async def fake_start_consumer():
-        calls.append('consumer')
-        app._consumer = AsyncMock()
-
-    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
+    monkeypatch.setattr(app._lifecycle, '_bind_sources', lambda: calls.append('bind'))
+    monkeypatch.setattr(app._lifecycle, '_start_sources', recorder('sources'))
     monkeypatch.setattr(app._lifecycle, '_claim_watchdog_slot', recorder('watchdog_claim'))
-    monkeypatch.setattr(app._lifecycle, '_poll_loop', recorder('poll'))
+    monkeypatch.setattr(app._lifecycle, '_run_sources', recorder('run'))
     monkeypatch.setattr(app._lifecycle, '_shutdown', recorder('shutdown'))
 
     await app._lifecycle._async_run()
 
-    assert calls.index('sinks') < calls.index('consumer')
+    assert calls.index('sinks') < calls.index('bind') < calls.index('sources')
 
 
-async def test_webapp_construction_failure_does_not_abort_startup(test_config, monkeypatch):
-    """The webapp is optional infrastructure; sinks and the consumer are the critical path."""
+async def test_http_bind_failure_aborts_startup(test_config, monkeypatch):
+    """A source that cannot take input leaves the worker unable to do its job.
+
+    The HTTP ingress used to be optional infrastructure whose bind failure
+    was logged and survived. It is an input source now: a worker that
+    cannot bind its socket would sit ready and process nothing, so the
+    failure is fatal and the exception leaves ``_async_run``.
+    """
     cfg = test_config.model_copy(deep=True)
-    cfg.webapp.enabled = True
-    # WebCapableHandler (not SimpleHandler) — DrakkarApp.__init__ validates
-    # the handler declares HTTP request/response models whenever
-    # webapp.enabled=True, before this test can even reach _start_webapp.
+    # HTTP-only: with the Kafka source on, startup would sleep out the
+    # wall-clock alignment and then dial a real broker.
+    cfg.sources.kafka.enabled = False
+    cfg.sources.http.enabled = True
+    cfg.sources.http.port = 0
     app = DrakkarApp(handler=WebCapableHandler(), config=cfg)
 
     def explode(*a, **kw):
         raise RuntimeError('port already bound')
 
-    monkeypatch.setattr('drakkar.webapp.WebApp', explode)
+    monkeypatch.setattr('drakkar.sources.http.WebApp', explode)
+    monkeypatch.setattr(app._lifecycle, '_connect_sinks', AsyncMock())
+    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', AsyncMock())
 
-    with capture_logs() as cap:
-        await app._lifecycle._start_webapp()
+    with pytest.raises(RuntimeError, match='port already bound'):
+        await app._lifecycle._async_run()
 
     assert app._webapp is None
-    assert any(e['event'] == 'webapp_start_failed' for e in cap)
 
 
 async def test_ui_disabled_warns_that_probes_are_unserved(test_config):
@@ -1963,10 +1978,9 @@ async def test_start_observability_logs_discovered_user_metrics(test_config):
 
 
 async def test_async_run_swallows_cancelled_error_and_still_shuts_down(test_config, monkeypatch):
-    """A cancelled poll loop must not crash the worker — shutdown still runs
+    """A cancelled run phase must not crash the worker — shutdown still runs
     so in-flight work drains and offsets get committed."""
     cfg = test_config.model_copy(deep=True)
-    cfg.kafka.startup_align_enabled = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     for step in (
@@ -1976,65 +1990,24 @@ async def test_async_run_swallows_cancelled_error_and_still_shuts_down(test_conf
         '_start_ui_and_recorder',
         '_start_cache',
         '_connect_sinks',
-        '_start_webapp',
+        '_start_sources',
         '_claim_watchdog_slot',
     ):
         monkeypatch.setattr(app._lifecycle, step, AsyncMock())
-
-    async def fake_start_consumer():
-        app._consumer = AsyncMock()
-
-    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
+    monkeypatch.setattr(app._lifecycle, '_bind_sources', MagicMock())
 
     async def raise_cancelled():
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(app._lifecycle, '_poll_loop', raise_cancelled)
+    monkeypatch.setattr(app._lifecycle, '_run_sources', raise_cancelled)
     shutdown_mock = AsyncMock()
     monkeypatch.setattr(app._lifecycle, '_shutdown', shutdown_mock)
 
-    # Must not raise: CancelledError from the poll loop is expected during
+    # Must not raise: CancelledError from the run phase is expected during
     # normal shutdown signalling, not a crash.
     await app._lifecycle._async_run()
 
     shutdown_mock.assert_awaited_once()
-
-
-async def test_async_run_logs_wall_clock_alignment_window(test_config, monkeypatch):
-    """The alignment log events must name the exact wall-clock boundary a
-    fleet converges on, and report how long this worker actually waited."""
-    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    assert app.config.kafka.startup_align_enabled  # precondition: default is on
-
-    for step in (
-        '_setup_watchdog',
-        '_build_executor_pool',
-        '_start_observability',
-        '_start_ui_and_recorder',
-        '_start_cache',
-        '_connect_sinks',
-        '_start_webapp',
-        '_claim_watchdog_slot',
-        '_poll_loop',
-        '_shutdown',
-    ):
-        monkeypatch.setattr(app._lifecycle, step, AsyncMock())
-
-    async def fake_start_consumer():
-        app._consumer = AsyncMock()
-
-    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
-    monkeypatch.setattr('drakkar.lifecycle.wait_for_aligned_startup', AsyncMock(return_value=0.25))
-
-    with capture_logs() as cap:
-        await app._lifecycle._async_run()
-
-    waiting = next(e for e in cap if e['event'] == 'startup_align_waiting')
-    done = next(e for e in cap if e['event'] == 'startup_align_done')
-    # The published target must actually sit on an interval boundary —
-    # that's the entire point of the alignment sleep.
-    assert waiting['target_wall_unix'] % app.config.kafka.startup_align_interval_seconds == 0
-    assert done['slept_seconds'] == 0.25
 
 
 async def test_connect_sinks_wires_recorder_and_dlq_after_connecting(test_config, monkeypatch):
@@ -2080,9 +2053,8 @@ async def test_start_consumer_exposes_connected_postgres_pool_to_on_ready(test_c
     pg_sink = next(sink for (sink_type, _), sink in app._sink_manager.sinks.items() if sink_type == 'postgres')
     pg_sink.pool = 'sentinel-pool'
 
-    await app._lifecycle._start_consumer()
+    await app._lifecycle._run_on_ready_and_periodics()
 
-    assert app._consumer is not None
     assert handler.seen_pg_pool == 'sentinel-pool'
 
 
@@ -2101,7 +2073,7 @@ async def test_start_consumer_schedules_declared_periodic_tasks(test_config):
     app = DrakkarApp(handler=handler, config=test_config)
     _setup_app_sinks(app)
 
-    await app._lifecycle._start_consumer()
+    await app._lifecycle._run_on_ready_and_periodics()
 
     try:
         assert len(app._periodic_tasks) == 1
@@ -2192,3 +2164,146 @@ def test_wire_annotator_passes_configured_budgets(test_config):
     assert annotator._max_bytes == 99
     assert annotator._max_bytes_per_call == 999
     assert annotator._log_max_bytes == 9
+
+
+# --- Source delegation ---
+
+
+def test_app_delegates_kafka_state_to_source(test_config):
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    assert app.kafka_source is not None
+    assert app._processors is app.kafka_source.processors
+    assert app._paused is False
+    assert app._consumer is None
+
+
+def test_app_without_kafka_source_exposes_empty_state(test_config):
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    assert app.kafka_source is None
+    assert app._processors == {}
+    assert app._paused is False
+    assert app._stalled_partitions == set()
+    assert app._consumer is None
+    assert app.is_ready is False
+
+
+def test_build_dlq_is_none_when_kafka_off_and_no_topic(test_config):
+    cfg = DrakkarConfig.model_validate(
+        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
+    )
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    app._build_dlq()
+    assert app._dlq_sink is None
+
+
+def test_build_dlq_with_topic_when_kafka_off(test_config):
+    cfg = DrakkarConfig.model_validate(
+        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': 'x-dlq'}}
+    )
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    app._build_dlq()
+    assert app._dlq_sink is not None and app._dlq_sink.topic == 'x-dlq'
+
+
+async def test_handle_collect_dlq_action_without_dlq_counts_unconfigured_drop(test_config):
+    from drakkar.metrics import dlq_unconfigured_drops
+
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    before = dlq_unconfigured_drops._value.get()
+    await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=3)
+    assert dlq_unconfigured_drops._value.get() == before + 3
+
+
+async def test_dlq_unconfigured_drop_warns_once_then_drops_to_debug(test_config):
+    """``dlq_send_dropped_unconfigured`` is what an operator alerts on, so
+    the event name is pinned. Only the first drop warns: a worker running
+    without a DLQ on purpose would otherwise repeat the warning for every
+    failed delivery, and the counter already carries the volume.
+    """
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+
+    with capture_logs() as cap:
+        await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=1)
+        await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=2)
+
+    drops = [entry for entry in cap if entry['event'] == 'dlq_send_dropped_unconfigured']
+    assert [entry['log_level'] for entry in drops] == ['warning', 'debug']
+    assert [entry['payload_count'] for entry in drops] == [1, 2]
+    assert drops[0]['category'] == 'sink'
+
+
+async def test_handle_collect_dlq_action_drops_when_dlq_is_off(test_config):
+    """A handler asking for the DLQ on a worker with the DLQ off counts a drop.
+
+    Stalling the delivery would wedge a worker that never configured a DLQ,
+    so the payloads are counted as lost and the pipeline carries on.
+    """
+    cfg = DrakkarConfig.model_validate(
+        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
+    )
+
+    class DlqHandler(HttpOnlyHandler):
+        async def on_delivery_error(self, error):
+            return DeliveryAction.DLQ
+
+    app = DrakkarApp(handler=DlqHandler(), config=cfg)
+    _setup_app_sinks(app)
+    app._build_dlq()
+    assert app._dlq_sink is None
+
+    kafka_sink = app._sink_manager._sinks[('kafka', 'results')]
+    kafka_sink.deliver.side_effect = RuntimeError('broker down')
+
+    drops: list[tuple[int, int]] = []
+
+    async def _drop(partition_id, payload_count):
+        drops.append((partition_id, payload_count))
+
+    app._drop_dlq_send_unconfigured = _drop
+
+    await app._handle_collect(CollectResult(kafka=[KafkaPayload(data=_D())]), partition_id=-1)
+
+    assert drops == [(-1, 1)]
+
+
+def test_app_paused_setter_delegates_and_tolerates_no_kafka_source(test_config):
+    """The consume-pause controller writes ``_paused`` through the app; without a Kafka source it is a no-op."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._paused = True
+    assert app.kafka_source.paused is True
+    assert app._paused is True
+
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    http_only = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    http_only._paused = True
+    assert http_only._paused is False
+
+
+def test_app_webapp_delegates_to_http_source(test_config):
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    assert app.http_source is not None
+    assert app._webapp is None
+
+    app.http_source.webapp = 'stub-server'
+    assert app._webapp == 'stub-server'
+
+    kafka_only = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    assert kafka_only.http_source is None
+    assert kafka_only._webapp is None
+
+
+def test_app_is_ready_tracks_sources_and_stopping(test_config):
+    """/readyz goes green only while every source serves input and no drain has begun."""
+    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
+    assert app.is_ready is False
+
+    app.http_source._ready = True
+    assert app.is_ready is True
+
+    app._stopping = True
+    assert app.is_ready is False

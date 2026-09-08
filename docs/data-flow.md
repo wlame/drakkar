@@ -55,20 +55,22 @@ After `on_startup`, the framework builds all components in this order:
 6. **Connects all sinks** by calling `connect()` on each in registration order. If any `connect()` raises, the worker crashes immediately (fail-fast design).
 
 7. **Builds and connects the DLQ sink**:
-   - Topic: `dlq.topic` if non-empty, otherwise `'{kafka.source_topic}_dlq'` (default source topic: `'input-events'`).
+   - Topic: `dlq.topic` if non-empty, otherwise `'{sources.kafka.topic}_dlq'` (default source topic: `'input-events'`). With the Kafka source disabled and `dlq.topic` empty, **no DLQ producer is built** -- see [the DLQ rule](sources.md#the-dlq-without-the-kafka-source).
    - Brokers: `dlq.brokers` if non-empty, otherwise `kafka.brokers` (default: `'localhost:9092'`).
    - Connects a dedicated Kafka producer for the DLQ.
 
-8. **Creates the Kafka consumer** (`KafkaConsumer` wrapping `confluent_kafka.aio.AIOConsumer`) with:
+8. **Builds the enabled input sources**, in the fixed order `kafka`, then `http`. A source whose `enabled` flag is false is not built at all. The Kafka source creates a `KafkaConsumer` (wrapping `confluent_kafka.aio.AIOConsumer`) with:
    - `bootstrap.servers`: `kafka.brokers` (default: `'localhost:9092'`)
-   - `group.id`: `kafka.consumer_group` (default: `'drakkar-workers'`)
+   - `group.id`: `sources.kafka.consumer_group` (default: `'drakkar-workers'`)
    - `enable.auto.commit`: `False` (offsets are committed manually by the framework)
    - `auto.offset.reset`: `'earliest'`
    - `partition.assignment.strategy`: `'cooperative-sticky'`
-   - `max.poll.interval.ms`: `kafka.max_poll_interval_ms` (default: `300000` = 5 minutes)
-   - `session.timeout.ms`: `kafka.session_timeout_ms` (default: `45000` = 45 seconds)
-   - `heartbeat.interval.ms`: `kafka.heartbeat_interval_ms` (default: `3000` = 3 seconds)
+   - `max.poll.interval.ms`: `sources.kafka.max_poll_interval_ms` (default: `300000` = 5 minutes)
+   - `session.timeout.ms`: `sources.kafka.session_timeout_ms` (default: `45000` = 45 seconds)
+   - `heartbeat.interval.ms`: `sources.kafka.heartbeat_interval_ms` (default: `3000` = 3 seconds)
    - Assign/revoke callbacks are wired to `_on_assign` and `_on_revoke`.
+
+   The HTTP source builds the webapp server. See [Input Sources](sources.md).
 
 9. **Exposes the PostgreSQL connection pool** for the handler: if any postgres sink exists, its `asyncpg.Pool` is extracted and passed to the next hook.
 
@@ -81,13 +83,20 @@ After `on_startup`, the framework builds all components in this order:
       - `on_error='continue'` (default): logs the error and continues looping.
       - `on_error='stop'`: logs the error and exits the task permanently.
 
-12. **Subscribes to the Kafka topic** and enters the main poll loop.
+12. **Starts the sources** in the same fixed order and logs `sources_starting` / `source_started`. The Kafka source subscribes to the topic and enters the poll loop; the HTTP source binds its socket. A source that fails to start is fatal: the worker logs `source_start_failed`, tears down, and stops.
 
 13. **Registers signal handlers** for `SIGINT` and `SIGTERM` that set `_running = False`, triggering graceful shutdown.
 
 ---
 
-## Phase 1: Polling Messages from Kafka
+## Phase 1: Polling Messages from Kafka (Kafka source)
+
+!!! note "HTTP-only workers skip this"
+    Phases 1, 2 and 9 belong to the Kafka source. A worker with
+    `sources.kafka.enabled: false` runs none of them: it has no poll loop,
+    no partition assignment, and no offsets to commit. Its work enters at
+    [the HTTP source path](#http-source-path) below and continues from
+    Phase 3.
 
 The main poll loop runs continuously while `_running` is True. Each iteration:
 
@@ -114,7 +123,7 @@ The hysteresis between high and low watermarks prevents rapid pause/resume oscil
 
 ### 1.2 Poll a Batch
 
-The consumer calls `consume(num_messages=count, timeout=1.0)` on the underlying `confluent_kafka.aio.AIOConsumer`, where `count` defaults to `kafka.max_poll_records` (default: `100`).
+The consumer calls `consume(num_messages=count, timeout=1.0)` on the underlying `confluent_kafka.aio.AIOConsumer`, where `count` defaults to `sources.kafka.max_poll_records` (default: `100`).
 
 - **If messages are returned**: each message is wrapped in a `SourceMessage` object containing `topic`, `partition`, `offset`, `key` (bytes or None), `value` (bytes), and `timestamp` (milliseconds, Kafka-provided).
 - **If a `PARTITION_EOF` error is received**: silently ignored (normal condition when consumer reaches end of partition).
@@ -140,6 +149,20 @@ If no processor exists for the partition (shouldn't happen under normal operatio
 ### 1.4 Idle Backoff
 
 If no messages were returned by the poll, the loop sleeps for **50ms** (`asyncio.sleep(0.05)`) to avoid busy-spinning.
+
+---
+
+### HTTP source path
+
+A request that arrives on the HTTP source does not pass through Phases 1
+and 2. The webapp runner synthesises one virtual `SourceMessage` with
+`partition = -1` and a monotone per-worker offset, then hands it to the
+same window and fan-out machinery the Kafka path uses, so Phase 3 onward
+is identical. The synthetic partition keeps HTTP work out of the partition
+trackers in the recorder and the operator UI. There are no offsets to
+commit, so Phase 9 does not apply either: the result goes back in the HTTP
+response, and to the sinks when `sources.http.sinks_enabled` is true. See
+[Webapp](webapp.md) for the request lifecycle and status codes.
 
 ---
 
@@ -643,6 +666,19 @@ When `committable()` returns a non-None offset:
 
 When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 
+**Shutdown is driven per source.** The worker first marks itself not ready,
+then calls `signal_stop` on every enabled source and logs `sources_draining`.
+Every source then drains **concurrently against one shared deadline**,
+`executor.drain_timeout_seconds` — the Kafka source waits for its partition
+processors to empty their queues and settle their in-flight tasks, the HTTP
+source waits for its in-flight requests. The step ends with `sources_drained`,
+or with the deadline expiring, which is what decides whether final offset
+commits are safe. Whatever remains of the budget is what stopping the sources
+gets; a source that fails to stop logs `source_stop_failed`. Only then do the
+shared subsystems close, in the order below. One shared deadline means the
+total shutdown time does not grow with the number of sources — the steps that
+follow describe what the **Kafka** source does inside its share of it.
+
 ### Step 1: Cancel Periodic Tasks
 - All periodic task `asyncio.Task` objects are cancelled.
 - `asyncio.gather(*tasks, return_exceptions=True)` waits for them to finish.
@@ -724,17 +760,30 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 
 ## Configuration Reference
 
-### `kafka` -- Kafka Consumer Settings
+### `kafka` -- Kafka Connection Settings
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `brokers` | str | `'localhost:9092'` | Kafka bootstrap servers |
-| `source_topic` | str | `'input-events'` | Topic to consume from |
+
+### `sources.kafka` -- Kafka Source Settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Consume the topic; off = no consumer group, no `arrange()` |
+| `topic` | str | `'input-events'` | Topic to consume from |
 | `consumer_group` | str | `'drakkar-workers'` | Consumer group ID |
 | `max_poll_records` | int | `100` | Max messages per poll batch |
 | `max_poll_interval_ms` | int | `300000` | Max time between polls before Kafka considers consumer dead |
 | `session_timeout_ms` | int | `45000` | Session timeout for group membership |
 | `heartbeat_interval_ms` | int | `3000` | Heartbeat interval to the broker |
+
+### `sources.http` -- HTTP Source Settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Serve the POST route; off = no server, no HTTP hooks |
+| `port` | int | `8090` | Bind port; see [Webapp](webapp.md) for the rest |
 
 ### `executor` -- Subprocess Executor Pool
 
@@ -808,7 +857,7 @@ Each sink type is a dict mapping instance names to their config:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `topic` | str | `''` | DLQ topic; empty = `'{source_topic}_dlq'` |
+| `topic` | str | `''` | DLQ topic; empty = `'{sources.kafka.topic}_dlq'`, or no DLQ at all when the Kafka source is off |
 | `brokers` | str | `''` | DLQ brokers; empty = inherits `kafka.brokers` |
 
 ### `metrics` -- Prometheus

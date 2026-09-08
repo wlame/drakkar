@@ -59,7 +59,7 @@ logger = structlog.get_logger()
 #
 # No ``bound=`` constraint: webapp users opt in by declaring concrete Pydantic
 # models in those slots; the framework only requires non-None at startup when
-# ``webapp.enabled=True``. Users who never enable the webapp keep the
+# ``sources.http.enabled=True``. Users who never enable the webapp keep the
 # defaults and never see the HTTP hooks.
 HttpRequestT = TypeVar('HttpRequestT', default=None)
 HttpResponseT = TypeVar('HttpResponseT', default=None)
@@ -111,7 +111,7 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     async def on_assign(self, partitions: list[int]) -> None: ...
     async def on_revoke(self, partitions: list[int]) -> None: ...
 
-    # Webapp hooks. Only invoked when ``webapp.enabled=True`` AND the handler
+    # Webapp hooks. Only invoked when ``sources.http.enabled=True`` AND the handler
     # subclass declares concrete types in the HttpRequestT/HttpResponseT slots.
     async def arrange_http_request(self, req: HttpRequestT, pending: PendingContext) -> list[ExecutorTask]: ...
     async def on_http_request_complete(self, group: MessageGroup) -> HttpResponseT: ...
@@ -156,12 +156,14 @@ def _extract_type_args(
 class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     """Base handler with no-op defaults for optional hooks.
 
-    Users extend this class and must override ``arrange()``.
-    All other hooks have sensible defaults.
+    Users extend this class. Overriding ``arrange()`` is required only when
+    the Kafka source is enabled; the HTTP hooks are required only when the
+    HTTP source is enabled. All other hooks have sensible defaults.
 
     Hooks (all three output hooks are independent; use any combination):
         arrange(messages, pending) -> list[ExecutorTask]
-            Required. Groups source messages into subprocess tasks.
+            Required when the Kafka source is enabled. Groups source
+            messages into subprocess tasks.
 
         on_task_complete(result) -> CollectResult | None
             Called per successful task. Return a CollectResult with
@@ -261,7 +263,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # the *class*, mirroring how ``input_model`` / ``output_model`` work for
     # the Kafka path. ``None`` means "this slot was not specified" (PEP 696
     # default); the webapp bootstrap fail-fasts when these are None
-    # and ``webapp.enabled=True``.
+    # and ``sources.http.enabled=True``.
     http_request_model: type[BaseModel] | None = None
     http_response_model: type[BaseModel] | None = None
 
@@ -389,7 +391,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
         On parse failure ``msg.payload`` stays ``None`` and
         ``msg.parse_error`` is set; the framework then applies the
-        ``kafka.on_parse_error`` policy (``skip`` / ``dlq`` / ``raise``).
+        ``sources.kafka.on_parse_error`` policy (``skip`` / ``dlq`` / ``raise``).
         Failures are logged with partition/offset context and counted in
         ``drakkar_message_parse_failures_total``.
         """
@@ -688,7 +690,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         return await self._offloader.run(fn, *args, **kwargs)
 
     # ------------------------------------------------------------------
-    # Webapp hooks (optional — only invoked when webapp.enabled=True).
+    # Webapp hooks (optional — only invoked when sources.http.enabled=True).
     #
     # Users opt in by declaring concrete types in the HttpRequestT /
     # HttpResponseT slots:
@@ -697,7 +699,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     #         async def arrange_http_request(self, req, pending): ...
     #         async def on_http_request_complete(self, group): ...
     #
-    # When ``webapp.enabled=True`` but a user hasn't overridden
+    # When ``sources.http.enabled=True`` but a user hasn't overridden
     # ``arrange_http_request`` / ``on_http_request_complete``, the framework
     # raises ``NotImplementedError`` from the default below at request time.
     # The error message names the missing override so operators can quickly
@@ -717,11 +719,11 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         auto-tagged with ``origin='http'``, ``client_name``, and
         ``request_id`` by the framework before submission.
 
-        Required when ``webapp.enabled=True``. The default raises
+        Required when ``sources.http.enabled=True``. The default raises
         ``NotImplementedError`` to fail fast at the first request — webapp
         users will see the missing-override message immediately.
         """
-        raise NotImplementedError('override arrange_http_request when webapp.enabled=True')
+        raise NotImplementedError('override arrange_http_request when sources.http.enabled=True')
 
     async def on_http_request_complete(
         self,
@@ -737,10 +739,10 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         under the ``"result"`` key (full response shape documented in
         ``docs/webapp.md``).
 
-        Required when ``webapp.enabled=True``. The default raises
+        Required when ``sources.http.enabled=True``. The default raises
         ``NotImplementedError``.
         """
-        raise NotImplementedError('override on_http_request_complete when webapp.enabled=True')
+        raise NotImplementedError('override on_http_request_complete when sources.http.enabled=True')
 
     def http_request_id(
         self,

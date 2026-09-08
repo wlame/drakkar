@@ -90,7 +90,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False

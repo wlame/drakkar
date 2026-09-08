@@ -6,6 +6,7 @@ is reachable here for advanced integration but intentionally absent from
 ``drakkar.__all__`` — it's a framework-internal lifecycle owner.
 """
 
+from drakkar.models import ConfigurationError
 from drakkar.webapp.dependencies import (
     WebappAuthError,
     WebappError,
@@ -22,7 +23,7 @@ from drakkar.webapp.models import (
     WebRequestContext,
 )
 from drakkar.webapp.runner import WebappHandlerError, WebappRunner
-from drakkar.webapp.server import ConfigurationError, WebApp
+from drakkar.webapp.server import WebApp
 
 __all__ = [
     'CacheStats',

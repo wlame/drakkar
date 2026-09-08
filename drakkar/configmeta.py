@@ -38,9 +38,9 @@ from drakkar.config import (
     OffloadConfig,
     RuntimeHealthConfig,
     SinksConfig,
+    SourcesConfig,
     ThroughputConfig,
     UIConfig,
-    WebAppConfig,
 )
 
 # The artifact this module regenerates. Mirrors the vendored-OpenAPI-spec
@@ -128,7 +128,8 @@ class ConfigMetadata(BaseModel):
 # drift from the page it points into.
 _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('root', 'Worker identity', 'worker-identity', None),
-    ('kafka', 'Kafka source (kafka:)', 'kafka-source-kafka', KafkaConfig),
+    ('kafka', 'Kafka connection (kafka:)', 'kafka-connection-kafka', KafkaConfig),
+    ('sources', 'Input sources (sources:)', 'input-sources-sources', SourcesConfig),
     ('executor', 'Executor pool (executor:)', 'executor-pool-executor', ExecutorConfig),
     ('sinks', 'Sinks (sinks:)', 'sinks-sinks', SinksConfig),
     ('dlq', 'Dead letter queue (dlq:)', 'dead-letter-queue-dlq', DLQConfig),
@@ -140,7 +141,6 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),
     ('ui', 'UI / Flight Recorder (ui:)', 'ui-flight-recorder-ui', UIConfig),
     ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
-    ('webapp', 'Webapp (webapp:)', 'webapp-webapp', WebAppConfig),
 ]
 
 
@@ -379,18 +379,19 @@ def _walk(
     name). A ``dict[str, SomeModel]`` field — a sink/statement/client
     instance map — recurses through ``SomeModel`` with a literal ``*``
     path segment standing in for the operator-chosen instance name.
-    ``list[SomeModel]`` fields (just ``webapp.clients``) are deliberately
-    NOT decomposed the same way: a list has no stable per-element path, so
-    it is reported as one ``array``-typed leaf instead.
+    ``list[SomeModel]`` fields (just ``sources.http.clients``) are
+    deliberately NOT decomposed the same way: a list has no stable
+    per-element path, so it is reported as one ``array``-typed leaf instead.
 
-    CAVEAT for the eventual Configs-tab endpoint: because ``webapp.clients``
-    is one un-decomposed leaf, ``ConfigFieldMeta.secret`` is never set for
-    it, even though its elements are ``WebClientConfig`` and
-    ``WebClientConfig.token`` IS marked secret at the model level (see
-    ``drakkar/config/``). A value-rendering endpoint must special-case
-    masking inside the ``webapp.clients`` array (mask each element's
-    ``token``) rather than trusting the top-level ``secret`` flag to cover
-    it — this module's tree has no per-list-element path to hang a flag on.
+    CAVEAT for the eventual Configs-tab endpoint: because
+    ``sources.http.clients`` is one un-decomposed leaf,
+    ``ConfigFieldMeta.secret`` is never set for it, even though its
+    elements are ``WebClientConfig`` and ``WebClientConfig.token`` IS
+    marked secret at the model level (see ``drakkar/config/``). A
+    value-rendering endpoint must special-case masking inside the
+    ``sources.http.clients`` array (mask each element's ``token``) rather
+    than trusting the top-level ``secret`` flag to cover it — this
+    module's tree has no per-list-element path to hang a flag on.
     """
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation
@@ -449,8 +450,8 @@ def build_config_metadata() -> ConfigMetadata:
         annotation = field_info.annotation
         if _is_basemodel(annotation):
             # Every nested-model field on DrakkarConfig shares its name with
-            # its group key (kafka/executor/sinks/dlq/metrics/logging/ui/
-            # cache/webapp) — see _GROUP_DEFS.
+            # its group key (kafka/sources/executor/sinks/dlq/metrics/
+            # logging/ui/cache) — see _GROUP_DEFS.
             _walk(annotation, [field_name], field_name, entries_by_group[field_name])
         else:
             entries_by_group['root'].append(_build_leaf(field_info, [field_name], 'root'))

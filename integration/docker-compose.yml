@@ -169,12 +169,12 @@ services:
       DK_METRICS__PORT: "9090"
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
-      # Webapp pipeline is enabled ONLY on worker-1. Worker-2 and worker-3
-      # leave webapp.enabled=false (the shared yaml default) — proving the
-      # load-balancer caveat documented in docs/webapp.md: the synchronous
-      # HTTP path is sticky to a single worker, and round-robin
+      # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
+      # leave sources.http.enabled=false (the shared yaml default) — proving
+      # the load-balancer caveat documented in docs/webapp.md: the
+      # synchronous HTTP path is sticky to a single worker, and round-robin
       # load-balancing across all three would 503 two-thirds of requests.
-      DK_WEBAPP__ENABLED: "true"
+      DK_SOURCES__HTTP__ENABLED: "true"
       # Env override of one ui.docs field, so the harness shows the docs
       # section taking DK_ overrides like any other scalar setting.
       # worker-1 labels the nav entry differently from worker-2/3, which
@@ -183,20 +183,20 @@ services:
     ports:
       - "9090:9090"
       - "8081:8081"
-      # Webapp port — only exposed on worker-1 because that's the only
-      # worker with the webapp pipeline running. Integration convention:
-      # webapp port = debug-UI port + 10 (debug 8081 → webapp 8091).
+      # HTTP source port — only exposed on worker-1 because that's the only
+      # worker with the HTTP source running. Integration convention: HTTP
+      # source port = debug-UI port + 10 (debug 8081 → HTTP source 8091).
       - "8091:8091"
     volumes:
       - ..:/project:ro
       - ./shared:/shared
     healthcheck:
       # Reuse the debug server's /healthz endpoint as the readiness gate.
-      # The webapp itself does not own a /healthz route — debug is always
-      # up well before the webapp accepts requests, so a green debug check
-      # is a reliable "worker process is alive" signal. The load_generator
-      # service depends on this healthcheck (service_healthy) so its first
-      # request lands after worker-1 has bound port 8091.
+      # The HTTP source itself does not own a /healthz route — debug is
+      # always up well before the HTTP source accepts requests, so a green
+      # debug check is a reliable "worker process is alive" signal. The
+      # load_generator service depends on this healthcheck (service_healthy)
+      # so its first request lands after worker-1 has bound port 8091.
       test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8081/healthz\", timeout=2).status==200 else 1)'"]
       interval: 5s
       timeout: 5s
@@ -319,6 +319,45 @@ services:
       - ..:/project:ro
       - ./shared:/shared
 
+  # --- HTTP-only worker (http cluster) ---
+  #
+  # Runs the ripgrep pipeline with the Kafka source disabled. The producer
+  # mirrors ~1% of its messages here over HTTP (HTTP_MIRROR_RATIO); results
+  # land in the search-results-http topic for a by-request-id comparison
+  # with search-results in Kafka-UI. Nothing verifies these — it is a demo.
+  http-worker:
+    build:
+      context: ..
+      dockerfile: integration/worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: http-worker
+      WORKER_HANDLER: http-search
+      DK_CONFIG: /app/http-worker.yaml
+      DK_METRICS__PORT: "9096"
+      DK_UI__PORT: "8086"
+      DK_UI__PUBLIC_URL: "http://localhost:8086/"
+    ports:
+      - "9096:9096"
+      - "8086:8086"
+      - "8092:8092"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+    healthcheck:
+      # /readyz, not /healthz: an HTTP-only worker is ready as soon as its
+      # HTTP source is bound, which is exactly what this proves.
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8086/readyz\", timeout=2).status==200 else 1)'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
   # --- Message Producer ---
 
   producer:
@@ -331,6 +370,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      http-worker:
+        condition: service_healthy
     environment:
       KAFKA_BROKERS: kafka:9092
       SOURCE_TOPIC: search-requests
@@ -338,10 +379,16 @@ services:
       # job verifies delivery end to end and does not need 5000 messages
       # to do it. Request ids are 1..TOTAL_MESSAGES either way.
       TOTAL_MESSAGES: "${TOTAL_MESSAGES:-5000}"
+      # Mirror ~1% of generated messages to the HTTP-only worker so its
+      # search-results-http topic gets a trickle of the same requests the
+      # Kafka path processes (read by the producer in a later task).
+      HTTP_MIRROR_RATIO: "0.01"
+      HTTP_MIRROR_URL: "http://http-worker:8092/process"
+      HTTP_MIRROR_TOKEN: "integration-http-mirror-token-do-not-use-in-prod"
 
   # --- HTTP Load Generator ---
   #
-  # Drives the worker-1 webapp pipeline on a 10-second cycle. Anonymous by
+  # Drives the worker-1 HTTP source on a 10-second cycle. Anonymous by
   # default (CLIENT_TOKEN unset → matches the ``anonymous`` client at
   # rpm=4). At one request every 10 seconds the anonymous limit is comfortably
   # under the rpm=4 cap, so 200 OK is the steady state. Set INTERVAL_SECONDS

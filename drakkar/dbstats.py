@@ -127,13 +127,31 @@ class DbRow:
 class _Listing:
     """What one ``os.scandir`` pass over ``db_dir`` found."""
 
+    # The directory as the caller spelled it, and its fully resolved location.
+    db_dir: str = ''
+    real_dir: str = ''
     # (path, mtime_ns, size) of every regular candidate .db file.
     files: list[tuple[str, int, int]] = field(default_factory=list)
-    # realpath(target) -> worker name, from ``<worker>-live.db`` symlinks.
+    # target path (spelled like ``files``) -> worker name, from
+    # ``<worker>-live.db`` symlinks.
     live_targets: dict[str, str] = field(default_factory=dict)
     # (symlink basename, worker, target path) from ``<worker>-cache.db``
     # symlinks whose target exists.
     cache_links: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def spell(self, resolved_target: str) -> str:
+        """``resolved_target`` spelled the way ``files`` spells its paths.
+
+        ``os.path.realpath`` returns a fully resolved path, while the listed
+        files are joined onto ``db_dir`` exactly as the caller wrote it. The
+        two are compared by string equality, so a ``db_dir`` reached through
+        a symlinked component would never match its own live marker. A
+        target outside the directory can never equal a listed file and is
+        returned unchanged.
+        """
+        if os.path.dirname(resolved_target) == self.real_dir:
+            return os.path.join(self.db_dir, os.path.basename(resolved_target))
+        return resolved_target
 
 
 class DbStatsCache:
@@ -297,6 +315,8 @@ def _scan_listing(db_dir: str) -> _Listing:
     listing = _Listing()
     if not db_dir or not os.path.isdir(db_dir):
         return listing
+    listing.db_dir = db_dir
+    listing.real_dir = os.path.realpath(db_dir)
     for entry in sorted(os.listdir(db_dir)):
         # Dot-prefixed names are pass-internal state (merge temporaries,
         # this module's own cache file) — never page rows.
@@ -313,6 +333,7 @@ def _scan_listing(db_dir: str) -> _Listing:
                 continue
             if not os.path.isfile(target):
                 continue  # dangling link (crashed worker, deleted target)
+            target = listing.spell(target)
             if entry.endswith(_LIVE_SUFFIX):
                 listing.live_targets[target] = entry.removesuffix(_LIVE_SUFFIX)
             elif entry.endswith(_CACHE_SUFFIX):
@@ -519,7 +540,7 @@ def collect(
 
     live_workers = set(listing.live_targets.values())
 
-    own = os.path.realpath(own_live_db) if own_live_db else ''
+    own = listing.spell(os.path.realpath(own_live_db)) if own_live_db else ''
     for path, mtime_ns, size in listing.files:
         peers_live = skip_peer_live and path in listing.live_targets and path != own
         row = _resolve_row(path, mtime_ns, size, cached, cache, budget, may_read=not peers_live)

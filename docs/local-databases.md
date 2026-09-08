@@ -190,6 +190,11 @@ rename and are **kept deliberately** for on-disk compatibility. Secrets
 are redacted before insertion (broker credentials stripped, secret-named
 env values replaced) — the file is downloadable via the operator UI.
 
+A worker with [no Kafka source](sources.md) writes `source_topic` and
+`consumer_group` as empty strings. The column set does not change, so a
+peer reading the file needs no special case — read an empty value as "this
+worker consumes no topic".
+
 ### `worker_state` (recorder, periodic snapshots)
 
 ```sql

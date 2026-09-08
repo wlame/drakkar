@@ -33,9 +33,6 @@ from tests.conftest import make_ui_config
 def test_kafka_config_defaults():
     cfg = KafkaConfig()
     assert cfg.brokers == 'localhost:9092'
-    assert cfg.consumer_group == 'drakkar-workers'
-    assert cfg.max_poll_records == 100
-    assert cfg.max_poll_interval_ms == 300_000
 
 
 # --- ExecutorConfig ---
@@ -91,7 +88,8 @@ def test_executor_config_rejects_negative_stderr_cap():
 def test_executor_config_output_caps_env_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__MAX_STDOUT_BYTES', '1048576')
     monkeypatch.setenv('DK_EXECUTOR__MAX_STDERR_BYTES', '65536')
-    cfg = DrakkarConfig()
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.executor.max_stdout_bytes == 1048576
     assert cfg.executor.max_stderr_bytes == 65536
 
@@ -380,12 +378,12 @@ def test_logging_config_invalid_format():
 
 
 def test_worker_name_env_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
+    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
     assert cfg.worker_name_env == 'WORKER_ID'
 
 
 def test_drakkar_config_sinks_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
+    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
     assert cfg.sinks.is_empty
     assert cfg.dlq.topic == ''
 
@@ -395,6 +393,7 @@ def test_drakkar_config_with_sinks():
         executor=ExecutorConfig(binary_path='/bin/true'),
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
         dlq=DLQConfig(topic='my-dlq'),
+        sources={'kafka': {'enabled': True}},
     )
     assert not cfg.sinks.is_empty
     assert cfg.dlq.topic == 'my-dlq'
@@ -437,11 +436,13 @@ def test_load_config_env_override(minimal_config_yaml_file: Path, monkeypatch: p
 def test_load_config_no_path_no_env_requires_executor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv('DK_CONFIG', raising=False)
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = load_config()
     assert cfg.executor.binary_path == '/usr/bin/test'
 
 
-def test_load_config_empty_yaml(tmp_path: Path):
+def test_load_config_empty_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     config_path = tmp_path / 'empty.yaml'
     config_path.write_text('')
     cfg = load_config(config_path)
@@ -451,17 +452,19 @@ def test_load_config_empty_yaml(tmp_path: Path):
 def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
     monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTORS', '16')
-    monkeypatch.setenv('DK_KAFKA__SOURCE_TOPIC', 'my-topic')
-    cfg = DrakkarConfig()
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_SOURCES__KAFKA__TOPIC', 'my-topic')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.executor.binary_path == '/usr/bin/test'
     assert cfg.executor.max_executors == 16
-    assert cfg.kafka.source_topic == 'my-topic'
+    assert cfg.sources.kafka.topic == 'my-topic'
 
 
 def test_load_config_with_sinks_yaml(tmp_path: Path):
     """YAML with sinks section parses correctly."""
     config_data = {
         'executor': {'binary_path': '/bin/echo'},
+        'sources': {'kafka': {'enabled': True}},
         'sinks': {
             'kafka': {'results': {'topic': 'search-results'}},
             'postgres': {'main': {'dsn': 'postgresql://localhost/db'}},
@@ -490,7 +493,7 @@ def test_config_serialization(config_yaml_file: Path):
 
 
 def test_drakkar_config_app_section_defaults_to_empty_dict():
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.app == {}
 
 
@@ -500,6 +503,9 @@ def test_load_config_app_section_passes_through_unvalidated(tmp_path: Path):
     config_path.write_text(
         'executor:\n'
         '  binary_path: /bin/echo\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
         'app:\n'
         '  priority_threshold: 20\n'
         '  scoring:\n'
@@ -515,7 +521,7 @@ def test_drakkar_config_rejects_dk_app_env_overrides(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv('DK_APP__PRIORITY_THRESHOLD', '20')
     monkeypatch.setenv('DK_APP__API_KEY', 'sekrit')
     with pytest.raises(ValidationError, match='DK_APP__\\* environment overrides are not supported') as excinfo:
-        DrakkarConfig()
+        DrakkarConfig(sources={'kafka': {'enabled': True}})
     # Sorted var list, mirroring the retired-debug-section guard's style.
     assert 'DK_APP__API_KEY, DK_APP__PRIORITY_THRESHOLD' in str(excinfo.value)
 
@@ -584,6 +590,7 @@ def test_webapp_config_defaults():
 def test_webapp_config_rejects_two_empty_token_clients():
     with pytest.raises(ValidationError) as exc_info:
         WebAppConfig(
+            enabled=True,
             clients=[
                 WebClientConfig(name='one', token='', rpm=4),
                 WebClientConfig(name='two', token='', rpm=4),
@@ -598,6 +605,7 @@ def test_webapp_config_rejects_two_empty_token_clients():
 def test_webapp_config_rejects_duplicate_non_empty_tokens():
     with pytest.raises(ValidationError) as exc_info:
         WebAppConfig(
+            enabled=True,
             clients=[
                 WebClientConfig(name='a', token='shared', rpm=4),
                 WebClientConfig(name='b', token='shared', rpm=4),
@@ -612,6 +620,7 @@ def test_webapp_config_rejects_duplicate_non_empty_tokens():
 def test_webapp_config_rejects_zero_rpm_client():
     with pytest.raises(ValidationError) as exc_info:
         WebAppConfig(
+            enabled=True,
             clients=[WebClientConfig(name='zero-rpm', token='t', rpm=0)],
         )
     msg = str(exc_info.value)
@@ -622,24 +631,25 @@ def test_webapp_config_rejects_zero_rpm_client():
 def test_webapp_config_rejects_negative_rpm_client():
     with pytest.raises(ValidationError):
         WebAppConfig(
+            enabled=True,
             clients=[WebClientConfig(name='neg-rpm', token='t', rpm=-5)],
         )
 
 
 def test_webapp_config_rejects_zero_request_timeout():
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(request_timeout_seconds=0)
+        WebAppConfig(enabled=True, request_timeout_seconds=0)
     assert 'request_timeout_seconds' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_negative_request_timeout():
     with pytest.raises(ValidationError):
-        WebAppConfig(request_timeout_seconds=-1.0)
+        WebAppConfig(enabled=True, request_timeout_seconds=-1.0)
 
 
 def test_webapp_config_rejects_zero_max_concurrent():
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(max_concurrent=0)
+        WebAppConfig(enabled=True, max_concurrent=0)
     assert 'max_concurrent' in str(exc_info.value)
 
 
@@ -647,13 +657,13 @@ def test_webapp_config_rejects_non_positive_max_body_bytes():
     # A zero/negative cap would reject every non-empty POST — same
     # validation rule (and message shape).
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(max_body_bytes=0)
+        WebAppConfig(enabled=True, max_body_bytes=0)
     assert 'max_body_bytes must be > 0' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_negative_max_concurrent():
     with pytest.raises(ValidationError):
-        WebAppConfig(max_concurrent=-1)
+        WebAppConfig(enabled=True, max_concurrent=-1)
 
 
 @pytest.mark.parametrize(
@@ -662,19 +672,20 @@ def test_webapp_config_rejects_negative_max_concurrent():
 )
 def test_webapp_config_rejects_invalid_path(bad_path: str):
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(path=bad_path)
-    assert 'webapp.path' in str(exc_info.value)
+        WebAppConfig(enabled=True, path=bad_path)
+    assert 'sources.http.path' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_empty_clients_list():
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(clients=[])
+        WebAppConfig(enabled=True, clients=[])
     assert 'at least one client' in str(exc_info.value)
 
 
 def test_webapp_config_accepts_one_anonymous_plus_named_clients():
     """Mixing one empty-token (anonymous) client with several named ones is valid."""
     cfg = WebAppConfig(
+        enabled=True,
         clients=[
             WebClientConfig(name='anonymous', token='', rpm=4),
             WebClientConfig(name='tenant-a', token='tok-a', rpm=60),
@@ -688,29 +699,31 @@ def test_webapp_config_accepts_one_anonymous_plus_named_clients():
 
 
 def test_drakkar_config_webapp_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
-    assert cfg.webapp.enabled is False
-    assert cfg.webapp.port == 8090
-    assert len(cfg.webapp.clients) == 1
-    assert cfg.webapp.clients[0].name == 'anonymous'
+    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
+    assert cfg.sources.http.enabled is False
+    assert cfg.sources.http.port == 8090
+    assert len(cfg.sources.http.clients) == 1
+    assert cfg.sources.http.clients[0].name == 'anonymous'
 
 
 def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
-    """YAML round-trip: a webapp block parses correctly."""
+    """YAML round-trip: a sources.http block parses correctly."""
     config_data = {
         'executor': {'binary_path': '/bin/echo'},
-        'webapp': {
-            'enabled': True,
-            'host': '0.0.0.0',
-            'port': 8090,
-            'path': '/process',
-            'sinks_enabled': True,
-            'request_timeout_seconds': 15.0,
-            'max_concurrent': 32,
-            'clients': [
-                {'name': 'anonymous', 'token': '', 'rpm': 4},
-                {'name': 'tenant-a', 'token': 'tok-a', 'rpm': 60},
-            ],
+        'sources': {
+            'http': {
+                'enabled': True,
+                'host': '0.0.0.0',
+                'port': 8090,
+                'path': '/process',
+                'sinks_enabled': True,
+                'request_timeout_seconds': 15.0,
+                'max_concurrent': 32,
+                'clients': [
+                    {'name': 'anonymous', 'token': '', 'rpm': 4},
+                    {'name': 'tenant-a', 'token': 'tok-a', 'rpm': 60},
+                ],
+            },
         },
     }
     import yaml
@@ -720,48 +733,49 @@ def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
         yaml.dump(config_data, f)
 
     cfg = load_config(config_path)
-    assert cfg.webapp.enabled is True
-    assert cfg.webapp.port == 8090
-    assert cfg.webapp.sinks_enabled is True
-    assert cfg.webapp.request_timeout_seconds == 15.0
-    assert cfg.webapp.max_concurrent == 32
-    assert len(cfg.webapp.clients) == 2
-    assert cfg.webapp.clients[1].name == 'tenant-a'
-    assert cfg.webapp.clients[1].rpm == 60
+    assert cfg.sources.http.enabled is True
+    assert cfg.sources.http.port == 8090
+    assert cfg.sources.http.sinks_enabled is True
+    assert cfg.sources.http.request_timeout_seconds == 15.0
+    assert cfg.sources.http.max_concurrent == 32
+    assert len(cfg.sources.http.clients) == 2
+    assert cfg.sources.http.clients[1].name == 'tenant-a'
+    assert cfg.sources.http.clients[1].rpm == 60
 
 
 def test_drakkar_config_webapp_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
-    monkeypatch.setenv('DK_WEBAPP__ENABLED', 'true')
-    cfg = DrakkarConfig()
-    assert cfg.webapp.enabled is True
+    monkeypatch.setenv('DK_SOURCES__HTTP__ENABLED', 'true')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    assert cfg.sources.http.enabled is True
 
 
 def test_drakkar_config_webapp_env_override_port(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
-    monkeypatch.setenv('DK_WEBAPP__PORT', '9000')
-    cfg = DrakkarConfig()
-    assert cfg.webapp.port == 9000
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_SOURCES__HTTP__PORT', '9000')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    assert cfg.sources.http.port == 9000
 
 
 def test_drakkar_config_webapp_env_override_client_rpm(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
-    """``DK_WEBAPP__CLIENTS__0__RPM`` overrides the first client's rpm.
+    """``DK_SOURCES__HTTP__CLIENTS__0__RPM`` overrides the first client's rpm.
 
     Verifies that pydantic-settings env-var nested delimiter handling
     (already exercised for other sub-configs) works for list-of-objects
     fields too.
     """
-    monkeypatch.setenv('DK_WEBAPP__CLIENTS__0__RPM', '10')
+    monkeypatch.setenv('DK_SOURCES__HTTP__CLIENTS__0__RPM', '10')
     cfg = load_config(minimal_config_yaml_file)
-    assert cfg.webapp.clients[0].rpm == 10
+    assert cfg.sources.http.clients[0].rpm == 10
 
 
 def test_drakkar_config_webapp_env_override_client_token(
     minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setenv('DK_WEBAPP__CLIENTS__0__TOKEN', 'tok-from-env')
+    monkeypatch.setenv('DK_SOURCES__HTTP__CLIENTS__0__TOKEN', 'tok-from-env')
     cfg = load_config(minimal_config_yaml_file)
-    assert cfg.webapp.clients[0].token == 'tok-from-env'
+    assert cfg.sources.http.clients[0].token == 'tok-from-env'
 
 
 # --- Postgres operator-authored statements ---

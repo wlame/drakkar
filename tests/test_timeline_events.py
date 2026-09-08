@@ -199,7 +199,8 @@ def test_end_ts_timestamp_overflow_drops_without_raising(window_ctx):
 def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__ (mirrors tests/test_uipages.py)."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),

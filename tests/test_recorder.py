@@ -1996,7 +1996,8 @@ def _make_drakkar_config():
     from drakkar.config import DrakkarConfig
 
     return DrakkarConfig(
-        kafka={'brokers': 'kafka:9092', 'source_topic': 'test-topic', 'consumer_group': 'test-group'},
+        kafka={'brokers': 'kafka:9092'},
+        sources={'kafka': {'enabled': True, 'topic': 'test-topic', 'consumer_group': 'test-group'}},
         executor={
             'binary_path': '/usr/bin/test',
             'max_executors': 4,
@@ -2102,6 +2103,26 @@ async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
     await rec.stop()
 
 
+async def test_write_config_empty_topic_and_group_when_kafka_source_off(tmp_path):
+    """A worker running only the HTTP source has no Kafka topic or group to report."""
+    from drakkar.config import DrakkarConfig
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    drakkar_cfg = DrakkarConfig(
+        executor={'binary_path': '/usr/bin/echo'},
+        sources={'http': {'enabled': True}},
+    )
+    await rec.write_config(drakkar_cfg)
+
+    async with rec._db.execute('SELECT source_topic, consumer_group FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row == ('', '')
+    await rec.stop()
+
+
 # --- H7: secrets in recorder must be redacted ---
 
 
@@ -2117,11 +2138,8 @@ async def test_write_config_redacts_sasl_kafka_brokers(tmp_path):
     await rec.start()
 
     drakkar_cfg = DrakkarConfig(
-        kafka={
-            'brokers': 'SASL_SSL://alice:s3cret@kafka-1.example.com:9094',
-            'source_topic': 't',
-            'consumer_group': 'g',
-        },
+        kafka={'brokers': 'SASL_SSL://alice:s3cret@kafka-1.example.com:9094'},
+        sources={'kafka': {'enabled': True, 'topic': 't', 'consumer_group': 'g'}},
         executor={'binary_path': '/bin/echo'},
         sinks={'kafka': {'out': {'topic': 'results'}}},
     )

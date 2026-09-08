@@ -1,6 +1,6 @@
 """Tests for ``GET /api/v1/config-reference``.
 
-Covers the response shape, secret masking (including the ``webapp.clients``
+Covers the response shape, secret masking (including the ``sources.http.clients``
 special case — its ``token`` has no per-element metadata path, see
 ``drakkar.uiserver.routes_config_reference``), ``is_default`` computation,
 dynamic-instance expansion (the ``*`` template entry plus one entry per
@@ -91,11 +91,12 @@ def entries_by_path(body: dict, path: str) -> list[dict]:
 
 class TestShape:
     async def test_response_has_expected_groups(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         group_keys = [g['key'] for g in body['groups']]
         assert group_keys == [
             'root',
             'kafka',
+            'sources',
             'executor',
             'sinks',
             'dlq',
@@ -107,17 +108,16 @@ class TestShape:
             'logging',
             'ui',
             'cache',
-            'webapp',
         ]
 
     async def test_group_has_title_and_doc_anchor(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         kafka_group = next(g for g in body['groups'] if g['key'] == 'kafka')
         assert kafka_group['title']
         assert kafka_group['doc_anchor']
 
     async def test_entry_has_every_field(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         entry = entries_by_path(body, 'kafka.brokers')[0]
         assert set(entry) == {
             'path',
@@ -138,7 +138,7 @@ class TestShape:
         recorder._reader_db = None
         recorder.reader_db = None
         recorder.config = ui_config
-        app = make_app(DrakkarConfig())
+        app = make_app(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         fastapi_app = create_ui_app(ui_config, recorder, app)
         async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as client:
             resp = await client.get('/api/v1/config-reference')
@@ -152,7 +152,7 @@ class TestShape:
 
 class TestMasking:
     async def test_configured_ui_auth_token_is_masked(self):
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.ui.auth_token = 'super-secret-token'
         body = await get_config_reference(config)
         entry = entries_by_path(body, 'ui.auth_token')[0]
@@ -160,19 +160,19 @@ class TestMasking:
         assert 'super-secret-token' not in body_as_text(body)
 
     async def test_unset_secret_is_empty_and_default(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         entry = entries_by_path(body, 'ui.auth_token')[0]
         assert entry['value'] == ''
         assert entry['is_default'] is True
 
-    async def test_webapp_client_token_is_masked(self):
-        config = DrakkarConfig()
-        config.webapp.clients = [
+    async def test_http_source_client_token_is_masked(self):
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        config.sources.http.clients = [
             WebClientConfig(name='tenant-a', token='tenant-a-bearer-token', rpm=10),
             WebClientConfig(name='anonymous', token='', rpm=4),
         ]
         body = await get_config_reference(config)
-        entry = entries_by_path(body, 'webapp.clients')[0]
+        entry = entries_by_path(body, 'sources.http.clients')[0]
         tokens = [c['token'] for c in entry['value']]
         assert tokens == [SECRET_MASK, '']
         assert 'tenant-a-bearer-token' not in body_as_text(body)
@@ -184,7 +184,7 @@ class TestMasking:
         The recorder already sanitizes the SAME env by key name before
         storing it, so the two surfaces disagreed about what is secret.
         """
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.executor.env = {
             'MY_API_KEY': 'sk-live-abcdef',
             'DB_PASSWORD': 'hunter2',
@@ -204,7 +204,7 @@ class TestMasking:
 
     async def test_executor_env_url_credentials_are_redacted(self):
         """A key name that looks innocent can still hold a DSN."""
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.executor.env = {'UPSTREAM': 'postgres://user:s3cr3t@db:5432/app'}
         body = await get_config_reference(config)
         entry = entries_by_path(body, 'executor.env')[0]
@@ -218,7 +218,7 @@ class TestMasking:
     async def test_client_config_secrets_are_masked(self, path):
         """librdkafka passthrough can carry sasl.password / ssl.key.password
         — only four keys are reserved, so anything may appear here."""
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         section = config.kafka if path.startswith('kafka') else config.dlq
         section.client_config = {
             'sasl.password': 'broker-secret',
@@ -238,7 +238,7 @@ class TestMasking:
         """The dynamic (wildcard) path must be covered too."""
         from drakkar.config import KafkaSinkConfig
 
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.sinks.kafka = {
             'primary_output_topic': KafkaSinkConfig(
                 topic='out',
@@ -254,7 +254,7 @@ class TestMasking:
     async def test_configured_kafka_sink_password_is_masked(self):
         from pydantic import SecretStr
 
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.sinks.kafka['results'] = KafkaSinkConfig(topic='results-topic')
         config.sinks.kafka['results'].security.sasl_password = SecretStr('kafka-sasl-secret')
         body = await get_config_reference(config)
@@ -275,7 +275,7 @@ class TestMasking:
         serialized response, not merely in the one field we'd think to check.
         """
         raw_dsn = 'postgresql://svc_user:hunter2@db.internal:5432/main'
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.sinks.postgres['main-db'] = PostgresSinkConfig(dsn=raw_dsn)
         body = await get_config_reference(config)
         entry = entries_by_path(body, 'sinks.postgres.main-db.dsn')[0]
@@ -298,13 +298,13 @@ def body_as_text(body: dict) -> str:
 
 class TestIsDefault:
     async def test_default_field_reports_true(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         entry = entries_by_path(body, 'executor.max_executors')[0]
         assert entry['value'] == entry['default'] == 4
         assert entry['is_default'] is True
 
     async def test_non_default_field_reports_false(self):
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.executor.max_executors = 16
         body = await get_config_reference(config)
         entry = entries_by_path(body, 'executor.max_executors')[0]
@@ -320,7 +320,7 @@ class TestIsDefault:
 
 class TestDynamicExpansion:
     async def test_two_kafka_sinks_yield_two_entries_plus_template(self):
-        config = DrakkarConfig()
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
         config.sinks.kafka['results'] = KafkaSinkConfig(topic='results-topic')
         config.sinks.kafka['audit'] = KafkaSinkConfig(topic='audit-topic')
         body = await get_config_reference(config)
@@ -339,7 +339,7 @@ class TestDynamicExpansion:
         assert results[0]['env'] is None  # dynamic paths carry no env var
 
     async def test_template_entry_present_with_zero_instances(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         template = entries_by_path(body, 'sinks.postgres.*.dsn')
         assert len(template) == 1
         assert template[0]['value'] is None
@@ -362,7 +362,7 @@ class TestDynamicExpansion:
 
 class TestEnvPassthrough:
     async def test_kafka_brokers_reports_its_env_var(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         entry = entries_by_path(body, 'kafka.brokers')[0]
         assert entry['env'] == 'DK_KAFKA__BROKERS'
 
@@ -411,14 +411,14 @@ def make_app_config_handler(instance: ReferenceAppConfig) -> AppConfigHandler:
 class TestAppConfigGroup:
     async def test_group_present_with_expected_identity(self):
         handler = make_app_config_handler(ReferenceAppConfig())
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         group = body['groups'][-1]
         assert group['key'] == 'app'
         assert group['title'] == 'Application'
         assert group['doc_anchor'] == 'app-config'
 
     async def test_group_absent_when_no_handler(self):
-        body = await get_config_reference(DrakkarConfig())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         assert 'app' not in [g['key'] for g in body['groups']]
 
     async def test_group_absent_when_handler_declares_no_model(self):
@@ -426,12 +426,12 @@ class TestAppConfigGroup:
             async def arrange(self, messages, pending):
                 return []
 
-        body = await get_config_reference(DrakkarConfig(), handler=PlainHandler())
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=PlainHandler())
         assert 'app' not in [g['key'] for g in body['groups']]
 
     async def test_entries_carry_app_prefixed_paths_and_user_env_names(self):
         handler = make_app_config_handler(ReferenceAppConfig())
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         entry = entries_by_path(body, 'app.priority_threshold')[0]
         assert entry['env'] == 'MYAPP_PRIORITY_THRESHOLD'
         assert entry['type'] == 'integer'
@@ -440,7 +440,7 @@ class TestAppConfigGroup:
 
     async def test_nested_model_walks_with_double_underscore_env(self):
         handler = make_app_config_handler(ReferenceAppConfig(scoring=ScoringSection(url='http://scoring-svc:9000')))
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         url_entry = entries_by_path(body, 'app.scoring.url')[0]
         assert url_entry['env'] == 'MYAPP_SCORING__URL'
         assert url_entry['value'] == 'http://scoring-svc:9000'
@@ -451,7 +451,7 @@ class TestAppConfigGroup:
 
     async def test_secretstr_field_is_masked_and_never_leaks_raw(self):
         handler = make_app_config_handler(ReferenceAppConfig(api_key=SecretStr('raw-secret-key')))
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         entry = entries_by_path(body, 'app.api_key')[0]
         assert entry['secret'] is True
         assert entry['value'] == SECRET_MASK
@@ -462,7 +462,7 @@ class TestAppConfigGroup:
 
     async def test_drakkar_secret_marker_field_is_masked(self):
         handler = make_app_config_handler(ReferenceAppConfig(webhook_token='raw-webhook-token'))
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         entry = entries_by_path(body, 'app.webhook_token')[0]
         assert entry['secret'] is True
         assert entry['value'] == SECRET_MASK
@@ -470,14 +470,14 @@ class TestAppConfigGroup:
 
     async def test_unset_secret_stays_visible_as_empty_and_default(self):
         handler = make_app_config_handler(ReferenceAppConfig())
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         entry = entries_by_path(body, 'app.api_key')[0]
         assert entry['value'] == ''
         assert entry['is_default'] is True
 
     async def test_default_scalar_reports_is_default_true(self):
         handler = make_app_config_handler(ReferenceAppConfig())
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         entry = entries_by_path(body, 'app.priority_threshold')[0]
         assert entry['value'] == 10
         assert entry['default'] == 10
@@ -487,7 +487,7 @@ class TestAppConfigGroup:
         """Adding the runtime group appends data — the 14 static groups keep
         their keys and order."""
         handler = make_app_config_handler(ReferenceAppConfig())
-        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
         static_keys = [g['key'] for g in body['groups'][:-1]]
-        baseline = await get_config_reference(DrakkarConfig())
+        baseline = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         assert static_keys == [g['key'] for g in baseline['groups']]

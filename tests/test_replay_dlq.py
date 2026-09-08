@@ -8,6 +8,7 @@ are needed besides the standard mock patterns used elsewhere in the suite.
 
 import asyncio
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -313,8 +314,11 @@ async def test_main_returns_exit_code_1_on_produce_failure(replay_module, tmp_pa
     config_file.write_text(
         'kafka:\n'
         '  brokers: "localhost:9092"\n'
-        '  source_topic: "requests"\n'
-        '  consumer_group: "grp"\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
+        '    topic: "requests"\n'
+        '    consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "requests_dlq"\n'
         '  brokers: "localhost:9092"\n'
@@ -406,13 +410,16 @@ def test_extract_payload_values_handles_mixed_types(replay_module):
 
 
 def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):
-    """When dlq.topic is empty, topic is derived as {source_topic}_dlq."""
+    """When dlq.topic is empty, topic is derived as {sources.kafka.topic}_dlq."""
     config_file = tmp_path / 'config.yaml'
     config_file.write_text(
         'kafka:\n'
         '  brokers: "kafka:9092"\n'
-        '  source_topic: "search-requests"\n'
-        '  consumer_group: "grp"\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
+        '    topic: "search-requests"\n'
+        '    consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: ""\n'
         '  brokers: ""\n'
@@ -429,7 +436,10 @@ def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
     config_file.write_text(
         'kafka:\n'
         '  brokers: "kafka:9092"\n'
-        '  source_topic: "requests"\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
+        '    topic: "requests"\n'
         '  consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "custom-dlq"\n'
@@ -441,13 +451,27 @@ def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
     assert brokers == 'other-cluster:9092'
 
 
+def test_resolve_dlq_coordinates_raises_when_topic_cannot_be_derived(replay_module, tmp_path):
+    """No dlq.topic and a disabled Kafka source leaves resolved_dlq_topic empty — surface that plainly."""
+    config_file = tmp_path / 'config.yaml'
+    config_file.write_text('kafka:\n  brokers: "kafka:9092"\nsources:\n  http:\n    enabled: true\ndlq:\n  topic: ""\n')
+
+    with pytest.raises(
+        ValueError, match=re.escape('cannot derive DLQ topic: dlq.topic is empty and the Kafka source is disabled')
+    ):
+        replay_module._resolve_dlq_coordinates(str(config_file))
+
+
 async def test_main_rejects_missing_target_topic(replay_module, tmp_path, capsys):
     """Without --dry-run, --target-topic is required (exit 2)."""
     config_file = tmp_path / 'config.yaml'
     config_file.write_text(
         'kafka:\n'
         '  brokers: "kafka:9092"\n'
-        '  source_topic: "requests"\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
+        '    topic: "requests"\n'
         '  consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "dlq"\n'
@@ -474,7 +498,10 @@ async def test_main_dry_run_happy_path(replay_module, tmp_path, capsys):
     config_file.write_text(
         'kafka:\n'
         '  brokers: "kafka:9092"\n'
-        '  source_topic: "requests"\n'
+        'sources:\n'
+        '  kafka:\n'
+        '    enabled: true\n'
+        '    topic: "requests"\n'
         '  consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "dlq"\n'

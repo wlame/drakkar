@@ -112,11 +112,12 @@ async def run_in_probe(handler, *, max_retries: int):
         handler=handler,
         executor_pool=make_pool(),
         app_config=DrakkarConfig(
+            sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
             executor=ExecutorConfig(
                 binary_path=BOGUS_BINARY,
                 task_timeout_seconds=5,
                 max_retries=max_retries,
-            )
+            ),
         ),
     )
     return await runner.run(ProbeInput(value='{"x": 1}', offset=0))

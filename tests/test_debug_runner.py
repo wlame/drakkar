@@ -990,11 +990,12 @@ def _make_config(*, max_retries: int = 1) -> DrakkarConfig:
     budget per scenario (retry path, retries exhausted, etc.).
     """
     return DrakkarConfig(
+        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
         executor=ExecutorConfig(
             binary_path='/nonexistent/binary/should-never-run',
             task_timeout_seconds=5,
             max_retries=max_retries,
-        )
+        ),
     )
 
 

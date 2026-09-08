@@ -349,7 +349,7 @@ async def test_lifecycle_wires_auto_sized_pool_from_the_executor_config():
     from drakkar.config import DrakkarConfig
     from drakkar.lifecycle import AppLifecycle
 
-    config = DrakkarConfig()
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     config.executor.max_executors = 13
     handler = SimpleNamespace(_offloader=None)
     app = SimpleNamespace(_config=config, _recorder=None, _handler=handler, _offload_pool=None)

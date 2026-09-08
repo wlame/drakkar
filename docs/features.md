@@ -3,13 +3,11 @@
 Drakkar's optional features depend on each other. This page is the map:
 which switch turns what on, what each feature silently needs, and the
 order to enable things in as a deployment grows from a minimal worker to
-a full-featured fleet. Every toggle,
-default, and dependency below is identical in the Python and Go
-implementations.
+a full-featured fleet.
 
 Per-feature guides: [Configuration](configuration.md) ·
 [Config Reference](config-reference.md) · [Observability](observability.md) ·
-[Cache](cache.md) · [Webapp](webapp.md) ·
+[Cache](cache.md) · [Input Sources](sources.md) · [Webapp](webapp.md) ·
 [Local Databases](local-databases.md).
 
 ## The switches
@@ -33,13 +31,19 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
 | Task cost & throughput | `throughput.cost_label` | **off** (empty) | Naming a numeric task label enables per-task speed and windowed throughput ([Throughput](throughput.md)) |
 | Cache peer sync | `cache.peer_sync.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
-| Synchronous HTTP ingress | `webapp.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
-| Aligned startup | `kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
+| Kafka input source | `sources.kafka.enabled` | **off** | Consumer group, poll loop, `arrange()`, offset commits |
+| HTTP input source | `sources.http.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
+| Aligned startup | `sources.kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
 
-Sinks are not a toggle: **at least one sink instance (of any type) is
-required** — a worker with zero sinks fails startup. The DLQ is always
-built (topic `{source_topic}_dlq`), and the circuit breaker always wraps
-sink delivery.
+Sources are not optional as a group: **at least one input source must be
+enabled**. Both are off by default, so every worker states where its work
+comes from. A config with neither fails to load
+(`no input source enabled: ...`). See [Input Sources](sources.md).
+
+Sinks are not a toggle either: **at least one sink instance (of any type)
+is required** — a worker with zero sinks fails startup. The DLQ is built
+whenever the Kafka source is on (topic `{sources.kafka.topic}_dlq`) or
+`dlq.topic` is set, and the circuit breaker always wraps sink delivery.
 
 ## Dependency rules (and what happens when they're unmet)
 
@@ -87,12 +91,13 @@ the failure mode so you can decide what your deployment needs.
    (WARN `cache_peer_sync_disabled_no_store_config`). Real cross-worker
    sync additionally needs the shared directory from rule 5.
 8. **The webapp needs handler support — checked at construction.** A
-   worker with `webapp.enabled` and a handler that lacks the HTTP hooks
-   (Python: `arrange_http_request` + `on_http_request_complete` plus the
-   3rd/4th generic models; Go: the `drakkar.HTTPHandler` interface)
-   fails fast with a `ConfigurationError`. A webapp
-   **bind** failure at startup is non-fatal (the worker continues
-   without it); a UI-server bind failure is fatal.
+   worker with `sources.http.enabled` and a handler that lacks the HTTP
+   hooks (`arrange_http_request` + `on_http_request_complete` plus the
+   3rd/4th generic models) fails fast with a `ConfigurationError`. A
+   webapp **bind** failure at startup is fatal too: the webapp is an
+   input source, so a worker that cannot bind its socket stops rather
+   than run with nothing to read. A UI-server bind failure is fatal as
+   well.
 9. **The webapp's dashboard tile needs the UI + recorder.** The tile on
    the operator dashboard reads request counts from recorder events; UI
    off = no tile, memory-only recorder = zeroed counts.
@@ -100,18 +105,38 @@ the failure mode so you can decide what your deployment needs.
     dashboard links section is hidden. The optional
     `ui.prometheus_worker_label` / `ui.prometheus_cluster_label` /
     `ui.custom_links` keys refine it.
+11. **At least one source must be enabled.** `sources.kafka.enabled` and
+    `sources.http.enabled` both default to `false`; a config with neither
+    fails to load with `no input source enabled: set
+    sources.kafka.enabled or sources.http.enabled`. Handler validation
+    follows the enabled sources: `arrange()` is required only with the
+    Kafka source, the HTTP hooks only with the HTTP source.
+12. **The DLQ needs the Kafka source or an explicit `dlq.topic`.** The
+    default DLQ topic is derived from the source topic, so a worker with
+    `sources.kafka.enabled: false` and an empty `dlq.topic` builds no DLQ
+    producer at all. DLQ sends are then dropped, warned once, and counted
+    in `drakkar_dlq_unconfigured_drops_total`. Set `dlq.topic` when an
+    HTTP-only worker must not lose failed payloads
+    ([the rule](sources.md#the-dlq-without-the-kafka-source)).
 
 ## Enable order: minimal → full-featured
 
 Each tier only depends on the tiers before it. Start at 0, stop at the
 tier your deployment needs.
 
-### Tier 0 — minimal pipeline
+### Tier 0 — choose your sources, then a minimal pipeline
+
+Start here: decide where work comes in. Everything below builds on that
+choice. This tier shows the Kafka source; for HTTP, or for both, see
+[Input Sources](sources.md).
 
 ```yaml
 kafka:
   brokers: kafka:9092
-  source_topic: input-events
+sources:
+  kafka:
+    enabled: true
+    topic: input-events
 executor:
   binary_path: /app/process
 sinks:
@@ -161,8 +186,8 @@ ui:
 ```
 
 Workers discover each other, the UI's worker switcher fills in, and
-tracing follows a message across workers. Mixed Python + Go fleets are
-supported on the same directory ([spec](local-databases.md)).
+tracing follows a message across workers. Any worker that implements the
+on-disk format can share the directory ([spec](local-databases.md)).
 
 ### Tier 4 — handler cache + peer sync
 
@@ -178,17 +203,19 @@ shared directory) converges across the fleet via LWW peer sync.
 ### Tier 5 — synchronous HTTP ingress
 
 ```yaml
-webapp:
-  enabled: true
-  clients:
-    - name: search-service
-      token: "${WEBAPP_TOKEN}"
-      rpm: 120
+sources:
+  http:
+    enabled: true
+    clients:
+      - name: search-service
+        token: "${WEBAPP_TOKEN}"
+        rpm: 120
 ```
 
 POST requests flow through the same handler pipeline with per-client
 auth, rate limits, and the `max_body_bytes` cap. Requires the HTTP hooks
-in your handler (rule 8).
+in your handler (rule 8). Turn `sources.kafka.enabled` off in the same
+config and the worker serves HTTP only.
 
 ## Quick sanity checklist
 
@@ -199,8 +226,12 @@ in your handler (rule 8).
 - Cache not syncing? → check `store_config` (rule 7), the shared
   directory (rule 6), and that both workers are in the same cluster for
   `cluster`-scoped keys.
-- Webapp 500s at the first request? → it can't: the worker now
-  reject a hook-less handler at startup (rule 8).
+- Webapp 500s at the first request? → it can't: the worker rejects a
+  hook-less handler at startup (rule 8).
+- Worker will not start with `no input source enabled`? → turn on
+  `sources.kafka.enabled`, `sources.http.enabled`, or both (rule 11).
+- HTTP-only worker losing failed payloads? → set `dlq.topic`; the derived
+  default needs a Kafka source (rule 12).
 - Air-gapped? → stage the bundle once with
   `drakkar-ui fetch --version=vX.Y.Z` into a cache the workers share, or
   point `ui.release.repo` at an internal mirror. `ui.release.enabled: false`

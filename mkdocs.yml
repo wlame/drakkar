@@ -65,6 +65,7 @@ nav:
   - Custom Timeline Events (handler-marked markers, ranges, and links): ui-timeline-events.md
   - Operator Docs Site (your runbook inside the UI): ui-docs.md
   - Configuration: configuration.md
+  - Input Sources (Kafka, HTTP, or both): sources.md
   - App Config (your own settings in drakkar.yaml): app-config.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md

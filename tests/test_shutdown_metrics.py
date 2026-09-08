@@ -39,6 +39,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
 )
 from drakkar.models import ExecutorTask
+from tests.conftest import wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
@@ -70,10 +71,8 @@ def shutdown_config() -> DrakkarConfig:
     even though we replace them with mocks before exercising shutdown.
     """
     return DrakkarConfig(
-        kafka=KafkaConfig(
-            brokers='localhost:9092',
-            source_topic='test-in',
-        ),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
@@ -104,14 +103,14 @@ async def test_shutdown_sets_uncommitted_offsets_gauge(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
     # Spin up two processors and stage three uncommitted offsets across
     # them. The drain loop will see them as pending and bail out — but we
     # only care that the snapshot was taken correctly.
-    app._lifecycle._on_assign([0, 1])
+    app.kafka_source.on_assign([0, 1])
     app.processors[0]._offset_tracker.register(10)
     app.processors[0]._offset_tracker.register(11)
     app.processors[1]._offset_tracker.register(20)
@@ -142,7 +141,7 @@ async def test_shutdown_sets_uncommitted_offsets_to_zero_on_clean_state(shutdown
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -166,7 +165,7 @@ async def test_shutdown_sets_inflight_gauge(shutdown_config):
     # The pool exposes ``active_count`` as a read-only property over
     # ``_active_count``, so set the underlying field directly.
     app._executor_pool._active_count = 4
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -184,8 +183,8 @@ async def test_shutdown_inflight_zero_when_pool_missing(shutdown_config):
     inflight_at_stop.set(77)
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
-    # Deliberately leave _executor_pool as None.
-    app._consumer = AsyncMock()
+    # Deliberately leave _executor_pool as None, so the sources stay unbound too.
+    app.kafka_source.consumer = AsyncMock()
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
@@ -215,11 +214,11 @@ async def test_drain_timeout_increments_counter(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     # Pending offset that never completes — drain hangs until timeout.
     app.processors[0]._offset_tracker.register(42)
 
@@ -243,13 +242,13 @@ async def test_drain_no_timeout_does_not_increment_counter(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
     # Assign a partition but leave its offset tracker empty so drain
     # returns immediately.
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
 
     await app._lifecycle._shutdown()
 
@@ -274,11 +273,11 @@ async def test_shutdown_stops_processors_concurrently(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._lifecycle._on_assign([0, 1, 2])
+    app.kafka_source.on_assign([0, 1, 2])
 
     concurrent = 0
     peak = 0
@@ -312,11 +311,11 @@ async def test_shutdown_drain_timeout_cancels_the_zombie_tasks(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._lifecycle._on_assign([0, 1])
+    app.kafka_source.on_assign([0, 1])
     for processor in app.processors.values():
         # Pending offset that never completes — the drain hangs until timeout.
         processor._offset_tracker.register(42)
@@ -352,18 +351,18 @@ async def test_revoke_teardown_stays_within_the_drain_budget(shutdown_config):
         max_executors=2,
         task_timeout_seconds=10,
     )
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     processor = app.processors[0]
     # Pending offset that never completes — the drain hangs until timeout.
     processor._offset_tracker.register(42)
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    await app._lifecycle._stop_processor(processor)
+    await app.kafka_source._stop_processor(processor)
     elapsed = loop.time() - start
 
     # Drain budget plus the step floor, with slack for scheduling. Before the
@@ -386,8 +385,9 @@ async def test_stop_processor_bounds_the_final_commit(shutdown_config):
     )
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
+    wire_kafka_source(app)
 
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     processor = app.processors[0]
     processor._offset_tracker.register(7)
     processor._offset_tracker.complete(7)  # drains cleanly, so a commit is due
@@ -395,12 +395,11 @@ async def test_stop_processor_bounds_the_final_commit(shutdown_config):
     async def never_answers(_offsets):
         await asyncio.sleep(3600)
 
-    app._consumer = AsyncMock()
     app._consumer.commit = never_answers
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    await app._lifecycle._stop_processor(processor)
+    await app.kafka_source._stop_processor(processor)
     elapsed = loop.time() - start
 
     assert elapsed < 3.0, f'the final commit was unbounded: {elapsed:.1f}s'

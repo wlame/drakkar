@@ -33,7 +33,7 @@ from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
-from drakkar.metrics import dlq_dropped_payloads
+from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
 from drakkar.probe import build_layout, referenced_bases
@@ -47,6 +47,10 @@ from drakkar.sinks.manager import SinkManager
 from drakkar.sinks.mongo import MongoSink
 from drakkar.sinks.postgres import PostgresSink
 from drakkar.sinks.redis import RedisSink
+from drakkar.sources.base import Source
+from drakkar.sources.http import HttpSource
+from drakkar.sources.kafka import KafkaSource
+from drakkar.sources.registry import build_sources
 from drakkar.timeline_events import referenced_link_bases
 from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
@@ -116,6 +120,14 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         'worker_name_env',
         'the worker id is resolved in DrakkarApp.__init__',
     ),
+    ConsumedSetting(
+        'sources.kafka.enabled',
+        'handler validation and source construction happen in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'sources.http.enabled',
+        'handler validation and source construction happen in DrakkarApp.__init__',
+    ),
 )
 
 
@@ -180,16 +192,12 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
-        # Fail fast on a webapp/handler mismatch: a webapp without the
-        # HTTP hooks (or
-        # the typed models they need) can never serve a request, so
-        # surface it at construction rather than at the first POST. The
-        # import is local because the webapp stack (FastAPI/uvicorn) is
-        # deliberately loaded only when the webapp is enabled.
-        if self._config.webapp.enabled:
-            from drakkar.webapp.server import validate_webapp_handler
+        # Fail fast when the handler cannot serve an enabled source: a
+        # source without its hooks can never process input, so surface it
+        # at construction rather than at the first message or request.
+        from drakkar.sources.validation import validate_handler_for_sources
 
-            validate_webapp_handler(handler)
+        validate_handler_for_sources(handler, self._config.sources)
         # Fail fast on an invalid probe-details model — same philosophy as
         # the webapp handler check above: code-owned mistakes surface at
         # boot, not at first probe. Read into a local so the type checker
@@ -280,7 +288,6 @@ class DrakkarApp:
         self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None
-        self._consumer: KafkaConsumer | None = None
         # The manager reads the ``sinks:`` section through a callable rather
         # than being handed its values now: this constructor runs before
         # ``on_startup``, and a handler that tunes ``sinks.circuit_breaker``
@@ -293,23 +300,14 @@ class DrakkarApp:
         self._ui_server = None
         # Runtime health monitor (event-loop lag + stall introspection) —
         # constructed in lifecycle._async_run when runtime_health.enabled.
-        # Forward-declared as ``Any`` for the same import-cost reason as
-        # ``_webapp`` below; the uiserver routes read it for the
-        # /runtime/health snapshot.
+        # Forward-declared as ``Any`` to keep drakkar.runtimehealth out of
+        # the import graph at app construction time; the uiserver routes
+        # read it for the /runtime/health snapshot.
         self._runtime_health: Any = None
         # Throughput tracker (contract v1.16) — constructed by the
         # lifecycle when throughput.cost_label is set; None otherwise.
         # Partition processors feed it, worker_state snapshots read it.
         self._throughput: Any = None
-        # Webapp HTTP server — constructed in lifecycle._async_run when
-        # webapp.enabled=true. ``None`` otherwise (the lifecycle never
-        # touches the field on the disabled path). Held here so the
-        # shutdown sequence can signal/stop it alongside the debug
-        # server. Forward-declared as ``Any`` to avoid pulling
-        # ``drakkar.webapp.server`` into the import graph at app
-        # construction time (the webapp depends on FastAPI; users who
-        # never enable it shouldn't pay the import cost).
-        self._webapp: Any = None
         # Framework cache — constructed in lifecycle._async_run when
         # cache.enabled=true, else the handler keeps its default NoOpCache
         # stub. Held here so _shutdown can stop the engine in the correct
@@ -323,25 +321,26 @@ class DrakkarApp:
         # construction time, mirroring ``_runtime_health``.
         self._offload_pool: Any = None
 
-        self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
-        self._paused = False
-        # Partitions paused because an offset stalled under
-        # dlq.on_send_failure=stall. Excluded from backpressure resume;
-        # cleared on revoke so a reassignment starts fresh.
-        self._stalled_partitions: set[int] = set()
         # Operator-driven timed pause (Live page control; opt-in via
         # ui.consume_pause.enabled). Constructed unconditionally — it is a
         # tiny state holder; the routes gate on the config flag.
         self._consume_pause = ConsumePauseController(self)
-        # Readiness signal for the ``/readyz`` Kubernetes probe (exposed
-        # via the debug server). Flipped to ``True`` after the worker has
-        # cleared its full startup sequence — consumer subscribed, sinks
-        # connected, first poll cycle completed — and back to ``False``
-        # during ``_shutdown`` so a draining pod fails its readiness
-        # probe and is taken out of rotation immediately.
-        self.is_ready: bool = False
-        self._background_tasks: set[asyncio.Task] = set()
+        # Input sources, built now (not at startup) so their state — the
+        # partition map, pause flags — exists from construction; the
+        # lifecycle binds their context and starts them. See drakkar/sources.
+        self.sources: list[Source] = build_sources(self)
+        # Flipped in _shutdown so ``is_ready`` (and with it /readyz and the
+        # webapp request gate) goes false the moment a drain starts, before
+        # any source has been told to stop.
+        self._stopping = False
+        # Set once the lifecycle hands the sources their context. A startup
+        # that failed earlier leaves them holding nothing, so shutdown skips
+        # their drain and stop instead of driving an unbound source.
+        self._sources_bound = False
+        # One warning per worker for DLQ sends with nowhere to go; the rest
+        # go to debug. See _drop_dlq_send_unconfigured.
+        self._dlq_drop_warned = False
         self._periodic_tasks: list[asyncio.Task] = []
         self._config_summary: str = ''
         # Main event loop — captured at the top of lifecycle._async_run.
@@ -354,10 +353,12 @@ class DrakkarApp:
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Internal lifecycle driver. Created eagerly so tests that exercise
-        # the rebalance / shutdown helpers (``_on_assign``, ``_shutdown``,
-        # …) can reach them via ``app._lifecycle._on_assign(...)`` without
-        # first running the full startup sequence. The lifecycle is a thin
-        # back-reference holder — see :mod:`drakkar.lifecycle`.
+        # the startup and shutdown helpers can reach them via
+        # ``app._lifecycle._bind_sources()`` / ``_shutdown()`` without first
+        # running the full startup sequence; the rebalance helpers moved to
+        # ``KafkaSource`` (``app.kafka_source.on_assign(...)``). The
+        # lifecycle is a thin back-reference holder — see
+        # :mod:`drakkar.lifecycle`.
         # Imported lazily here to avoid a circular import (lifecycle
         # imports ``DrakkarApp`` only under ``TYPE_CHECKING``).
         from drakkar.lifecycle import AppLifecycle
@@ -395,6 +396,59 @@ class DrakkarApp:
     @property
     def processors(self) -> dict[int, PartitionProcessor]:
         return self._processors
+
+    @property
+    def kafka_source(self) -> KafkaSource | None:
+        """The Kafka input source, or None when ``sources.kafka`` is disabled."""
+        return next((s for s in self.sources if isinstance(s, KafkaSource)), None)
+
+    @property
+    def http_source(self) -> HttpSource | None:
+        """The HTTP input source, or None when ``sources.http`` is disabled."""
+        return next((s for s in self.sources if isinstance(s, HttpSource)), None)
+
+    # Delegating views for the UI routes, the consume-pause controller and
+    # tests. Empty or None when the Kafka source is not configured.
+    @property
+    def _processors(self) -> dict[int, PartitionProcessor]:
+        src = self.kafka_source
+        return src.processors if src is not None else {}
+
+    @property
+    def _paused(self) -> bool:
+        src = self.kafka_source
+        return src.paused if src is not None else False
+
+    @_paused.setter
+    def _paused(self, value: bool) -> None:
+        src = self.kafka_source
+        if src is not None:
+            src.paused = value
+
+    @property
+    def _stalled_partitions(self) -> set[int]:
+        src = self.kafka_source
+        return src.stalled_partitions if src is not None else set()
+
+    @property
+    def _consumer(self) -> KafkaConsumer | None:
+        src = self.kafka_source
+        return src.consumer if src is not None else None
+
+    @property
+    def _background_tasks(self) -> set[asyncio.Task]:
+        src = self.kafka_source
+        return src.background_tasks if src is not None else set()
+
+    @property
+    def _webapp(self) -> Any:
+        src = self.http_source
+        return src.webapp if src is not None else None
+
+    @property
+    def is_ready(self) -> bool:
+        """Readiness for /readyz: not stopping, and every source is ready."""
+        return not self._stopping and all(s.is_ready for s in self.sources)
 
     @property
     def recorder(self) -> EventRecorder | None:
@@ -441,7 +495,7 @@ class DrakkarApp:
         setup_logging(
             self._config.logging,
             worker_id=self._worker_id,
-            consumer_group=self._config.kafka.consumer_group,
+            consumer_group=self._config.resolved_consumer_group,
             version=__version__,
             cluster_name=self._cluster_name,
         )
@@ -612,8 +666,10 @@ class DrakkarApp:
                 self._sink_manager.register(sink_factory(instance_name, instance_cfg))
 
     def _build_dlq(self) -> None:
-        """Create the DLQ sink from config."""
-        dlq_topic = self._config.dlq.topic or f'{self._config.kafka.source_topic}_dlq'
+        """Create the DLQ sink, or leave it None when the config disables the DLQ (see DrakkarConfig.dlq_enabled)."""
+        if not self._config.dlq_enabled:
+            self._dlq_sink = None
+            return
         resolved = resolve_client(
             self._config.dlq.brokers,
             self._config.dlq.security,
@@ -623,31 +679,28 @@ class DrakkarApp:
             fallback_client_config=self._config.kafka.client_config,
         )
         self._dlq_sink = DLQSink(
-            topic=dlq_topic,
+            topic=self._config.resolved_dlq_topic,
             brokers=resolved.brokers,
             security=resolved.security,
             client_config=resolved.client_config,
             flush_timeout_seconds=self._config.dlq.flush_timeout_seconds,
         )
 
-    def _total_queued(self) -> int:
-        """Total messages buffered across all partition queues + in-flight tasks."""
-        return sum(p.queue_size + p.inflight_count for p in self._processors.values())
-
-    def _total_waiting(self) -> int:
-        """Messages waiting in partition queues, not yet dispatched to executors."""
-        return sum(p.queue_size for p in self._processors.values())
-
     def _get_worker_state(self) -> dict:
         """Return current worker state for the recorder's state sync."""
+        src = self.kafka_source
+        # A worker with no Kafka source has no partitions, nothing queued
+        # and nothing to pause — the recorder still gets the full row shape.
+        kafka_state: dict[str, Any] = (
+            src.snapshot()
+            if src is not None
+            else {'assigned_partitions': [], 'partition_count': 0, 'paused': False, 'total_queued': 0}
+        )
         state = {
             'uptime_seconds': time.monotonic() - self._start_time,
-            'assigned_partitions': sorted(self._processors.keys()),
-            'partition_count': len(self._processors),
             'pool_active': self._executor_pool.active_count if self._executor_pool else 0,
             'pool_max': self._executor_pool.max_executors if self._executor_pool else 0,
-            'total_queued': self._total_queued(),
-            'paused': self._paused,
+            **kafka_state,
         }
         if self._runtime_health is not None:
             # Contract v1.15: merged fleet databases can answer "which
@@ -661,6 +714,19 @@ class DrakkarApp:
             # worker_state time series then replays throughput history.
             state['throughput'] = self._throughput.window_stats()
         return state
+
+    async def _drop_dlq_send_unconfigured(self, partition_id: int, payload_count: int) -> None:
+        """Count and log a DLQ send that has nowhere to go because the DLQ is off."""
+        dlq_unconfigured_drops.inc(payload_count)
+        log = logger.adebug if self._dlq_drop_warned else logger.awarning
+        self._dlq_drop_warned = True
+        await log(
+            'dlq_send_dropped_unconfigured',
+            category='sink',
+            partition=partition_id,
+            payload_count=payload_count,
+            hint='set dlq.topic to enable the DLQ on a worker without the Kafka source',
+        )
 
     async def _handle_dlq_failure(self, error: 'DeliveryError', partition_id: int, reason: str) -> None:
         """Apply the ``dlq.on_send_failure`` strategy when the DLQ fallback failed.
@@ -712,7 +778,15 @@ class DrakkarApp:
                 # DLQ is the last resort. If it is missing or the write
                 # fails, the payloads have nowhere safe to go — apply the
                 # dlq.on_send_failure strategy.
-                if self._dlq_sink is None:
+                if self._dlq_sink is None and not self._config.dlq_enabled:
+                    # The DLQ is off by configuration, not broken: stalling
+                    # a partition over it would wedge a worker that never
+                    # asked for a DLQ. Count the loss and carry on.
+                    # A live Kafka source always implies ``dlq_enabled``, so
+                    # this branch guards the HTTP-only path — the webapp
+                    # runner and direct callers of ``_handle_collect``.
+                    await self._drop_dlq_send_unconfigured(partition_id, len(error.payloads))
+                elif self._dlq_sink is None:
                     await self._handle_dlq_failure(
                         error,
                         partition_id=partition_id,
@@ -735,10 +809,3 @@ class DrakkarApp:
         if self._recorder:
             for payload in result.kafka:
                 self._recorder.record_produced(payload, source_partition=partition_id)
-
-    async def _handle_commit(self, partition_id: int, offset: int) -> None:
-        """Commit an offset for a specific partition."""
-        if self._consumer:
-            await self._consumer.commit({partition_id: offset})
-        if self._recorder:
-            self._recorder.record_committed(partition_id, offset)

@@ -582,7 +582,8 @@ class DLQConfig(BaseModel):
     """Dead letter queue configuration.
 
     Failed sink deliveries are written to this Kafka topic.
-    If `topic` is empty, defaults to `{source_topic}_dlq` at runtime.
+    If `topic` is empty and the Kafka source is enabled, the topic is `{sources.kafka.topic}_dlq`.
+    If `topic` is empty and the Kafka source is disabled, no DLQ producer is built (see docs/sources.md).
     If `brokers` is empty, inherits from `kafka.brokers` — and with them
     `kafka.security` and `kafka.client_config`, on the same
     same-cluster-means-same-credentials rule the Kafka sinks follow.
@@ -590,7 +591,10 @@ class DLQConfig(BaseModel):
 
     topic: str = Field(
         default='',
-        description="DLQ Kafka topic name. Empty derives '{source_topic}_dlq' at runtime.",
+        description=(
+            "DLQ Kafka topic name. Empty derives '{sources.kafka.topic}_dlq' when the Kafka source "
+            'is enabled, and disables the DLQ when it is not.'
+        ),
     )
     brokers: str = Field(
         default='',

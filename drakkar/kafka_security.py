@@ -57,7 +57,7 @@ RESERVED_CLIENT_KEYS: dict[str, str] = {
         'the drain-on-revoke path assumes cooperative-sticky rebalancing; another '
         'strategy re-opens the duplicate-delivery window'
     ),
-    'group.id': 'set it with kafka.consumer_group',
+    'group.id': 'set it with sources.kafka.consumer_group',
     'bootstrap.servers': 'set it with kafka.brokers (or the sink/DLQ brokers field)',
 }
 

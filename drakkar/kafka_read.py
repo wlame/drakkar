@@ -20,9 +20,11 @@ Topic aliases — the security boundary
 Callers never name a raw Kafka topic. They name an *alias*, and the alias
 table is built from the worker's own config (`build_alias_table`):
 
-- ``source``          — the pipeline input topic (``kafka.source_topic``)
+- ``source``          — the pipeline input topic (``sources.kafka.topic``),
+                        present only while ``sources.kafka.enabled``
 - ``dlq``             — the dead-letter topic (``dlq.topic`` or its
-                        ``{source_topic}_dlq`` default)
+                        ``{topic}_dlq`` default), present only while the
+                        DLQ is enabled (``DrakkarConfig.dlq_enabled``)
 - ``<sink name>``     — each configured Kafka sink instance, under the
                         operator-chosen instance name
 
@@ -100,45 +102,66 @@ class AliasTarget:
     client_config: dict[str, str]
 
 
+# Reserved aliases explain themselves when config switched them off; any
+# other name is simply not a configured alias (unknown, or a plain sink
+# name that was never registered).
+_DISABLED_ALIAS_REASONS: dict[str, str] = {
+    'source': 'the Kafka source is disabled',
+    'dlq': 'the DLQ is disabled (set dlq.topic)',
+}
+
+# The alias names the framework owns. Reserved whether or not the source and
+# the DLQ are switched on: a sink instance named ``source`` must never claim
+# the alias just because this worker happens to read no source topic.
+RESERVED_ALIASES: frozenset[str] = frozenset(_DISABLED_ALIAS_REASONS)
+
+
 def build_alias_table(config: DrakkarConfig) -> dict[str, AliasTarget]:
     """Map every readable alias to its resolved topic + client settings.
 
-    Reserved aliases ``source`` and ``dlq`` always win; a Kafka sink
-    instance that shadows one of them is skipped with a warning so the
-    reserved meaning stays stable (the sink itself is unaffected —
-    only its read alias is unavailable).
+    ``source`` is present only while ``config.sources.kafka.enabled``, and
+    ``dlq`` only while ``config.dlq_enabled`` — a worker with the source or
+    the DLQ switched off has no such topic to read. Reserved aliases always
+    win over a same-named Kafka sink instance; the sink that shadows one is
+    skipped with a warning so the reserved meaning stays stable (the sink
+    itself is unaffected — only its read alias is unavailable).
     """
     kafka = config.kafka
-    table: dict[str, AliasTarget] = {
-        'source': AliasTarget(
+    table: dict[str, AliasTarget] = {}
+
+    source = config.sources.kafka
+    if source.enabled:
+        table['source'] = AliasTarget(
             alias='source',
             kind='source',
-            topic=kafka.source_topic,
+            topic=source.topic,
             brokers=kafka.brokers,
             security=kafka.security,
             client_config=dict(kafka.client_config),
         )
-    }
 
-    dlq_client = resolve_client(
-        config.dlq.brokers,
-        config.dlq.security,
-        config.dlq.client_config,
-        fallback_brokers=kafka.brokers,
-        fallback_security=kafka.security,
-        fallback_client_config=kafka.client_config,
-    )
-    table['dlq'] = AliasTarget(
-        alias='dlq',
-        kind='dlq',
-        topic=config.dlq.topic or f'{kafka.source_topic}_dlq',
-        brokers=dlq_client.brokers,
-        security=dlq_client.security,
-        client_config=dict(dlq_client.client_config),
-    )
+    if config.dlq_enabled:
+        dlq_client = resolve_client(
+            config.dlq.brokers,
+            config.dlq.security,
+            config.dlq.client_config,
+            fallback_brokers=kafka.brokers,
+            fallback_security=kafka.security,
+            fallback_client_config=kafka.client_config,
+        )
+        table['dlq'] = AliasTarget(
+            alias='dlq',
+            kind='dlq',
+            topic=config.resolved_dlq_topic,
+            brokers=dlq_client.brokers,
+            security=dlq_client.security,
+            client_config=dict(dlq_client.client_config),
+        )
 
     for name, sink in config.sinks.kafka.items():
-        if name in table:
+        # table can only hold 'source'/'dlq' at this point, both already in
+        # RESERVED_ALIASES, so checking the reserved set alone is enough.
+        if name in RESERVED_ALIASES:
             logger.warning(
                 'kafka_read_alias_shadowed',
                 category='kafka',
@@ -164,6 +187,24 @@ def build_alias_table(config: DrakkarConfig) -> dict[str, AliasTarget]:
             client_config=dict(sink_client.client_config),
         )
     return table
+
+
+class KafkaReadError(Exception):
+    """An alias does not resolve to a readable topic under the current config."""
+
+
+def resolve_alias(config: DrakkarConfig, alias: str) -> AliasTarget:
+    """Look up one alias, raising a ``KafkaReadError`` that names why it is unavailable.
+
+    For the reserved ``source``/``dlq`` aliases the message says which
+    config switch to flip; any other missing name is reported as simply
+    not configured.
+    """
+    target = build_alias_table(config).get(alias)
+    if target is not None:
+        return target
+    reason = _DISABLED_ALIAS_REASONS.get(alias, 'no such alias is configured')
+    raise KafkaReadError(f"alias '{alias}' is not available: {reason}")
 
 
 # ---- wire models ------------------------------------------------------------

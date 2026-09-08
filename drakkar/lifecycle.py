@@ -1,11 +1,11 @@
 """Application lifecycle for :class:`drakkar.app.DrakkarApp`.
 
 The lifecycle is the slice of ``DrakkarApp`` that drives the running
-worker — startup orchestration, the Kafka poll loop, partition assign /
-revoke callbacks, and graceful shutdown / drain. It was extracted from
-``DrakkarApp`` so the public app class stays focused on wiring (config,
-handler, sink manager, recorder) while this class owns the event-loop-bound
-machinery.
+worker: it builds the subsystems every input source needs (executor pool,
+recorder, cache, sinks), then binds, starts, runs, drains and stops the
+enabled sources. It was extracted from ``DrakkarApp`` so the public app
+class stays focused on wiring (config, handler, sink manager, recorder)
+while this class owns the event-loop-bound machinery.
 
 Design notes
 ============
@@ -16,27 +16,25 @@ Design notes
   directly. The class name itself is plain PascalCase per project style:
   the public surface is controlled by :mod:`drakkar.__init__` exports,
   not by underscore-prefixing class names.
-- The class holds a single back-reference, ``self._app``. All extracted
-  methods read and write app state via ``self._app.<attr>`` so the move
-  is a pure relocation — no semantic change to which object owns
-  ``_running``, ``_paused``, ``_processors``, etc. The app remains the
+- The class holds a single back-reference, ``self._app``. All methods
+  read and write app state via ``self._app.<attr>``; the app remains the
   single source of truth for that state because the debug server and
   user-facing properties continue to read it from ``DrakkarApp``.
+- The lifecycle knows nothing about Kafka or HTTP specifics. Everything a
+  source needs arrives through one :class:`drakkar.sources.base.SourceContext`,
+  and the shutdown order below is the same for every source — see
+  :mod:`drakkar.sources.base` for the contract.
 - ``DrakkarApp`` instantiates an ``AppLifecycle`` eagerly in ``__init__``
-  so tests that exercise the extracted methods directly can do so via
-  ``app._lifecycle._on_assign(...)`` without first running the full
-  startup sequence.
+  so tests that exercise the startup steps directly can do so via
+  ``app._lifecycle._start_sources()`` without running the full sequence.
 """
 
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import signal
 import time
-from collections.abc import Coroutine
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,56 +50,31 @@ from drakkar.app import (
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
-from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
 from drakkar.logging import close_logging
 from drakkar.metrics import (
-    assigned_partitions,
-    backpressure_active,
-    consumer_idle,
     discover_handler_metrics,
-    drain_timeout_hit,
-    executor_idle_waste,
     executor_pool_max,
     host_effective_cpus,
     inflight_at_stop,
-    messages_unassigned_dropped,
     start_metrics_server,
-    total_queued,
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.partition import PartitionProcessor
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.sinks.manager import SinkNotConfiguredError
-from drakkar.timefmt import format_rfc3339_micro
+from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
-from drakkar.utils import wait_for_aligned_startup
 from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
 logger = structlog.get_logger()
-
-# Seconds to sleep when Kafka poll returns no messages. Defined once here,
-# next to the poll loop, so the lifecycle module is self-contained.
-POLL_IDLE_SLEEP = 0.05
-
-# Floor for the shares of a teardown deadline handed to a commit RPC or to
-# ``PartitionProcessor.stop``. A deadline that has already passed still has to
-# let a step that is only waiting on an already-settled future finish, so it
-# never gets zero.
-MIN_TEARDOWN_STEP_SECONDS = 0.5
-
-
-def _remaining(deadline: float) -> float:
-    """Return what is left of ``deadline``, never below the step floor."""
-    return max(deadline - time.monotonic(), MIN_TEARDOWN_STEP_SECONDS)
 
 
 class AppLifecycle:
@@ -160,11 +133,11 @@ class AppLifecycle:
             )
 
     async def _async_run(self) -> None:
-        """Full async startup → poll-loop → shutdown sequence.
+        """Full async startup → run-the-sources → shutdown sequence.
 
         Every ``self.X`` is written ``self._app.X`` so the app remains the
-        single source of truth for instance state. Startup and the poll
-        loop are both guarded: whichever one fails, ``_shutdown`` runs
+        single source of truth for instance state. Startup and the run
+        phase are both guarded: whichever one fails, ``_shutdown`` runs
         before the exception leaves this coroutine.
         """
         app = self._app
@@ -181,7 +154,7 @@ class AppLifecycle:
         # the interpreter blocked in ``threading._shutdown`` — the process stays
         # alive with liveness green, the atexit last-breath flush never runs, and
         # no orchestrator restarts it. Any startup failure therefore runs the
-        # same ``_shutdown`` the poll loop uses, then re-raises so the worker
+        # same ``_shutdown`` the run phase uses, then re-raises so the worker
         # exits non-zero. ``_shutdown`` is written to tolerate partial state.
         try:
             await self._setup_watchdog()
@@ -211,30 +184,10 @@ class AppLifecycle:
             self._wire_offload_pool()
             await self._start_cache()
             await self._connect_sinks()
-            await self._start_webapp()
-            await self._start_consumer()
-
-            # Stagger startup: sleep until the next wall-clock alignment
-            # boundary so a fleet of workers in a rolling deploy converges
-            # on a single Kafka consumer-group rebalance instead of N. See
-            # KafkaConfig.startup_align_* for tuning and rationale.
-            if app._config.kafka.startup_align_enabled:
-                min_wait = app._config.kafka.startup_min_wait_seconds
-                interval = app._config.kafka.startup_align_interval_seconds
-                target_wall = math.ceil((time.time() + min_wait) / interval) * interval
-                await log.ainfo(
-                    'startup_align_waiting',
-                    category='lifecycle',
-                    min_wait_seconds=min_wait,
-                    align_interval_seconds=interval,
-                    target_wall_unix=target_wall,
-                    target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
-                )
-                slept = await wait_for_aligned_startup(min_wait, interval)
-                await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
-
-            assert app._consumer is not None
-            await app._consumer.subscribe()
+            await self._warn_ignored_source_config()
+            self._bind_sources()
+            await self._run_on_ready_and_periodics()
+            await self._start_sources()
 
             # Claim the watchdog slot for this run NOW — only once we're
             # committed to running. See ``_claim_watchdog_slot`` for the
@@ -265,7 +218,7 @@ class AppLifecycle:
             raise
 
         try:
-            await self._poll_loop()
+            await self._run_sources()
         except asyncio.CancelledError:
             pass
         finally:
@@ -405,7 +358,8 @@ class AppLifecycle:
             {
                 'worker_id': app._worker_id,
                 'version': __version__,
-                'consumer_group': app._config.kafka.consumer_group,
+                # Empty when no Kafka source is enabled — see the property.
+                'consumer_group': app._config.resolved_consumer_group,
             }
         )
 
@@ -657,10 +611,12 @@ class AppLifecycle:
         app._build_sinks()
         await app._sink_manager.connect_all()
 
-        # build and connect DLQ
+        # Build and connect the DLQ. ``_build_dlq`` leaves the sink None
+        # when the config disables the DLQ — there is no producer to
+        # connect and nothing to name in the topology log.
         app._build_dlq()
-        assert app._dlq_sink is not None
-        await app._dlq_sink.connect()
+        if app._dlq_sink is not None:
+            await app._dlq_sink.connect()
 
         # Wire recorder + DLQ into the sink manager now that both are ready.
         # SinkManager was constructed in ``__init__`` (required by tests and
@@ -679,60 +635,16 @@ class AppLifecycle:
             'sinks_configured',
             category='lifecycle',
             sinks=app._config.sinks.summary(),
-            dlq_topic=app._dlq_sink.topic,
+            dlq_topic=app._dlq_sink.topic if app._dlq_sink is not None else '',
         )
 
-    async def _start_webapp(self) -> None:
-        """Start the optional webapp HTTP server.
+    async def _run_on_ready_and_periodics(self) -> None:
+        """Run the handler's ``on_ready`` hook and start its periodic tasks.
 
-        Extracted from ``_async_run`` so the boot sequence is testable step by
-        step; the body is unchanged.
+        Runs after the sinks connect and before any source starts, so the
+        hook sees a fully wired worker that is not yet taking input.
         """
         app = self._app
-        log = logger.bind(worker_id=app._worker_id)
-        # Webapp HTTP server. Constructed AFTER sinks connect (so the
-        # readyz/health gate the route uses is meaningful) and BEFORE
-        # consumer subscribe (so the route is reachable even during the
-        # short window before the first poll completes — at which point
-        # the not_ready 503 gate keeps requests from racing the pipeline).
-        # Wrapped in try/except so a webapp construction failure does
-        # NOT abort startup — sink and consumer setup is the critical
-        # path; the webapp is optional infrastructure that an operator
-        # can disable on the next config reload.
-        if app._config.webapp.enabled:
-            try:
-                from drakkar.webapp import WebApp
-
-                app._webapp = WebApp(app, app._config.webapp)
-                app._webapp.start_in_thread()
-                # 5s is generous for a clean uvicorn bind on a free port;
-                # tests use the same default. A startup-time TimeoutError
-                # is logged and the worker proceeds without the webapp.
-                # ``wait_until_ready`` blocks (Event.wait + poll loop), so
-                # run it off-loop to keep the main loop responsive.
-                await asyncio.to_thread(app._webapp.wait_until_ready, timeout=5.0)
-            except Exception as exc:
-                await log.aerror(
-                    'webapp_start_failed',
-                    category='webapp',
-                    error=str(exc),
-                    exc_type=type(exc).__name__,
-                )
-                app._webapp = None
-
-    async def _start_consumer(self) -> None:
-        """Construct the consumer, run on_ready, and start periodic tasks.
-
-        Extracted from ``_async_run`` so the boot sequence is testable step by
-        step; the body is unchanged.
-        """
-        app = self._app
-        app._consumer = KafkaConsumer(
-            config=app._config.kafka,
-            on_assign=self._on_assign,
-            on_revoke=self._on_revoke,
-        )
-
         # expose postgres pool for on_ready if available
         pg_pool = None
         for (sink_type, _), sink in app._sink_manager.sinks.items():
@@ -758,260 +670,108 @@ class AppLifecycle:
             )
             app._periodic_tasks.append(task)
 
-    async def _poll_loop(self) -> None:
-        """Main polling loop with backpressure via Kafka pause/resume."""
+    async def _warn_ignored_source_config(self) -> None:
+        """A disabled source block with invalid values is ignored, not fatal — say so once.
+
+        Pydantic validates a source block only when it is enabled, so a typo
+        in a block someone switched off passes startup silently and then
+        surprises whoever switches it back on. Naming it here costs nothing
+        and keeps ``enabled: false`` a safe edit.
+        """
         app = self._app
-        assert app._consumer is not None
-        assert app._executor_pool is not None
-        max_executors = app._config.executor.max_executors
-        high_watermark = max_executors * app._config.executor.backpressure_high_multiplier
-        low_watermark = max(1, max_executors * app._config.executor.backpressure_low_multiplier)
-        last_tick = time.monotonic()
+        log = logger.bind(worker_id=app._worker_id)
+        for name in ('kafka', 'http'):
+            block = getattr(app._config.sources, name)
+            if block.enabled:
+                continue
+            errors = block.validation_errors()
+            if errors:
+                await log.awarning(
+                    'source_config_ignored',
+                    category='lifecycle',
+                    source=name,
+                    errors=errors,
+                )
 
-        while app._running:
-            now = time.monotonic()
-            dt = now - last_tick
-            last_tick = now
+    def _bind_sources(self) -> None:
+        """Hand every source the one context it may read the worker through.
 
-            total = app._total_queued()
-            total_queued.set(total)
-
-            # Executor idle waste: slots sitting free while messages wait in queues.
-            # Uses queue_size only (not inflight) — inflight tasks ARE using slots.
-            waiting = app._total_waiting()
-            if waiting > 0:
-                idle_slots = max_executors - app._executor_pool.active_count
-                if idle_slots > 0:
-                    executor_idle_waste.inc(idle_slots * dt)
-
-            # An active operator debug pause (ui.consume_pause) outranks the
-            # backpressure resume: queues draining below the low watermark
-            # must not restart fetching while the operator asked for quiet.
-            # The debug resume hands control back here — if backpressure is
-            # still holding, this branch resumes once queues drain.
-            if app._paused and total <= low_watermark and not app._consume_pause.active:
-                # Never resume partitions paused by a delivery stall — they
-                # stay paused until restart/revoke regardless of backpressure.
-                partition_ids = [p for p in app._processors if p not in app._stalled_partitions]
-                if partition_ids:
-                    await app._consumer.resume(partition_ids)
-                    app._paused = False
-                    backpressure_active.set(0)
-
-            if not app._paused and total >= high_watermark:
-                partition_ids = list(app._processors.keys())
-                if partition_ids:
-                    await app._consumer.pause(partition_ids)
-                    app._paused = True
-                    backpressure_active.set(1)
-
-            messages = await app._consumer.poll_batch()
-            for msg in messages:
-                processor = app._processors.get(msg.partition)
-                if processor:
-                    processor.enqueue(msg)
-                else:
-                    # Revoke raced the poll: the processor was popped but
-                    # the broker delivered a few more messages before
-                    # acknowledging the revoke. The new partition owner
-                    # redelivers from the last committed offset, so
-                    # dropping here is safe — but it must be visible.
-                    messages_unassigned_dropped.labels(partition=str(msg.partition)).inc()
-                    logger.warning(
-                        'message_for_unassigned_partition_dropped',
-                        category='kafka',
-                        partition=msg.partition,
-                        offset=msg.offset,
-                    )
-
-            # After the first poll completes successfully we consider the
-            # worker ready to serve traffic — the consumer is subscribed,
-            # sinks were connected before the loop started, and at least
-            # one poll round-trip has finished. Kubernetes readiness probes
-            # can now flip us into the service endpoints. Idempotent: the
-            # assignment on subsequent iterations is a no-op.
-            app.is_ready = True
-
-            if not messages:
-                # Consumer idle: no messages from Kafka, nothing queued, not paused.
-                # Measures time with genuinely nothing to do (consumer lag is zero).
-                if total == 0 and not app._paused:
-                    consumer_idle.inc(dt)
-                await asyncio.sleep(POLL_IDLE_SLEEP)
-
-    def _on_assign(self, partition_ids: list[int]) -> None:
-        """Handle new partition assignments."""
+        Built once, after the sinks connect, so every collaborator a source
+        needs is already live. The context is the only channel the lifecycle
+        opens: a source reads the worker through it rather than reaching for
+        app attributes. ``HttpSource`` is the exception — it holds the app so
+        it can pass it to the webapp server, which the request path needs.
+        """
         app = self._app
         assert app._executor_pool is not None
-        if app._recorder:
-            app._recorder.record_assigned(partition_ids)
-        newly_added: list[int] = []
-        for pid in partition_ids:
-            if pid not in app._processors:
-                processor = PartitionProcessor(
-                    partition_id=pid,
-                    handler=app._handler,
-                    executor_pool=app._executor_pool,
-                    window_size=app._config.executor.window_size,
-                    max_retries=app._config.executor.max_retries,
-                    on_collect=app._handle_collect,
-                    on_commit=app._handle_commit,
-                    recorder=app._recorder,
-                    on_parse_error=app._config.kafka.on_parse_error,
-                    dlq_send=app._dlq_sink.send if app._dlq_sink else None,
-                    on_dlq_failure=app._config.dlq.on_send_failure,
-                    on_stall=self._pause_stalled_partition,
-                    throughput=app._throughput,
-                )
-                app._processors[pid] = processor
-                processor.start()
-                newly_added.append(pid)
+        ctx = SourceContext(
+            config=app._config,
+            handler=app._handler,
+            executor_pool=app._executor_pool,
+            sink_manager=app._sink_manager,
+            dlq_sink=app._dlq_sink,
+            recorder=app._recorder,
+            throughput=app._throughput,
+            worker_id=app._worker_id,
+            cluster_name=app._cluster_name,
+            on_collect=app._handle_collect,
+            # A late-bound lambda, not the current value: readiness is
+            # composed across every source and flips during shutdown.
+            is_worker_ready=lambda: app.is_ready,
+        )
+        for source in app.sources:
+            source.bind(ctx)
+        app._sources_bound = True
 
-        assigned_partitions.set(len(app._processors))
+    async def _start_sources(self) -> None:
+        """Start every enabled source in table order. A failure is fatal.
 
-        # If backpressure or an operator debug pause is active, the
-        # previously-assigned partitions are already paused. Newly-assigned
-        # partitions were not in that pause set, so Kafka would deliver
-        # messages from them until the next poll tick (or the pause's end).
-        # Pause them now so neither gate is bypassed between assignment and
-        # the next _poll_loop iteration.
-        if (app._paused or app._consume_pause.active) and newly_added and app._consumer is not None:
-            consumer = app._consumer
-
-            async def _pause_newly_assigned() -> None:
-                await consumer.pause(newly_added)
-
-            pt = asyncio.ensure_future(self._safe_call(_pause_newly_assigned()))
-            app._background_tasks.add(pt)
-            pt.add_done_callback(app._background_tasks.discard)
-
-        async def _on_assign_with_ctx() -> None:
-            bind_contextvars(hook='on_assign', partitions=partition_ids)
-            try:
-                await app._handler.on_assign(partition_ids)
-            finally:
-                unbind_contextvars('hook', 'partitions')
-
-        t = asyncio.ensure_future(self._safe_call(_on_assign_with_ctx()))
-        app._background_tasks.add(t)
-        t.add_done_callback(app._background_tasks.discard)
-
-    async def _on_revoke(self, partition_ids: list[int]) -> None:
-        """Handle partition revocation, blocking until the drain commits.
-
-        This coroutine does NOT return until every revoked partition has
-        drained and committed. ``AIOConsumer`` runs rebalance callbacks via
-        ``run_coroutine_threadsafe(...).result()``, so librdkafka's
-        rebalance thread waits here — which is what holds the rebalance
-        open until our offsets are committed.
-
-        Returning early and finishing the drain on a detached background
-        task would let the rebalance complete while this worker is still
-        draining: the new owner would begin consuming from the last
-        committed offset while in-flight work here is still producing sink
-        deliveries for the same messages, so every message between the
-        last commit and the drain end would be delivered twice.
-
-        The wait is bounded, not open-ended: every ``_stop_processor`` runs
-        against one ``executor.drain_timeout_seconds`` deadline that covers
-        the drain, the final commit RPC and the processor stop, so this
-        always returns within roughly that budget. That bound matters —
-        ``run_coroutine_threadsafe(...).result()`` has no timeout of its
-        own, so an unbounded wait here would wedge the consumer thread
-        permanently. Teardown runs concurrently across partitions, so N
-        revoked partitions cost one drain timeout, not N.
-
-        A drain that expires cancels the tasks it was waiting for rather
-        than leaving them running: their results are discarded anyway, and
-        an uncancelled zombie holds an executor slot until
-        ``task_timeout_seconds`` while it also keeps the processing loop
-        from exiting, adding a full stop timeout on top of the drain.
-
-        The handler's ``on_revoke`` hook stays on a background task — it is
-        a user notification, not part of the commit contract, and a slow
-        hook must not eat into the rebalance budget.
+        A source that cannot acquire its input — no consumer group, no
+        bound socket — leaves the worker unable to do the job it was
+        deployed for, so the exception propagates and ``_async_run``
+        tears the worker down rather than running half a pipeline.
         """
         app = self._app
-        if app._recorder:
-            app._recorder.record_revoked(partition_ids)
-        to_stop: list[PartitionProcessor] = []
-        for pid in partition_ids:
-            # A revoked partition is no longer ours — clear any stall-pause
-            # bookkeeping so a future reassignment starts fresh.
-            app._stalled_partitions.discard(pid)
-            processor = app._processors.pop(pid, None)
-            if processor:
-                to_stop.append(processor)
-
-        assigned_partitions.set(len(app._processors))
-
-        if to_stop:
-            await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
-
-        async def _on_revoke_with_ctx() -> None:
-            bind_contextvars(hook='on_revoke', partitions=partition_ids)
+        log = logger.bind(worker_id=app._worker_id)
+        await log.ainfo('sources_starting', category='lifecycle', sources=[s.name for s in app.sources])
+        for source in app.sources:
             try:
-                await app._handler.on_revoke(partition_ids)
-            finally:
-                unbind_contextvars('hook', 'partitions')
+                await source.start()
+            except Exception as exc:
+                await log.aerror(
+                    'source_start_failed',
+                    category='lifecycle',
+                    source=source.name,
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+                raise
+            await log.ainfo('source_started', category='lifecycle', source=source.name)
 
-        t = asyncio.ensure_future(self._safe_call(_on_revoke_with_ctx()))
-        app._background_tasks.add(t)
-        t.add_done_callback(app._background_tasks.discard)
+    async def _run_sources(self) -> None:
+        """Run all sources until a signal or a fatal source error.
 
-    async def _safe_call(self, coro: Coroutine) -> None:
-        """Run a coroutine and log any exception instead of leaving it unretrieved.
-
-        For best-effort user hooks (on_assign/on_revoke) and auxiliary
-        framework work only. Critical cleanup paths like _stop_processor
-        must NOT go through this wrapper — they carry their own
-        error handling with forced teardown.
-        """
-        try:
-            await coro
-        except Exception as e:
-            logger.warning(
-                'async_callback_failed',
-                category='lifecycle',
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True,
-            )
-
-    async def _pause_stalled_partition(self, partition_id: int) -> None:
-        """Pause a partition whose watermark stalled (dlq.on_send_failure=stall).
-
-        Called (once per processor lifetime) by ``PartitionProcessor`` when
-        the first offset stalls. Pausing stops Kafka from delivering new
-        messages so the stall doesn't snowball: without it, every message
-        processed past the stall point would be re-processed (and
-        re-delivered to sinks) after restart, and the offset tracker would
-        grow without bound. The partition stays paused until the worker
-        restarts or the partition is revoked — ``_stalled_partitions``
-        keeps the backpressure resume cycle from silently un-pausing it.
+        ``FIRST_EXCEPTION`` returns as soon as one source's ``run`` raises,
+        or when every source has returned because ``signal_stop`` was
+        called. A raised error cancels the other sources and is re-raised
+        so ``_async_run`` runs ``_shutdown`` and the worker exits non-zero
+        — a source that died silently would leave the worker up, ready and
+        processing nothing.
         """
         app = self._app
-        app._stalled_partitions.add(partition_id)
-        if app._recorder:
-            app._recorder.record_partition_stalled(partition_id)
-        if app._consumer is not None:
-            try:
-                await app._consumer.pause([partition_id])
-                logger.error(
-                    'partition_paused_on_stall',
-                    category='lifecycle',
-                    partition=partition_id,
-                    hint='delivery (incl. DLQ) unconfirmed and dlq.on_send_failure=stall; '
-                    'partition paused — fix the downstream and restart the worker to resume',
-                )
-            except Exception as e:
-                logger.error(
-                    'partition_stall_pause_failed',
-                    category='lifecycle',
-                    partition=partition_id,
-                    error=str(e),
-                    exc_info=True,
-                )
+        tasks = [asyncio.create_task(source.run(), name=f'source:{source.name}') for source in app.sources]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            error = None if task.cancelled() else task.exception()
+            if error is None:
+                continue
+            for other in pending:
+                other.cancel()
+            if pending:
+                # Let the cancellations settle here rather than leaving
+                # pending tasks for the loop to complain about at exit.
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise error
 
     async def _claim_watchdog_slot(self) -> None:
         """Write the per-worker watchdog file, tolerating ``OSError``.
@@ -1043,115 +803,43 @@ class AppLifecycle:
             )
             self._watchdog = None
 
-    async def _stop_processor(self, processor: PartitionProcessor) -> None:
-        """Drain in-flight tasks, commit final offsets, then stop.
-
-        Only commits the watermark when drain completed cleanly. If drain
-        timed out, tasks may still be in flight — committing their offsets
-        now would silently skip them on partition reassign and lose data.
-        Preferring at-least-once duplication over silent loss.
-        """
-        app = self._app
-        drain_timeout = app._config.executor.drain_timeout_seconds
-        # One deadline for the whole teardown. librdkafka's rebalance thread
-        # is blocked on this coroutine, so every step below has to come out
-        # of the same budget — a step that takes its own would let the
-        # callback overrun ``max.poll.interval.ms`` and get the member
-        # evicted, which triggers the next rebalance.
-        deadline = time.monotonic() + drain_timeout
-        try:
-            processor.signal_stop()
-            drained_cleanly = False
-            try:
-                await asyncio.wait_for(processor.drain(), timeout=drain_timeout)
-                drained_cleanly = True
-            except TimeoutError:
-                # Tasks still running are zombies now — the new partition
-                # owner replays their messages, so their late results must
-                # not reach sinks (double-write) or commit offsets
-                # (clobbering the new owner's progress).
-                processor.suppress_deliveries()
-                cancelled = await processor.cancel_active_tasks()
-                logger.warning(
-                    'stop_processor_drain_timeout',
-                    category='lifecycle',
-                    partition=processor.partition_id,
-                    inflight=processor.inflight_count,
-                    queue_size=processor.queue_size,
-                    cancelled_tasks=cancelled,
-                )
-            if drained_cleanly:
-                committable = processor.offset_tracker.committable()
-                if committable is not None and app._consumer:
-                    try:
-                        # Bounded: this is a synchronous librdkafka commit
-                        # dispatched to the consumer's thread pool, and a
-                        # coordinator that stopped answering would otherwise
-                        # hold the rebalance callback open with no deadline.
-                        await asyncio.wait_for(
-                            app._consumer.commit({processor.partition_id: committable}),
-                            timeout=_remaining(deadline),
-                        )
-                        processor.offset_tracker.acknowledge_commit(committable)
-                    except Exception as e:
-                        logger.warning(
-                            'stop_processor_commit_failed',
-                            category='kafka',
-                            partition=processor.partition_id,
-                            error=str(e),
-                        )
-            await processor.stop(timeout=_remaining(deadline))
-        except Exception as e:
-            # Critical cleanup path: a failure here must not leave the
-            # processor running (it would keep consuming executor slots
-            # with no owner). Log loudly with the full traceback, then
-            # force-stop as a last resort.
-            logger.error(
-                'stop_processor_failed',
-                category='lifecycle',
-                partition=processor.partition_id,
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True,
-            )
-            try:
-                await processor.stop()
-            except Exception as stop_exc:
-                logger.error(
-                    'stop_processor_force_stop_failed',
-                    category='lifecycle',
-                    partition=processor.partition_id,
-                    error=str(stop_exc),
-                    exc_info=True,
-                )
-
     def _handle_signal(self) -> None:
-        """Handle shutdown signals."""
+        """Handle shutdown signals.
+
+        Signalling every source is what makes ``_run_sources`` return: each
+        ``run`` loop watches its own stop flag, so without this the worker
+        would sit in the poll loop until the orchestrator escalated to
+        SIGKILL. In-flight work is untouched — the drain settles it.
+        """
         logger.info('shutdown_signal_received', category='lifecycle')
         self._app._running = False
+        for source in self._app.sources:
+            source.signal_stop()
 
     async def _shutdown(self) -> None:
-        """Graceful shutdown: cancel periodic tasks, drain executors, commit offsets, close sinks."""
+        """Graceful shutdown: stop taking input, drain and stop the sources, close everything else.
+
+        Tolerates partial state: startup failures land here too, so every
+        step guards against the subsystem it releases never having started.
+        """
         app = self._app
         log = logger.bind(worker_id=app._worker_id)
         await log.ainfo('drakkar_shutting_down', category='lifecycle')
 
-        # Flip the webapp shutdown gate FIRST — ahead of any drain work.
-        # New HTTP requests immediately receive a 503 with
-        # ``status='shutdown'`` while in-flight requests continue draining
-        # naturally. Wrapped in try/except so a webapp-internal hiccup
-        # never aborts the wider teardown sequence (sinks, recorder,
-        # consumer.close all still need to run).
-        if app._webapp is not None:
-            try:
-                app._webapp.shutdown_event.set()
-                await log.ainfo('webapp_shutdown_starting', category='webapp')
-            except Exception as exc:
-                await log.awarning(
-                    'webapp_shutdown_event_set_failed',
-                    category='webapp',
-                    error=str(exc),
-                )
+        # Flip readiness off IMMEDIATELY so a Kubernetes readiness probe
+        # that fires between now and ``close_all`` fails — the pod is
+        # taken out of the service endpoints before we start tearing down
+        # sinks. Liveness (``/healthz``) stays responsive until the process
+        # actually exits. ``DrakkarApp.is_ready`` reads this flag, and so
+        # does the webapp's per-request gate.
+        app._stopping = True
+
+        # Then tell every source to stop accepting input. Idempotent: the
+        # signal handler already did this when a signal started the
+        # shutdown, but a startup failure or a dead source gets here
+        # without one.
+        for source in app.sources:
+            source.signal_stop()
 
         # Snapshot the drain-phase observability gauges BEFORE doing any
         # drain work. We always call ``.set()`` (even with ``0``) so the
@@ -1159,28 +847,17 @@ class AppLifecycle:
         # rather than "stale value from earlier in the run". See
         # ``drakkar.metrics`` for the metric docstrings.
         #
-        # Uncommitted offsets: sum the per-partition offset-tracker pending
-        # counts across every assigned partition. ``pending_count`` is the
-        # canonical accessor used elsewhere in the framework (e.g. the
-        # ``drakkar_offset_lag`` per-partition gauge updated on every
-        # message complete in ``PartitionProcessor``).
-        uncommitted_total = sum(processor.offset_tracker.pending_count for processor in app._processors.values())
-        uncommitted_offsets_at_stop.set(uncommitted_total)
+        # Uncommitted offsets exist only with a Kafka source; a worker
+        # without one reports 0 rather than leaving the gauge stale.
+        kafka = app.kafka_source
+        uncommitted_offsets_at_stop.set(kafka.uncommitted_offsets() if kafka is not None else 0)
 
         # In-flight executor tasks: read the pool's running ``active_count``,
         # which is the same accessor used by ``ExecutorPool`` to drive the
         # ``drakkar_executor_pool_active`` gauge during normal operation.
         # The pool may be ``None`` if shutdown is invoked before startup
         # completed (defensive programming for tests / aborted boot).
-        inflight_total = app._executor_pool.active_count if app._executor_pool is not None else 0
-        inflight_at_stop.set(inflight_total)
-
-        # Flip readiness off IMMEDIATELY so a Kubernetes readiness probe
-        # that fires between now and ``close_all`` fails — the pod is
-        # taken out of the service endpoints before we start tearing down
-        # sinks. Liveness (``/healthz``) stays responsive until the process
-        # actually exits.
-        app.is_ready = False
+        inflight_at_stop.set(app._executor_pool.active_count if app._executor_pool is not None else 0)
 
         # cancel periodic tasks
         for task in app._periodic_tasks:
@@ -1189,74 +866,25 @@ class AppLifecycle:
             await asyncio.gather(*app._periodic_tasks, return_exceptions=True)
             app._periodic_tasks.clear()
 
-        # Snapshot the processors BEFORE draining: a rebalance firing
-        # concurrently with shutdown pops processors from ``_processors``
-        # (handing them to ``_stop_processor`` background tasks). Draining
-        # from the live dict would skip those, and ``drained_cleanly=True``
-        # could fire with their work still in flight.
-        processors_snapshot = list(app._processors.values())
-        for processor in processors_snapshot:
-            processor.signal_stop()
+        # A startup failure before ``_bind_sources`` leaves the sources with
+        # no context and nothing acquired — no consumer, no bound socket —
+        # so there is nothing to drain or stop.
+        sources = app.sources if app._sources_bound else []
 
         drain_timeout = app._config.executor.drain_timeout_seconds
-        await log.ainfo('draining_executors', category='lifecycle', timeout=drain_timeout)
-        drained_cleanly = False
-        # Drain-and-teardown wrapped in try/finally so the teardown phase
-        # (mark_clean + final commits + processor.stop + cache/recorder/
-        # debug-server/sinks/DLQ/consumer.close) ALWAYS runs even when
-        # the drain itself raises an unexpected exception. Without this
-        # structure, a non-TimeoutError out of ``_drain_all_processors``
-        # (e.g. RuntimeError, OSError, an upstream CancelledError) would
-        # escape ``_shutdown`` and skip every cleanup step below — leaking
-        # connections, partial writes, and a stale (empty-body) watchdog
-        # file that the next startup would mis-classify as a SIGKILL.
+        deadline = time.monotonic() + drain_timeout
+
+        # Everything from the watchdog mark to ``drakkar_stopped`` is teardown
+        # that has to run whatever the drain phase does, so it sits in a
+        # ``finally``. Two things can take that phase out: this ``_shutdown``
+        # task being cancelled — an orchestrator whose grace period expired
+        # mid-drain — and anything that is not an ``Exception`` escaping it.
+        # Skipping the block below would leave the recorder, the cache, the
+        # sinks and the consumer open, and a stale empty-body watchdog file
+        # that the next startup reads as a SIGKILL. The error still propagates
+        # once the teardown has run.
         try:
-            try:
-                await asyncio.wait_for(self._drain_all_processors(processors_snapshot), timeout=drain_timeout)
-                drained_cleanly = True
-                await log.ainfo('executors_drained', category='lifecycle')
-            except TimeoutError:
-                # Surface the drain-timeout event as a Prometheus counter so
-                # operators can alert on ``rate(...[5m]) > 0`` instead of
-                # parsing logs for the ``drain_timeout`` warning.
-                drain_timeout_hit.inc()
-                # In-flight tasks are zombies now: after this worker exits,
-                # another consumer-group member replays their messages from
-                # the last committed offset. Suppress their late sink
-                # deliveries and commits to avoid double-writes during the
-                # remaining teardown window.
-                zombies = list(app._processors.values())
-                for processor in zombies:
-                    processor.suppress_deliveries()
-                # Cancel them as well: an uncancelled zombie keeps its
-                # executor slot and subprocess for up to
-                # ``task_timeout_seconds`` and keeps its processing loop from
-                # exiting, so every ``processor.stop()`` below would wait out
-                # its full timeout inside the pod's grace period.
-                await asyncio.gather(*(p.cancel_active_tasks() for p in zombies))
-                await log.awarning(
-                    'drain_timeout',
-                    category='lifecycle',
-                    msg=f'some executors did not finish in {drain_timeout}s; skipping final commit',
-                )
-            except Exception as exc:
-                # Any non-TimeoutError raised during drain is logged as a
-                # distinct event so it does not get conflated with the
-                # benign "some tasks took too long" timeout case. We do
-                # NOT increment ``drain_timeout_hit`` here — this is a
-                # different failure mode (drain bug, processor invariant
-                # violation, OS error mid-drain) and should be alerted
-                # on its own metric in the future. ``drained_cleanly``
-                # stays False so the post-drain final-commit phase is
-                # skipped (preferring at-least-once duplication over
-                # silent loss, same rationale as the timeout branch).
-                await log.aerror(
-                    'drain_exception',
-                    category='lifecycle',
-                    error=str(exc),
-                    exc_type=type(exc).__name__,
-                    exc_info=True,
-                )
+            await self._drain_sources(sources, deadline)
         finally:
             # Mark the watchdog clean as soon as the drain phase has been
             # accounted for — drain-timeout / drain-exception are both
@@ -1281,73 +909,12 @@ class AppLifecycle:
                         exc_info=True,
                     )
 
-            # Only commit final offsets if drain succeeded cleanly. After
-            # a timeout / drain-exception we cannot be sure tasks have
-            # stopped running, so committing here would silently skip
-            # in-flight work on restart — preferring at-least-once
-            # duplication over silent loss.
-            if drained_cleanly:
-                for processor in list(app._processors.values()):
-                    committable = processor.offset_tracker.committable()
-                    if committable is not None and app._consumer:
-                        try:
-                            await app._consumer.commit({processor.partition_id: committable})
-                            processor.offset_tracker.acknowledge_commit(committable)
-                        except Exception as e:
-                            await log.awarning(
-                                'final_commit_failed',
-                                category='kafka',
-                                partition=processor.partition_id,
-                                error=str(e),
-                                exc_info=True,
-                            )
-
-            # Stop every partition processor regardless of drain outcome.
-            # ``processor.stop()`` is idempotent on already-drained
-            # processors, and skipping it on a drain failure would leak
-            # the processor's worker tasks.
-            # Concurrently, as the revoke path does. Sequentially, a worker
-            # with N partitions pays N stop timeouts back to back and the
-            # pod's grace period expires mid-teardown — after the watchdog
-            # was already marked clean, so the SIGKILL is recorded as a
-            # clean exit and the sink/DLQ/recorder/consumer closes below
-            # never run.
-            async def _stop_one(processor: PartitionProcessor) -> None:
-                try:
-                    await processor.stop()
-                except Exception as exc:
-                    await log.awarning(
-                        'processor_stop_failed',
-                        category='lifecycle',
-                        partition=processor.partition_id,
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            stopping = list(app._processors.values())
-            if stopping:
-                await asyncio.gather(*(_stop_one(p) for p in stopping))
-            app._processors.clear()
-
-            # Wait for background tasks scheduled by rebalance callbacks
-            # (_stop_processor from revoke, on_assign/revoke handler hooks,
-            # backpressure pauses) to complete BEFORE we close the
-            # consumer. These tasks hold references to self._consumer;
-            # closing it while they run would cause use-after-close
-            # errors and skip their final commits.
-            if app._background_tasks:
-                bg_snapshot = list(app._background_tasks)
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*bg_snapshot, return_exceptions=True),
-                        timeout=drain_timeout,
-                    )
-                except TimeoutError:
-                    await log.awarning(
-                        'background_task_drain_timeout',
-                        category='lifecycle',
-                        count=len(bg_snapshot),
-                    )
+            # The sources stop before the sinks and the DLQ. ``stop()``
+            # finishes the final commits, stops the partition processors and
+            # awaits the background rebalance work before it closes the
+            # consumer, and the sinks only have to outlive the in-flight
+            # deliveries the drain above settled.
+            await self._stop_sources(deadline, sources)
 
             # Shut the offload pool down first among the observability-
             # adjacent subsystems: hooks have finished draining by now, so
@@ -1434,29 +1001,6 @@ class AppLifecycle:
                         exc_info=True,
                     )
 
-            # Stop the webapp uvicorn thread. ``stop`` is a sync method
-            # (the webapp owns its own thread/loop, not an asyncio task)
-            # and bounds its join on ``drain_timeout`` so a stuck request
-            # cannot prevent worker shutdown. The join can block for the
-            # full drain_timeout, so run it off-loop — the main loop must
-            # keep servicing the rest of teardown. Wrapped in try/except
-            # so a filesystem / thread hiccup at the very end does not
-            # skip the consumer close on the next line.
-            if app._webapp is not None:
-                try:
-                    await asyncio.to_thread(
-                        app._webapp.stop,
-                        drain_timeout=app._config.executor.drain_timeout_seconds,
-                    )
-                except Exception as exc:
-                    await log.awarning(
-                        'webapp_stop_failed',
-                        category='webapp',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-                app._webapp = None
-
             # close all sinks and DLQ. ``close_all`` already swallows
             # per-sink errors internally; only an unexpected framework
             # bug in close_all itself can raise here, but we still wrap
@@ -1481,39 +1025,58 @@ class AppLifecycle:
                         exc_info=True,
                     )
 
-            if app._consumer:
-                try:
-                    await app._consumer.close()
-                except Exception as exc:
-                    await log.awarning(
-                        'consumer_close_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
             await log.ainfo('drakkar_stopped', category='lifecycle')
             close_logging()
 
-    async def _drain_all_processors(self, processors: list[PartitionProcessor]) -> None:
-        """Wait for the given partition processors to finish queued + in-flight work.
+    async def _drain_sources(self, sources: list[Source], deadline: float) -> None:
+        """Wait for every source's in-flight work, all against one ``deadline``.
 
-        Takes an explicit snapshot instead of reading ``app._processors``
-        so a rebalance that pops processors mid-shutdown cannot shrink the
-        drain set under us. Processors whose only pending offsets are
-        stalled (delivery unconfirmed) drain promptly — ``drain()`` itself
-        excludes stalled offsets from its wait condition.
+        The sources share the executor pool, so giving each its own budget
+        would multiply the worst case by their number and overrun the pod's
+        grace period. A source that fails its own drain is logged and does
+        not stop the others from finishing theirs.
         """
-        drain_tasks = [
-            processor.drain()
-            for processor in processors
-            # A dead processor has no loop left to empty its queue or settle
-            # its pending offsets, so including it guarantees the whole drain
-            # hits the timeout and every healthy partition's commit is
-            # suppressed with it. ``drain()`` returns at once for one anyway;
-            # skipping it here keeps the intent visible at the call site.
-            if not processor.is_dead
-            and (processor.queue_size > 0 or processor.offset_tracker.has_pending() or processor.inflight_count > 0)
-        ]
-        if drain_tasks:
-            await asyncio.gather(*drain_tasks)
+        log = logger.bind(worker_id=self._app._worker_id)
+        if not sources:
+            return
+        await log.ainfo(
+            'sources_draining',
+            category='lifecycle',
+            timeout=round(max(deadline - time.monotonic(), 0.0), 3),
+            sources=[source.name for source in sources],
+        )
+        results = await asyncio.gather(
+            *(source.drain(deadline) for source in sources),
+            return_exceptions=True,
+        )
+        for source, result in zip(sources, results, strict=True):
+            if isinstance(result, BaseException):
+                await log.aerror(
+                    'drain_exception',
+                    category='lifecycle',
+                    source=source.name,
+                    error=str(result),
+                    exc_type=type(result).__name__,
+                )
+        if all(result is True for result in results):
+            await log.ainfo('sources_drained', category='lifecycle')
+
+    async def _stop_sources(self, deadline: float, sources: list[Source]) -> None:
+        """Release every source's resources against the remaining deadline.
+
+        One failing source must not keep the others (or the subsystems that
+        still have to close after them) from being released, so each stop
+        is wrapped on its own.
+        """
+        log = logger.bind(worker_id=self._app._worker_id)
+        for source in sources:
+            try:
+                await source.stop(deadline)
+            except Exception as exc:
+                await log.awarning(
+                    'source_stop_failed',
+                    category='lifecycle',
+                    source=source.name,
+                    error=str(exc),
+                    exc_info=True,
+                )

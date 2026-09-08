@@ -58,8 +58,10 @@ framework's own fields.
 
 ```yaml
 # drakkar.yaml — framework sections and your section, one file
-kafka:
-  source_topic: input-events
+sources:
+  kafka:
+    enabled: true
+    topic: input-events
 
 app:
   priority_threshold: 20

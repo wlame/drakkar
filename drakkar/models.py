@@ -93,7 +93,7 @@ class SourceMessage(BaseModel):
             'Set by deserialize_message() when the raw value could not be '
             'parsed into the input model. None means parsing succeeded (or '
             'no input_model is configured). The framework applies the '
-            'kafka.on_parse_error policy to messages with a non-None value.'
+            'sources.kafka.on_parse_error policy to messages with a non-None value.'
         ),
     )
 
@@ -116,7 +116,7 @@ class SinkDeliveryFailedError(Exception):
 
 
 class MessageParseError(Exception):
-    """Raised under ``kafka.on_parse_error: raise`` when a source message
+    """Raised under ``sources.kafka.on_parse_error: raise`` when a source message
     fails input_model deserialization.
 
     Propagates out of the partition processor's window loop, stopping the
@@ -132,10 +132,21 @@ class MessageParseError(Exception):
         super().__init__(f'message {partition}:{offset} failed deserialization: {error}')
 
 
+class ConfigurationError(RuntimeError):
+    """Raised at startup when the handler cannot serve an enabled input source.
+
+    Each source validates the handler before anything binds: Kafka requires
+    ``arrange()`` to be overridden; HTTP requires the HTTP hooks and typed
+    request/response models. Failing fast here turns a config/handler
+    mismatch into a startup error instead of a confusing failure at the
+    first message or request.
+    """
+
+
 class ParseFailurePayload(BaseModel):
     """DLQ payload wrapper for a source message that failed deserialization.
 
-    Produced by the framework when ``kafka.on_parse_error: dlq`` is set.
+    Produced by the framework when ``sources.kafka.on_parse_error: dlq`` is set.
     Carries the raw value (decoded with replacement characters) plus
     enough metadata to locate the original message in Kafka.
     """

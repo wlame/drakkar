@@ -4,7 +4,7 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 The models are split per domain across this package — ``kafka``, ``sinks``,
-``runtime``, ``ui``, ``cache``, ``webapp`` — and assembled by ``root``.
+``sources``, ``runtime``, ``ui``, ``cache``, ``webapp`` — and assembled by ``root``.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
@@ -33,6 +33,7 @@ from drakkar.config.sinks import (
     RedisSinkConfig,
     SinksConfig,
 )
+from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
 from drakkar.config.ui import (
     BUILTIN_LINK_BASES,
     DEFAULT_ARCHIVE_RETENTION_DAYS,
@@ -76,6 +77,7 @@ __all__ = [
     'IOConfig',
     'KafkaConfig',
     'KafkaSinkConfig',
+    'KafkaSourceConfig',
     'LoggingConfig',
     'MetricsConfig',
     'MongoSinkConfig',
@@ -85,6 +87,7 @@ __all__ = [
     'RedisSinkConfig',
     'RuntimeHealthConfig',
     'SinksConfig',
+    'SourcesConfig',
     'ThroughputConfig',
     'TimelineColorRule',
     'TimelineEventType',

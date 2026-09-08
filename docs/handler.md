@@ -25,7 +25,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request (webapp only) | `str` (validated; ≤64 chars, ASCII, no whitespace) |
 | `http_request_label(req, request_id)` | Before logging each HTTP request | Once per HTTP request (webapp only) | `str` |
 
-Only `arrange()` is required. All other hooks have safe defaults. The four `*http*` hooks at the bottom are invoked only when [`webapp.enabled=true`](webapp.md) and the handler subclass declares concrete types in the `HttpRequestT` / `HttpResponseT` slots; see [Generic type parameters](#generic-type-parameters) below for the four-parameter form.
+**Which hooks are required follows the enabled [input sources](sources.md).** `arrange()` is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true, together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
 
 ---
 
@@ -39,14 +39,14 @@ from drakkar import BaseDrakkarHandler
 
 `BaseDrakkarHandler` accepts up to four optional type parameters. The
 first two control Kafka-path message (de)serialization; the third and
-fourth opt the handler into the [webapp pipeline](webapp.md):
+fourth opt the handler into the [HTTP source](sources.md) pipeline:
 
 ```python
 # Two-param form (Kafka only). HttpRequestT / HttpResponseT default to None.
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
     ...
 
-# Four-param form (Kafka + webapp). Required when webapp.enabled=true.
+# Four-param form (Kafka + HTTP). Required when sources.http.enabled=true.
 class MyHandler(BaseDrakkarHandler[KafkaIn, KafkaOut, HttpReq, HttpResp]):
     ...
 ```
@@ -57,7 +57,7 @@ and fourth slots materialise to `None` and the framework never invokes
 the HTTP hooks. Four-param subclasses opt into the webapp pipeline by
 declaring concrete Pydantic models in the new slots; the framework
 reads those at startup and raises `ConfigurationError` when
-`webapp.enabled=true` but a slot is left at the default. See
+`sources.http.enabled=true` but a slot is left at the default. See
 [Webapp → Enabling](webapp.md#enabling) for the full setup.
 
 All declared type arguments must be Pydantic `BaseModel` subclasses. At
@@ -130,6 +130,8 @@ point where config can be changed at runtime.
     | `app` | the handler's app-config model (see [Application config](app-config.md)) |
     | `cluster_name`, `cluster_name_env` | the worker's resolved cluster name |
     | `worker_name_env` | the worker's resolved id |
+    | `sources.kafka.enabled` | handler validation and source construction |
+    | `sources.http.enabled` | handler validation and source construction |
 
     Set those in the config file or through their `DK_` environment
     overrides instead. The worker does not fail on such a change — it logs
@@ -137,9 +139,10 @@ point where config can be changed at runtime.
     dropped, so the gap is visible rather than silent.
 
     Everything else — `executor`, `kafka`, `sinks` (the instances, the
-    circuit breaker and the delivery timeout alike), `ui`, `webapp`, `dlq`,
-    `cache`, `logging`, `metrics` — is read after the hook and a change to
-    it takes effect.
+    circuit breaker and the delivery timeout alike), `ui`, `dlq`, `cache`,
+    `logging`, `metrics`, and every `sources.*` field other than the two
+    `enabled` switches — is read after the hook and a change to it takes
+    effect.
 
 ```python
 import os
@@ -171,7 +174,7 @@ async def on_ready(self, config: dk.DrakkarConfig, db_pool) -> None:
         self.lookup_table = {r['id']: r['name'] for r in rows}
 ```
 
-### arrange (required)
+### arrange (required with the Kafka source) {#arrange-required}
 
 ```python
 async def arrange(
@@ -181,8 +184,10 @@ async def arrange(
 ) -> list[ExecutorTask]
 ```
 
-The only **required** hook. Transforms source messages into subprocess
-tasks. See [ExecutorTask](executor.md#executortask) for the full task model reference.
+**Required whenever `sources.kafka.enabled` is true**, and never called
+otherwise — an [HTTP-only worker](sources.md#http-only) may leave it
+unimplemented. Transforms source messages into subprocess tasks. See
+[ExecutorTask](executor.md#executortask) for the full task model reference.
 
 **Partition isolation.** Each call receives messages from exactly **one
 Kafka partition**. Drakkar runs an independent pipeline per partition, so

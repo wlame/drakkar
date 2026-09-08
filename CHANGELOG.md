@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The HTTP source now counts its drain timeouts.** When in-flight HTTP
+  requests outlive `executor.drain_timeout_seconds` at shutdown,
+  `drakkar_drain_timeout_hit_total` ticks, the same as for the Kafka
+  source. Its help text now names both sources.
+
+- **A `db_dir` behind a symlink no longer loses its live markers.** When
+  `ui.recorder.db_dir` was reached through a symlinked path, the Databases
+  page did not mark the live database as in use, and the background stats
+  sweep also read other workers' live databases. A marker's target is now
+  compared in the same path spelling as the listed files.
+
 - **Webapp tasks now end on the live Timeline.** HTTP-started tasks now
   record `task_completed` or `task_failed`, like Kafka tasks.
 
@@ -17,6 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structlog. The minimum uvicorn version is now 0.35.0.
 
 ### Changed
+
+- **Breaking: input sources are configured under `sources:`.** `kafka:` now
+  holds only the cluster connection (`brokers`, `security`, `client_config`,
+  `ui_url`, `ui_cluster_name`). The consumer moved to `sources.kafka`
+  (`topic`, `consumer_group`, poll and alignment settings, `on_parse_error`)
+  and the webapp section moved to `sources.http`. Both sources are off by
+  default; enable at least one. A worker can now run with HTTP input only.
+  A top-level `webapp:` key now fails to load with a message that names
+  `sources.http`.
+- **The config summary line changed.** `sources=[kafka:<topic>/<group>/<n>poll http:<port>]`
+  replaces the `topic=`, `group=` and `webapp=` tokens, and `exec=` no
+  longer carries the poll count. `dlq=off` appears when no DLQ is built.
+- **DLQ without the Kafka source.** With `sources.kafka.enabled=false`, the
+  DLQ runs only when `dlq.topic` is set. Otherwise DLQ sends are dropped,
+  logged once at warning, and counted in `drakkar_dlq_unconfigured_drops_total`.
+- **An HTTP source that cannot bind now stops the worker.** It was a warning.
+- **Handler validation follows the enabled sources.** `arrange()` is required
+  only with the Kafka source; the HTTP hooks only with the HTTP source.
+- `drakkar_worker_info{consumer_group}` is empty and the `consumer_group`
+  log field is omitted when the Kafka source is off.
+- **The startup and shutdown log events changed.** `webapp_start_failed` and
+  `webapp_shutdown_starting` are gone. The worker now logs `sources_starting`,
+  `source_started`, `source_start_failed`, `sources_draining`,
+  `sources_drained` and `source_stop_failed`. Update log alerts that match
+  the old names.
 
 - **Code comments no longer narrate implementation history.** Roughly 50
   comments and docstrings across the pipeline core, sinks, cache, recorder

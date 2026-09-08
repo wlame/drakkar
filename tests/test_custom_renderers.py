@@ -40,7 +40,8 @@ def renderers_file(tmp_path):
 def _minimal_config(ui: UIConfig) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),
@@ -89,7 +90,7 @@ def _make_client(ui_config: UIConfig) -> AsyncClient:
     recorder._reader_db = None
     recorder.reader_db = None
     recorder.config = ui_config
-    app = _mock_app(DrakkarConfig(ui=ui_config))
+    app = _mock_app(DrakkarConfig(sources={'kafka': {'enabled': True}}, ui=ui_config))
     fastapi_app = create_ui_app(ui_config, recorder, app)
     return AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test')
 

@@ -90,6 +90,7 @@ from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import WebAppConfig
 from drakkar.loopserver import LoopLoggingServer
 from drakkar.metrics import (
+    webapp_inflight,
     webapp_request_duration,
     webapp_requests,
     webapp_rpm_limit,
@@ -102,6 +103,7 @@ from drakkar.webapp.dependencies import (
 )
 from drakkar.webapp.models import WebRequestContext
 from drakkar.webapp.runner import WebappHandlerError, WebappRunner
+from drakkar.webapp.validation import validate_webapp_handler
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -133,7 +135,7 @@ _SEMAPHORE_ACQUIRE_PROBE_SECONDS = 0.001
 #
 # Constants rather than config: there is nothing here for an operator to
 # trade off, and the one dimension that IS deployment-specific — how large
-# a body to accept — is already ``webapp.max_body_bytes``.
+# a body to accept — is already ``sources.http.max_body_bytes``.
 
 # Reaps keep-alive connections idle between requests, so abandoned clients
 # cannot pin connections (and file descriptors) forever.
@@ -150,61 +152,6 @@ MAX_HEADER_BYTES = 64 * 1024
 # alone is not a slow-loris defence: a client can stay under
 # ``max_body_bytes`` forever by sending one byte a minute.
 BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
-
-
-class ConfigurationError(RuntimeError):
-    """Raised at webapp startup when required handler types are missing.
-
-    Webapp users opt in by declaring concrete Pydantic models in the
-    ``HttpRequestT`` / ``HttpResponseT`` slots of
-    :class:`drakkar.handler.BaseDrakkarHandler`. When ``webapp.enabled=True``
-    but a slot is left at the PEP 696 ``None`` default, the framework
-    fails fast at startup rather than producing a confusing per-request
-    error later.
-    """
-
-
-def validate_webapp_handler(handler: Any) -> None:
-    """Fail fast when ``webapp.enabled`` but the handler can't serve HTTP.
-
-    Called from ``DrakkarApp.__init__`` — construction time, so a
-    misconfiguration fails before anything binds — and again defensively
-    when the webapp server is built. Two requirements:
-
-    - both HTTP hooks are overridden (the ``BaseDrakkarHandler`` defaults
-      only raise ``NotImplementedError`` at request time), and
-    - the 3rd/4th generic slots carry concrete Pydantic models
-      (``http_request_model`` / ``http_response_model``).
-    """
-    from drakkar.handler import BaseDrakkarHandler
-
-    handler_cls = type(handler)
-    # Types first: the 4-slot generic is the primary opt-in mechanism and
-    # its message names the offending class — the most useful pointer for
-    # a handler that has no webapp support at all.
-    request_model = getattr(handler, 'http_request_model', None)
-    response_model = getattr(handler, 'http_response_model', None)
-    if request_model is None or response_model is None:
-        cls_name = handler_cls.__name__
-        raise ConfigurationError(
-            f'webapp.enabled=true but {cls_name} did not declare '
-            f'HttpRequestT/HttpResponseT — extend '
-            f'BaseDrakkarHandler[InputT, OutputT, HttpRequestT, '
-            f'HttpResponseT] with concrete Pydantic models in slots '
-            f'3 and 4. See docs/webapp.md for an example.'
-        )
-    base = BaseDrakkarHandler
-    hooks_overridden = (
-        getattr(handler_cls, 'arrange_http_request', base.arrange_http_request) is not base.arrange_http_request
-        and getattr(handler_cls, 'on_http_request_complete', base.on_http_request_complete)
-        is not base.on_http_request_complete
-    )
-    if not hooks_overridden:
-        raise ConfigurationError(
-            'webapp.enabled=true but the handler does not override '
-            'arrange_http_request + on_http_request_complete — implement '
-            'both hooks or disable the webapp section'
-        )
 
 
 class WebApp:
@@ -393,6 +340,21 @@ class WebApp:
         # the same TimeoutError shape so callers can handle both stages
         # uniformly.
         raise TimeoutError(f'webapp uvicorn server did not enter the started state within {timeout}s')
+
+    @property
+    def inflight_count(self) -> int:
+        """Current in-flight request count.
+
+        Reads the same ``drakkar_webapp_inflight`` gauge the debug-UI
+        dashboard tile reads (``routes_pages.py``'s ``_build_webapp_tile``),
+        via the same ``Gauge._value.get()`` accessor — the gauge is process-
+        wide and there is one ``WebApp`` per process, so the two readings
+        agree.
+        """
+        try:
+            return int(webapp_inflight._value.get())
+        except Exception:
+            return 0
 
     def stop(self, drain_timeout: float) -> None:
         """Signal uvicorn to exit and join the worker thread.
@@ -743,7 +705,7 @@ class WebApp:
                     content={
                         'error': 'request_too_large',
                         'request_id': gate_request_id,
-                        'details': f'request body exceeds webapp.max_body_bytes ({max_body} bytes)',
+                        'details': f'request body exceeds sources.http.max_body_bytes ({max_body} bytes)',
                     },
                 )
 

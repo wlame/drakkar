@@ -603,6 +603,14 @@ class EventRecorder(EventWriter):
                 names = list(getattr(sinks_cfg, sink_type, {}).keys())
                 if names:
                     sinks[sink_type] = names
+        # A worker with the Kafka source off reads no topic, so the
+        # recorded row says so plainly rather than showing the source
+        # config's unused default. ``resolved_consumer_group`` already
+        # carries the analogous rule for the group.
+        source = drakkar_config.sources.kafka
+        source_topic = source.topic if source.enabled else ''
+        consumer_group = drakkar_config.resolved_consumer_group
+
         now = time.time()
         await self._db.execute(
             """INSERT OR REPLACE INTO worker_config
@@ -617,8 +625,8 @@ class EventRecorder(EventWriter):
                 self._config.port,
                 self._config.public_url or None,
                 redact_url(drakkar_config.kafka.brokers),
-                drakkar_config.kafka.source_topic,
-                drakkar_config.kafka.consumer_group,
+                source_topic,
+                consumer_group,
                 drakkar_config.executor.binary_path,
                 drakkar_config.executor.max_executors,
                 drakkar_config.executor.task_timeout_seconds,

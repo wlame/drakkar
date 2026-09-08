@@ -29,7 +29,8 @@ class NoopHandler(BaseDrakkarHandler):
 
 def make_config(**overrides) -> DrakkarConfig:
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        'kafka': KafkaConfig(brokers='localhost:9092'),
+        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         'executor': ExecutorConfig(binary_path='/bin/echo'),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
@@ -47,6 +48,13 @@ class TestTheTableItself:
         snapshot = snapshot_consumed_settings(config)
 
         assert set(snapshot) == {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+
+    def test_the_source_toggles_are_listed(self):
+        """Sources are built in ``__init__``, so flipping one in the hook does nothing."""
+        paths = {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+
+        assert 'sources.kafka.enabled' in paths
+        assert 'sources.http.enabled' in paths
 
     def test_every_entry_explains_why_it_is_consumed_early(self):
         for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP:

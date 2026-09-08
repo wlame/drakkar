@@ -160,7 +160,8 @@ def test_annotation_byte_caps_reject_negative(field: str):
 def test_annotation_env_override(monkeypatch):
     monkeypatch.setenv('DK_UI__RECORDER__ANNOTATIONS_ENABLED', 'false')
     monkeypatch.setenv('DK_UI__RECORDER__ANNOTATION_MAX_BYTES', '4096')
-    cfg = DrakkarConfig()
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.ui.recorder.annotations_enabled is False
     assert cfg.ui.recorder.annotation_max_bytes == 4096
 
@@ -187,7 +188,8 @@ def test_env_nested_override(monkeypatch):
     monkeypatch.setenv('DK_UI__RECORDER__DB_DIR', '/data')
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'false')
     monkeypatch.setenv('DK_UI__PORT', '9001')
-    cfg = DrakkarConfig()
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.ui.recorder.db_dir == '/data'
     assert cfg.ui.release.check_update is False
     assert cfg.ui.port == 9001
@@ -200,27 +202,27 @@ def test_unknown_top_level_section_is_still_fatal():
 
 
 def test_retired_flat_ui_keys_are_ignored_extras():
-    cfg = DrakkarConfig(ui={'release_repo': 'a/b', 'check_update': False})
+    cfg = DrakkarConfig(ui={'release_repo': 'a/b', 'check_update': False}, sources={'kafka': {'enabled': True}})
     assert cfg.ui.release.repo == 'wlame/drakkar-ui'
     assert cfg.ui.release.check_update is True
 
 
 def test_config_summary_uses_ui_token():
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
     assert ' ui=on:8080 ' in summary
     assert 'debug=' not in summary
 
 
 def test_config_summary_ui_off():
-    cfg = DrakkarConfig(ui={'enabled': False})
+    cfg = DrakkarConfig(ui={'enabled': False}, sources={'kafka': {'enabled': True}})
     assert ' ui=off ' in cfg.config_summary(worker_id='w1')
 
 
-def test_config_summary_webapp_token_follows_ui():
-    cfg = DrakkarConfig()
+def test_config_summary_cache_token_follows_ui():
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on:8080 webapp=off ' in summary
+    assert ' ui=on:8080 cache=off ' in summary
 
 
 def test_probe_and_merge_default_to_enabled():
@@ -234,6 +236,7 @@ def test_probe_and_merge_env_overrides(monkeypatch):
     """Reachable via ``DK_UI__*`` so a deployment can close them without a config file."""
     monkeypatch.setenv('DK_UI__PROBE_ENABLED', 'false')
     monkeypatch.setenv('DK_UI__MERGE_ENABLED', 'false')
-    cfg = DrakkarConfig()
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.ui.probe_enabled is False
     assert cfg.ui.merge_enabled is False

@@ -19,6 +19,7 @@ from drakkar.config import (
     ExecutorConfig,
     KafkaConfig,
     KafkaSinkConfig,
+    KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -35,7 +36,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 # --- Helpers ---
@@ -98,7 +99,8 @@ def make_msg(partition=0, offset=0) -> SourceMessage:
 def make_config(**overrides) -> DrakkarConfig:
     """Build a DrakkarConfig with sensible test defaults, allowing overrides."""
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        'kafka': KafkaConfig(brokers='localhost:9092'),
+        'sources': {'kafka': {'enabled': True, 'topic': 'test-in'}},
         'executor': ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
         'metrics': MetricsConfig(enabled=False),
@@ -135,11 +137,11 @@ class TestDebugModes:
         config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-        app._consumer = MagicMock()
+        wire_kafka_source(app, MagicMock())
         app._consumer.commit = AsyncMock()
 
         assert app._recorder is None
-        app._lifecycle._on_assign([0, 1])
+        app.kafka_source.on_assign([0, 1])
         assert len(app.processors) == 2
 
         for proc in app.processors.values():
@@ -150,10 +152,10 @@ class TestDebugModes:
         config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-        app._consumer = AsyncMock()
+        wire_kafka_source(app)
 
-        app._lifecycle._on_assign([0, 1])
-        await app._lifecycle._on_revoke([0])
+        app.kafka_source.on_assign([0, 1])
+        await app.kafka_source.on_revoke([0])
         await wait_for(lambda: 0 not in app.processors)
         for proc in app.processors.values():
             await proc.stop()
@@ -162,9 +164,9 @@ class TestDebugModes:
         """Offset commits work when debug is disabled."""
         config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._consumer = AsyncMock()
+        wire_kafka_source(app)
 
-        await app._handle_commit(partition_id=0, offset=10)
+        await app.kafka_source._handle_commit(partition_id=0, offset=10)
         app._consumer.commit.assert_called_once_with({0: 10})
 
     async def test_handle_collect_without_recorder(self):
@@ -183,7 +185,7 @@ class TestDebugModes:
         """Shutdown completes cleanly when debug is disabled."""
         config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._consumer = AsyncMock()
+        wire_kafka_source(app)
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
@@ -198,7 +200,7 @@ class TestDebugModes:
         """Shutdown stops recorder and debug_server if they exist."""
         config = make_config(ui=make_ui_config(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._consumer = AsyncMock()
+        wire_kafka_source(app)
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
         app._recorder = AsyncMock()
@@ -311,7 +313,9 @@ class TestRecorderStoreFlags:
         # write_config should be safe regardless
         from drakkar.config import DrakkarConfig, ExecutorConfig
 
-        dummy_config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+        dummy_config = DrakkarConfig(
+            executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}}
+        )
         await rec.write_config(dummy_config)
 
         # get_events should return empty if store_events is False
@@ -343,7 +347,9 @@ class TestRecorderStoreFlags:
 
         from drakkar.config import DrakkarConfig, ExecutorConfig
 
-        dummy_config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+        dummy_config = DrakkarConfig(
+            executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}}
+        )
         await rec.write_config(dummy_config)
 
         await rec.stop()
@@ -681,12 +687,12 @@ class TestCombinedModes:
         handler = CollectHandler()
         app = DrakkarApp(handler=handler, config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-        app._consumer = MagicMock()
+        wire_kafka_source(app, MagicMock())
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._lifecycle._on_assign([0])
+        app.kafka_source.on_assign([0])
         proc = app.processors[0]
         proc.enqueue(make_msg(offset=0))
 
@@ -716,12 +722,12 @@ class TestCombinedModes:
         handler = CollectHandler()
         app = DrakkarApp(handler=handler, config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-        app._consumer = MagicMock()
+        wire_kafka_source(app, MagicMock())
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._lifecycle._on_assign([0])
+        app.kafka_source.on_assign([0])
         proc = app.processors[0]
 
         for i in range(3):
@@ -750,12 +756,12 @@ class TestCombinedModes:
         handler = RetryHandler()  # asks for RETRY but max_retries=0 blocks it
         app = DrakkarApp(handler=handler, config=config)
         app._executor_pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
-        app._consumer = MagicMock()
+        wire_kafka_source(app, MagicMock())
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._lifecycle._on_assign([0])
+        app.kafka_source.on_assign([0])
         proc = app.processors[0]
         proc.enqueue(make_msg(offset=0))
 
@@ -778,7 +784,8 @@ class TestConsumerCallbackModes:
         from drakkar.consumer import KafkaConsumer
 
         consumer = KafkaConsumer(
-            config=KafkaConfig(brokers='localhost:9092'),
+            connection=KafkaConfig(brokers='localhost:9092'),
+            source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
             on_assign=None,
             on_revoke=None,
         )
@@ -791,7 +798,8 @@ class TestConsumerCallbackModes:
         assign_cb = MagicMock()
         revoke_cb = MagicMock()
         consumer = KafkaConsumer(
-            config=KafkaConfig(brokers='localhost:9092'),
+            connection=KafkaConfig(brokers='localhost:9092'),
+            source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
             on_assign=assign_cb,
             on_revoke=revoke_cb,
         )
@@ -862,12 +870,10 @@ class TestConfigSummary:
         cfg = make_config()
         summary = cfg.config_summary(worker_id='worker-01', cluster_name='prod')
         assert summary.startswith('[worker-01/prod]')
-        assert 'topic=test-in' in summary
-        assert 'group=drakkar-workers' in summary
+        assert 'sources=[kafka:test-in/drakkar-workers/100poll]' in summary
         assert 'exec=2w/' in summary
         assert 'retries=' in summary
         assert 'ui=off' in summary
-        assert 'webapp=off' in summary
         assert 'sinks=[kf:out]' in summary
         assert 'log=WARNING' in summary
 
@@ -888,15 +894,14 @@ class TestConfigSummary:
         assert 'ui=on:8080' in summary
 
     def test_summary_webapp_on(self):
-        cfg = make_config(webapp={'enabled': True, 'port': 8090})
+        cfg = make_config(sources={'http': {'enabled': True, 'port': 8090}})
         summary = cfg.config_summary(worker_id='w')
-        # Adjacency pins both value and position (right after the ui token).
-        assert ' ui=off webapp=on:8090 ' in summary
+        assert 'sources=[http:8090]' in summary
 
     def test_summary_webapp_off_by_default(self):
         cfg = make_config()
         summary = cfg.config_summary(worker_id='w')
-        assert ' webapp=off ' in summary
+        assert 'http:' not in summary
 
     def test_summary_metrics_enabled(self):
         cfg = make_config(metrics=MetricsConfig(enabled=True, port=9090))
@@ -961,10 +966,9 @@ class TestConfigSummary:
                 max_retries=5,
                 task_timeout_seconds=300,
             ),
-            kafka=KafkaConfig(max_poll_records=50),
         )
         summary = cfg.config_summary(worker_id='w')
-        assert 'exec=8w/200win/50poll' in summary
+        assert 'exec=8w/200win' in summary
         assert 'retries=5/300s' in summary
 
     def test_summary_cache_off_by_default(self):

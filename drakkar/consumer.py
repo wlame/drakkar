@@ -12,7 +12,7 @@ import structlog
 from confluent_kafka import KafkaError, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 
-from drakkar.config import KafkaConfig
+from drakkar.config import KafkaConfig, KafkaSourceConfig
 from drakkar.kafka_security import merge_client_config
 from drakkar.metrics import consumer_errors, offsets_committed, rebalance_events
 from drakkar.models import SourceMessage
@@ -22,7 +22,7 @@ logger = structlog.get_logger()
 OnAssignCallback = Callable[[list[int]], Any]
 # The revoke callback is awaited: the rebalance must not complete until the
 # worker has drained and committed the revoked partitions (see
-# AppLifecycle._on_revoke). AIOConsumer runs this via
+# KafkaSource.on_revoke in drakkar/sources/kafka.py). AIOConsumer runs this via
 # run_coroutine_threadsafe(...).result(), so librdkafka waits on it.
 OnRevokeCallback = Callable[[list[int]], Awaitable[None]]
 
@@ -53,11 +53,13 @@ class KafkaConsumer:
 
     def __init__(
         self,
-        config: KafkaConfig,
+        connection: KafkaConfig,
+        source: KafkaSourceConfig,
         on_assign: OnAssignCallback | None = None,
         on_revoke: OnRevokeCallback | None = None,
     ) -> None:
-        self._config = config
+        self._connection = connection
+        self._source = source
         self._on_assign_cb = on_assign
         self._on_revoke_cb = on_revoke
 
@@ -69,25 +71,35 @@ class KafkaConsumer:
         self._consumer = AIOConsumer(
             merge_client_config(
                 {
-                    'bootstrap.servers': config.brokers,
-                    'group.id': config.consumer_group,
+                    'bootstrap.servers': connection.brokers,
+                    'group.id': source.consumer_group,
                     'enable.auto.commit': False,
                     'auto.offset.reset': 'earliest',
                     'partition.assignment.strategy': 'cooperative-sticky',
-                    'max.poll.interval.ms': config.max_poll_interval_ms,
-                    'session.timeout.ms': config.session_timeout_ms,
-                    'heartbeat.interval.ms': config.heartbeat_interval_ms,
+                    'max.poll.interval.ms': source.max_poll_interval_ms,
+                    'session.timeout.ms': source.session_timeout_ms,
+                    'heartbeat.interval.ms': source.heartbeat_interval_ms,
                 },
-                config.security,
-                config.client_config,
+                connection.security,
+                connection.client_config,
             ),
             max_workers=CONSUMER_MAX_WORKERS,
         )
 
+    @property
+    def source_topic(self) -> str:
+        """The Kafka topic this consumer is subscribed to."""
+        return self._source.topic
+
+    @property
+    def consumer_group(self) -> str:
+        """The consumer group this consumer joins."""
+        return self._source.consumer_group
+
     async def subscribe(self) -> None:
         """Subscribe to the source topic with rebalance callbacks."""
         await self._consumer.subscribe(
-            [self._config.source_topic],
+            [self._source.topic],
             on_assign=self._handle_assign,
             on_revoke=self._handle_revoke,
         )
@@ -120,7 +132,7 @@ class KafkaConsumer:
 
     async def poll_batch(self, max_messages: int | None = None, timeout: float = 1.0) -> list[SourceMessage]:
         """Poll up to max_messages from Kafka."""
-        count = max_messages or self._config.max_poll_records
+        count = max_messages or self._source.max_poll_records
         raw_messages = await self._consumer.consume(
             num_messages=count,
             timeout=timeout,
@@ -149,7 +161,7 @@ class KafkaConsumer:
     async def commit(self, offsets: dict[int, int]) -> None:
         """Commit offsets for specific partitions."""
         topic_partitions = [
-            TopicPartition(self._config.source_topic, partition, offset) for partition, offset in offsets.items()
+            TopicPartition(self._source.topic, partition, offset) for partition, offset in offsets.items()
         ]
         await self._consumer.commit(offsets=topic_partitions, asynchronous=False)
         for partition_id in offsets:
@@ -158,13 +170,13 @@ class KafkaConsumer:
 
     async def pause(self, partition_ids: list[int]) -> None:
         """Pause consuming from specific partitions (backpressure)."""
-        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
         await self._consumer.pause(tps)
         logger.debug('partitions_paused', category='kafka', partitions=partition_ids)
 
     async def resume(self, partition_ids: list[int]) -> None:
         """Resume consuming from previously paused partitions."""
-        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
         await self._consumer.resume(tps)
         logger.debug('partitions_resumed', category='kafka', partitions=partition_ids)
 
@@ -173,7 +185,7 @@ class KafkaConsumer:
         if not partition_ids:
             return 0
 
-        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
         try:
             committed_list = await self._consumer.committed(tps, timeout=LAG_QUERY_TIMEOUT_SECONDS)
         except Exception as e:
@@ -197,7 +209,7 @@ class KafkaConsumer:
 
         async def _watermark(pid: int) -> int:
             try:
-                tp = TopicPartition(self._config.source_topic, pid)
+                tp = TopicPartition(self._source.topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
                 return max(0, high - committed_map.get(pid, 0))
             except Exception as e:
@@ -225,7 +237,7 @@ class KafkaConsumer:
             return {}
 
         result: dict[int, dict] = {}
-        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
 
         # single batched committed() call for all partitions
         committed_map: dict[int, int] = {}
@@ -247,7 +259,7 @@ class KafkaConsumer:
         # parallel watermark lookups
         async def _watermark(pid: int) -> tuple[int, int]:
             try:
-                tp = TopicPartition(self._config.source_topic, pid)
+                tp = TopicPartition(self._source.topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
                 return pid, high
             except Exception as e:

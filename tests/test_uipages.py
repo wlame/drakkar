@@ -202,7 +202,8 @@ def test_pages_referenced_bases_collects_column_templates():
 def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),

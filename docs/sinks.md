@@ -540,13 +540,22 @@ The DLQ topic is configured under the `dlq` key:
 
 ```yaml
 dlq:
-  topic: ""       # empty = auto-derived from source topic
+  topic: ""       # empty = derived from sources.kafka.topic, or no DLQ at all
+                  #   when the Kafka source is disabled
   brokers: ""     # empty = inherits from kafka.brokers
 ```
 
-When `topic` is empty, the framework derives it as `{source_topic}_dlq`. For example,
-if `kafka.source_topic` is `search-requests`, the DLQ topic becomes
+When `topic` is empty and the Kafka source is enabled, the framework derives
+the DLQ topic as `{sources.kafka.topic}_dlq`. For example, if
+`sources.kafka.topic` is `search-requests`, the DLQ topic becomes
 `search-requests_dlq`.
+
+**With the Kafka source disabled there is nothing to derive from**, so an
+empty `topic` means no DLQ producer is built at all: a DLQ send is dropped,
+logged once per worker run as `dlq_send_dropped_unconfigured`, and counted in
+`drakkar_dlq_unconfigured_drops_total`. Set `dlq.topic` explicitly on an
+HTTP-only worker that must not lose failed payloads — see
+[the DLQ rule](sources.md#the-dlq-without-the-kafka-source).
 
 ### Message format
 

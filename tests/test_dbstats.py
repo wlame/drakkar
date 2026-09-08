@@ -234,6 +234,25 @@ class TestSymlinks:
         # The symlink itself is not a row.
         assert 'w1-live.db' not in rows
 
+    def test_live_symlink_marks_its_target_when_db_dir_is_reached_through_a_symlink(self, tmp_path):
+        # A db_dir spelled through a symlinked component (a symlinked mount, or
+        # /var -> /private/var on macOS) must still match its own live marker:
+        # the marker's target is fully resolved, so the scanned paths must be too.
+        real_dir = tmp_path / 'real'
+        real_dir.mkdir()
+        alias_dir = tmp_path / 'alias'
+        os.symlink(real_dir, alias_dir)
+        current = str(real_dir / 'w1-2026.db')
+        rotated = str(real_dir / 'w1-2025.db')
+        make_recorder_db(current)
+        make_recorder_db(rotated)
+        os.symlink(current, str(real_dir / 'w1-live.db'))
+        cache = DbStatsCache(str(alias_dir))
+
+        rows = {r.stats.filename: r for r in collect(str(alias_dir), cache, inline_scan_limit=-1)}
+        assert rows['w1-2026.db'].live_for == 'w1'
+        assert rows['w1-2025.db'].live_for == ''
+
     def test_cache_symlink_becomes_a_cache_row_under_its_stable_name(self, tmp_path):
         cache = DbStatsCache(str(tmp_path))
         target = str(tmp_path / 'w1-cache.db.actual')
@@ -347,6 +366,32 @@ class TestWarmerLeavesPeerLiveDatabasesAlone:
 
         warm_directory(str(tmp_path), cache, own_live_db=mine)
         assert touched == [mine]
+
+    def test_sweep_still_skips_peers_when_db_dir_is_reached_through_a_symlink(self, tmp_path, monkeypatch):
+        import drakkar.dbstats as dbstats_mod
+
+        real_dir = tmp_path / 'real'
+        real_dir.mkdir()
+        alias_dir = tmp_path / 'alias'
+        os.symlink(real_dir, alias_dir)
+        mine = self._live_pair(real_dir, 'me', 2)
+        peer = self._live_pair(real_dir, 'peer', 2)
+        cache = DbStatsCache(str(alias_dir))
+        warm_directory(str(alias_dir), cache)
+        self._grow(mine, 3)
+        self._grow(peer, 3)
+
+        touched: list[str] = []
+        real_delta = dbstats_mod._delta_scan
+        monkeypatch.setattr(
+            dbstats_mod,
+            '_delta_scan',
+            lambda path, cached: (touched.append(path), real_delta(path, cached))[1],
+        )
+
+        # A worker spells its own live DB through the configured (aliased) db_dir.
+        warm_directory(str(alias_dir), cache, own_live_db=str(alias_dir / 'me-live.db'))
+        assert [os.path.basename(path) for path in touched] == [os.path.basename(mine)]
 
     def test_peer_rows_survive_the_purge_pass(self, tmp_path):
         """A skipped peer must still count as present, or its cached stats

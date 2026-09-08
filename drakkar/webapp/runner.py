@@ -524,7 +524,7 @@ class WebappRunner:
         if not tasks:
             return []
         if self._app._executor_pool is None:
-            # Defensive — webapp.enabled=true requires a running pool.
+            # Defensive — sources.http.enabled=true requires a running pool.
             # Surfacing this as a clear runtime error beats an
             # AttributeError later in the partition path.
             raise RuntimeError(
@@ -896,10 +896,8 @@ class WebappRunner:
 
             if action == DeliveryAction.DLQ:
                 # Match DrakkarApp._handle_collect: the DLQ send happens
-                # only when a DLQ sink is configured. Without it, the
-                # SinkManager logs ``sink_delivery_failed_to_dlq`` and
-                # the payloads are effectively dropped — same behaviour
-                # the Kafka path exhibits in pre-DLQ deployments.
+                # only when a DLQ sink is configured, and a deployment
+                # without one gets the unconfigured-drop path below.
                 if app._dlq_sink is not None:
                     try:
                         sent = await app._dlq_sink.send(error, partition_id=-1)
@@ -921,6 +919,17 @@ class WebappRunner:
                         # path has no offsets to stall; the request-level
                         # error report IS the recovery signal.
                         sink_result.errors.append('dlq_send_failed: DLQ write not confirmed')
+                elif not app._config.dlq_enabled:
+                    # The DLQ is off by configuration, not broken. That is a
+                    # drop, not a failed write, so it gets its own counter
+                    # and its own marker in the response.
+                    await app._drop_dlq_send_unconfigured(-1, failed_count)
+                    sink_result.errors.append('dlq_unconfigured')
+                else:
+                    # The DLQ is configured but the sink is missing — it
+                    # failed to build. Report it as a failed write, like a
+                    # send that could not be confirmed.
+                    sink_result.errors.append('dlq_send_failed: DLQ is configured but no DLQ sink was built')
                 sink_result.dlq += failed_count
                 sink_result.delivered = max(0, sink_result.delivered - failed_count)
             elif action == DeliveryAction.SKIP:

@@ -120,6 +120,17 @@ def _scan_target_labels(file_path: str) -> dict[str, str]:
     }
 
 
+def _match_count(result: dk.ExecutorResult) -> int:
+    """Number of non-blank match lines one task's stdout produced.
+
+    Module-level rather than a closure so both the aggregation hook and
+    the HTTP-only handler in http_handler.py count matches identically —
+    run-rg.sh invokes rg with --no-filename, so every non-blank line is
+    exactly one match.
+    """
+    return sum(1 for line in result.stdout.strip().split('\n') if line)
+
+
 class RipgrepHandler(
     dk.BaseDrakkarHandler[SearchRequest, SearchResult, RankRequest, RankResponse],
 ):
@@ -760,6 +771,37 @@ class RipgrepHandler(
             ],
         )
 
+    def build_summary(self, group: dk.MessageGroup, match_counts: list[int]) -> SearchAggregate:
+        """Roll one message group's terminal outcomes into a SearchAggregate.
+
+        Pure and synchronous — the request-level record itself, with none
+        of the probe, timeline or sink-routing work that surrounds it in
+        on_message_complete. Split out so an alternative handler can
+        reuse the exact same aggregate shape without inheriting this
+        handler's sink fan-out (see http_handler.py).
+
+        ``match_counts`` is passed in rather than recomputed because the
+        caller already needs the per-result list for its own breakdown;
+        re-parsing every result's stdout a second time here would double
+        the cost of the only part of this hook that scales with output
+        size. It must line up positionally with ``group.results``.
+        """
+        # The Kafka caller has already ruled out a None payload; a group
+        # whose payload never parsed carries no request id to report.
+        req: SearchRequest | None = group.source_message.payload
+        return SearchAggregate(
+            request_id=req.request_id if req is not None else '',
+            partition=group.source_message.partition,
+            offset=group.source_message.offset,
+            total_tasks=group.total,
+            succeeded_tasks=group.succeeded,
+            failed_tasks=group.failed,
+            replaced_tasks=group.replaced,
+            total_matches=sum(match_counts),
+            max_matches=max(match_counts, default=0),
+            duration_seconds=round(group.duration_seconds, 3),
+        )
+
     async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult | None:
         """Per-REQUEST aggregation — fires once after ALL fan-out tasks finish.
 
@@ -787,12 +829,10 @@ class RipgrepHandler(
         # isn't shared across hooks (each hook is independent). In a real
         # handler you'd cache the parsed data on self for efficiency, or
         # emit a compact intermediate via on_task_complete.
-        def _match_count(r: dk.ExecutorResult) -> int:
-            return sum(1 for line in r.stdout.strip().split('\n') if line)
-
         match_counts = [_match_count(r) for r in group.results]
-        total_matches = sum(match_counts)
-        max_matches = max(match_counts) if match_counts else 0
+        aggregate = self.build_summary(group, match_counts)
+        total_matches = aggregate.total_matches
+        max_matches = aggregate.max_matches
 
         # Probe-details example: this request's matches, broken down by
         # pattern and ranked — the same data total_matches rolls up,
@@ -852,19 +892,6 @@ class RipgrepHandler(
             ts=now - timedelta(seconds=group.duration_seconds),
             end_ts=now,
             match=dk.TimelineMatch(offsets=((group.source_message.partition, group.source_message.offset),)),
-        )
-
-        aggregate = SearchAggregate(
-            request_id=req.request_id,
-            partition=group.source_message.partition,
-            offset=group.source_message.offset,
-            total_tasks=group.total,
-            succeeded_tasks=group.succeeded,
-            failed_tasks=group.failed,
-            replaced_tasks=group.replaced,
-            total_matches=total_matches,
-            max_matches=max_matches,
-            duration_seconds=round(group.duration_seconds, 3),
         )
 
         await logger.ainfo(

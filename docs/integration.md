@@ -16,8 +16,10 @@ cd integration
 docker-compose up --build -d
 ```
 
-This starts 14 services. First run pulls images and builds workers
-(~2 minutes). Subsequent runs start in seconds.
+This starts 19 services, including six workers in three clusters. (A
+twentieth, `load_generator_tenant_a`, is gated behind the `tenant` Compose
+profile.) First run pulls images and builds workers (~2 minutes).
+Subsequent runs start in seconds.
 
 To stop everything:
 
@@ -63,8 +65,8 @@ Webapp port follows the integration convention **UI port + 10**
 the integration cluster is `8090`; the integration `drakkar.yaml`
 overrides it to keep the port plan consistent across services.
 
-Only worker-1 has `DK_WEBAPP__ENABLED=true`; worker-2 and worker-3 are
-Kafka-only. This is intentional -- it demonstrates the
+Only worker-1 has `DK_SOURCES__HTTP__ENABLED=true`; worker-2 and worker-3
+are Kafka-only. This is intentional -- it demonstrates the
 [load-balancer caveat](webapp.md#load-balancer-caveat) for the
 synchronous HTTP endpoint: requests land where they're sent, no
 framework-level redistribution.
@@ -77,6 +79,24 @@ framework-level redistribution.
 |--------|----------|---------|--------|
 | fast-worker-1 | [localhost:8084](http://localhost:8084) | [localhost:9094](http://localhost:9094/metrics) | 2 executors, Kafka-only sink |
 | fast-worker-2 | [localhost:8085](http://localhost:8085) | [localhost:9095](http://localhost:9095/metrics) | 2 executors, Kafka-only sink |
+
+### HTTP Cluster (the same search, over HTTP)
+
+One worker, no consumer group. `http-worker` runs with
+`sources.kafka.enabled: false`, so it is the harness's
+[HTTP-only worker](sources.md#http-only).
+
+| Worker | Operator UI | Metrics | HTTP source | Config |
+|--------|----------|---------|-------------|--------|
+| http-worker | [localhost:8086](http://localhost:8086) | [localhost:9096](http://localhost:9096/metrics) | [localhost:8092](http://localhost:8092/process) | 2 executors, one Kafka sink, **no Kafka source**, DLQ off |
+
+Its Compose healthcheck polls `/readyz` rather than `/healthz`, which is
+exactly the HTTP-only readiness rule: the worker turns ready once its socket
+is bound and every sink is connected, because it has no partitions to wait
+for. Its
+`dlq.topic` is empty and its Kafka source is off, so it also exercises
+the `dlq=off` path — its startup summary line reads
+`sources=[http:8092] ... dlq=off`.
 
 ---
 
@@ -104,6 +124,20 @@ binary runs the search that many times), creating tasks that take
 minutes instead of seconds. This exercises timeout handling and
 mixed-duration workloads.
 
+**The HTTP mirror.** After producing a message, the producer POSTs the
+same JSON body to `http-worker` with probability `HTTP_MIRROR_RATIO`
+(default `0.01`, so about 1%). It logs one line per mirrored request:
+
+```
+mirror: req-000123 -> 200
+```
+
+Requests are **mirrored, not diverted**: the message still goes to Kafka,
+so the main and fast clusters see it as usual. An HTTP error or a timeout
+(5 s) on the mirror never fails the producer run. `HTTP_MIRROR_URL` and
+`HTTP_MIRROR_TOKEN` point it at `http://http-worker:8092/process` with the
+`mirror` client's bearer token.
+
 ### Main Cluster Processing
 
 Each search message flows through:
@@ -128,6 +162,17 @@ Same source topic, different consumer group. Each message:
 Fast tasks finish in milliseconds, demonstrating [duration threshold](observability.md#duration-thresholds)
 filtering and high-throughput behavior.
 
+### HTTP Cluster Processing
+
+`http-worker` reuses the main cluster's ripgrep handler
+(`integration/worker/http_handler.py`, selected by `WORKER_HANDLER=http-search`;
+its config is `integration/http-worker/drakkar.yaml`). Its
+`arrange_http_request` calls the same task-building code `arrange` uses, so
+a mirrored request runs the identical search. The response carries a
+`SearchResponse` (request id, per-task match counts, succeeded and failed
+counts), and because `sources.http.sinks_enabled` is on, the result also
+goes to the `search-results-http` Kafka topic.
+
 ### Webapp Pipeline (worker-1 only)
 
 Worker-1 also runs the [synchronous HTTP webapp](webapp.md). The
@@ -149,6 +194,38 @@ A `load_generator` container drives a request every 10 seconds using
 the anonymous client (so you can watch the rate-limit kick in at the
 4-rpm cap). A second `load_generator_tenant_a` service is gated behind
 the `tenant` Compose profile and uses the higher-rpm tenant token.
+
+---
+
+## Comparing the two paths
+
+The mirror makes the two input paths comparable on the same request. Both
+topics are keyed by request id, so one id can be read from each:
+
+1. Find a mirrored id in the producer log: `docker-compose logs producer |
+   grep mirror` prints lines like `mirror: req-000123 -> 200`.
+2. Open the [Kafka UI](http://localhost:8088) and read `search-results` —
+   the Kafka path's output for that id, written by the main cluster.
+3. Read `search-results-http` — the HTTP path's output for the same id,
+   written by `http-worker`.
+
+The search itself is the same, so the two results should agree on the match
+counts. What differs is everything around it: the Kafka row carries a real
+partition and offset, the HTTP row carries the synthetic `partition = -1`
+and a per-worker sequence number.
+
+!!! note "What the traces anchor on"
+    On `http-worker`, a request trace in the operator UI carries the
+    handler's own annotations only where the **synthetic offset** lines up.
+    The handler mirrors the runner's per-request sequence number as that
+    offset, so the two agree for requests the runner numbered — the trace
+    is anchored on a counter, not on a Kafka coordinate.
+
+!!! warning "Nothing verifies the mirror"
+    `verify_delivery.py` does not check the mirrored 1%. It rebuilds the
+    produced id set and checks the **Kafka** path's sinks. The mirror is a
+    demonstration of the HTTP-only worker, not an assertion; a mirrored
+    request that silently failed would not fail the harness.
 
 ---
 
@@ -258,7 +335,7 @@ config. To exercise it:
 
 ```bash
 # In integration/docker-compose.yml -> worker-1 -> environment
-DK_WEBAPP__SINKS_ENABLED: "true"
+DK_SOURCES__HTTP__SINKS_ENABLED: "true"
 ```
 
 Restart worker-1. Now each HTTP request also flows through the
@@ -342,6 +419,7 @@ list. Each icon opens that page in a drawer beside the live view.
 | `search-results` | 50 | main cluster | -- |
 | `search-requests_dlq` | 50 | main cluster (DLQ) | -- |
 | `symbol-counts` | 50 | fast cluster | -- |
+| `search-results-http` | 50 | http cluster | -- |
 
 Browse topics in the [Kafka UI](http://localhost:8088).
 
@@ -400,7 +478,12 @@ is a pass/fail gate, not an invitation to read three dashboards.
 `verify_delivery.py` is what makes the harness a test rather than a demo. It
 rebuilds the exact set of request ids the producer sent -- they are numbered
 `req-000001`..`req-<TOTAL_MESSAGES>`, not random -- and checks it against
-what the sinks hold:
+what the sinks hold.
+
+The [HTTP mirror](#comparing-the-two-paths) does not affect it. Mirrored
+requests are sent to Kafka as well, so the produced id set is unchanged, and
+the mirror writes to its own topic rather than to the sinks these checks
+read. Nothing here verifies the mirrored 1%:
 
 | Check | What a failure means |
 |-------|----------------------|

@@ -12,6 +12,7 @@ from drakkar.config import (
     ExecutorConfig,
     KafkaConfig,
     KafkaSinkConfig,
+    KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -282,12 +283,13 @@ def test_consumer_passes_security_to_the_client(monkeypatch):
     from drakkar.consumer import KafkaConsumer
 
     KafkaConsumer(
-        KafkaConfig(
+        connection=KafkaConfig(
             brokers='b:9093',
             security=KafkaSecurityConfig(
                 protocol='SASL_SSL', sasl_mechanism='PLAIN', sasl_username='u', sasl_password='p'
             ),
-        )
+        ),
+        source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
     )
     assert captured['security.protocol'] == 'SASL_SSL'
     assert captured['sasl.password'] == 'p'
@@ -306,7 +308,10 @@ def test_consumer_without_security_is_unchanged(monkeypatch):
     monkeypatch.setattr('drakkar.consumer.AIOConsumer', FakeAIOConsumer)
     from drakkar.consumer import KafkaConsumer
 
-    KafkaConsumer(KafkaConfig(brokers='b:9092'))
+    KafkaConsumer(
+        connection=KafkaConfig(brokers='b:9092'),
+        source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
+    )
     assert not [k for k in captured if k.startswith(('security.', 'sasl.', 'ssl.'))]
 
 
@@ -354,7 +359,8 @@ async def test_dlq_sink_applies_security(monkeypatch):
 def _app_with(consumer_security: KafkaSecurityConfig, sink_config: KafkaSinkConfig) -> DrakkarApp:
     """A minimal app whose only interesting property is its Kafka security."""
     config = DrakkarConfig(
-        kafka=KafkaConfig(brokers='shared:9092', source_topic='in', security=consumer_security),
+        kafka=KafkaConfig(brokers='shared:9092', security=consumer_security),
+        sources={'kafka': {'enabled': True, 'topic': 'in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(kafka={'out': sink_config}),
         metrics=MetricsConfig(enabled=False),
@@ -410,6 +416,6 @@ def test_env_override_reaches_the_password(monkeypatch):
     monkeypatch.setenv('DK_KAFKA__SECURITY__SASL_PASSWORD', 'envpass')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
 
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.kafka.security.sasl_username == 'envuser'
     assert cfg.kafka.security.to_client_config()['sasl.password'] == 'envpass'

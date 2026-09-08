@@ -1,0 +1,84 @@
+# HTTP-only worker — the same ripgrep pipeline, fed by POST requests only.
+# No Kafka consumer group is joined. Results go to one Kafka topic so they
+# can be compared, by request id, with the Kafka path's search-results.
+
+worker_name_env: "WORKER_ID"
+# A third cluster, distinct from "main cluster" (worker-1..3) and
+# "fast cluster" (fast-worker-1/2) — see the cache note near the bottom
+# for why this worker's cluster identity does not need to match theirs.
+cluster_name: "http cluster"
+
+kafka:
+  brokers: "kafka:9092"          # still needed: the sink below is Kafka
+  ui_url: "http://localhost:8088"
+  ui_cluster_name: "drakkar-local"
+
+sources:
+  kafka:
+    enabled: false
+  http:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8092                   # convention: UI port + 10 (UI is 8086 in compose)
+    path: "/process"
+    sinks_enabled: true          # on_message_complete → mirrored_results
+    request_timeout_seconds: 60.0
+    max_concurrent: 16
+    clients:
+      - name: mirror
+        token: "integration-http-mirror-token-do-not-use-in-prod"
+        rpm: 600                 # the producer's burst phases mirror several requests per second
+
+executor:
+  binary_path: "/usr/local/bin/run-rg"
+  env:
+    RG_COLORS: "never"
+    SEARCH_CORPUS: "/tmp/search-corpus"
+  max_executors: 2
+  task_timeout_seconds: 120
+  window_size: 10
+  max_retries: 1
+  drain_timeout_seconds: 5
+
+sinks:
+  kafka:
+    mirrored_results:            # user-chosen instance name, referenced by KafkaPayload(sink=...)
+      topic: "search-results-http"
+      ui_url: "http://localhost:8088"
+
+dlq:
+  topic: ""                      # Kafka source off + empty topic = DLQ off (dlq=off in the summary)
+
+metrics:
+  enabled: true
+  port: 9090
+
+logging:
+  level: "INFO"
+  format: "json"
+
+ui:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  expose_env_vars: ["WORKER_ID", "DK_CONFIG", "WORKER_HANDLER"]
+  prometheus_url: "http://localhost:9099"
+  prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
+  prometheus_cluster_label: 'cluster="http-cluster"'
+  recorder:
+    # Same db_dir as the main/fast clusters' workers, so the Debug UI's
+    # workers page lists this one alongside them on the one shared volume.
+    db_dir: "/shared"
+    store_events: true
+    store_config: true
+    store_state: true
+    store_output: true
+    event_min_duration_ms: 0
+
+# No top-level cache: block here — the framework's in-process cache stays
+# disabled on this worker (every handler.cache call becomes a no-op). Its
+# arrange() still runs the inherited two-tier precomputed-cache lookup, but
+# that fast track can only ever hit on rows peer-synced in from the Kafka
+# workers' cache DBs, which needs cache.enabled=true AND a shared
+# cluster_name on both sides — neither holds here. This worker demonstrates
+# the Kafka-source-off / HTTP-only path, not cross-cluster cache sharing.

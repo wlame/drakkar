@@ -20,14 +20,14 @@ metrics:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_worker` | Info | `worker_id`, `version`, `consumer_group` | Worker instance identity, published once at startup |
+| `drakkar_worker` | Info | `worker_id`, `version`, `consumer_group` | Worker instance identity, published once at startup. The `consumer_group` label is **empty** on a worker with `sources.kafka.enabled: false` — it joins no group, so reporting the configured default would place it in every group-scoped dashboard query it has nothing to do with. |
 
 #### Messages
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_messages_consumed_total` | Counter | `partition` | Total messages consumed from the source Kafka topic |
-| `drakkar_message_parse_failures_total` | Counter | `partition` | Source messages whose value failed `input_model` deserialization (handled per `kafka.on_parse_error`) |
+| `drakkar_message_parse_failures_total` | Counter | `partition` | Source messages whose value failed `input_model` deserialization (handled per `sources.kafka.on_parse_error`) |
 | `drakkar_delivery_stalled_offsets_total` | Counter | `partition` | Offsets left uncommitted because sink delivery (including the DLQ fallback) could not be confirmed. The watermark is stalled; messages are redelivered after restart. **Alert on this.** |
 | `drakkar_suppressed_zombie_deliveries_total` | Counter | `partition` | Sink deliveries suppressed because the task finished after a revoke/shutdown drain timeout — the new partition owner re-processes those messages. A rising rate means `executor.drain_timeout_seconds` is too small for the workload. |
 | `drakkar_messages_unassigned_dropped_total` | Counter | `partition` | Messages received from Kafka for a partition with no registered processor (a revoke raced the poll). The new owner redelivers them; this only signals the race happened. |
@@ -120,6 +120,7 @@ Prometheus needed for a quick read.
 | `drakkar_tasks_precomputed_total` | Counter | -- | Tasks whose result was supplied by the handler via `ExecutorTask.precomputed`, bypassing the subprocess. Framework is agnostic to the reason (cache hit, lookup, deterministic shortcut). Compare to `drakkar_executor_tasks_total{status="completed"}` for the short-circuit rate. |
 | `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the [dead letter queue](sinks.md#dead-letter-queue) |
 | `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. What happens next depends on `dlq.on_send_failure`: `drop` (default) commits past the lost payloads, `stall` leaves the offsets uncommitted and pauses the partition — alert on this counter either way. |
+| `drakkar_dlq_unconfigured_drops_total` | Counter | -- | DLQ sends dropped because no DLQ topic is configured and the Kafka source is disabled. See [the DLQ rule](sources.md#the-dlq-without-the-kafka-source). The first drop also logs `dlq_send_dropped_unconfigured` at warning level. |
 | `drakkar_dlq_dropped_payloads_total` | Counter | `partition` | Payloads dropped because both the sink delivery and the DLQ write failed under `dlq.on_send_failure=drop`. The offset committed and the payloads are lost. **Alert on this.** |
 | `drakkar_sink_circuit_open` | Gauge | `sink_type`, `sink_name` | Per-sink [circuit breaker](sinks.md#circuit-breaker) state: `0.0` closed, `0.5` half-open, `1.0` open. Gauges are zero-initialized at sink registration so a never-tripped sink still appears in scrape output. Sustained `1.0` on a sink means its downstream has been down longer than the cooldown can recover from. |
 | `drakkar_sink_circuit_trips_total` | Counter | `sink_type`, `sink_name` | Transitions *into* the open state per sink — both the initial failure-threshold trip and every half-open probe failure. A flapping circuit surfaces as a rising rate on this counter, not a single trip plus silent reopens. Alert on `rate(...[5m]) > 0` paired with non-zero `drakkar_sink_circuit_open`. |
@@ -197,13 +198,13 @@ histogram — no dedicated cache-only timing histograms.
 
 #### Webapp
 
-Emitted only when [`webapp.enabled=true`](webapp.md). Track per-client request volume, latency, capacity headroom, and drop rates. Status labels are drawn from a closed set documented in [Webapp → Status codes](webapp.md#status-codes): `ok | timeout | error | rate_limited | auth_failed | shutdown | not_ready | capacity`. The `client` label is bounded by the configured client list plus the fixed `unauthenticated` sentinel for auth-failed / pre-auth gate hits, so cardinality stays small.
+Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client request volume, latency, capacity headroom, and drop rates. Status labels are drawn from a closed set documented in [Webapp → Status codes](webapp.md#status-codes): `ok | timeout | error | rate_limited | auth_failed | shutdown | not_ready | capacity`. The `client` label is bounded by the configured client list plus the fixed `unauthenticated` sentinel for auth-failed / pre-auth gate hits, so cardinality stays small.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_webapp_requests_total` | Counter | `client`, `status` | One increment per HTTP request, labelled by the matched client name and the terminal outcome. Replaces a separate `webapp_rate_limited_total` -- query `drakkar_webapp_requests_total{status='rate_limited'}` instead. |
 | `drakkar_webapp_request_duration_seconds` | Histogram | `client`, `status` | Server-side wall-clock duration of HTTP requests. Buckets: 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30 -- covers sub-second work and the default 30s `request_timeout_seconds` budget. The duration starts at route entry and ends at response emission, so it includes auth + rate-limit + body parsing as well as the runner. |
-| `drakkar_webapp_inflight` | Gauge | -- | Number of HTTP requests currently being processed by the runner on T1. Incremented on runner entry, decremented in `finally`. **Alert on `drakkar_webapp_inflight > webapp.max_concurrent` to spot semaphore-leak bugs** -- a permit accidentally held past response would surface here. |
+| `drakkar_webapp_inflight` | Gauge | -- | Number of HTTP requests currently being processed by the runner on T1. Incremented on runner entry, decremented in `finally`. **Alert on `drakkar_webapp_inflight > sources.http.max_concurrent` to spot semaphore-leak bugs** -- a permit accidentally held past response would surface here. |
 | `drakkar_webapp_dropped_after_timeout_total` | Counter | `client` | Requests whose pipeline result was dropped on T1 after T2 had already returned a 504 to the caller. Incremented at each cancellation gate (post-execute and pre-`on_http_request_complete`). A high rate signals either a too-tight `request_timeout_seconds` or a slow subprocess pipeline -- correlate with `drakkar_executor_duration_seconds`. |
 | `drakkar_webapp_rpm_limit` | Gauge | `client` | Configured rpm cap per client. **Informational gauge** set once at webapp startup and never updated thereafter (the cap is a config field; operators edit YAML and restart). Read alongside `drakkar_webapp_requests_total{status='rate_limited'}` to confirm deployed limits match the workload's expectations. |
 
@@ -213,7 +214,7 @@ Emitted only when [`webapp.enabled=true`](webapp.md). Track per-client request v
 |--------|------|--------|-------------|
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
-| `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time `_drain_all_processors` exceeded `executor.drain_timeout_seconds` before all partition processors finished draining. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
+| `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout_seconds` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
 | `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{ui.recorder.db_dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
 #### OOM / SIGKILL detection
@@ -394,7 +395,7 @@ Every log line includes these fields, bound once at startup:
 | `level` | Log level | `info` |
 | `service_name` | Hardcoded | `drakkar` |
 | `worker_id` | `worker_name_env` env var | `worker-3` |
-| `consumer_group` | `kafka.consumer_group` config | `drakkar-workers` |
+| `consumer_group` | `sources.kafka.consumer_group` config; **omitted entirely** when the Kafka source is disabled | `drakkar-workers` |
 | `module` | Python module name | `drakkar.partition` |
 
 ### Per-Context Binding
@@ -681,7 +682,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
 
 #### `worker_config` -- Autodiscovery
 
-Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`.
+Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
 
 This table is what enables the worker autodiscovery feature -- other workers scan for it in shared `db_dir`.
 

@@ -76,6 +76,11 @@ dlq_dropped_payloads = Counter(
     ['partition'],
 )
 
+dlq_unconfigured_drops = Counter(
+    'drakkar_dlq_unconfigured_drops_total',
+    'DLQ sends dropped because no DLQ topic is configured and the Kafka source is disabled',
+)
+
 delivery_stalled_offsets = Counter(
     'drakkar_delivery_stalled_offsets_total',
     (
@@ -866,10 +871,12 @@ annotations_dropped = Counter(
 #       Set ONCE per shutdown, before drain runs.
 #
 #   drakkar_drain_timeout_hit_total
-#       Increments each time ``_drain_all_processors`` exceeds its
-#       ``drain_timeout_seconds`` budget without finishing. A nonzero
-#       rate means workers are being killed mid-flight — investigate
-#       whether the timeout is too tight or whether handlers are stuck.
+#       Increments each time an input source's drain exceeds its
+#       ``drain_timeout_seconds`` budget without finishing — the Kafka
+#       source's partition processors or the HTTP source's in-flight
+#       requests. A nonzero rate means workers are being killed
+#       mid-flight — investigate whether the timeout is too tight or
+#       whether handlers are stuck.
 #
 # The two gauges are deliberately ``set`` (not ``inc``) so a re-scrape
 # after restart does not accumulate state from prior runs; the counter
@@ -896,9 +903,9 @@ inflight_at_stop = Gauge(
 drain_timeout_hit = Counter(
     'drakkar_drain_timeout_hit_total',
     (
-        'Incremented each time _drain_all_processors timed out before all '
-        'partition processors finished draining. Nonzero rate signals '
-        'workers being killed mid-flight.'
+        'Incremented each time an input source drain timed out before its '
+        'in-flight work finished: Kafka partition processors or HTTP '
+        'requests. Nonzero rate signals workers being killed mid-flight.'
     ),
 )
 
@@ -922,7 +929,7 @@ suspected_oom_kills = Counter(
 # --- Webapp ---
 #
 # Observability for the synchronous-HTTP pipeline (the optional
-# ``webapp.enabled`` feature). Cardinality is bounded by:
+# ``sources.http.enabled`` feature). Cardinality is bounded by:
 #   * the configured client list (operator-controlled, typically <10 entries)
 #   * a single fixed sentinel ``client='unauthenticated'`` for requests that
 #     never matched a configured client (auth_failed / pre-auth gate hits).

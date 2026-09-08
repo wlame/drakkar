@@ -62,7 +62,7 @@ def mock_app():
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
@@ -628,7 +628,7 @@ class TestApiV1LiveOverview:
     async def test_kafka_ui_config_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._config.kafka.ui_url = 'http://kafka-ui:8080/'
         mock_app._config.kafka.ui_cluster_name = 'local'
-        mock_app._config.kafka.source_topic = 'events-in'
+        mock_app._config.sources.kafka.topic = 'events-in'
         mock_recorder.config = debug_config
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')

@@ -72,13 +72,13 @@ async def test_base_handler_on_revoke_is_noop(handler: BaseDrakkarHandler):
 
 
 async def test_base_handler_on_startup_returns_config_unchanged(handler: BaseDrakkarHandler):
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}}, executor=ExecutorConfig(binary_path='/bin/echo'))
     result = await handler.on_startup(config)
     assert result is config
 
 
 async def test_base_handler_on_ready_is_noop(handler: BaseDrakkarHandler):
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}}, executor=ExecutorConfig(binary_path='/bin/echo'))
     await handler.on_ready(config, None)  # should not raise
 
 
@@ -94,7 +94,7 @@ async def test_on_ready_receives_db_pool():
             initialized['config'] = config
 
     handler = InitHandler()
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}}, executor=ExecutorConfig(binary_path='/bin/echo'))
     fake_pool = object()
     await handler.on_ready(config, fake_pool)
 
@@ -123,6 +123,7 @@ async def test_on_startup_can_modify_config():
 
     handler = TuningHandler()
     config = DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=1),
     )
     result = await handler.on_startup(config)

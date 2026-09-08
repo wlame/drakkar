@@ -19,3 +19,10 @@ scrape_configs:
           - fast-worker-2:9095
         labels:
           cluster: fast-cluster
+
+  - job_name: drakkar-http
+    static_configs:
+      - targets:
+          - http-worker:9096
+        labels:
+          cluster: http-cluster

@@ -559,10 +559,18 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return _disabled_response('probe', 'ui.probe_enabled')
         runner = _get_probe_runner()
         # Default empty topic to the configured source topic so handlers
-        # that key on ``msg.topic`` see a realistic value. The model
-        # itself accepts an empty topic to support callers that
-        # deliberately want to probe with no topic set.
-        topic = req.topic or drakkar_app._config.kafka.source_topic
+        # that key on ``msg.topic`` see a realistic value. A worker with
+        # the Kafka source disabled has no configured topic to fall back
+        # to, so an empty request topic is then a caller error, not a
+        # value to paper over with a default that would not exist in
+        # production.
+        kafka_src = drakkar_app._config.sources.kafka
+        topic = req.topic or (kafka_src.topic if kafka_src.enabled else '')
+        if not topic:
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'topic is required: the Kafka source is disabled on this worker'},
+            )
         probe_input = ProbeInput(
             value=req.value,
             key=req.key,

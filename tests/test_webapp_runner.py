@@ -863,6 +863,7 @@ def _make_stub_app_with_sinks(
     pool: Any,
     sink_manager: _StubSinkManager,
     dlq_sink: Any = None,
+    dlq_enabled: bool = False,
 ) -> Any:
     """Build a stub ``DrakkarApp`` that exposes ``_sink_manager`` + ``_dlq_sink``."""
     app = MagicMock()
@@ -871,6 +872,7 @@ def _make_stub_app_with_sinks(
     app._recorder = None
     app._sink_manager = sink_manager
     app._dlq_sink = dlq_sink
+    app._config = MagicMock(dlq_enabled=dlq_enabled)
     app.is_ready = True
     app.main_loop = None
     return app
@@ -992,6 +994,103 @@ async def test_runner_sinks_failure_routes_to_dlq_and_records_error():
     # The request as a whole still succeeded — sink failures should not
     # bubble into the user-facing ``status`` field.
     assert report.status == 'ok'
+
+
+@pytest.mark.asyncio
+async def test_runner_dlq_action_without_dlq_sink_records_unconfigured_drop():
+    """DLQ action on a worker with no DLQ configured → the drop is counted and named.
+
+    An HTTP-only worker may legitimately run without a DLQ topic. The
+    payloads are still lost, so the request report has to say so rather
+    than reporting a DLQ write that never happened.
+    """
+    from drakkar.models import DeliveryAction
+
+    handler = _RecordingHandler()
+    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task]
+
+    handler.arrange_http_request_impl = arrange_impl
+
+    async def on_message_complete_impl(group):
+        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
+
+    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
+
+    async def on_delivery_error_impl(error):
+        return DeliveryAction.DLQ
+
+    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
+
+    pool = _make_pool_returning([_make_canned_result(task)])
+    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
+
+    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=None)
+    drops: list[tuple[int, int]] = []
+
+    async def _drop(partition_id, payload_count):
+        drops.append((partition_id, payload_count))
+
+    app._drop_dlq_send_unconfigured = _drop
+
+    runner = WebappRunner(app, _make_sinks_enabled_config())
+
+    report = await runner.run(_make_ctx())
+
+    kafka_summary = report.sinks.by_type['kafka']
+    assert kafka_summary.delivered == 0
+    assert kafka_summary.dlq == 1
+    assert 'dlq_unconfigured' in kafka_summary.errors
+    assert drops == [(-1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_runner_dlq_action_without_sink_but_dlq_configured_reports_a_failed_write():
+    """A configured DLQ whose sink is missing is a failure, not a drop.
+
+    Mirrors ``DrakkarApp._handle_collect``: only ``dlq.dlq_enabled`` being
+    false makes a missing sink an unconfigured drop. A DLQ that was asked
+    for and did not build is a broken deployment, so the request report
+    says the write failed and the drop counter stays untouched.
+    """
+    from drakkar.models import DeliveryAction
+
+    handler = _RecordingHandler()
+    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task]
+
+    handler.arrange_http_request_impl = arrange_impl
+
+    async def on_message_complete_impl(group):
+        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
+
+    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
+
+    async def on_delivery_error_impl(error):
+        return DeliveryAction.DLQ
+
+    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
+
+    pool = _make_pool_returning([_make_canned_result(task)])
+    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
+    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=None, dlq_enabled=True)
+    drops: list[tuple[int, int]] = []
+
+    async def _drop(partition_id, payload_count):
+        drops.append((partition_id, payload_count))
+
+    app._drop_dlq_send_unconfigured = _drop
+
+    report = await WebappRunner(app, _make_sinks_enabled_config()).run(_make_ctx())
+
+    kafka_summary = report.sinks.by_type['kafka']
+    assert drops == []
+    assert 'dlq_unconfigured' not in kafka_summary.errors
+    assert any(error.startswith('dlq_send_failed') for error in kafka_summary.errors)
 
 
 @pytest.mark.asyncio

@@ -1,14 +1,15 @@
 # Drakkar
 
-**Kafka → subprocess pool → sinks, for Python 3.13+.**
+**Kafka and/or HTTP → subprocess pool → sinks, for Python 3.13+.**
 
-Drakkar is an orchestration framework for CPU-heavy stream processing: it consumes messages from Kafka, turns them into invocations of an external binary run in a managed subprocess pool, and delivers the results to any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, and files. You write a handler with a few async hooks; the framework owns polling, windowing, backpressure, delivery, offset commits, and observability.
+Drakkar is an orchestration framework for CPU-heavy stream processing: it consumes messages from Kafka and/or accepts HTTP requests, turns them into invocations of an external binary run in a managed subprocess pool, and delivers the results to any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, and files. You write a handler with a few async hooks; the framework owns polling, windowing, backpressure, delivery, offset commits, and observability.
 
 Workers are the Drakkars, executors are the Vikings.
 
 ```mermaid
 flowchart LR
     K["Kafka<br>source topic"] -- "poll" --> W
+    H["HTTP clients"] -- "POST" --> W
     subgraph worker ["Drakkar worker — one pipeline per partition"]
         W["window of<br>messages"] --> A["arrange()<br>your code"]
         A -- "tasks" --> P["subprocess pool<br>runs your binary"]
@@ -34,6 +35,7 @@ flowchart LR
 
 ## Features
 
+- **Two input sources** — Kafka and HTTP, each optional: a worker runs Kafka-only, HTTP-only, or both, behind one handler, one executor pool and one set of sinks
 - **Per-partition pipelines** with watermark offset tracking — commits happen only after every sink confirmed
 - **Pluggable sinks** — Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; multiple named instances per type, third-party sinks via entry points
 - **Dead letter queue** with replay tooling; `on_delivery_error()` decides retry / skip / DLQ per failure
@@ -101,8 +103,12 @@ class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
 # drakkar.yaml
 kafka:
   brokers: "localhost:9092"
-  source_topic: "jobs"
-  consumer_group: "my-workers"
+
+sources:
+  kafka:
+    enabled: true
+    topic: "jobs"
+    consumer_group: "my-workers"
 
 executor:
   binary_path: "/usr/local/bin/my-tool"
@@ -136,7 +142,7 @@ More hooks are available for aggregation and error handling — `on_message_comp
 
 ## Try it
 
-A full docker-compose environment with Kafka, all six sink types, five workers, and a load generator lives in [`integration/`](integration/):
+A full docker-compose environment with Kafka, all six sink types, six workers in three clusters, and a load generator lives in [`integration/`](integration/):
 
 ```bash
 cd integration

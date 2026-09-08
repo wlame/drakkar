@@ -8,6 +8,7 @@ for topic in \
         search-requests \
         search-results \
         search-results-priority \
+        search-results-http \
         search-requests_dlq \
         symbol-counts \
         symbol-count-windows; do

@@ -50,7 +50,8 @@ def _mock_recorder() -> AsyncMock:
 
 def _drakkar_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='main:9092', source_topic='input-events'),
+        kafka=KafkaConfig(brokers='main:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
         sinks=SinksConfig(kafka={'search-results-kafka-sink': KafkaSinkConfig(topic='search-results')}),
     )
 
@@ -153,6 +154,37 @@ async def test_message_unknown_alias_404_names_valid_aliases():
         resp = await client.get('/api/v1/debug/kafka/nope/message?partition=0&offset=0')
     assert resp.status_code == 404
     assert 'source' in resp.json()['detail']
+
+
+def _http_only_config() -> DrakkarConfig:
+    """A worker with the Kafka source off and no DLQ topic — both reserved
+    read aliases are then unavailable."""
+    return DrakkarConfig(ui={'release': {'enabled': False}}, sources={'http': {'enabled': True}})
+
+
+async def test_message_source_alias_404_names_the_disabled_kafka_source():
+    async with _client(config=_http_only_config()) as client:
+        resp = await client.get('/api/v1/debug/kafka/source/message?partition=0&offset=0')
+    assert resp.status_code == 404
+    assert resp.json()['detail'] == "alias 'source' is not available: the Kafka source is disabled"
+
+
+async def test_message_dlq_alias_404_names_the_disabled_dlq():
+    async with _client(config=_http_only_config()) as client:
+        resp = await client.get('/api/v1/debug/kafka/dlq/message?partition=0&offset=0')
+    assert resp.status_code == 404
+    assert resp.json()['detail'] == "alias 'dlq' is not available: the DLQ is disabled (set dlq.topic)"
+
+
+async def test_message_source_alias_still_resolves_when_kafka_source_enabled(monkeypatch):
+    """Regression guard for the ``_target_or_404`` rewiring: a worker with
+    the Kafka source on must still resolve ``source`` exactly as before."""
+    fetched = _message()
+    monkeypatch.setattr(routes_kafka_read, 'fetch_message', AsyncMock(return_value=fetched))
+    async with _client() as client:  # default config: sources.kafka.enabled = True
+        resp = await client.get('/api/v1/debug/kafka/source/message?partition=0&offset=7')
+    assert resp.status_code == 200
+    assert resp.json() == fetched.model_dump()
 
 
 async def test_message_returns_fetched_record(monkeypatch):

@@ -387,7 +387,7 @@ def test_oversized_body_returns_413_with_go_parity_envelope():
             assert response.status_code == 413
             body = response.json()
             assert body['error'] == 'request_too_large'
-            assert body['details'] == 'request body exceeds webapp.max_body_bytes (64 bytes)'
+            assert body['details'] == 'request body exceeds sources.http.max_body_bytes (64 bytes)'
             assert 'request_id' in body
 
             # Exactly at the limit is still accepted by the cap — this

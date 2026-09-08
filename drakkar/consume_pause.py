@@ -21,7 +21,7 @@ from stepping on each other:
 
 - While a debug pause is active, the backpressure loop must not resume
   partitions (its low-watermark branch checks ``active`` — see
-  ``lifecycle.py``). Backpressure *pausing* during a debug pause is a
+  ``drakkar/sources/kafka.py``). Backpressure *pausing* during a debug pause is a
   harmless no-op.
 - A debug resume leaves partitions paused when backpressure currently
   holds them (``app._paused``) — the backpressure loop resumes them when
@@ -30,8 +30,8 @@ from stepping on each other:
   touched in either direction — they stay paused until restart/revoke,
   same contract as everywhere else.
 - Partitions assigned *during* a debug pause are paused immediately by
-  ``_on_assign`` (same hole-plugging backpressure does), so a rebalance
-  cannot leak messages past an active pause.
+  ``KafkaSource.on_assign`` (same hole-plugging backpressure does), so a
+  rebalance cannot leak messages past an active pause.
 
 Every method runs on the app's main event loop — the UI server dispatches
 through ``dispatch_to_loop`` — so the state needs no locking.
@@ -120,8 +120,8 @@ class ConsumePauseController:
         )
 
         # Auto-resume timer on the app loop. Tracked in _background_tasks so
-        # shutdown cancels it with the rest (same pattern as _on_assign's
-        # fire-and-forget pause task in lifecycle.py).
+        # shutdown cancels it with the rest (same pattern as the
+        # fire-and-forget pause task in ``KafkaSource.on_assign``).
         self._timer = asyncio.create_task(self._auto_resume(duration_seconds))
         app._background_tasks.add(self._timer)
         self._timer.add_done_callback(app._background_tasks.discard)

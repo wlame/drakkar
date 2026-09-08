@@ -6,7 +6,14 @@ from drakkar.annotations import AnnotatorLike
 from drakkar.app import DrakkarApp
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheLike, CacheScope
-from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig, load_config
+from drakkar.config import (
+    DrakkarConfig,
+    KafkaSourceConfig,
+    SourcesConfig,
+    WebAppConfig,
+    WebClientConfig,
+    load_config,
+)
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
 from drakkar.models import (
     CollectResult,
@@ -62,6 +69,7 @@ __all__ = [
     'FilePayload',
     'HttpPayload',
     'KafkaPayload',
+    'KafkaSourceConfig',
     'MessageGroup',
     'MessageParseError',
     'MongoPayload',
@@ -76,6 +84,7 @@ __all__ = [
     'SinkDeliveryFailedError',
     'SinkDeliverySummary',
     'SourceMessage',
+    'SourcesConfig',
     'TaskOrigin',
     'TimelineEventEmitter',
     'TimelineMatch',

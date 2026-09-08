@@ -25,6 +25,8 @@ import json
 import os
 import random
 import time
+import urllib.error
+import urllib.request
 
 from confluent_kafka import Producer
 
@@ -35,6 +37,16 @@ TOTAL_MESSAGES = int(os.environ.get('TOTAL_MESSAGES', '5000'))
 # Kept byte-identical in integration/verify_delivery.py, which rebuilds the
 # produced id set from TOTAL_MESSAGES alone. A unit test pins the two.
 REQUEST_ID_FORMAT = 'req-{:06d}'
+
+# A small fraction of messages are ALSO POSTed to the HTTP-only worker, in
+# addition to the Kafka send below — never instead of it, so
+# verify_delivery.py's Kafka-derived accounting is unaffected. It is a demo
+# of the HTTP input source; nothing verifies these requests automatically,
+# the maintainer compares the two sink topics by hand.
+HTTP_MIRROR_RATIO = float(os.environ.get('HTTP_MIRROR_RATIO', '0.01'))
+HTTP_MIRROR_URL = os.environ.get('HTTP_MIRROR_URL', 'http://http-worker:8092/process')
+HTTP_MIRROR_TOKEN = os.environ.get('HTTP_MIRROR_TOKEN', '')
+HTTP_MIRROR_TIMEOUT_SECONDS = 5.0
 
 # search requests pool — patterns x paths
 SEARCH_REQUESTS = [
@@ -158,6 +170,32 @@ def delivery_report(err, msg):
         print(f'Delivery failed: {err}', flush=True)
 
 
+def maybe_mirror_over_http(message: dict) -> None:
+    """With probability HTTP_MIRROR_RATIO, POST the same message to the HTTP-only worker.
+
+    This is IN ADDITION to the Kafka send in send_batch/send_steady, never
+    instead of it — verify_delivery.py only ever reconstructs delivery from
+    the Kafka-produced id range, so this mirror has no effect on it.
+
+    Best effort by design: the mirror is a demo of the HTTP source, so a
+    refused connection or a 5xx is logged and never fails the run.
+    """
+    if HTTP_MIRROR_RATIO <= 0 or random.random() >= HTTP_MIRROR_RATIO:
+        return
+    body = json.dumps(message).encode()
+    headers = {'Content-Type': 'application/json'}
+    if HTTP_MIRROR_TOKEN:
+        headers['Authorization'] = f'Bearer {HTTP_MIRROR_TOKEN}'
+    request = urllib.request.Request(HTTP_MIRROR_URL, data=body, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_MIRROR_TIMEOUT_SECONDS) as response:
+            print(f'  mirror: {message["request_id"]} -> {response.status}', flush=True)
+    except urllib.error.HTTPError as exc:
+        print(f'  mirror: {message["request_id"]} -> {exc.code}', flush=True)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f'  mirror: {message["request_id"]} -> error {exc}', flush=True)
+
+
 def send_batch(producer, ids, label=''):
     """Send one message per id in `ids` as fast as possible (burst)."""
     for request_id in ids:
@@ -168,6 +206,7 @@ def send_batch(producer, ids, label=''):
             value=json.dumps(message).encode(),
             callback=delivery_report,
         )
+        maybe_mirror_over_http(message)
         producer.poll(0)
     producer.flush(timeout=10)
     print(f'  [{label}] burst: {len(ids)} messages sent', flush=True)
@@ -184,6 +223,7 @@ def send_steady(producer, ids, rate, label=''):
             value=json.dumps(message).encode(),
             callback=delivery_report,
         )
+        maybe_mirror_over_http(message)
         producer.poll(0)
         if (i + 1) % 100 == 0:
             print(f'  [{label}] steady: {i + 1}/{len(ids)} at {rate}/sec', flush=True)

@@ -17,7 +17,7 @@ Usage:
 Args:
     --dlq-config: path to the YAML config the worker used. The DLQ topic +
         brokers are taken from ``dlq.topic`` / ``dlq.brokers`` (with fallback
-        to ``kafka.brokers`` and auto-derived topic ``{source_topic}_dlq``,
+        to ``kafka.brokers`` and auto-derived topic ``{sources.kafka.topic}_dlq``,
         identical to the runtime framework behavior).
     --target-topic: Kafka topic the entries are republished to. When omitted,
         the script uses the sink_name embedded in the DLQ entry as a best-effort
@@ -178,16 +178,16 @@ def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
     """Resolve (topic, brokers) for the DLQ reader from a Drakkar config file.
 
     Applies the same fallback rules the runtime framework uses:
-      - topic: ``dlq.topic`` when set, else ``{kafka.source_topic}_dlq``
+      - topic: ``dlq.topic`` when set, else ``{sources.kafka.topic}_dlq``
       - brokers: ``dlq.brokers`` when set, else ``kafka.brokers``
     """
     cfg = load_config(config_path)
-    topic = cfg.dlq.topic or f'{cfg.kafka.source_topic}_dlq'
+    topic = cfg.resolved_dlq_topic
     brokers = cfg.dlq.brokers or cfg.kafka.brokers
     if not topic:
-        raise ValueError('Cannot derive DLQ topic: dlq.topic is empty and kafka.source_topic is unset.')
+        raise ValueError('cannot derive DLQ topic: dlq.topic is empty and the Kafka source is disabled')
     if not brokers:
-        raise ValueError('Cannot derive DLQ brokers: dlq.brokers and kafka.brokers are both empty.')
+        raise ValueError('cannot derive DLQ brokers: dlq.brokers and kafka.brokers are both empty')
     return topic, brokers
 
 

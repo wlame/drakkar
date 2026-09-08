@@ -148,6 +148,36 @@ class SearchAggregate(BaseModel):
     duration_seconds: float
 
 
+class TaskMatches(BaseModel):
+    """Per-task match count in an HTTP search response.
+
+    One row per terminal task of the request — the HTTP caller's view of
+    the fan-out, listing which (pattern, file_path) pair each subprocess
+    covered and how many lines it matched.
+    """
+
+    task_id: str
+    pattern: str
+    file_path: str
+    match_count: int
+
+
+class SearchResponse(BaseModel):
+    """Body of the HTTP source's JSON response for a SearchRequest.
+
+    The HTTP-only worker's counterpart to RankResponse: the same ripgrep
+    fan-out, answered synchronously to the POST caller instead of being
+    routed to per-task sinks. The framework wraps this model under
+    "result" in the JSON envelope (see docs/webapp.md).
+    """
+
+    request_id: str
+    tasks: int
+    succeeded: int
+    failed: int
+    matches: list[TaskMatches]
+
+
 # ---------------------------------------------------------------------
 # Models for the write-operation demo in on_message_complete.
 #

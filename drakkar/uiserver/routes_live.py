@@ -145,6 +145,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
         # Results) for hooks the handler doesn't implement.
         kafka_cfg = drakkar_app._config.kafka
+        kafka_src = drakkar_app._config.sources.kafka
         overview = {
             'worker_id': drakkar_app._worker_id,
             'running_tasks': running_tasks,
@@ -167,7 +168,10 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             # HTML pages). Always strings; empty when unconfigured.
             'kafka_ui_base': kafka_cfg.ui_url.rstrip('/'),
             'kafka_ui_cluster': kafka_cfg.ui_cluster_name,
-            'kafka_source_topic': kafka_cfg.source_topic,
+            # Empty when the Kafka source is off — there is no source topic
+            # to report, and ``kafka_src.topic`` would otherwise leak the
+            # unused default.
+            'kafka_source_topic': kafka_src.topic if kafka_src.enabled else '',
         }
         # Key-presence-as-flag (same idiom as ``webapp_tile`` on the
         # dashboard): a worker with no offload pool — including this one

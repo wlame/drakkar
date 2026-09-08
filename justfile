@@ -115,6 +115,12 @@ test *args:
 cover:
     uv run pytest {{ test_parallel }} --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
+# Unit tests of the integration-harness handlers. Separate from `test`
+# because pyproject's testpaths is tests/ only, so the harness handlers
+# would otherwise never run in any gate.
+test-harness:
+    uv run pytest integration/worker/test_handler.py -q
+
 # Regenerate the recorder event-type vocabulary fixture from
 # drakkar.recorder.schema.EventType (test_event_vocabulary.py pins it)
 gen-event-vocabulary:
@@ -124,8 +130,8 @@ gen-event-vocabulary:
 # CI / pre-push
 # ---------------------------------------------------------------------------
 
-# Exactly what GitHub CI enforces, same order: lock → format → lint → types → tests+coverage → docs
-ci: lock-check fmt-check lint typecheck cover docs-build
+# Exactly what GitHub CI enforces, same order: lock → format → lint → types → tests+coverage → harness → docs
+ci: lock-check fmt-check lint typecheck cover test-harness docs-build
 
 # Full pre-push battery: ci + the CVE scan CI keeps in a job of its own
 check: ci audit

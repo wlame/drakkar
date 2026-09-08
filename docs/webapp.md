@@ -1,15 +1,15 @@
 # Webapp
 
-An optional synchronous-HTTP entry point that exposes the same handler
-pipeline used for Kafka. When `webapp.enabled=true`, Drakkar runs a
-FastAPI server on a dedicated thread accepting POST requests, parses the
-body into a user-defined Pydantic model, dispatches the request to the
-main pipeline loop, and returns a JSON response built from the executor
-fan-out.
+The HTTP input source, served by the webapp server. Enabled with
+`sources.http.enabled: true`. Drakkar then runs a FastAPI server on a
+dedicated thread accepting POST requests, parses the body into a
+user-defined Pydantic model, dispatches the request to the main pipeline
+loop, and returns a JSON response built from the executor fan-out.
 
-The webapp is **opt-in** (`webapp.enabled=false` by default). It coexists
-with the Kafka source pipeline rather than replacing it -- the same
-worker can consume from Kafka and serve HTTP requests at the same time.
+HTTP is one of two [input sources](sources.md); Kafka is the other. Each is
+optional, so this page covers a worker that serves HTTP alongside a Kafka
+consumer **and** a worker that serves HTTP only. Both sources are off by
+default and at least one must be on.
 
 ---
 
@@ -22,6 +22,7 @@ worker can consume from Kafka and serve HTTP requests at the same time.
 | "Do I need per-tenant authentication and rate limits at the worker?" | **Webapp.** Auth + rpm is built in. The Kafka path has no per-producer admission control. |
 | "Is the pipeline logic identical for HTTP and Kafka inputs?" | **Both, on the same worker.** Reuse `arrange()` / `arrange_http_request()` and share the executor pool, sinks, cache, and recorder. |
 | "Will my caller send 1000s of requests per second from many concurrent clients?" | **Kafka source.** A single worker's webapp is capped by `max_concurrent` (default 64) and rate-limited per client; horizontal scale-out plus the Kafka-fallback pattern below is the path to higher throughput. |
+| "Do I have no Kafka at all?" | **HTTP-only worker.** Set `sources.kafka.enabled: false` and leave `sources.http.enabled: true`. The worker joins no consumer group; see [Input Sources](sources.md) for what goes empty. |
 
 The framework defaults the webapp to a small dev deployment (one
 anonymous client, rpm=4). Production deployments should configure named
@@ -32,9 +33,11 @@ clients with non-empty tokens and per-client rpm caps -- see
 
 ## Enabling
 
-Set `webapp.enabled: true` in the worker config and declare the HTTP
+Set `sources.http.enabled: true` in the worker config and declare the HTTP
 request and response types as the third and fourth generic parameters
-to `BaseDrakkarHandler`:
+to `BaseDrakkarHandler`. A **bind failure is fatal**: the HTTP source is an
+input, so a worker that cannot bind its socket stops rather than run with
+nothing to read.
 
 ```python
 import drakkar as dk
@@ -91,15 +94,16 @@ class RankHandler(dk.BaseDrakkarHandler[KafkaIn, KafkaOut, RankRequest, RankResp
 ```
 
 ```yaml
-webapp:
-  enabled: true
-  host: 0.0.0.0
-  port: 8090
-  path: /process
-  clients:
-    - name: tenant-a
-      token: "secret-bearer-token"
-      rpm: 60
+sources:
+  http:
+    enabled: true
+    host: 0.0.0.0
+    port: 8090
+    path: /process
+    clients:
+      - name: tenant-a
+        token: "secret-bearer-token"
+        rpm: 60
 ```
 
 That is the minimum. The handler keeps its existing `arrange()` /
@@ -111,7 +115,7 @@ executor pool, the same `self.cache`, and the same recorder.
     handlers (`BaseDrakkarHandler[InputT, OutputT]`) keep working
     unchanged thanks to PEP 696 default `TypeVars`; the HTTP slots
     default to `None` and the webapp hooks are never called. **When
-    `webapp.enabled=true`, the framework reads `HttpRequestT` and
+    `sources.http.enabled=true`, the framework reads `HttpRequestT` and
     `HttpResponseT` off the handler subclass at startup and raises
     `ConfigurationError` if either is `None`.** See [Handler hooks](#handler-hooks) below.
 
@@ -119,7 +123,7 @@ executor pool, the same `self.cache`, and the same recorder.
 
 ## Config reference
 
-Top-level `webapp:` block. Every field has a safe default so the example
+The `sources.http` block. Every field has a safe default so the example
 in [Enabling](#enabling) is enough to get a working endpoint; the table
 below documents every knob for production deployments.
 
@@ -135,7 +139,7 @@ below documents every knob for production deployments.
 | `max_body_bytes` | `int` | `10485760` (10 MiB) | Cap on a single POST body, counted from the stream (a lying Content-Length cannot bypass it). Oversized requests receive 413 `error='request_too_large'` before parsing. Must be > 0. |
 | `clients` | `list[WebClientConfig]` | one anonymous client with rpm=4 | Configured tenants. See the table below. At least one client is required; explicit `clients: []` fails at config load. |
 
-### `webapp.clients[]` — `WebClientConfig`
+### `sources.http.clients[]` — `WebClientConfig`
 
 Each entry defines one tenant with its bearer token and rpm cap.
 
@@ -146,25 +150,26 @@ Each entry defines one tenant with its bearer token and rpm cap.
 | `rpm` | `int` | `4` | Per-client requests-per-minute cap, enforced on a 60-second sliding window. Must be > 0. |
 
 ```yaml
-webapp:
-  enabled: true
-  host: 0.0.0.0
-  port: 8090
-  path: /process
-  sinks_enabled: false
-  request_timeout_seconds: 30.0
-  max_concurrent: 64
-  max_body_bytes: 10485760
-  clients:
-    - name: anonymous
-      token: ""
-      rpm: 4
-    - name: tenant-a
-      token: "secret-tenant-a-token"
-      rpm: 60
-    - name: tenant-b
-      token: "secret-tenant-b-token"
-      rpm: 600
+sources:
+  http:
+    enabled: true
+    host: 0.0.0.0
+    port: 8090
+    path: /process
+    sinks_enabled: false
+    request_timeout_seconds: 30.0
+    max_concurrent: 64
+    max_body_bytes: 10485760
+    clients:
+      - name: anonymous
+        token: ""
+        rpm: 4
+      - name: tenant-a
+        token: "secret-tenant-a-token"
+        rpm: 60
+      - name: tenant-b
+        token: "secret-tenant-b-token"
+        rpm: 600
 ```
 
 Validation runs at config load time. Misconfigurations
@@ -183,7 +188,7 @@ aggregation.
 
 `BaseDrakkarHandler` exposes four HTTP-specific hooks alongside the
 Kafka-path hooks documented in [Handler](handler.md). They are invoked
-only when `webapp.enabled=true` and only for HTTP requests; Kafka
+only when `sources.http.enabled=true` and only for HTTP requests; Kafka
 messages never trigger them.
 
 | Hook | When called | Frequency | Returns |
@@ -260,7 +265,7 @@ async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse
     )
 ```
 
-When `webapp.sinks_enabled=true`, the framework calls
+When `sources.http.sinks_enabled=true`, the framework calls
 `on_message_complete(group)` (the same hook used by the Kafka path)
 **before** `on_http_request_complete`, routes any returned payloads
 through the [SinkManager](sinks.md), and records per-sink outcomes into
@@ -301,7 +306,7 @@ def http_request_label(self, req: RankRequest, request_id: str) -> str:
 
 ## Request / response examples
 
-Once the worker is running with `webapp.enabled=true`, send a POST to
+Once the worker is running with `sources.http.enabled=true`, send a POST to
 the configured `path` with a JSON body matching `HttpRequestT`. The
 examples below assume the [Enabling](#enabling) handler.
 
@@ -373,14 +378,15 @@ Successful response body (HTTP 200):
 
 ### With sinks (`sinks_enabled: true`)
 
-The same request as above with `webapp.sinks_enabled: true` in config
+The same request as above with `sources.http.sinks_enabled: true` in config
 and an `on_message_complete` hook returning a `CollectResult`:
 
 ```yaml
-webapp:
-  enabled: true
-  sinks_enabled: true
-  # ... rest unchanged
+sources:
+  http:
+    enabled: true
+    sinks_enabled: true
+    # ... rest unchanged
 ```
 
 ```python
@@ -439,7 +445,7 @@ topic for higher throughput and worker-restart resilience.
 |------|----------|------|-------------|
 | 200 | `ok` | Successful end-to-end execution | See [Request / response examples](#request-response-examples). |
 | 401 | `auth_failed` | `Authorization` header is missing-with-no-anonymous-slot, malformed, or names a non-configured token | `{"error": "unauthorized"}` |
-| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds webapp.max_body_bytes (10485760 bytes)"}` |
+| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds sources.http.max_body_bytes (10485760 bytes)"}` |
 | 422 | n/a (legacy `error: invalid_request`) | Body is missing or fails Pydantic validation against `HttpRequestT` | `{"error": "invalid_request", "request_id": "req-...", "details": [{"loc": ["query"], "msg": "Field required", "type": "missing"}]}` |
 | 429 | n/a (`error: rate_limited`) | Per-client rpm window is full (rejected at the gate, before the runner; the response also carries a `Retry-After` header with the wait rounded up to whole seconds) | `{"error": "rate_limited", "client": "tenant-a", "rpm_limit": 60, "retry_after_seconds": 1.7, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 408 | n/a (`error: request_timeout`) | The request body was not delivered within `request_timeout_seconds` + 30 s. The size cap alone is not a slow-loris defence — a client can stay under it indefinitely by sending one byte at a time — so the body read is bounded in time too | `{"error": "request_timeout", "request_id": "req-...", "hint": "the request body was not delivered in time"}` |
@@ -537,7 +543,7 @@ Webapp state is **per-worker**, not per-cluster:
 |----------|----------------------|
 | Per-tenant rate limits should match the configured rpm regardless of which worker handled the request | Sticky routing by `Authorization` token (or `X-Tenant-ID`). The same client always lands on the same worker; per-worker rpm equals cluster rpm. |
 | Workload is uniform and you want even utilisation | Stateless distribution (round-robin, random, least-conn). Effective cluster rpm is `rpm * worker_count`; size the configured rpm down accordingly. |
-| Workers run different config (e.g. only worker-1 has `webapp.enabled=true`) | Pin webapp traffic to the enabled workers; the unconfigured workers do not bind the webapp port. The integration scenario uses this layout deliberately to exercise mixed-config deployments. |
+| Workers run different config (e.g. only worker-1 has `sources.http.enabled=true`) | Pin webapp traffic to the enabled workers; the unconfigured workers do not bind the webapp port. The integration scenario uses this layout deliberately to exercise mixed-config deployments. |
 
 The framework does not coordinate rate-limit state across workers. If
 you need true cluster-wide rate limits, terminate them at the
@@ -664,20 +670,49 @@ ignore the hint and tight-loop the webapp will see sustained
 `{status='capacity'}` -- correlate those metrics with the relevant
 client label and surface the load-balancing problem at the deployer.
 
+### On a worker with no Kafka source
+
+The hint text is part of the response envelope and does not change: every
+429, 503 and 504 still carries it, because the worker cannot know what
+else the caller can reach. On an HTTP-only worker, read it as "back off
+and retry" rather than "produce to a topic" — this worker consumes no
+topic, so nothing it serves will be picked up again by the same process.
+
+The fallback is still available if **some** worker in your deployment
+consumes the topic: the client wrapper above works unchanged, because the
+producer call goes to Kafka directly, not through the worker that answered
+the request. Design the fallback around your fleet, not around the worker
+you happened to POST to. When no worker consumes a topic at all, drop the
+fallback branch and let the client retry with a backoff.
+
 ---
 
 ## Integration scenario
 
 The repo ships with a runnable end-to-end scenario under `integration/`
 that wires the webapp pipeline into the same docker-compose stack used
-for Kafka demos. It demonstrates:
+for Kafka demos. It runs the HTTP source in both shapes: **mixed** on
+`worker-1`, which also consumes Kafka, and **HTTP-only** on
+`http-worker`, which joins no consumer group. It demonstrates:
 
 - **Per-worker enablement** -- only `worker-1` flips
-  `webapp.enabled=true` (via the `DK_WEBAPP__ENABLED=true` env var); the
+  `sources.http.enabled=true` (via the `DK_SOURCES__HTTP__ENABLED=true` env var); the
   other two workers leave the shared yaml default of `false` so they
   never bind port 8091 (the integration stack overrides the framework
   default of 8090). This matches the third row of the
   [Load balancer caveat](#load-balancer-caveat) table.
+- **An HTTP-only worker** -- `http-worker` runs its own config with
+  `sources.kafka.enabled: false`, binds HTTP on 8092 and serves its UI on
+  8086. Its compose healthcheck polls `/readyz`, which proves the
+  HTTP-only readiness rule: the worker turns ready once the socket is bound
+  and every sink is connected, with no partitions to wait for. Its `dlq.topic` is empty, so
+  it also exercises the `dlq=off` path.
+- **The mirror** -- the producer POSTs about 1% of the messages it
+  produces (`HTTP_MIRROR_RATIO`) to `http-worker` as well as sending them
+  to Kafka. The requests are mirrored, not diverted, so the Kafka path is
+  unaffected. `http-worker` writes its results to `search-results-http`,
+  which makes the two paths comparable by request id. See
+  [Integration harness](integration.md#comparing-the-two-paths).
 - **Anonymous client at rpm=4** -- the default `load_generator`
   service polls `POST /process` every 10 seconds with no
   `Authorization` header. Steady state is 200 OK; lower
@@ -722,9 +757,12 @@ What to expect within ~30 seconds of the stack being healthy:
 | `integration/load_generator/Dockerfile` | Thin `python:3.13-slim` image; the only dependency is a pinned `httpx`. |
 | `integration/load_generator/requirements.txt` | `httpx==0.27.2` (pinned). |
 | `integration/worker/handler.py` | 4-param `BaseDrakkarHandler`; defines `arrange_http_request`, `on_http_request_complete`, and the `task_priority` override. |
-| `integration/worker/models.py` | Adds `RankRequest` / `RankResponse`. |
-| `integration/worker/drakkar.yaml` | `webapp:` block with two clients; `enabled=false` by default and flipped per-worker via env. |
+| `integration/worker/models.py` | Adds `RankRequest` / `RankResponse` for the Kafka path, and `SearchRequest` / `SearchResponse` for the HTTP-only worker. |
+| `integration/worker/drakkar.yaml` | `sources.http` block with two clients; `enabled=false` by default and flipped per-worker via env. |
+| `integration/http-worker/drakkar.yaml` | The HTTP-only worker's config: `sources.kafka.enabled: false`, one `mirror` client, a Kafka sink on `search-results-http`, DLQ off. |
+| `integration/worker/http_handler.py` | The HTTP-only handler, selected by `WORKER_HANDLER=http-search`. Subclasses the `worker/` ripgrep handler; its `arrange_http_request` reuses the same task-building code as `arrange`. |
 | `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes webapp port 8091 on `worker-1` and reuses the debug UI server's `/healthz` (port 8081) as the readiness gate — the webapp itself owns no `/healthz` route. |
+| `integration/docker-compose.yml` (`http-worker` service) | The HTTP-only worker: `WORKER_HANDLER=http-search`, `DK_CONFIG=/app/http-worker.yaml`; its `/readyz` (not `/healthz`) is the health check, since it is ready as soon as its HTTP source binds. |
 
 ---
 
@@ -732,8 +770,10 @@ What to expect within ~30 seconds of the stack being healthy:
 
 - [Handler](handler.md) -- the full hook surface, including the four
   HTTP-specific hooks
-- [Configuration](configuration.md#webapp-webapp) -- the deep config
-  table for the `webapp:` block
+- [Input Sources](sources.md) -- Kafka and HTTP side by side, readiness,
+  shutdown, and the DLQ rule
+- [Configuration](configuration.md#http-source-sourceshttp) -- the deep
+  config table for the `sources.http` block
 - [Observability](observability.md#webapp) -- Prometheus metrics, the
   six new recorder event types, and the recorder upgrade story
 - [Sinks](sinks.md) -- the same `CollectResult` / sink routing the

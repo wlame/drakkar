@@ -121,7 +121,7 @@ def mock_app():
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
@@ -174,6 +174,27 @@ def debug_config():
 
 @pytest.fixture
 async def client(debug_config, mock_recorder, mock_app):
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        yield c
+
+
+@pytest.fixture
+async def http_only_client(debug_config, mock_recorder, mock_app):
+    """Like ``client``, but the worker runs only the HTTP source: the
+    Kafka source is off, so endpoints that fall back to the configured
+    Kafka topic have nothing to fall back to."""
+    from tests.test_sources_validation import HttpOnlyHandler
+
+    mock_app._config = DrakkarConfig(sources={'http': {'enabled': True}})
+    mock_app._config.ui.release.enabled = False
+    mock_app.handler = HttpOnlyHandler()
+    # A bare MagicMock is truthy and its .snapshot() is not JSON
+    # serializable; None keeps the overview's optional 'offload' key absent
+    # (key-presence is the feature flag), matching a worker with no
+    # offload pool wired.
+    mock_app._offload_pool = None
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -3988,7 +4009,7 @@ def _probe_mock_app(mock_app):
     )
     # Replace the MagicMock-based config with a real one so the endpoint
     # can read ``executor.task_timeout_seconds`` without TypeError.
-    mock_app._config = DrakkarConfig()
+    mock_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     return mock_app
 
 
@@ -4312,6 +4333,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     # With a -1.9 headroom that lands at 0.1s, which is well below the
     # handler's 1s sleep.
     _probe_mock_app._config = DrakkarConfig(
+        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
@@ -4357,6 +4379,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     handler.on_message_complete = on_message_complete_slow  # type: ignore[method-assign]
 
     _probe_mock_app._config = DrakkarConfig(
+        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
@@ -4461,7 +4484,7 @@ async def test_probe_endpoint_dispatches_to_drakkar_main_loop_when_different(
 
 
 async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_recorder, debug_config, _probe_mock_app):
-    """POST with no ``topic`` in body → probe sees ``config.kafka.source_topic``.
+    """POST with no ``topic`` in body → probe sees ``config.sources.kafka.topic``.
 
     Handlers that key off ``msg.topic`` would see an empty string
     without this default — the endpoint substitutes the configured
@@ -4472,7 +4495,8 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
     _probe_mock_app.handler = _ProbeTestHandler(task_count=0)
     _probe_mock_app._config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/nonexistent'),
-        kafka=KafkaConfig(brokers='host:9092', source_topic='configured-input-topic', consumer_group='grp'),
+        kafka=KafkaConfig(brokers='host:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'configured-input-topic', 'consumer_group': 'grp'}},
     )
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
@@ -5445,3 +5469,21 @@ class TestUIServerBodyLimit:
         assert kwargs['ws'] == 'websockets-sansio'
         assert kwargs['ws_ping_interval'] == WS_PING_INTERVAL_SECONDS
         assert kwargs['ws_ping_timeout'] == WS_PING_TIMEOUT_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Kafka-source-disabled surfaces (worker running only the HTTP source)
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_without_topic_is_400_when_kafka_source_off(http_only_client):
+    """No request topic, and no configured Kafka topic to fall back to, is a
+    caller error — not silently probed with an empty topic."""
+    resp = await http_only_client.post('/api/v1/debug/probe', json={'value': '{}', 'topic': ''})
+    assert resp.status_code == 400
+    assert resp.json()['error'] == 'topic is required: the Kafka source is disabled on this worker'
+
+
+async def test_live_overview_kafka_source_topic_empty_when_off(http_only_client):
+    resp = await http_only_client.get('/api/v1/live/overview')
+    assert resp.json()['kafka_source_topic'] == ''

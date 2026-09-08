@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -72,6 +73,26 @@ def fast_idle_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', TEST_IDLE_POLL_TIMEOUT)
 
 
+def wire_kafka_source(app, consumer=None):
+    """Bind the app's sources and attach a fake consumer, as startup does.
+
+    Tests that drive ``kafka_source.on_assign`` or ``_shutdown`` directly
+    skip ``_async_run``, so without this the source has no
+    ``SourceContext`` and no consumer. Returns the Kafka source.
+
+    Binding needs an executor pool; a test that only exercises the
+    rebalance or commit paths never touches one, so a stand-in is
+    supplied rather than making every such test build a real pool.
+    """
+    if app._executor_pool is None:
+        app._executor_pool = MagicMock(active_count=0, max_executors=1)
+    app._lifecycle._bind_sources()
+    source = app.kafka_source
+    assert source is not None, 'sources.kafka must be enabled for this helper'
+    source.consumer = AsyncMock() if consumer is None else consumer
+    return source
+
+
 @pytest.fixture
 def source_message() -> SourceMessage:
     return SourceMessage(
@@ -120,6 +141,7 @@ def minimal_config_dict() -> dict:
         'executor': {
             'binary_path': '/usr/bin/echo',
         },
+        'sources': {'kafka': {'enabled': True}},
     }
 
 
@@ -128,12 +150,17 @@ def full_config_dict() -> dict:
     return {
         'kafka': {
             'brokers': 'kafka1:9092,kafka2:9092',
-            'source_topic': 'input-events',
-            'consumer_group': 'drakkar-workers',
-            'max_poll_records': 200,
-            'max_poll_interval_ms': 600_000,
-            'session_timeout_ms': 30_000,
-            'heartbeat_interval_ms': 5_000,
+        },
+        'sources': {
+            'kafka': {
+                'enabled': True,
+                'topic': 'input-events',
+                'consumer_group': 'drakkar-workers',
+                'max_poll_records': 200,
+                'max_poll_interval_ms': 600_000,
+                'session_timeout_ms': 30_000,
+                'heartbeat_interval_ms': 5_000,
+            },
         },
         'executor': {
             'binary_path': '/usr/local/bin/processor',

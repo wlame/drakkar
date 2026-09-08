@@ -36,7 +36,7 @@ before applying:
   UI and metrics — `configmap.yaml`.
 - `<kafka_brokers>` — Kafka bootstrap servers, e.g.
   `kafka-bootstrap.kafka:9092` — `configmap.yaml`.
-- `<source_topic>` — input Kafka topic — `configmap.yaml`.
+- `<source_topic>` — input Kafka topic (`sources.kafka.topic`) — `configmap.yaml`.
 - `<binary_path>` — path to your handler executable inside the
   container image (must exist in `<image>`) — `configmap.yaml`.
 - `<output_topic>` — Kafka topic the example sink writes to —

@@ -36,6 +36,7 @@ from drakkar.config import (
 from drakkar.consume_pause import ConsumerNotReadyError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import ExecutorTask
+from tests.conftest import wire_kafka_source
 
 
 class _Handler(BaseDrakkarHandler):
@@ -46,7 +47,8 @@ class _Handler(BaseDrakkarHandler):
 @pytest.fixture
 def pause_config() -> DrakkarConfig:
     cfg = DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
@@ -61,7 +63,7 @@ async def app(pause_config):
 
     app = DrakkarApp(handler=_Handler(), config=pause_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     yield app
     await app.consume_pause.resume()
     for proc in list(app.processors.values()):
@@ -72,7 +74,7 @@ async def app(pause_config):
 
 
 async def test_pause_pauses_assigned_partitions_and_reports_state(app):
-    app._lifecycle._on_assign([0, 3])
+    app.kafka_source.on_assign([0, 3])
     state = await app.consume_pause.pause(60)
 
     app._consumer.pause.assert_awaited_once_with([0, 3])
@@ -84,20 +86,20 @@ async def test_pause_pauses_assigned_partitions_and_reports_state(app):
 
 
 async def test_pause_without_consumer_raises_not_ready(app):
-    app._consumer = None
+    app.kafka_source.consumer = None
     with pytest.raises(ConsumerNotReadyError):
         await app.consume_pause.pause(15)
 
 
 async def test_pause_excludes_stall_paused_partitions(app):
-    app._lifecycle._on_assign([0, 1])
+    app.kafka_source.on_assign([0, 1])
     app._stalled_partitions.add(1)
     await app.consume_pause.pause(60)
     app._consumer.pause.assert_awaited_once_with([0])
 
 
 async def test_second_pause_replaces_the_deadline(app):
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     first = await app.consume_pause.pause(15)
     second = await app.consume_pause.pause(3600)
     assert second['resume_at_ms'] > first['resume_at_ms']
@@ -106,7 +108,7 @@ async def test_second_pause_replaces_the_deadline(app):
 
 
 async def test_manual_resume_resumes_partitions_and_is_idempotent(app):
-    app._lifecycle._on_assign([0, 2])
+    app.kafka_source.on_assign([0, 2])
     await app.consume_pause.pause(3600)
 
     state = await app.consume_pause.resume()
@@ -121,7 +123,7 @@ async def test_manual_resume_resumes_partitions_and_is_idempotent(app):
 
 
 async def test_auto_resume_fires_at_the_deadline(app):
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await app.consume_pause.pause(1)
     # Shrink the wait: cancel the real timer and drive the deadline directly.
     # (pause() scheduled a 1s sleep — too slow for a unit test.)
@@ -135,7 +137,7 @@ async def test_auto_resume_fires_at_the_deadline(app):
 async def test_resume_defers_to_active_backpressure(app):
     """When backpressure still holds the partitions, a debug resume must not
     restart fetching — the backpressure loop resumes once queues drain."""
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await app.consume_pause.pause(3600)
     app._paused = True  # backpressure engaged while debug pause was active
 
@@ -148,20 +150,20 @@ async def test_resume_defers_to_active_backpressure(app):
 
 
 async def _run_one_poll_iteration(app):
-    """Run the REAL _poll_loop for exactly one iteration: the scripted
-    poll_batch flips _running off so the while-loop exits after one pass."""
+    """Run the REAL poll loop for exactly one iteration: the scripted
+    poll_batch signals the source to stop, so the loop exits after one pass."""
 
     async def _poll_batch(*args, **kwargs):
-        app._running = False
+        app.kafka_source.signal_stop()
         return []
 
     app._consumer.poll_batch = AsyncMock(side_effect=_poll_batch)
     app._running = True
-    await app._lifecycle._poll_loop()
+    await app.kafka_source.run()
 
 
 async def test_poll_loop_backpressure_resume_blocked_while_debug_paused(app):
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await app.consume_pause.pause(3600)
     app._paused = True  # backpressure holds; queues are empty (below low watermark)
 
@@ -172,7 +174,7 @@ async def test_poll_loop_backpressure_resume_blocked_while_debug_paused(app):
 
 
 async def test_poll_loop_backpressure_resume_works_when_not_debug_paused(app):
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     app._paused = True  # backpressure holds; queues empty; no debug pause
 
     await _run_one_poll_iteration(app)
@@ -182,11 +184,11 @@ async def test_poll_loop_backpressure_resume_works_when_not_debug_paused(app):
 
 
 async def test_partitions_assigned_during_debug_pause_arrive_paused(app):
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await app.consume_pause.pause(3600)
     assert not app._paused  # backpressure NOT active — only the debug pause
 
-    app._lifecycle._on_assign([5, 7])
+    app.kafka_source.on_assign([5, 7])
     # The lifecycle pauses new partitions via a background task.
     for _ in range(50):
         if any(call.args[0] == [5, 7] for call in app._consumer.pause.call_args_list):

@@ -34,6 +34,11 @@ CREATE TABLE workers (
     debug_port           INTEGER,
     debug_url            TEXT,
     kafka_brokers        TEXT,
+    -- source_topic/consumer_group mirror recorder/schema.py's worker_config
+    -- columns of the same name, written from sources.kafka.topic /
+    -- resolved_consumer_group. The column names predate that config path
+    -- and stay as-is: this SQLite schema is a stable contract, not a
+    -- mirror of the current config field names.
     source_topic         TEXT,
     consumer_group       TEXT,
     binary_path          TEXT,

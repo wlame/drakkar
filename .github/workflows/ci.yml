@@ -163,6 +163,10 @@ jobs:
         if: ${{ !matrix.experimental }}
         run: just cover
 
+      - name: Run the harness handler tests
+        if: ${{ !matrix.experimental }}
+        run: just test-harness
+
       # Plain test run: the question here is "does Drakkar work on the next
       # CPython", and a coverage floor would only add noise to the answer.
       - name: Run tests without the coverage gate

@@ -210,7 +210,7 @@ YAML file + env overrides (`DK_` prefix, `__` nesting). See [Configuration Loadi
 
 ### How do I stagger a rolling deploy so my fleet doesn't cascade-rebalance?
 
-Leave `kafka.startup_align_enabled: true` (default). Each worker delays its first `subscribe()` until the next shared wall-clock boundary, so 10 workers booting over 15 seconds all join the consumer group at the same moment. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
+Leave `sources.kafka.startup_align_enabled: true` (default). Each worker delays its first `subscribe()` until the next shared wall-clock boundary, so 10 workers booting over 15 seconds all join the consumer group at the same moment. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
 
 ### How many workers should I run per consumer group?
 
@@ -218,7 +218,7 @@ Up to the number of Kafka partitions. Extra workers sit idle (Kafka only assigns
 
 ### Can I hot-reload config without restarting?
 
-No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `kafka.startup_align_enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
+No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `sources.kafka.startup_align_enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
 
 ### Where do logs go?
 
@@ -430,7 +430,7 @@ If you put the UI on a non-loopback host outside a private network, set a strong
 
 ### Why doesn't Drakkar validate Kafka message payloads?
 
-Parse failures are policy-driven via `kafka.on_parse_error`. The default (`skip`) sets `msg.payload=None` and stamps `msg.parse_error`, logging a `message_parse_failed` warning and ticking `drakkar_message_parse_failures_total`; the handler decides what to do with the message in `arrange()`. Set `dlq` to exclude unparseable messages from `arrange()` and route them to the DLQ topic as `ParseFailurePayload` records (a failed DLQ write then follows the `dlq.on_send_failure` strategy — see the next question), or `raise` to fail fast on schema-broken deployments. A malicious producer can trigger parse failures but cannot execute code in the worker.
+Parse failures are policy-driven via `sources.kafka.on_parse_error`. The default (`skip`) sets `msg.payload=None` and stamps `msg.parse_error`, logging a `message_parse_failed` warning and ticking `drakkar_message_parse_failures_total`; the handler decides what to do with the message in `arrange()`. Set `dlq` to exclude unparseable messages from `arrange()` and route them to the DLQ topic as `ParseFailurePayload` records (a failed DLQ write then follows the `dlq.on_send_failure` strategy — see the next question), or `raise` to fail fast on schema-broken deployments. A malicious producer can trigger parse failures but cannot execute code in the worker.
 
 ### What happens when the DLQ itself fails?
 

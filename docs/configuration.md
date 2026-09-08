@@ -31,12 +31,21 @@ app = DrakkarApp(handler=MyHandler(), config_path='drakkar.yaml')
 app = DrakkarApp(handler=MyHandler())
 
 # Option 3: inline config object (no file needed)
-from drakkar.config import DrakkarConfig, KafkaConfig, ExecutorConfig
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    KafkaConfig,
+    KafkaSourceConfig,
+    SourcesConfig,
+)
 
 app = DrakkarApp(
     handler=MyHandler(),
     config=DrakkarConfig(
-        kafka=KafkaConfig(brokers='kafka:9092', source_topic='my-events'),
+        kafka=KafkaConfig(brokers='kafka:9092'),
+        sources=SourcesConfig(
+            kafka=KafkaSourceConfig(enabled=True, topic='my-events'),
+        ),
         executor=ExecutorConfig(max_executors=8),
     ),
 )
@@ -89,40 +98,28 @@ cluster_name_env: DK_CLUSTER
 
 ---
 
-## Kafka Source (`kafka:`)
+## Kafka connection (`kafka:`)
 
-Settings for the Kafka consumer that reads input messages.
+How this worker reaches the Kafka cluster. The block holds no consumer
+settings: the consumer is an input source and lives under
+[`sources.kafka`](#kafka-source-sourceskafka). One connection serves three
+users — the Kafka source, the [Kafka sinks](#kafka-sink-sinkskafkaname),
+and the [DLQ](#dead-letter-queue-dlq) — so a worker with no Kafka source
+still needs this block when it writes to Kafka.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `brokers` | `str` | `'localhost:9092'` | Kafka bootstrap servers (comma-separated for multiple brokers). Also used as the fallback for sink and DLQ brokers when they are left empty. |
-| `source_topic` | `str` | `'input-events'` | The Kafka topic to consume messages from. |
-| `consumer_group` | `str` | `'drakkar-workers'` | Consumer group ID. All workers in the same group share partition assignments. |
-| `max_poll_records` | `int` | `100` | Maximum number of messages returned per poll batch. Higher values improve throughput; lower values reduce latency. |
-| `max_poll_interval_ms` | `int` | `300000` | Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
-| `session_timeout_ms` | `int` | `45000` | Session timeout (ms) for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
-| `heartbeat_interval_ms` | `int` | `3000` | Interval (ms) between heartbeats sent to the broker. Should be less than `session_timeout_ms / 3`. |
-| `on_parse_error` | `'skip'` \| `'dlq'` \| `'raise'` | `'skip'` | What to do when a message value fails `input_model` parsing. `skip`: the message reaches `arrange()` with `payload=None` and `msg.parse_error` set. `dlq`: the message is excluded from `arrange()` and written to the DLQ topic as a `ParseFailurePayload`; the offset commits once the DLQ write is confirmed (a failed write follows `dlq.on_send_failure`). `raise`: fail fast — a `MessageParseError` stops the partition processor. |
-| `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
-| `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
-| `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
 | `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption. See [Kafka security](#kafka-security-kafkasecurity). |
 | `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties merged after `security`. See [the escape hatch](#raw-librdkafka-overrides-client_config). |
+| `ui_url` | `str` | `''` | Base URL of a Kafka-UI instance. With `ui_cluster_name`, the operator UI renders a deep link next to every `partition:offset`. Empty disables the links. |
+| `ui_cluster_name` | `str` | `''` | Cluster name as registered in Kafka-UI, used in those deep links. Both fields must be set. |
 
 ```yaml
 kafka:
   brokers: kafka-1:9092,kafka-2:9092
-  source_topic: search-requests
-  consumer_group: search-workers
-  max_poll_records: 200
-  max_poll_interval_ms: 600000
-  session_timeout_ms: 60000
-  heartbeat_interval_ms: 5000
-  # Rolling-deploy: serialize group rebalances by waking all workers at
-  # the same wall-clock moment instead of whenever each finishes init.
-  startup_align_enabled: true
-  startup_min_wait_seconds: 4.0
-  startup_align_interval_seconds: 10
+  ui_url: http://kafka-ui:8080
+  ui_cluster_name: search-cluster
 ```
 
 ### Kafka security (`kafka.security`)
@@ -229,12 +226,89 @@ kafka:
 |---|---|
 | `enable.auto.commit` | At-least-once delivery depends on Drakkar committing on its own per-partition watermark; auto-commit would advance past unprocessed messages. |
 | `partition.assignment.strategy` | The drain-on-revoke path assumes cooperative-sticky rebalancing. |
-| `group.id` | Set it with `kafka.consumer_group`. |
+| `group.id` | Set it with `sources.kafka.consumer_group`. |
 | `bootstrap.servers` | Set it with `kafka.brokers`. |
 
 Rejecting beats ignoring: an override that is silently dropped looks like it worked.
 
-### Staggered startup alignment
+---
+
+## Input sources (`sources:`)
+
+A worker reads work from Kafka, from HTTP, or from both. Each input is a
+**source** under `sources:`. Both are off by default, and **at least one
+must be on** — a config with neither fails to load:
+
+```
+no input source enabled: set sources.kafka.enabled or sources.http.enabled
+```
+
+A source block is validated only when it is enabled. A disabled block that
+would not pass validation logs one `source_config_ignored` warning at
+startup and does not block the worker.
+
+The [Input Sources](sources.md) page compares the two side by side and
+covers readiness, shutdown and the DLQ rule. This section is the field
+reference.
+
+| Source | Key | Default | Starts |
+|---|---|---|---|
+| Kafka consumer | `sources.kafka.enabled` | `false` | Consumer group, poll loop, per-partition processors |
+| HTTP ingress | `sources.http.enabled` | `false` | One POST route on its own server thread |
+
+!!! warning "The top-level `webapp:` block is gone"
+    The HTTP source used to be configured under `webapp:`. A config that
+    still carries that key fails to load with `webapp: moved to
+    sources.http (see docs/sources.md)`. Move the block under
+    `sources.http`; every field keeps its name and its default. Env
+    overrides move with it — `DK_WEBAPP__PORT` becomes
+    `DK_SOURCES__HTTP__PORT`.
+
+### Kafka source (`sources.kafka`)
+
+Settings for the Kafka consumer that reads input messages. The cluster it
+connects to comes from [`kafka:`](#kafka-connection-kafka).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Consume the Kafka topic. When `false`, no consumer group is joined and `arrange()` is never called. |
+| `topic` | `str` | `'input-events'` | The Kafka topic to consume messages from. |
+| `consumer_group` | `str` | `'drakkar-workers'` | Consumer group ID. All workers in the same group share partition assignments. |
+| `max_poll_records` | `int` | `100` | Maximum number of messages returned per poll batch. Higher values improve throughput; lower values reduce latency. |
+| `max_poll_interval_ms` | `int` | `300000` | Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
+| `session_timeout_ms` | `int` | `45000` | Session timeout (ms) for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
+| `heartbeat_interval_ms` | `int` | `3000` | Interval (ms) between heartbeats sent to the broker. Should be less than `session_timeout_ms / 3`. |
+| `on_parse_error` | `'skip'` \| `'dlq'` \| `'raise'` | `'skip'` | What to do when a message value fails `input_model` parsing. `skip`: the message reaches `arrange()` with `payload=None` and `msg.parse_error` set. `dlq`: the message is excluded from `arrange()` and written to the DLQ topic as a `ParseFailurePayload`; the offset commits once the DLQ write is confirmed (a failed write follows `dlq.on_send_failure`). `raise`: fail fast — a `MessageParseError` stops the partition processor. |
+| `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
+| `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
+| `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
+
+When enabled, `topic` and `consumer_group` must be non-empty.
+
+```yaml
+kafka:
+  brokers: kafka-1:9092,kafka-2:9092
+
+sources:
+  kafka:
+    enabled: true
+    topic: search-requests
+    consumer_group: search-workers
+    max_poll_records: 200
+    max_poll_interval_ms: 600000
+    session_timeout_ms: 60000
+    heartbeat_interval_ms: 5000
+    # Rolling-deploy: serialize group rebalances by waking all workers at
+    # the same wall-clock moment instead of whenever each finishes init.
+    startup_align_enabled: true
+    startup_min_wait_seconds: 4.0
+    startup_align_interval_seconds: 10
+```
+
+Env overrides follow the keys: `DK_SOURCES__KAFKA__ENABLED`,
+`DK_SOURCES__KAFKA__TOPIC`, `DK_SOURCES__KAFKA__CONSUMER_GROUP`, and so on.
+
+#### Staggered startup alignment
 
 During a rolling deploy, workers come up one at a time over a span of seconds. Each fresh `subscribe` call triggers a Kafka consumer-group rebalance, which stalls consumption on every other worker in the group. A fleet of 10 workers that boots over ~15 seconds can cause 10 cascading rebalances and several seconds of effective downtime.
 
@@ -251,6 +325,66 @@ Tuning:
 - **Larger fleets**: keep `startup_align_interval_seconds: 10` (default) — works well up to dozens of workers.
 - **Slow-init workers** (seconds of migrations): raise `startup_min_wait_seconds` so the boundary is likely to fall AFTER the slowest worker's init.
 - **Very small clusters / dev iteration**: set `startup_align_enabled: false` to skip the pause entirely.
+
+### HTTP source (`sources.http`)
+
+The synchronous HTTP entry point, served by the webapp server. When
+`enabled: true`, Drakkar runs a FastAPI server on its own thread that
+accepts POST requests and routes them through the same handler pipeline as
+Kafka messages. The handler must declare `HttpRequestT` / `HttpResponseT`
+as the third and fourth generic parameters of `BaseDrakkarHandler`; missing
+types raise `ConfigurationError` at startup.
+
+A bind failure is **fatal**. The HTTP source is an input, so a worker that
+cannot bind its socket stops instead of running with nothing to read.
+
+See [Webapp](webapp.md) for the full feature guide (hooks,
+request/response shape, status codes, shutdown semantics).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the FastAPI server is not started and the HTTP hooks are not invoked. |
+| `host` | `str` | `'0.0.0.0'` | | Interface uvicorn binds. Use `'127.0.0.1'` for host-private deployments. |
+| `port` | `int` | `8090` | | Port uvicorn binds. Distinct from the metrics and operator-UI ports. |
+| `path` | `str` | `'/process'` | starts with `'/'`, length > 1 | Single POST route the framework registers. |
+| `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
+| `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |
+| `max_concurrent` | `int` | `64` | > 0 | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. |
+| `max_body_bytes` | `int` | `10485760` (10 MiB) | > 0 | Cap on a single POST body; oversized requests receive 413 `error='request_too_large'` before the body is buffered. |
+| `clients` | `list[WebClientConfig]` | one anonymous client (`name='anonymous'`, `token=''`, `rpm=4`) | length >= 1 | Configured tenants. Empty `clients: []` fails at config load. |
+
+#### HTTP clients (`sources.http.clients[]`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `name` | `str` | required | non-empty | Tenant name. Used in metric labels (`drakkar_webapp_requests_total{client=...}`), recorder rows, and the response body. |
+| `token` | `str` | `''` | at most one client may have empty token; non-empty tokens unique | Bearer token presented in `Authorization: Bearer <token>`. Empty token = anonymous slot for requests without an `Authorization` header. |
+| `rpm` | `int` | `4` | > 0 | Per-client requests-per-minute cap, enforced on a 60-second sliding window. |
+
+```yaml
+sources:
+  http:
+    enabled: true
+    host: 0.0.0.0
+    port: 8090
+    path: /process
+    sinks_enabled: false
+    request_timeout_seconds: 30.0
+    max_concurrent: 64
+    max_body_bytes: 10485760
+    clients:
+      - name: anonymous
+        token: ""
+        rpm: 4
+      - name: tenant-a
+        token: "secret-tenant-a-token"
+        rpm: 60
+```
+
+Env overrides reach list entries by index:
+`DK_SOURCES__HTTP__CLIENTS__0__RPM=10`.
+
+When every configured client has an empty token, the worker logs a `webapp_unauthenticated_warning` at startup so private-network deployments that should have had a token configured surface in log aggregation.
 
 ---
 
@@ -558,9 +692,20 @@ probing a recovering downstream is itself expensive.
 
 Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafka topic. The DLQ captures the original payloads, error details, and metadata for later inspection or reprocessing.
 
+**Whether a DLQ producer is built depends on the Kafka source.** The DLQ derives its default topic from the source topic, so a worker without a Kafka source has nothing to derive from and needs an explicit `dlq.topic`:
+
+| `sources.kafka.enabled` | `dlq.topic` | Result |
+|---|---|---|
+| on | empty | DLQ built, topic `{sources.kafka.topic}_dlq` |
+| on | set | DLQ built with that topic |
+| off | set | DLQ built with that topic; brokers from `dlq.brokers`, else `kafka.brokers` |
+| off | empty | **No DLQ producer.** The summary line reports `dlq=off`. A DLQ send is dropped, logged once per worker run as `dlq_send_dropped_unconfigured` (then at debug), and counted in `drakkar_dlq_unconfigured_drops_total`. |
+
+The startup log `sinks_configured` reports `dlq_topic: ""` when the DLQ is off. `on_parse_error: dlq` is a Kafka-source setting, so it is only reachable when the Kafka source is on — the DLQ is always present for it.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `topic` | `str` | `''` | DLQ Kafka topic name. If empty, auto-derived as `{source_topic}_dlq` (e.g., `input-events_dlq`). |
+| `topic` | `str` | `''` | DLQ Kafka topic name. If empty, auto-derived as `{sources.kafka.topic}_dlq` (e.g., `input-events_dlq`) — and with the Kafka source off, empty means no DLQ at all (table above). |
 | `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers` — and with them `kafka.security` and `kafka.client_config`, on the same same-cluster-means-same-credentials rule the Kafka sinks follow. |
 | `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for the DLQ producer. Only consulted when `brokers` is set. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
 | `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for the DLQ producer, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
@@ -949,57 +1094,6 @@ cache:
 
 ---
 
-## Webapp (`webapp:`)
-
-Optional synchronous-HTTP entry point. **Disabled by default** -- when `enabled: false`, no FastAPI server runs and the handler's HTTP hooks are never invoked. Webapp users declare `HttpRequestT` / `HttpResponseT` as the third and fourth generic parameters of `BaseDrakkarHandler`; missing types raise `ConfigurationError` at startup.
-
-See [Webapp](webapp.md) for the full feature guide (enabling, hooks, request/response shape, status codes, shutdown semantics).
-
-### Webapp Settings
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `false` | | Master switch. When `false`, the FastAPI server is not started and the HTTP hooks are not invoked. |
-| `host` | `str` | `'0.0.0.0'` | | Interface uvicorn binds. Use `'127.0.0.1'` for host-private deployments. |
-| `port` | `int` | `8090` | | Port uvicorn binds. Distinct from the metrics and operator-UI ports. |
-| `path` | `str` | `'/process'` | starts with `'/'`, length > 1 | Single POST route the framework registers. |
-| `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
-| `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |
-| `max_concurrent` | `int` | `64` | > 0 | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. |
-| `max_body_bytes` | `int` | `10485760` (10 MiB) | > 0 | Cap on a single POST body; oversized requests receive 413 `error='request_too_large'` before the body is buffered. Enforced before the body is buffered. backend. |
-| `clients` | `list[WebClientConfig]` | one anonymous client (`name='anonymous'`, `token=''`, `rpm=4`) | length >= 1 | Configured tenants. Empty `clients: []` fails at config load. |
-
-### Webapp Clients (`webapp.clients[]`)
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `name` | `str` | required | non-empty | Tenant name. Used in metric labels (`drakkar_webapp_requests_total{client=...}`), recorder rows, and the response body. |
-| `token` | `str` | `''` | at most one client may have empty token; non-empty tokens unique | Bearer token presented in `Authorization: Bearer <token>`. Empty token = anonymous slot for requests without an `Authorization` header. |
-| `rpm` | `int` | `4` | > 0 | Per-client requests-per-minute cap, enforced on a 60-second sliding window. |
-
-```yaml
-webapp:
-  enabled: true
-  host: 0.0.0.0
-  port: 8090
-  path: /process
-  sinks_enabled: false
-  request_timeout_seconds: 30.0
-  max_concurrent: 64
-  max_body_bytes: 10485760
-  clients:
-    - name: anonymous
-      token: ""
-      rpm: 4
-    - name: tenant-a
-      token: "secret-tenant-a-token"
-      rpm: 60
-```
-
-When every configured client has an empty token, the worker logs a `webapp_unauthenticated_warning` at startup so private-network deployments that should have had a token configured surface in log aggregation.
-
----
-
 ## Settings `on_startup` cannot change
 
 `DrakkarApp.__init__` builds a few things straight from the config it is
@@ -1008,6 +1102,12 @@ those settings changes nothing — the object built from the old value
 already exists. Rather than dropping the change silently, the worker logs
 one `on_startup_config_change_ignored` warning naming every setting it
 ignored and what consumed it.
+
+`sources.kafka.enabled` and `sources.http.enabled` are on that list:
+handler validation and source construction both happen while the app object
+is built, so a hook that flips a source on or off changes nothing. Set them
+in YAML, or through `DK_SOURCES__KAFKA__ENABLED` /
+`DK_SOURCES__HTTP__ENABLED`.
 
 The full list and the working alternative are on the
 [Handler](handler.md#on_startup) page.

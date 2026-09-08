@@ -2,7 +2,7 @@
 
 **Kafka subprocess orchestration for Python 3.13+**
 
-Drakkar consumes messages from Kafka, runs CPU-intensive external binaries in a managed subprocess pool, and delivers results to any combination of six sink types. Workers are the Drakkars, executors are the Vikings.
+Drakkar consumes messages from Kafka and/or accepts HTTP requests, runs CPU-intensive external binaries in a managed subprocess pool, and delivers results to any combination of six sink types. Each input is an optional [source](sources.md), so a worker can run Kafka-only, HTTP-only, or both. Workers are the Drakkars, executors are the Vikings.
 
 !!! danger "Drakkar is an internal tool"
 
@@ -19,6 +19,7 @@ Drakkar consumes messages from Kafka, runs CPU-intensive external binaries in a 
 ```mermaid
 flowchart LR
     K["Kafka\nsource topic"] -- "poll" --> W
+    H["HTTP clients"] -- "POST" --> W
 
     subgraph worker ["Drakkar worker — one pipeline per partition"]
         W["window of\nmessages"] --> A["arrange()\n<i>your code</i>"]
@@ -38,6 +39,7 @@ flowchart LR
     style worker fill:#f0fdfa,stroke:#0d9488,stroke-width:2px,color:#1a1a1a
     style sinks fill:#f8fafc,stroke:#94a3b8,stroke-width:1px,color:#6b7280
     style K fill:#e0f2fe,stroke:#0284c7,color:#1a1a1a
+    style H fill:#e0f2fe,stroke:#0284c7,color:#1a1a1a
     style W fill:#f8fafc,stroke:#64748b,color:#1a1a1a
     style A fill:#fef3c7,stroke:#d97706,color:#1a1a1a
     style P fill:#f5f3ee,stroke:#64748b,color:#1a1a1a
@@ -57,6 +59,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     K["Kafka\nsource topic"] -- "poll" --> W
+    H["HTTP clients"] -- "POST" --> W
 
     subgraph worker ["Drakkar worker — one pipeline per partition"]
         W["window of\nmessages"] --> A["arrange()\n<i>your code</i>"]
@@ -76,6 +79,7 @@ flowchart LR
     style worker fill:#1a3a3a,stroke:#2dd4bf,stroke-width:2px,color:#e2e8f0
     style sinks fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#94a3b8
     style K fill:#172554,stroke:#60a5fa,color:#e2e8f0
+    style H fill:#172554,stroke:#60a5fa,color:#e2e8f0
     style W fill:#1e293b,stroke:#64748b,color:#e2e8f0
     style A fill:#422006,stroke:#f59e0b,color:#fef3c7
     style P fill:#1e293b,stroke:#64748b,color:#e2e8f0
@@ -95,6 +99,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 
 ## Key Features
 
+- **[Two input sources](sources.md)** -- Kafka and HTTP, each optional: a worker runs Kafka-only, HTTP-only, or both, with the same handler, executor pool and sinks behind either
 - **[Per-partition pipelines](data-flow.md#phase-3-window-collection-and-arrangement)** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
 - **[Pluggable sinks](sinks.md)** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- failed deliveries route to a DLQ topic with error metadata
@@ -173,8 +178,12 @@ class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
 # drakkar.yaml
 kafka:
   brokers: "localhost:9092"
-  source_topic: "jobs"
-  consumer_group: "my-workers"
+
+sources:
+  kafka:
+    enabled: true
+    topic: "jobs"
+    consumer_group: "my-workers"
 
 executor:
   binary_path: "/usr/local/bin/my-tool"
@@ -223,6 +232,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [UI Customization Cookbook](ui-customization-cookbook.md) | One small handler built through five short steps, showing how probe details, enrichment, and declared pages compose |
 | [Timeline Tuning](ui-timeline.md) | `ui.timeline` — history depth, first-match-wins color rules, and tag/caption/highlight/filter/marker label roles |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
+| [Input Sources](sources.md) | Kafka and HTTP as peer, optional inputs: modes, readiness, shutdown, the DLQ rule |
 | [Features & Enable Order](features.md) | Which switch enables what, dependency rules, tiered rollout order |
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |
 | [Sink Write Operations](sink-write-operations.md) | Declarative write operations plus the raw-SQL/command escape hatch, per sink type |

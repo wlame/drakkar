@@ -38,10 +38,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from drakkar.kafka_read import (
     STREAM_LIMIT_MAX,
     AliasTarget,
+    KafkaReadError,
     KafkaReadNotFound,
     KafkaReadUnavailable,
     build_alias_table,
     fetch_message,
+    resolve_alias,
     stream_messages,
 )
 
@@ -83,12 +85,21 @@ def create_kafka_read_router(deps: UIDeps) -> APIRouter:
 
     def _target_or_404(alias: str) -> AliasTarget:
         target = aliases.get(alias)
-        if target is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Unknown topic alias '{alias}' — valid aliases: {sorted(aliases)}",
-            )
-        return target
+        if target is not None:
+            return target
+        # The reserved aliases have a specific reason to be missing — the
+        # Kafka source or the DLQ is switched off — worth naming over the
+        # generic "unknown alias" text. Any other name was simply never a
+        # configured alias (unknown, or a sink instance that doesn't exist).
+        if alias in ('source', 'dlq'):
+            try:
+                return resolve_alias(deps.drakkar_app._config, alias)
+            except KafkaReadError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown topic alias '{alias}' — valid aliases: {sorted(aliases)}",
+        )
 
     @router.get('/api/v1/debug/kafka/topics')
     async def kafka_topics():

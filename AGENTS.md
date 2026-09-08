@@ -6,11 +6,12 @@ invariants with non-obvious rationale, and commands.
 
 ## What this is
 
-A Kafka → subprocess-pool → sinks orchestration framework: poll messages,
-`arrange()` them into tasks run by a managed subprocess pool, deliver results to
-pluggable sinks (Kafka, Postgres, Mongo, Redis, HTTP, files), commit offsets
-at-least-once on a per-partition watermark. The framework owns the control loop
-and calls into user code; the actual work runs in an external subprocess.
+A subprocess-pool → sinks orchestration framework: the worker reads from Kafka
+and/or HTTP, `arrange()`s input into tasks run by a managed subprocess pool,
+delivers results to pluggable sinks (Kafka, Postgres, Mongo, Redis, HTTP,
+files), and commits Kafka offsets at-least-once on a per-partition watermark
+when the Kafka source is enabled. The framework owns the control loop and
+calls into user code; the actual work runs in an external subprocess.
 
 The worker serves its own operator UI: `drakkar-ui`, a versioned SPA
 published on GitHub Releases and fetched at startup (see "Decoupled UI
@@ -71,10 +72,11 @@ parametrize).
    surfaced on `/readyz`. `_supervise` owns crash handling — never swallow an
    exception in `_run`. A restart does not recover the crashed window's
    offsets: they stay pending by design (committing past unprocessed messages
-   would lose them). A dead processor is excluded from every drain: nothing
-   will empty its queue, so waiting on one spends the whole budget and
-   suppresses the other partitions' final commits with it.
-4. `_on_revoke` blocks until the drain commits. librdkafka waits on the
+   would lose them). A dead processor is excluded from every drain
+   (`drakkar/sources/kafka.py`): nothing will empty its queue, so waiting on
+   one spends the whole budget and suppresses the other partitions' final
+   commits with it.
+4. `_on_revoke` (`drakkar/sources/kafka.py`) blocks until the drain commits. librdkafka waits on the
    rebalance callback; returning early re-opens the duplicate-delivery window.
    The whole teardown — drain, final commit, `stop()` — runs against one
    `executor.drain_timeout_seconds` deadline; a step that takes its own budget
@@ -115,7 +117,7 @@ parametrize).
   combining `include_router` — on FastAPI ≥ 0.139 included routes are hidden
   from the app-level table and the alias walk (a startup guard raises if the
   walk finds nothing).
-- Three separate HTTP servers: UI server `:8080`, opt-in webapp `:8090`
+- Three separate HTTP servers: UI server `:8080`, opt-in HTTP source `:8090`
   (synchronous ingress, no health routes — readiness is per-request),
   Prometheus exporter `:9090` (not FastAPI). Kubernetes probes live on the UI
   server only.
@@ -142,6 +144,7 @@ drakkar/
   consumer.py, partition.py, offsets.py   poll loop, per-partition pipeline, watermarks
   executor.py              subprocess pool (argv exec, process-group kill)
   sinks/                   sink implementations + DLQ + circuit breaker
+  sources/                 input-source protocol, registry, handler validation
   cache/                   LWW SQLite cache + peer sync
   recorder/                flight recorder (SQLite event log)
   uiserver/                UI server: routes + message probe runner

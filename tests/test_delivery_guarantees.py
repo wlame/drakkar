@@ -1,7 +1,7 @@
 """Tests for the delivery-guarantee fixes from the 2026-06-09 product review.
 
 Covers:
-- parse-error stamping in deserialize_message + the kafka.on_parse_error
+- parse-error stamping in deserialize_message + the sources.kafka.on_parse_error
   policy (skip / dlq / raise)
 - the DLQSink.send() bool contract (True = confirmed write)
 - SinkDeliveryFailedError propagation from DrakkarApp._handle_collect when
@@ -13,7 +13,7 @@ Covers:
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel as BM
@@ -43,7 +43,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
 
@@ -77,7 +77,8 @@ def echo_pool() -> ExecutorPool:
 @pytest.fixture
 def app_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10, window_size=5),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
@@ -434,10 +435,11 @@ async def test_circuit_open_dlq_failure_drop_mode_counts(app_config):
 
 async def test_pause_stalled_partition_pauses_consumer_and_records(app_config):
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
-    app._consumer = AsyncMock()
+    # The recorder is captured into the SourceContext, so set it before binding.
     app._recorder = MagicMock()
+    wire_kafka_source(app)
 
-    await app._lifecycle._pause_stalled_partition(3)
+    await app.kafka_source.pause_stalled_partition(3)
 
     app._consumer.pause.assert_awaited_once_with([3])
     app._recorder.record_partition_stalled.assert_called_once_with(3)
@@ -446,18 +448,19 @@ async def test_pause_stalled_partition_pauses_consumer_and_records(app_config):
 
 async def test_pause_stalled_partition_survives_pause_error(app_config):
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
     app._consumer.pause.side_effect = RuntimeError('broker gone')
 
-    await app._lifecycle._pause_stalled_partition(2)  # must not raise
+    await app.kafka_source.pause_stalled_partition(2)  # must not raise
     assert 2 in app._stalled_partitions
 
 
 async def test_revoke_clears_stall_bookkeeping(app_config):
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
+    wire_kafka_source(app)
     app._stalled_partitions.add(4)
 
-    await app._lifecycle._on_revoke([4])
+    await app.kafka_source.on_revoke([4])
     await wait_for(lambda: 4 not in app._stalled_partitions)
 
 
@@ -475,7 +478,7 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
     committed: list[tuple[int, int]] = []
 
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app)
 
     async def record_commit(offsets: dict[int, int]) -> None:
         for pid, off in offsets.items():
@@ -488,7 +491,7 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
         handler=SimpleHandler(),
         executor_pool=echo_pool,
         window_size=10,
-        on_commit=app._handle_commit,
+        on_commit=app.kafka_source._handle_commit,
     )
     app._processors[4] = proc
     proc.start()
@@ -496,7 +499,7 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
 
     # Revoke with the message still unprocessed: the drain inside
     # _stop_processor must finish it AND commit before _on_revoke returns.
-    await app._lifecycle._on_revoke([4])
+    await app.kafka_source.on_revoke([4])
 
     # No wait_for here: by the time _on_revoke returns, the commit must
     # ALREADY have happened. Polling would hide an early return.

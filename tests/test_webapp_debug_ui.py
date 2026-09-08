@@ -75,11 +75,11 @@ def _make_mock_app(*, webapp_enabled: bool = False) -> MagicMock:
     app._executor_pool = MagicMock(active_count=0, waiting_count=0, max_executors=8)
     app._consumer = None
 
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     if webapp_enabled:
         # ``WebAppConfig`` requires a non-default ``path`` length > 1 — the
         # default ``/process`` already satisfies this.
-        cfg.webapp = WebAppConfig(
+        cfg.sources.http = WebAppConfig(
             enabled=True,
             clients=[
                 WebClientConfig(name='tenant-A', token='', rpm=10),

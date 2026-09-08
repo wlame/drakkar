@@ -49,8 +49,8 @@ Clients never name a raw Kafka topic. The `{alias}` in the path is one of:
 
 | Alias | Resolves to |
 |-------|-------------|
-| `source` | The pipeline input topic (`kafka.source_topic`) |
-| `dlq` | The dead-letter topic (`dlq.topic`, or its `{source_topic}_dlq` default) |
+| `source` | The pipeline input topic (`sources.kafka.topic`). **Unavailable when the Kafka source is disabled**: the worker consumes no topic, and the alias answers 404 with `alias 'source' is not available: the Kafka source is disabled`. |
+| `dlq` | The resolved DLQ topic: `dlq.topic`, or its `{sources.kafka.topic}_dlq` default. **Unavailable when the DLQ is off** — no `dlq.topic` and no Kafka source ([the rule](sources.md#the-dlq-without-the-kafka-source)) — answering 404 with `alias 'dlq' is not available: the DLQ is disabled (set dlq.topic)`. |
 | *sink instance name* | That Kafka sink's `topic` — e.g. a sink configured as `sinks.kafka.search-results-kafka-sink` is readable as alias `search-results-kafka-sink` |
 
 Raw topic names and broker addresses appear nowhere in the API — not in

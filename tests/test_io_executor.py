@@ -11,7 +11,7 @@ from drakkar.lifecycle import AppLifecycle
 
 
 def make_lifecycle(max_threads: int) -> AppLifecycle:
-    config = DrakkarConfig()
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     config.io.max_threads = max_threads
     lifecycle = AppLifecycle.__new__(AppLifecycle)
     lifecycle._app = SimpleNamespace(_config=config)

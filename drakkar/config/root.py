@@ -24,6 +24,7 @@ from drakkar.config.runtime import (
     ThroughputConfig,
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
+from drakkar.config.sources import SourcesConfig
 from drakkar.config.ui import UIConfig
 from drakkar.config.webapp import WebAppConfig
 
@@ -61,6 +62,19 @@ class DrakkarConfig(BaseSettings):
             )
         return values
 
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_top_level_webapp(cls, values: object) -> object:
+        """Refuse a top-level ``webapp:`` key — the section moved under ``sources.http``.
+
+        A dedicated check rather than relying on ``extra='forbid'`` alone,
+        so the error names the new location instead of pydantic's generic
+        "extra fields not permitted" message.
+        """
+        if isinstance(values, dict) and 'webapp' in values:
+            raise ValueError('webapp: moved to sources.http (see docs/sources.md)')
+        return values
+
     worker_name_env: str = Field(
         default='WORKER_ID',
         description='Environment variable that holds the worker name for logs, metrics, and UI',
@@ -85,7 +99,7 @@ class DrakkarConfig(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
-    webapp: WebAppConfig = Field(default_factory=WebAppConfig)
+    sources: SourcesConfig = Field(default_factory=SourcesConfig)
     app: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -94,30 +108,72 @@ class DrakkarConfig(BaseSettings):
         ),
     )
 
+    @model_validator(mode='after')
+    def _require_one_source_enabled(self) -> 'DrakkarConfig':
+        """At least one of ``sources.kafka``/``sources.http`` must be enabled.
+
+        Checked here rather than on ``SourcesConfig`` itself, so a bare
+        ``SourcesConfig()`` (both sources off) stays constructible on its
+        own — the requirement is about a runnable worker, not about the
+        section in isolation.
+        """
+        if not self.sources.enabled_names:
+            raise ValueError('no input source enabled: set sources.kafka.enabled or sources.http.enabled')
+        return self
+
+    @property
+    def dlq_enabled(self) -> bool:
+        """Whether a DLQ producer is built: always with the Kafka source, otherwise only with an explicit ``dlq.topic``."""
+        return self.sources.kafka.enabled or bool(self.dlq.topic)
+
+    @property
+    def resolved_consumer_group(self) -> str:
+        """The consumer group this worker joins; ``''`` when the Kafka source is off.
+
+        A worker with no Kafka source joins no group, so reporting the
+        ``sources.kafka.consumer_group`` default would put it in every
+        group-scoped log filter and dashboard query it has nothing to do
+        with. Read by the ``worker_info`` metric and by logging setup.
+        """
+        return self.sources.kafka.consumer_group if self.sources.kafka.enabled else ''
+
+    @property
+    def resolved_dlq_topic(self) -> str:
+        """The DLQ topic the worker will use; ``''`` when the DLQ is off."""
+        if self.dlq.topic:
+            return self.dlq.topic
+        if self.sources.kafka.enabled:
+            return f'{self.sources.kafka.topic}_dlq'
+        return ''
+
     def config_summary(self, worker_id: str = '', cluster_name: str = '') -> str:
         """One-line human-readable config summary for startup logging and debug UI.
 
-        Format (Option C — structured-but-readable):
-        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s ui=on:8080 webapp=on:8090 cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        Format:
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
-        The ``ui`` token reports the UI server state; the ``ui.release``
-        bundle-fetch settings are deliberately excluded (they never affect
-        pipeline behavior). The exact bytes are contractual.
-
-        The ``webapp`` token reports the synchronous-ingress server
-        (``webapp.host``/``port`` bind; port shown, host omitted like the
-        other tokens).
+        ``sources=[...]`` lists the enabled input sources in fixed order
+        (kafka, then http). The ``ui`` token reports the UI server state;
+        the ``ui.release`` bundle-fetch settings are deliberately excluded
+        (they never affect pipeline behavior). The exact bytes are
+        contractual.
         """
         identity = worker_id or '?'
         if cluster_name:
             identity = f'{identity}/{cluster_name}'
 
+        source_tokens: list[str] = []
+        if self.sources.kafka.enabled:
+            k = self.sources.kafka
+            source_tokens.append(f'kafka:{k.topic}/{k.consumer_group}/{k.max_poll_records}poll')
+        if self.sources.http.enabled:
+            source_tokens.append(f'http:{self.sources.http.port}')
+
         ex = self.executor
-        exec_part = f'{ex.max_executors}w/{ex.window_size}win/{self.kafka.max_poll_records}poll'
+        exec_part = f'{ex.max_executors}w/{ex.window_size}win'
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
         ui_part = f'on:{self.ui.port}' if self.ui.enabled else 'off'
-        webapp_part = f'on:{self.webapp.port}' if self.webapp.enabled else 'off'
 
         # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
         # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping
@@ -135,8 +191,12 @@ class DrakkarConfig(BaseSettings):
 
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
 
-        dlq_topic = self.dlq.topic or f'{self.kafka.source_topic}_dlq'
-        dlq_part = dlq_topic if self.dlq.topic else 'on'
+        if not self.dlq_enabled:
+            dlq_part = 'off'
+        elif self.dlq.topic:
+            dlq_part = self.dlq.topic
+        else:
+            dlq_part = 'on'
 
         sink_parts: list[str] = []
         abbrevs = {
@@ -154,12 +214,10 @@ class DrakkarConfig(BaseSettings):
 
         return (
             f'[{identity}]'
-            f' topic={self.kafka.source_topic}'
-            f' group={self.kafka.consumer_group}'
+            f' sources=[{" ".join(source_tokens)}]'
             f' exec={exec_part}'
             f' retries={retries_part}'
             f' ui={ui_part}'
-            f' webapp={webapp_part}'
             f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'
@@ -211,23 +269,26 @@ def _apply_list_field_defaults(merged: dict) -> dict:
     """Ensure list-of-objects env-var overrides do not erase default entries.
 
     When env-vars target individual list elements (e.g.
-    ``DK_WEBAPP__CLIENTS__0__RPM=10``), the parser produces a partial list
-    like ``[{'rpm': '10'}]`` with no other fields. If the YAML did not
-    supply ``webapp.clients`` at all, Pydantic would now see this partial
-    list as the entire value and reject it for missing required fields
-    (``name``). To preserve the documented behaviour — env-vars override
-    individual fields without forcing operators to repeat the defaults —
-    we deep-merge the default ``WebAppConfig`` clients list under the
-    partial override before construction.
+    ``DK_SOURCES__HTTP__CLIENTS__0__RPM=10``), the parser produces a partial
+    list like ``[{'rpm': '10'}]`` with no other fields. If the YAML did not
+    supply ``sources.http.clients`` at all, Pydantic would now see this
+    partial list as the entire value and reject it for missing required
+    fields (``name``). To preserve the documented behaviour — env-vars
+    override individual fields without forcing operators to repeat the
+    defaults — we deep-merge the default ``WebAppConfig`` clients list
+    under the partial override before construction.
 
-    This is intentionally narrow (only ``webapp.clients`` for now). If
-    another list-of-objects field needs the same treatment later, add it
+    This is intentionally narrow (only ``sources.http.clients`` for now).
+    If another list-of-objects field needs the same treatment later, add it
     here with a small helper rather than introducing a generic mechanism.
     """
-    webapp = merged.get('webapp')
-    if not isinstance(webapp, dict):
+    sources = merged.get('sources')
+    if not isinstance(sources, dict):
         return merged
-    clients_override = webapp.get('clients')
+    http = sources.get('http')
+    if not isinstance(http, dict):
+        return merged
+    clients_override = http.get('clients')
     if not isinstance(clients_override, list):
         return merged
     # Build the default clients list from the WebAppConfig default factory
@@ -235,11 +296,12 @@ def _apply_list_field_defaults(merged: dict) -> dict:
     # fresh WebAppConfig() to dict form so we are guaranteed to track any
     # future changes to the default list.
     default_clients = [c.model_dump() for c in WebAppConfig().clients]
-    merged_clients = _deep_merge(default_clients, clients_override)
-    new_webapp = dict(webapp)
-    new_webapp['clients'] = merged_clients
+    new_http = dict(http)
+    new_http['clients'] = _deep_merge(default_clients, clients_override)
+    new_sources = dict(sources)
+    new_sources['http'] = new_http
     new_merged = dict(merged)
-    new_merged['webapp'] = new_webapp
+    new_merged['sources'] = new_sources
     return new_merged
 
 
@@ -247,10 +309,11 @@ def _parse_env_overrides(prefix: str, delimiter: str, *, skip_config_key: bool =
     """Extract env vars with prefix, split by delimiter into nested dict.
 
     Numeric path segments are detected and the surrounding dict is
-    converted to a list (e.g. ``DK_WEBAPP__CLIENTS__0__RPM=10`` becomes
-    ``{'webapp': {'clients': [{'rpm': '10'}]}}``). This lets list-of-objects
-    config fields (like ``webapp.clients``) be overridden by env vars in
-    the same nested-delimiter style as scalar fields.
+    converted to a list (e.g. ``DK_SOURCES__HTTP__CLIENTS__0__RPM=10``
+    becomes ``{'sources': {'http': {'clients': [{'rpm': '10'}]}}}``). This
+    lets list-of-objects config fields (like ``sources.http.clients``) be
+    overridden by env vars in the same nested-delimiter style as scalar
+    fields.
 
     ``skip_config_key`` drops ``<prefix>CONFIG`` — the framework's own
     config-file-path convention (``DK_CONFIG``). The app-config loader
@@ -308,8 +371,9 @@ def _deep_merge(base: Any, override: Any) -> Any:
     override's i-th element overrides base's i-th element (recursively
     if both are dicts), and any extra base elements past the override's
     length are preserved. This supports the env-var override pattern
-    where ``DK_WEBAPP__CLIENTS__0__RPM=10`` should change only the first
-    client's rpm without dropping the rest of the clients defined in YAML.
+    where ``DK_SOURCES__HTTP__CLIENTS__0__RPM=10`` should change only the
+    first client's rpm without dropping the rest of the clients defined
+    in YAML.
     """
     if isinstance(base, dict) and isinstance(override, dict):
         result_dict: dict[Any, Any] = dict(base)

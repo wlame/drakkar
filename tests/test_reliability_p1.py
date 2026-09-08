@@ -26,6 +26,7 @@ from drakkar.config import (
     ExecutorConfig,
     KafkaConfig,
     KafkaSinkConfig,
+    KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -46,7 +47,7 @@ from drakkar.models import (
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.kafka import KafkaSink
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
 
@@ -77,7 +78,8 @@ def echo_pool() -> ExecutorPool:
 @pytest.fixture
 def app_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10, window_size=5),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
@@ -124,7 +126,7 @@ async def test_suppressed_processor_neither_delivers_nor_commits(echo_pool):
 async def test_stop_processor_drain_timeout_sets_suppression(app_config):
     app_config.executor.drain_timeout_seconds = 0.05
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
 
     proc = PartitionProcessor(
         partition_id=0,
@@ -135,7 +137,7 @@ async def test_stop_processor_drain_timeout_sets_suppression(app_config):
     # A pending offset that never completes wedges drain until the timeout.
     proc._offset_tracker.register(42)
 
-    await app._lifecycle._stop_processor(proc)
+    await app.kafka_source._stop_processor(proc)
 
     assert proc._deliveries_suppressed, 'drain timeout must mark in-flight tasks as zombies'
     app._consumer.commit.assert_not_called()
@@ -174,7 +176,7 @@ async def test_drain_all_processors_uses_snapshot_not_live_dict(app_config):
     # NOT registered in app._processors — simulates the revoke-pop race.
     assert app._processors == {}
 
-    await app._lifecycle._drain_all_processors([ghost])
+    await app.kafka_source._drain_all_processors([ghost])
 
     assert ghost.drained, 'snapshot processors must be drained even after being popped'
 
@@ -347,30 +349,35 @@ async def test_on_delivery_error_raise_records_breaker_failure(app_config):
 
 @pytest.fixture
 def kafka_config() -> KafkaConfig:
-    return KafkaConfig(brokers='localhost:9092', source_topic='test-source', consumer_group='g')
+    return KafkaConfig(brokers='localhost:9092')
+
+
+@pytest.fixture
+def kafka_source_config() -> KafkaSourceConfig:
+    return KafkaSourceConfig(enabled=True, topic='test-source', consumer_group='g')
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_counts_error_on_committed_failure(mock_cls, kafka_config):
+async def test_get_total_lag_counts_error_on_committed_failure(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.committed.side_effect = RuntimeError('broker election')
     mock_cls.return_value = mock_inner
 
     before = consumer_errors._value.get()
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     assert await consumer.get_total_lag([0, 1]) == 0
     assert consumer_errors._value.get() == before + 1
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag_counts_errors_per_failed_watermark(mock_cls, kafka_config):
+async def test_get_partition_lag_counts_errors_per_failed_watermark(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.committed.return_value = []
     mock_inner.get_watermark_offsets.side_effect = RuntimeError('broker election')
     mock_cls.return_value = mock_inner
 
     before = consumer_errors._value.get()
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0, 1])
     assert result[0]['lag'] == 0
     assert result[1]['lag'] == 0

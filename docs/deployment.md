@@ -5,7 +5,7 @@
 Before anything below: **a Drakkar worker belongs on a trusted, private
 network.** It serves up to three HTTP ports — the operator UI
 (`ui.port`, default 8080), the optional webapp ingress
-(`webapp.port`, default 8090) and the optional Prometheus exporter
+(`sources.http.port`, default 8090) and the optional Prometheus exporter
 (`metrics.port`, default 9090) — and none of them is designed to face an
 untrusted network. Bind them where only your own infrastructure can reach
 them, and put a reverse proxy in front of anything that must travel
@@ -105,7 +105,7 @@ readinessProbe:
 The ``initialDelaySeconds: 10`` on the readiness probe accommodates the
 worker's cold-start sequence: loading config, connecting to Kafka, and
 bringing up sinks. Tune upward if the cluster-align wait
-(``kafka.startup_align_enabled``) or a large sink fleet extends the
+(``sources.kafka.startup_align_enabled``) or a large sink fleet extends the
 cold-start budget.
 
 ### Rolling restarts

@@ -123,7 +123,8 @@ def test_extra_keys_forbidden():
 def _minimal_config(ui: UIConfig | None = None, sinks: SinksConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__ (mirrors tests/test_uipages.py)."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=sinks or SinksConfig(),
         metrics=MetricsConfig(enabled=False),

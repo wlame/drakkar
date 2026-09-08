@@ -16,7 +16,7 @@ given deployment happens to use.
 
 Secret masking happens here, not in :mod:`drakkar.configmeta` (which never
 sees a live value): any field with ``secret=True`` whose live value is
-non-empty is replaced by :data:`SECRET_MASK`. ``webapp.clients`` is a
+non-empty is replaced by :data:`SECRET_MASK`. ``sources.http.clients`` is a
 special case — see its docstring caveat in ``drakkar.configmeta._walk`` —
 because it is one un-decomposed ``array`` leaf whose elements embed a
 per-client ``token`` that IS secret at the ``WebClientConfig`` model level
@@ -126,8 +126,8 @@ def _expand_path(node: Any, segments: list[str]) -> list[tuple[list[str], Any]]:
     return [([head, *tail_segments], value) for tail_segments, value in _expand_path(node[head], rest)]
 
 
-def _mask_webapp_clients(clients: Any) -> Any:
-    """Deep-copy ``webapp.clients`` and mask each element's non-empty ``token``.
+def _mask_http_clients(clients: Any) -> Any:
+    """Deep-copy ``sources.http.clients`` and mask each element's non-empty ``token``.
 
     See the module docstring: the metadata tree has no per-element path for
     ``WebClientConfig.token``, so the top-level ``secret`` flag (always
@@ -170,7 +170,7 @@ def _mask_env_dict(values: Any) -> Any:
 # metadata path, wildcards included — matched against ``field_meta.path``,
 # which is the un-expanded template.
 _DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
-    'webapp.clients': _mask_webapp_clients,
+    'sources.http.clients': _mask_http_clients,
     'executor.env': _mask_env_dict,
     'kafka.client_config': _mask_env_dict,
     'dlq.client_config': _mask_env_dict,
@@ -308,7 +308,7 @@ def create_config_reference_router(deps: UIDeps) -> APIRouter:
 
         Every ``secret``-flagged field with a non-empty live value is
         replaced by a fixed six-bullet mask before it leaves the process;
-        ``webapp.clients`` is masked element-by-element (its ``token``
+        ``sources.http.clients`` is masked element-by-element (its ``token``
         field) since it has no per-element metadata path of its own.
         """
         config_dump = deps.drakkar_app._config.model_dump(mode='json')

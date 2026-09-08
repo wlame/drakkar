@@ -35,12 +35,18 @@ data:
 
     kafka:
       brokers: "<kafka_brokers>"  # <-- e.g. "kafka-bootstrap.kafka:9092"
-      source_topic: "<source_topic>"  # <-- e.g. "input-events"
-      consumer_group: "drakkar-workers"
-      max_poll_records: 100
-      max_poll_interval_ms: 300000
-      session_timeout_ms: 45000
-      heartbeat_interval_ms: 3000
+
+    sources:
+      # At least one input source must be enabled or the worker refuses
+      # to start. The HTTP ingress (sources.http) is off by default.
+      kafka:
+        enabled: true
+        topic: "<source_topic>"  # <-- e.g. "input-events"
+        consumer_group: "drakkar-workers"
+        max_poll_records: 100
+        max_poll_interval_ms: 300000
+        session_timeout_ms: 45000
+        heartbeat_interval_ms: 3000
 
     executor:
       binary_path: "<binary_path>"  # <-- e.g. "/usr/local/bin/my-handler"
@@ -59,7 +65,7 @@ data:
           topic: "<output_topic>"  # <-- e.g. "output-results"
 
     dlq:
-      # Empty topic auto-derives "<source_topic>_dlq".
+      # Empty topic auto-derives "<sources.kafka.topic>_dlq".
       topic: ""
 
     metrics:

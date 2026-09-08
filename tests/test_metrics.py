@@ -18,6 +18,7 @@ from drakkar.config import (
     ExecutorConfig,
     KafkaConfig,
     KafkaSinkConfig,
+    KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -51,9 +52,16 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.partition import PartitionProcessor
-from tests.conftest import wait_for
+from tests.conftest import wait_for, wire_kafka_source
 
 # --- Helpers ---
+
+
+class ArrangeHandler(BaseDrakkarHandler):
+    """Minimal handler that satisfies the Kafka source's arrange() requirement."""
+
+    async def arrange(self, messages, pending):
+        return []
 
 
 def counter_val(counter, **labels):
@@ -122,14 +130,19 @@ def make_kafka_ok_msg(partition=0, offset=0, value=b'v'):
 
 @pytest.fixture
 def kafka_config():
-    return KafkaConfig(brokers='localhost:9092', source_topic='src')
+    return KafkaConfig(brokers='localhost:9092')
+
+
+@pytest.fixture
+def kafka_source_config():
+    return KafkaSourceConfig(enabled=True, topic='src', consumer_group='test-group')
 
 
 # === Consumer metrics ===
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_error_increments_consumer_errors(mock_cls, kafka_config):
+async def test_poll_error_increments_consumer_errors(mock_cls, kafka_config, kafka_source_config):
     """When poll returns a non-EOF error, consumer_errors counter goes up."""
     mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
@@ -138,14 +151,14 @@ async def test_poll_error_increments_consumer_errors(mock_cls, kafka_config):
     ]
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     before = counter_val(consumer_errors)
     await consumer.poll_batch(timeout=0.1)
     assert counter_val(consumer_errors) == before + 2
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_poll_eof_does_not_increment_consumer_errors(mock_cls, kafka_config):
+async def test_poll_eof_does_not_increment_consumer_errors(mock_cls, kafka_config, kafka_source_config):
     """Partition EOF is not an error — should not touch consumer_errors."""
     mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
@@ -153,19 +166,19 @@ async def test_poll_eof_does_not_increment_consumer_errors(mock_cls, kafka_confi
     ]
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     before = counter_val(consumer_errors)
     await consumer.poll_batch(timeout=0.1)
     assert counter_val(consumer_errors) == before
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_rebalance_assign_increments_metric(mock_cls, kafka_config):
+async def test_rebalance_assign_increments_metric(mock_cls, kafka_config, kafka_source_config):
     """_handle_assign from Kafka triggers rebalance_events(type=assign)."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.subscribe()
 
     before = counter_val(rebalance_events, type='assign')
@@ -175,12 +188,12 @@ async def test_rebalance_assign_increments_metric(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_rebalance_revoke_increments_metric(mock_cls, kafka_config):
+async def test_rebalance_revoke_increments_metric(mock_cls, kafka_config, kafka_source_config):
     """_handle_revoke from Kafka triggers rebalance_events(type=revoke)."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     await consumer.subscribe()
 
     before = counter_val(rebalance_events, type='revoke')
@@ -190,12 +203,12 @@ async def test_rebalance_revoke_increments_metric(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_commit_increments_offsets_committed(mock_cls, kafka_config):
+async def test_commit_increments_offsets_committed(mock_cls, kafka_config, kafka_source_config):
     """consumer.commit() increments offsets_committed per partition."""
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    consumer = KafkaConsumer(kafka_config)
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     before_p0 = counter_val(offsets_committed, partition='0')
     before_p3 = counter_val(offsets_committed, partition='3')
 
@@ -211,7 +224,7 @@ async def test_commit_increments_offsets_committed(mock_cls, kafka_config):
 async def test_enqueue_increments_consumed_and_sets_queue_size():
     """PartitionProcessor.enqueue() increments messages_consumed and sets queue_size."""
     pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    handler = BaseDrakkarHandler()
+    handler = ArrangeHandler()
     proc = PartitionProcessor(partition_id=77, handler=handler, executor_pool=pool, window_size=10)
 
     before = counter_val(messages_consumed, partition='77')
@@ -487,15 +500,16 @@ async def test_on_assign_sets_assigned_partitions_gauge():
 
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
+        sources={'kafka': {'enabled': True}},
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-    handler = BaseDrakkarHandler()
+    handler = ArrangeHandler()
     app = DrakkarApp(handler=handler, config=config)
-    app._consumer = MagicMock()
+    wire_kafka_source(app, MagicMock())
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
-    app._lifecycle._on_assign([10, 11, 12])
+    app.kafka_source.on_assign([10, 11, 12])
 
     assert gauge_val(assigned_partitions) == len(app.processors)
 
@@ -509,18 +523,19 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
 
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
+        sources={'kafka': {'enabled': True}},
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-    handler = BaseDrakkarHandler()
+    handler = ArrangeHandler()
     app = DrakkarApp(handler=handler, config=config)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
-    app._lifecycle._on_assign([20, 21, 22])
+    app.kafka_source.on_assign([20, 21, 22])
     assert gauge_val(assigned_partitions) == len(app.processors)
 
-    await app._lifecycle._on_revoke([21])
+    await app.kafka_source.on_revoke([21])
     await wait_for(lambda: gauge_val(assigned_partitions) == len(app.processors))
 
     for proc in list(app.processors.values()):
@@ -533,11 +548,12 @@ async def test_handle_collect_delivers_to_sinks():
 
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
+        sources={'kafka': {'enabled': True}},
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='t')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-    handler = BaseDrakkarHandler()
+    handler = ArrangeHandler()
     app = DrakkarApp(handler=handler, config=config)
 
     # build sinks then mock the deliver method
@@ -771,18 +787,19 @@ class TestCollectAllMetrics:
 
 
 async def test_total_waiting_excludes_inflight():
-    """_total_waiting() counts only queue sizes, not in-flight tasks."""
+    """total_waiting() counts only queue sizes, not in-flight tasks."""
     from drakkar.app import DrakkarApp
     from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
 
     config = DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
     )
-    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app = DrakkarApp(handler=ArrangeHandler(), config=config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
+    wire_kafka_source(app, AsyncMock())
     app._running = True
-    app._lifecycle._on_assign([0])
+    app.kafka_source.on_assign([0])
     await asyncio.sleep(0.01)
 
     # put 5 in queue, simulate 3 inflight
@@ -791,8 +808,8 @@ async def test_total_waiting_excludes_inflight():
         app.processors[0]._queue.put_nowait(msg)
     app.processors[0]._inflight_count = 3
 
-    assert app._total_waiting() == 5  # only queue
-    assert app._total_queued() == 8  # queue + inflight
+    assert app.kafka_source.total_waiting() == 5  # only queue
+    assert app.kafka_source.total_queued() == 8  # queue + inflight
 
     for proc in app.processors.values():
         await proc.stop()

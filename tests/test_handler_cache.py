@@ -144,7 +144,8 @@ def _make_config_with_cache(
 ) -> DrakkarConfig:
     """Build a DrakkarConfig with a working cache+debug setup rooted at tmp_path."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        kafka=KafkaConfig(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
@@ -325,7 +326,7 @@ async def test_shutdown_stops_cache_before_recorder(tmp_path) -> None:
     order: list[str] = []
 
     # Stub the consumer and dlq sink — _shutdown touches them too.
-    app._consumer = AsyncMock()
+    app.kafka_source.consumer = AsyncMock()
     app._dlq_sink = AsyncMock()
 
     # Mock CacheEngine.stop and EventRecorder.stop with side-effects that
@@ -370,7 +371,7 @@ async def test_shutdown_skips_cache_stop_when_engine_not_started(tmp_path) -> No
     config = _make_config_with_cache(tmp_path, cache_enabled=False, debug_enabled=False)
     app = DrakkarApp(handler=handler, config=config, worker_id='w1')
 
-    app._consumer = AsyncMock()
+    app.kafka_source.consumer = AsyncMock()
     app._dlq_sink = AsyncMock()
     app._recorder = AsyncMock()
     app._ui_server = AsyncMock()

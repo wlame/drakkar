@@ -27,10 +27,12 @@ from drakkar.config import DLQConfig, DrakkarConfig, KafkaConfig, KafkaSinkConfi
 from drakkar.kafka_read import (
     STREAM_LIMIT_MAX,
     AliasTarget,
+    KafkaReadError,
     KafkaReadNotFound,
     KafkaReadUnavailable,
     build_alias_table,
     fetch_message,
+    resolve_alias,
     stream_messages,
 )
 from drakkar.kafka_security import KafkaSecurityConfig
@@ -183,7 +185,8 @@ def _target(topic: str = 'orders') -> AliasTarget:
 
 def _config_with_sinks(**kafka_overrides) -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='main:9092', source_topic='input-events', **kafka_overrides),
+        kafka=KafkaConfig(brokers='main:9092', **kafka_overrides),
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
         sinks=SinksConfig(
             kafka={
                 'search-results-kafka-sink': KafkaSinkConfig(topic='search-results'),
@@ -229,13 +232,60 @@ def test_alias_table_sink_without_brokers_inherits_consumer_credentials():
 
 def test_alias_table_sink_shadowing_reserved_alias_is_skipped():
     config = DrakkarConfig(
-        kafka=KafkaConfig(source_topic='input-events'),
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
         sinks=SinksConfig(kafka={'dlq': KafkaSinkConfig(topic='not-the-real-dlq')}),
     )
     table = build_alias_table(config)
     # the reserved meaning wins; the sink is not readable under 'dlq'
     assert table['dlq'].kind == 'dlq'
     assert table['dlq'].topic == 'input-events_dlq'
+
+
+def _http_only_config(**overrides) -> DrakkarConfig:
+    """A worker with the Kafka source off and only the HTTP source enabled."""
+    return DrakkarConfig(
+        ui={'release': {'enabled': False}},
+        executor={'binary_path': '/usr/bin/echo'},
+        sources={'http': {'enabled': True}},
+        **overrides,
+    )
+
+
+def test_alias_table_without_kafka_source_has_no_source_alias_and_dlq_only_with_topic():
+    table = build_alias_table(_http_only_config())
+    assert 'source' not in table and 'dlq' not in table
+    table_with_dlq = build_alias_table(_http_only_config(dlq={'topic': 'd'}))
+    assert table_with_dlq['dlq'].topic == 'd'
+
+
+def test_resolve_source_alias_error_names_the_disabled_source():
+    with pytest.raises(KafkaReadError, match="alias 'source' is not available: the Kafka source is disabled"):
+        resolve_alias(_http_only_config(), 'source')
+
+
+def test_sink_named_after_a_reserved_alias_is_skipped_even_when_the_source_is_off():
+    """A reserved name stays reserved whatever the config says.
+
+    With no Kafka source and no DLQ topic neither alias is in the table, so
+    a sink instance called ``source`` would otherwise claim the name and a
+    read of ``source`` would silently return the sink's topic instead of
+    failing with "the Kafka source is disabled".
+    """
+    config = _http_only_config(sinks=SinksConfig(kafka={'source': KafkaSinkConfig(topic='a-plain-sink-topic')}))
+    assert build_alias_table(config) == {}
+    with pytest.raises(KafkaReadError, match="alias 'source' is not available: the Kafka source is disabled"):
+        resolve_alias(config, 'source')
+
+
+def test_resolve_dlq_alias_error_names_the_disabled_dlq():
+    with pytest.raises(KafkaReadError, match="alias 'dlq' is not available: the DLQ is disabled"):
+        resolve_alias(_http_only_config(), 'dlq')
+
+
+def test_resolve_alias_returns_the_target_when_present():
+    cfg = _config_with_sinks()
+    target = resolve_alias(cfg, 'source')
+    assert target.topic == 'input-events'
 
 
 # ---------------------------------------------------------------------------

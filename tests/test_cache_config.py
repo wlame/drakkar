@@ -120,7 +120,7 @@ def test_cache_peer_sync_config_has_no_resolution_cache_knob():
 
 
 def test_drakkar_config_has_cache_field():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}}, executor=ExecutorConfig(binary_path='/bin/true'))
     assert isinstance(cfg.cache, CacheConfig)
     # default: disabled
     assert cfg.cache.enabled is False
@@ -132,7 +132,7 @@ def test_drakkar_config_has_cache_field():
 def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
 
 
@@ -143,7 +143,7 @@ def test_cache_config_env_override_nested_peer_sync(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
     monkeypatch.setenv('DK_CACHE__PEER_SYNC__INTERVAL_SECONDS', '60')
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
     assert cfg.cache.peer_sync.interval_seconds == 60.0
 
@@ -151,12 +151,12 @@ def test_cache_config_env_override_nested_peer_sync(monkeypatch: pytest.MonkeyPa
 def test_cache_config_env_override_db_dir(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__DB_DIR', '/srv/cache')
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.db_dir == '/srv/cache'
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__MAX_MEMORY_ENTRIES', '2000')
-    cfg = DrakkarConfig()
+    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.max_memory_entries == 2000

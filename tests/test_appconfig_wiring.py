@@ -56,7 +56,8 @@ class UndeclaredHandler(BaseDrakkarHandler):
 
 def make_config(**overrides) -> DrakkarConfig:
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        'kafka': KafkaConfig(brokers='localhost:9092'),
+        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
         'executor': ExecutorConfig(binary_path='/bin/echo'),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),

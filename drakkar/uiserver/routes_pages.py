@@ -174,7 +174,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         * ``drakkar_webapp_inflight`` — current in-flight request count from
           the prometheus Gauge (via the private ``_value.get()`` accessor that
           the recorder tests already use).
-        * ``webapp.clients`` config — name + per-client rpm cap. The webapp's
+        * ``sources.http.clients`` config — name + per-client rpm cap. The webapp's
           rate-limit dependency persists no live counter, so the tile only
           surfaces the configured cap (operators alert on the rpm metric for
           actual rates).
@@ -191,7 +191,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
           through the shared ``flush_and_select`` helper so the reader
           connection stays on the main loop.
         """
-        webapp_cfg = drakkar_app._config.webapp
+        webapp_cfg = drakkar_app._config.sources.http
         if not webapp_cfg.enabled:
             return None
         # Read the gauge directly. ``Gauge._value.get()`` is the single-process
@@ -372,7 +372,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'pool_max': pool.max_executors if pool else 0,
             'total_lag': total_lag,
         }
-        # Webapp tile is only included when ``webapp.enabled``. Keeping the
+        # Webapp tile is only included when ``sources.http.enabled``. Keeping the
         # key absent (rather than ``None``) lets the JS dashboard treat its
         # presence as the feature flag without a separate boolean.
         if webapp_tile is not None:
