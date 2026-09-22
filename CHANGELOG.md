@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-22
+
 ### Fixed
 
 - **The HTTP source now counts its drain timeouts.** When in-flight HTTP
