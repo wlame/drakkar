@@ -1,12 +1,15 @@
 """Tests for Drakkar Kafka consumer wrapper."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from confluent_kafka import OFFSET_INVALID, KafkaError, TopicPartition
 from structlog.testing import capture_logs
 
 from drakkar.config import KafkaConfig, KafkaSourceConfig
 from drakkar.consumer import CONSUMER_MAX_WORKERS, LAG_QUERY_TIMEOUT_SECONDS, KafkaConsumer
+from drakkar.metrics import consumer_errors
 
 
 @pytest.fixture
@@ -303,18 +306,6 @@ async def test_consumer_pool_is_larger_than_the_two_thread_default(mock_cls, kaf
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_committed_exception(mock_cls, kafka_config, kafka_source_config):
-    """get_total_lag returns 0 when committed() raises."""
-    mock_inner = AsyncMock()
-    mock_inner.committed.side_effect = RuntimeError('broker unreachable')
-    mock_cls.return_value = mock_inner
-
-    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
-    total = await consumer.get_total_lag([0, 1])
-    assert total == 0
-
-
-@patch('drakkar.consumer.AIOConsumer')
 async def test_get_total_lag_watermark_exception(mock_cls, kafka_config, kafka_source_config):
     """Watermark exception for one partition yields 0 lag for that partition only."""
     from confluent_kafka import TopicPartition
@@ -367,8 +358,8 @@ async def test_get_partition_lag(mock_cls, kafka_config, kafka_source_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag_exception_returns_zeros(mock_cls, kafka_config, kafka_source_config):
-    """get_partition_lag returns zeros for a partition when an exception occurs."""
+async def test_get_partition_lag_watermark_failure_returns_zero_lag(mock_cls, kafka_config, kafka_source_config):
+    """A failed watermark query yields zero lag; nothing known about the commit reads as None."""
     mock_inner = AsyncMock()
     mock_inner.get_watermark_offsets.side_effect = RuntimeError('connection lost')
     mock_cls.return_value = mock_inner
@@ -376,54 +367,163 @@ async def test_get_partition_lag_exception_returns_zeros(mock_cls, kafka_config,
     consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0])
 
-    assert result[0] == {'committed': 0, 'high_watermark': 0, 'lag': 0}
+    assert result[0] == {'committed': None, 'high_watermark': 0, 'lag': 0}
 
 
-@patch('drakkar.consumer.AIOConsumer')
-async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config, kafka_source_config):
-    """Partitions with negative committed offset (no commit yet) use 0 as baseline."""
-    from confluent_kafka import TopicPartition
+LOW_WATERMARK = 10
+HIGH_WATERMARK = 100
 
+
+def make_lag_consumer(mock_cls, connection, source, committed_rows):
+    """A KafkaConsumer whose broker reports the module watermarks and the given committed() rows."""
     mock_inner = AsyncMock()
+    mock_inner.get_watermark_offsets.return_value = (LOW_WATERMARK, HIGH_WATERMARK)
+    mock_inner.committed.return_value = committed_rows
     mock_cls.return_value = mock_inner
-
-    # offset -1001 means no committed offset
-    tp0 = TopicPartition(kafka_source_config.topic, 0, -1001)
-    mock_inner.committed.return_value = [tp0]
-
-    async def fake_watermarks(tp, *, timeout=None):
-        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
-        return (0, 50)
-
-    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
-
-    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
-    total = await consumer.get_total_lag([0])
-    # no committed offset → committed_map has no entry → lag = max(0, 50 - 0) = 50
-    assert total == 50
+    return KafkaConsumer(connection=connection, source=source)
 
 
+def committed_row_with_error(partition):
+    """A committed() row that carries a per-partition error.
+
+    ``TopicPartition.error`` is read-only from Python, so this stand-in has
+    the attributes the lag code reads.
+    """
+    return SimpleNamespace(
+        partition=partition,
+        offset=OFFSET_INVALID,
+        error=KafkaError(KafkaError.REQUEST_TIMED_OUT),
+    )
+
+
+@pytest.mark.parametrize(
+    ('broker_offset', 'own_commit', 'expected_committed', 'expected_lag'),
+    [
+        pytest.param(90, None, 90, 10, id='broker-only'),
+        pytest.param(OFFSET_INVALID, 95, 95, 5, id='broker-missing-uses-own-commit'),
+        pytest.param(90, 95, 95, 5, id='larger-of-both'),
+        pytest.param(0, None, 0, HIGH_WATERMARK, id='broker-zero-is-a-real-offset'),
+        pytest.param(OFFSET_INVALID, None, None, HIGH_WATERMARK - LOW_WATERMARK, id='nothing-known'),
+    ],
+)
 @patch('drakkar.consumer.AIOConsumer')
-async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_config, kafka_source_config):
-    """Partition with negative committed offset uses 0."""
-    from confluent_kafka import TopicPartition
+async def test_get_partition_lag_resolves_committed_offset(
+    mock_cls, kafka_config, kafka_source_config, broker_offset, own_commit, expected_committed, expected_lag
+):
+    """An offset the broker does not report never reads as committed=0 and a full backlog."""
+    consumer = make_lag_consumer(
+        mock_cls, kafka_config, kafka_source_config, [TopicPartition(kafka_source_config.topic, 0, broker_offset)]
+    )
+    if own_commit is not None:
+        await consumer.commit({0: own_commit})
 
-    mock_inner = AsyncMock()
-    mock_cls.return_value = mock_inner
-
-    async def fake_watermarks(tp, *, timeout=None):
-        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
-        return (0, 100)
-
-    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
-
-    tp_committed = TopicPartition(kafka_source_config.topic, 0, -1001)
-    mock_inner.committed.return_value = [tp_committed]
-
-    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
     result = await consumer.get_partition_lag([0])
 
-    assert result[0] == {'committed': 0, 'high_watermark': 100, 'lag': 100}
+    assert result[0] == {'committed': expected_committed, 'high_watermark': HIGH_WATERMARK, 'lag': expected_lag}
+
+
+@pytest.mark.parametrize(
+    ('reset_policy', 'expected_lag'),
+    [
+        ('earliest', HIGH_WATERMARK - LOW_WATERMARK),
+        ('smallest', HIGH_WATERMARK - LOW_WATERMARK),
+        ('beginning', HIGH_WATERMARK - LOW_WATERMARK),
+        ('error', HIGH_WATERMARK - LOW_WATERMARK),
+        ('latest', 0),
+        ('largest', 0),
+        ('end', 0),
+        ('Latest', 0),
+    ],
+)
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_partition_lag_without_committed_offset_counts_from_reset_position(
+    mock_cls, kafka_source_config, reset_policy, expected_lag
+):
+    """With no committed offset, lag counts from where auto.offset.reset starts reading."""
+    connection = KafkaConfig(brokers='localhost:9092', client_config={'auto.offset.reset': reset_policy})
+    consumer = make_lag_consumer(
+        mock_cls, connection, kafka_source_config, [TopicPartition(kafka_source_config.topic, 0, OFFSET_INVALID)]
+    )
+
+    result = await consumer.get_partition_lag([0])
+
+    assert result[0] == {'committed': None, 'high_watermark': HIGH_WATERMARK, 'lag': expected_lag}
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_partition_lag_with_per_partition_error_logs_and_counts_it(
+    mock_cls, kafka_config, kafka_source_config
+):
+    """A per-partition committed() error is visible, and the partition falls back to its own commit."""
+    consumer = make_lag_consumer(
+        mock_cls,
+        kafka_config,
+        kafka_source_config,
+        [TopicPartition(kafka_source_config.topic, 0, 90), committed_row_with_error(1)],
+    )
+    await consumer.commit({1: 95})
+    errors_before = consumer_errors._value.get()  # type: ignore[attr-defined]
+
+    with capture_logs() as cap:
+        result = await consumer.get_partition_lag([0, 1])
+
+    failures = [e for e in cap if e['event'] == 'lag_query_failed']
+    assert [(f['op'], f['partition']) for f in failures] == [('committed', 1)]
+    assert consumer_errors._value.get() == errors_before + 1  # type: ignore[attr-defined]
+    assert result[0] == {'committed': 90, 'high_watermark': HIGH_WATERMARK, 'lag': 10}
+    assert result[1] == {'committed': 95, 'high_watermark': HIGH_WATERMARK, 'lag': 5}
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag_when_committed_query_fails_equals_partition_lag_sum(
+    mock_cls, kafka_config, kafka_source_config
+):
+    """A failed committed() call falls back per partition, and the total is the per-partition sum."""
+    consumer = make_lag_consumer(mock_cls, kafka_config, kafka_source_config, [])
+    mock_cls.return_value.committed.side_effect = RuntimeError('broker unreachable')
+    await consumer.commit({0: 95})
+
+    partition_lag = await consumer.get_partition_lag([0, 1])
+    total = await consumer.get_total_lag([0, 1])
+
+    assert partition_lag[0] == {'committed': 95, 'high_watermark': HIGH_WATERMARK, 'lag': 5}
+    assert partition_lag[1] == {
+        'committed': None,
+        'high_watermark': HIGH_WATERMARK,
+        'lag': HIGH_WATERMARK - LOW_WATERMARK,
+    }
+    assert total == partition_lag[0]['lag'] + partition_lag[1]['lag']
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_assign_forgets_commit_from_an_earlier_assignment(mock_cls, kafka_config, kafka_source_config):
+    """A re-assigned partition does not reuse this worker's commit from before."""
+    consumer = make_lag_consumer(
+        mock_cls, kafka_config, kafka_source_config, [TopicPartition(kafka_source_config.topic, 0, OFFSET_INVALID)]
+    )
+    await consumer.commit({0: 95})
+    await consumer.subscribe()
+    assign_cb = mock_cls.return_value.subscribe.call_args.kwargs['on_assign']
+
+    await assign_cb(mock_cls.return_value, [TopicPartition(kafka_source_config.topic, 0)])
+    result = await consumer.get_partition_lag([0])
+
+    assert result[0]['committed'] is None
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_failed_commit_is_not_used_for_lag(mock_cls, kafka_config, kafka_source_config):
+    """Only a commit the broker accepted can stand in for a missing broker answer."""
+    consumer = make_lag_consumer(
+        mock_cls, kafka_config, kafka_source_config, [TopicPartition(kafka_source_config.topic, 0, OFFSET_INVALID)]
+    )
+    mock_cls.return_value.commit.side_effect = RuntimeError('commit rejected')
+
+    with pytest.raises(RuntimeError, match='commit rejected'):
+        await consumer.commit({0: 95})
+    result = await consumer.get_partition_lag([0])
+
+    assert result[0]['committed'] is None
 
 
 @patch('drakkar.consumer.AIOConsumer')

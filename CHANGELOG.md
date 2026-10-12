@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Partition lag no longer shows the whole partition when the broker reports
+  no committed offset.** The worker uses its own last commit instead. If no
+  offset is known, `committed_offset` is `null` and lag counts from the
+  `auto.offset.reset` start. Failed lag queries log `lag_query_failed`.
+
 ## [2.3.0] - 2026-09-22
 
 ### Fixed

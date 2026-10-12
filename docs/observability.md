@@ -477,6 +477,14 @@ Per-partition stats table:
 - Consumed, completed, and failed event counts
 - Live/dead status indicator
 
+Lag is the high watermark minus the committed offset. The committed offset
+comes from the broker. If the broker does not report one for a partition, the
+worker uses the last offset that it committed for that partition itself. When
+neither is known, the committed offset shows as `-` (`null` in the API) and
+lag counts from where the consumer starts to read under `auto.offset.reset`:
+the low watermark for `earliest` (the default), the high watermark for
+`latest`. The dashboard's total lag is the sum of these per-partition values.
+
 #### `/partitions/{id}` -- Partition Detail
 
 Paginated event browser for a single partition. Shows all recorded events (consumed, arranged, task_started, task_completed, task_failed, committed) in reverse chronological order with 50 events per page.

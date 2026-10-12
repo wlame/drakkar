@@ -361,11 +361,14 @@ def kafka_source_config() -> KafkaSourceConfig:
 async def test_get_total_lag_counts_error_on_committed_failure(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.committed.side_effect = RuntimeError('broker election')
+    mock_inner.get_watermark_offsets.return_value = (10, 100)
     mock_cls.return_value = mock_inner
 
     before = consumer_errors._value.get()
     consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
-    assert await consumer.get_total_lag([0, 1]) == 0
+    # No committed offset is known, so each partition counts from the low
+    # watermark — the failure must not read as "no backlog".
+    assert await consumer.get_total_lag([0, 1]) == 180
     assert consumer_errors._value.get() == before + 1
 
 
