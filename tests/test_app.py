@@ -604,6 +604,19 @@ def test_app_cluster_name_falls_back_to_config(monkeypatch):
     assert app._cluster_name == 'fallback-cluster'
 
 
+def test_app_cluster_name_falls_back_to_config_when_env_var_is_empty(monkeypatch):
+    """An empty value counts as unset: config.cluster_name is used."""
+    monkeypatch.setenv('MY_CLUSTER', '')
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
+        cluster_name='fallback-cluster',
+        cluster_name_env='MY_CLUSTER',
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    assert app._cluster_name == 'fallback-cluster'
+
+
 def test_app_cluster_name_no_env_var_configured():
     """When cluster_name_env is empty, config.cluster_name is used directly."""
     config = DrakkarConfig(

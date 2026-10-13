@@ -912,11 +912,12 @@ database files and merging them into a single file. This is useful for:
 - **Archival** -- download a merged file for offline analysis with
   any SQLite tool
 
-The merge process copies all events from selected files into a new
-timestamped file (`merged-{timestamp}.db`), deduplicates by
-`(ts, event, partition, offset, task_id)`, and creates a combined
-`worker_config` table listing all source workers. The merged file
-appears in the database list and can be downloaded.
+The merge process copies all events from the selected files into a new
+file named `merged-<timestamp>-<token>.db`. It does not remove duplicates.
+The `workers` table lists every source worker; a selected merged file
+keeps its own workers, events and states. The file is written under a
+hidden temporary name and appears in the database list only when it is
+complete. It can be downloaded.
 
 **Archives are never merge candidates.** The Databases tab's Archives
 section (see [Archiving](#archiving) above) is read-only — no selection

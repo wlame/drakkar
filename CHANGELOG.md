@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name extends this one after a `-` (`search` and `search-hot`) was counted
   too. `drakkar_recorder_archive_bytes` and `drakkar_recorder_archive_files`
   now match the cluster exactly.
+- **Archives keep every worker when a late file is folded in.** Merging an
+  existing archive, or a merged file picked in the UI, used to put all its
+  events on one placeholder worker and drop its states. Now each worker keeps
+  its events and states.
+- **The UI merge writes its result atomically.** The file appears only when
+  complete, its name ends with a random token (`merged-<ts>-<token>.db`), and a
+  failed merge leaves nothing behind and answers 500.
+- **A UI-merged file is never archived.** With no cluster name set, the
+  archive pass took `merged-*.db` files in `db_dir` as sources and deleted
+  them. Merged files now stay until you remove them, as the docs say.
 
 ## [2.3.0] - 2026-09-22
 

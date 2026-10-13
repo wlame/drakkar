@@ -1,7 +1,9 @@
 """Merge multiple Drakkar debug SQLite databases into one.
 
 The merged database contains:
-- ``workers`` table: one row per source DB's worker_config
+- ``workers`` table: one row per source DB's worker_config. A source that is
+  itself a merge output (an archive folded into its successor, or a merged
+  file picked again) contributes its own ``workers`` rows unchanged.
 - ``events`` table: all events from all DBs, with a ``worker_id``
   foreign key linking each event to its worker. Rows are copied
   source-by-source; readers order via the ``ts`` index, so insertion
@@ -14,7 +16,9 @@ called programmatically.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import secrets
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -178,6 +182,13 @@ _STATE_COLUMNS = [
     'updated_at_dt',
 ]
 
+# A merge output used as a merge source (an archive folded into its
+# successor, or a merged file picked again in the UI) carries ``workers``
+# rows instead of one ``worker_config`` row. Its rows are copied verbatim,
+# source_file included, so every original worker keeps its events and
+# states, and a folded archive still names the raw files it covers.
+_MERGED_WORKER_COLUMNS = [*_WORKER_CONFIG_COLUMNS, 'source_file']
+
 
 @dataclass
 class DbStats:
@@ -241,6 +252,52 @@ def _table_exists(db: sqlite3.Connection, table: str) -> bool:
         [table],
     ).fetchone()
     return row is not None
+
+
+def _is_merged_db(db: sqlite3.Connection) -> bool:
+    """True for a merge output: it carries a ``workers`` table (the rule ``scan_db`` uses)."""
+    return _table_exists(db, 'workers')
+
+
+def _copy_merged_workers(
+    src: sqlite3.Connection,
+    out: sqlite3.Connection,
+    cluster_names: set[str],
+) -> dict[int, int]:
+    """Copy every ``workers`` row of a merged source; return its old id -> new id."""
+    rows = src.execute('SELECT * FROM workers ORDER BY id').fetchall()
+    cols = ', '.join(_MERGED_WORKER_COLUMNS)
+    placeholders = ', '.join(['?'] * len(_MERGED_WORKER_COLUMNS))
+    ids: dict[int, int] = {}
+    for row in rows:
+        cursor = out.execute(
+            f'INSERT INTO workers ({cols}) VALUES ({placeholders})',
+            [row.get(col) for col in _MERGED_WORKER_COLUMNS],
+        )
+        new_id = cursor.lastrowid
+        assert new_id is not None
+        ids[row['id']] = new_id
+        cluster_names.add(row.get('cluster_name') or '')
+    return ids
+
+
+def _owner_ids(
+    rows: list[dict],
+    db_path: str,
+    worker_map: dict[str, int],
+    merged_ids: dict[str, dict[int, int]],
+) -> list[int]:
+    """The output ``worker_id`` of each source row, in row order.
+
+    A recorder source has one worker, so every row maps to it. A merged
+    source maps each row's own ``worker_id`` through the ids its workers got
+    in the output. A row naming a worker the source does not list raises
+    ``KeyError``; the caller then treats the whole source as incomplete.
+    """
+    ids = merged_ids.get(db_path)
+    if ids is None:
+        return [worker_map[db_path]] * len(rows)
+    return [ids[row['worker_id']] for row in rows]
 
 
 def scan_db(path: str) -> DbStats:
@@ -339,6 +396,8 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
 
     Each source DB's ``worker_config`` becomes a row in the ``workers``
     table. Events and state snapshots reference their worker via FK.
+    A source that is itself a merge output keeps its own workers, events
+    and states.
 
     If all source DBs share the same ``cluster_name``, the result
     inherits that cluster.
@@ -372,6 +431,8 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
 
     # phase 1: insert all workers, collect worker_id mappings
     worker_map: dict[str, int] = {}  # db_path → worker_id
+    # Merged sources: db_path → (source worker id → output worker id).
+    merged_ids: dict[str, dict[int, int]] = {}
 
     for db_path in db_paths:
         basename = os.path.basename(db_path)
@@ -380,6 +441,10 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
+            if _is_merged_db(src):
+                merged_ids[db_path] = _copy_merged_workers(src, out, cluster_names)
+                result.worker_count += len(merged_ids[db_path])
+                continue
 
             worker_id: int | None = None
 
@@ -432,16 +497,18 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     insert_event_sql = f'INSERT INTO events ({event_cols}) VALUES ({event_placeholders})'
 
     for db_path in db_paths:
-        if db_path not in worker_map:
+        if db_path not in worker_map and db_path not in merged_ids:
             continue
-        wid = worker_map[db_path]
         src: sqlite3.Connection | None = None
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
             if _table_exists(src, 'events'):
                 rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
-                batch = [(wid, *(row.get(col) for col in _EVENT_COLUMNS)) for row in rows]
+                owners = _owner_ids(rows, db_path, worker_map, merged_ids)
+                batch = [
+                    (owner, *(row.get(col) for col in _EVENT_COLUMNS)) for owner, row in zip(owners, rows, strict=True)
+                ]
                 out.executemany(insert_event_sql, batch)
                 result.event_count += len(batch)
         except Exception as e:
@@ -454,20 +521,23 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
 
     # phase 3: merge worker_state rows
     for db_path in db_paths:
-        if db_path not in worker_map:
+        if db_path not in worker_map and db_path not in merged_ids:
             continue
-        wid = worker_map[db_path]
         src: sqlite3.Connection | None = None
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
-            if _table_exists(src, 'worker_state'):
-                rows = src.execute('SELECT * FROM worker_state ORDER BY updated_at').fetchall()
+            # A recorder file keeps snapshots in ``worker_state``; a merge
+            # output keeps them, already worker-tagged, in ``worker_states``.
+            state_table = 'worker_states' if db_path in merged_ids else 'worker_state'
+            if _table_exists(src, state_table):
+                rows = src.execute(f'SELECT * FROM {state_table} ORDER BY updated_at').fetchall()
+                owners = _owner_ids(rows, db_path, worker_map, merged_ids)
                 cols = ', '.join(['worker_id', *_STATE_COLUMNS])
                 placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
-                for row in rows:
+                for owner, row in zip(owners, rows, strict=True):
                     values = [row.get(col) for col in _STATE_COLUMNS]
-                    out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
+                    out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [owner, *values])
                     result.state_count += 1
         except Exception as e:
             logger.warning('merge_source_skipped', path=db_path, phase='states', error=str(e))
@@ -477,7 +547,9 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             if src is not None:
                 src.close()
 
-    result.merged_files = [path for path in db_paths if path in worker_map and path not in incomplete]
+    result.merged_files = [
+        path for path in db_paths if (path in worker_map or path in merged_ids) and path not in incomplete
+    ]
 
     out.commit()
     out.close()
@@ -487,4 +559,26 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     if len(non_empty) == 1 and '' not in cluster_names:
         result.cluster_name = non_empty.pop()
 
+    return result
+
+
+def merge_databases_atomic(db_paths: list[str], output_path: str) -> MergeResult:
+    """Merge into a hidden temp file next to ``output_path``, then rename it into place.
+
+    A reader of the folder never sees a half-written result: the temp name is
+    dot-prefixed (every listing skips it) and the final name appears through
+    one ``os.replace``. On any failure the temp file and its SQLite sidecars
+    are removed and the error is re-raised.
+    """
+    folder, name = os.path.split(output_path)
+    temp_path = os.path.join(folder, f'.{name}.{secrets.token_hex(8)}.tmp')
+    try:
+        result = merge_databases(db_paths, temp_path)
+        os.replace(temp_path, output_path)
+    except BaseException:
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(temp_path + suffix)
+        raise
+    result.output_path = output_path
     return result

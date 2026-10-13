@@ -44,7 +44,7 @@ SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
     SideEffectingEndpoint(
         route='POST /api/v1/debug/merge',
         field='merge_enabled',
-        effect='writes a new merged-<ts>.db into ui.recorder.db_dir that nothing reclaims',
+        effect='writes a new merged-<ts>-<token>.db into ui.recorder.db_dir that nothing reclaims',
     ),
 )
 

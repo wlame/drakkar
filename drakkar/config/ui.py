@@ -829,7 +829,7 @@ class UIConfig(BaseModel):
         default=True,
         description=(
             'Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that '
-            'writes to disk: each call creates a new ``merged-<ts>.db`` in '
+            'writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in '
             '``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls '
             'grow unbounded. Set to false to serve 403 instead — independently '
             'of ``auth_token``, per the reasoning on ``probe_enabled``.'

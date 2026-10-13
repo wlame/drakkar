@@ -1808,8 +1808,68 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
     assert data['worker_count'] == 2
     assert data['event_count'] == 2
     assert data['cluster_name'] == 'main'
-    assert data['filename'].startswith('merged-')
+    assert re.fullmatch(r'merged-\d{4}-\d{2}-\d{2}__\d{2}_\d{2}_\d{2}-[0-9a-f]{16}\.db', data['filename'])
     assert os.path.isfile(os.path.join(str(tmp_path), data['filename']))
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith('.')]
+
+
+def _write_merge_sources(tmp_path) -> None:
+    """Two minimal recorder DBs, w1.db and w2.db, that a merge accepts."""
+    import sqlite3
+
+    from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
+
+    for name in ['w1', 'w2']:
+        db = sqlite3.connect(str(tmp_path / f'{name}.db'))
+        db.executescript(SCHEMA_WORKER_CONFIG)
+        db.execute(
+            'INSERT INTO worker_config (id, worker_name, created_at, created_at_dt) '
+            "VALUES (1, ?, 1000.0, '1970-01-01 00:16:40.000')",
+            [name],
+        )
+        db.executescript(SCHEMA_EVENTS)
+        db.execute(
+            "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
+        )
+        db.commit()
+        db.close()
+
+
+async def test_api_debug_merge_twice_in_one_second_keeps_both_results(tmp_path, mock_recorder, mock_app):
+    _write_merge_sources(tmp_path)
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        first = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
+        second = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()['filename'] != second.json()['filename']
+    assert (tmp_path / first.json()['filename']).is_file()
+    assert (tmp_path / second.json()['filename']).is_file()
+
+
+async def test_api_debug_merge_failure_answers_500_and_leaves_nothing(tmp_path, mock_recorder, mock_app, monkeypatch):
+    import sqlite3
+
+    import drakkar.merge as merge_module
+
+    _write_merge_sources(tmp_path)
+
+    def failing_merge(db_paths, output_path):
+        with open(output_path, 'wb') as f:
+            f.write(b'half-written')
+        raise sqlite3.OperationalError('disk I/O error')
+
+    monkeypatch.setattr(merge_module, 'merge_databases', failing_merge)
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
+
+    assert resp.status_code == 500
+    assert resp.json()['error'].startswith('Merge failed: ')
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['w1.db', 'w2.db']
 
 
 async def test_api_debug_merge_rejects_single_file(debug_client):

@@ -27,10 +27,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -41,6 +43,8 @@ from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
+
+logger = structlog.get_logger()
 
 # Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
 # the probe's wall-clock timeout. Covers arrange + two round-trips of
@@ -249,7 +253,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     async def api_debug_merge(request: Request):
         """Merge selected database files into one."""
 
-        from drakkar.merge import merge_databases
+        from drakkar.merge import merge_databases_atomic
 
         # Policy gate, checked before the body is even read: merge is the
         # one UI endpoint that writes to disk, and nothing reclaims what it
@@ -287,10 +291,20 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             db_paths.append(str(full))
 
         ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
-        output_name = f'merged-{ts}.db'
+        # The random suffix keeps two merges in the same second apart.
+        output_name = f'merged-{ts}-{secrets.token_hex(8)}.db'
         output_path = str(root / output_name)
 
-        result = await asyncio.to_thread(merge_databases, db_paths, output_path)
+        try:
+            result = await asyncio.to_thread(merge_databases_atomic, db_paths, output_path)
+        except Exception as exc:
+            await logger.awarning(
+                'merge_failed',
+                category='debug',
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return JSONResponse({'error': f'Merge failed: {exc}'}, status_code=500)
 
         return JSONResponse(
             {

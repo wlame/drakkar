@@ -500,8 +500,8 @@ ui:
   # --- Side-effecting endpoints (gated independently of auth_token) ---
   probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
-  merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>.db into recorder.db_dir,
-                                   # never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
+  merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
+                                   # recorder.db_dir, never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
   kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 

@@ -60,7 +60,7 @@ closed with a pointer here:
   **Message Probe** (`ui.probe_enabled`) executes the live handler
   against pasted input and competes with production traffic for
   executor slots, and **Merge** (`ui.merge_enabled`) writes a
-  `merged-<ts>.db` into `db_dir` that nothing reclaims. It is intended
+  `merged-<ts>-<token>.db` into `db_dir` that nothing reclaims. It is intended
   for private-network deployment.
 
 Findings that break *out* of these boundaries — for example remote code

@@ -14,6 +14,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from drakkar.config import UIRecorderConfig
+from drakkar.merge import merge_databases
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, EventRecorder, format_dt
 from drakkar.recorder import archive as archive_mod
 from drakkar.recorder import core as core_mod
@@ -638,6 +639,92 @@ def _events_in_archive(path: Path) -> int:
     finally:
         db.close()
         unpacked.unlink()
+
+
+def _archive_workers(path: Path) -> list[tuple]:
+    """Unpack an archive; return (worker_name, source_file, event count) per worker."""
+    unpacked = path.parent / f'unpacked-{path.name}.db'
+    with gzip.open(path, 'rb') as gz:
+        unpacked.write_bytes(gz.read())
+    db = sqlite3.connect(str(unpacked))
+    try:
+        return db.execute(
+            'SELECT w.worker_name, w.source_file, COUNT(e.id) FROM workers w '
+            'LEFT JOIN events e ON e.worker_id = w.id GROUP BY w.id ORDER BY w.worker_name'
+        ).fetchall()
+    finally:
+        db.close()
+        unpacked.unlink()
+
+
+def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
+    """Folding an archive into its successor keeps every worker and its events."""
+    now = time.time()
+    start = _due_start(now)
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+    _run(tmp_path)
+    name = _archives(tmp_path)[0]
+
+    _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
+    _run(tmp_path)
+    _make_db(tmp_path, 'worker-4', start + 3 * HOUR, event_count=1)
+    _run(tmp_path)
+
+    assert _archives(tmp_path) == [name]
+    assert _archive_workers(tmp_path / name) == [
+        ('worker-1', _db_name('worker-1', start), 2),
+        ('worker-2', _db_name('worker-2', start + HOUR), 3),
+        ('worker-3', _db_name('worker-3', start + 2 * HOUR), 4),
+        ('worker-4', _db_name('worker-4', start + 3 * HOUR), 1),
+    ]
+
+
+def _backdate_sidecars(path: Path, ts: float) -> None:
+    """Give a WAL-mode file's -wal/-shm the time ``ts`` (a read-only open re-creates them now)."""
+    for suffix in ('-wal', '-shm'):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            os.utime(sidecar, (ts, ts))
+
+
+def test_run_archive_pass_never_takes_a_merged_file_as_a_source(tmp_path):
+    """A UI merge can snapshot a raw file that is still being written.
+
+    Archived, the merged file's source names would mark that raw file as
+    archived, and a later pass would delete it together with the events
+    written after the snapshot.
+    """
+    now = time.time()
+    start = _due_start(now)
+    raw = _make_db(tmp_path, 'worker-1', start, cluster=None, event_count=2, sidecars=False)
+    merged = tmp_path / 'merged-snapshot.db'
+    merge_databases([raw], str(merged))
+    os.utime(merged, (start + HOUR, start + HOUR))
+    # worker-1 writes five more events after the snapshot.
+    db = sqlite3.connect(raw)
+    for offset in range(10, 15):
+        db.execute(
+            'INSERT INTO events (ts, dt, event, partition, offset) VALUES (?, ?, ?, ?, ?)',
+            [start + offset, format_dt(start + offset), 'consumed', 0, offset],
+        )
+    db.commit()
+    db.close()
+    os.utime(raw, (start + 2 * HOUR, start + 2 * HOUR))
+
+    # Two passes while the raw file is still live; between them an hour
+    # passes for the sidecars a read-only open left on the merged file.
+    _run(tmp_path, cluster='', exclude_path=raw)
+    _backdate_sidecars(merged, start + HOUR)
+    _run(tmp_path, cluster='', exclude_path=raw)
+    # The worker has moved on to a new file.
+    _run(tmp_path, cluster='')
+
+    assert merged.exists()
+    assert not Path(raw).exists()
+    names = _archives(tmp_path)
+    assert len(names) == 1
+    assert _events_in_archive(tmp_path / names[0]) == 7
 
 
 # --- election -----------------------------------------------------------

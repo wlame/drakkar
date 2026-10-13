@@ -430,18 +430,27 @@ def _sweep_stale_temps(db_dir: str, cluster: str, now: float) -> None:
         )
 
 
-def _read_cluster(path: str) -> str:
+def _read_cluster(path: str) -> str | None:
     """Return the sanitized cluster a raw file belongs to.
 
-    Read-only URI connection, one small SELECT. A file with no
+    Read-only URI connection, one or two small SELECTs. A file with no
     ``worker_config`` table, an unreadable file, or one recorded without a
     cluster name groups under :data:`DEFAULT_CLUSTER`.
+
+    A merge output (it carries a ``workers`` table) belongs to no cluster
+    and returns ``None``, so it is never an archive source. A UI merge can
+    snapshot a raw file that is still being written; archived, the merged
+    file's ``source_file`` names would mark that raw file as already
+    archived, and a later pass would delete it with the events written
+    after the snapshot.
     """
     try:
         conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
     except sqlite3.Error:
         return DEFAULT_CLUSTER
     try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workers'").fetchone():
+            return None
         row = conn.execute('SELECT cluster_name FROM worker_config WHERE id = 1').fetchone()
     except sqlite3.Error:
         return DEFAULT_CLUSTER

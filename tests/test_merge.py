@@ -4,9 +4,15 @@ import json
 import os
 import sqlite3
 import time
+from pathlib import Path
 
+import pytest
+
+import drakkar.merge as merge_module
 from drakkar.merge import (
+    MERGED_SCHEMA,
     merge_databases,
+    merge_databases_atomic,
     scan_db,
     scan_directory,
 )
@@ -1103,3 +1109,168 @@ def test_merge_source_files_includes_corrupt(tmp_path):
 
     assert 'corrupt.db' in result.source_files
     assert 'good.db' in result.source_files
+
+
+# ─── merged databases as sources ─────────────────────────────
+
+
+def _worker_counts(path, table) -> dict[str, int]:
+    """Rows of ``table`` (events or worker_states) per worker_name in a merged DB."""
+    db = sqlite3.connect(str(path))
+    try:
+        return dict(
+            db.execute(
+                f'SELECT w.worker_name, COUNT(x.id) FROM workers w '
+                f'LEFT JOIN {table} x ON x.worker_id = w.id GROUP BY w.id'
+            ).fetchall()
+        )
+    finally:
+        db.close()
+
+
+def _source_files(path) -> list[str]:
+    db = sqlite3.connect(str(path))
+    try:
+        return [row[0] for row in db.execute('SELECT source_file FROM workers ORDER BY id')]
+    finally:
+        db.close()
+
+
+def _three_sources(tmp_path):
+    a, b, c = tmp_path / 'a.db', tmp_path / 'b.db', tmp_path / 'c.db'
+    _create_source_db(
+        a,
+        worker_name='worker-a',
+        cluster_name='main',
+        events=[{'ts': 1.0, 'offset': 1}, {'ts': 2.0, 'offset': 2}],
+        state=[{'updated_at': 10.0}],
+    )
+    _create_source_db(
+        b,
+        worker_name='worker-b',
+        cluster_name='main',
+        events=[{'ts': 3.0, 'offset': 3}],
+        state=[{'updated_at': 11.0}, {'updated_at': 12.0}],
+    )
+    _create_source_db(
+        c,
+        worker_name='worker-c',
+        cluster_name='main',
+        events=[{'ts': 4.0, 'offset': 4}],
+        state=[{'updated_at': 13.0}],
+    )
+    return a, b, c
+
+
+def test_merge_of_a_merged_db_keeps_every_worker_its_events_and_states(tmp_path):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert result.worker_count == 3
+    assert result.merged_files == [str(first), str(c)]
+    assert result.cluster_name == 'main'
+    assert _worker_counts(out, 'events') == {'worker-a': 2, 'worker-b': 1, 'worker-c': 1}
+    assert _worker_counts(out, 'worker_states') == {'worker-a': 1, 'worker-b': 2, 'worker-c': 1}
+    assert _source_files(out) == ['a.db', 'b.db', 'c.db']
+
+
+def test_merge_of_a_merged_db_with_an_unknown_worker_id_is_left_out(tmp_path):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+    db = sqlite3.connect(str(first))
+    db.execute('UPDATE events SET worker_id = 99 WHERE id = (SELECT MIN(id) FROM events)')
+    db.commit()
+    db.close()
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert result.merged_files == [str(c)]
+    assert result.event_count == 1
+    assert _worker_counts(out, 'events')['worker-c'] == 1
+
+
+def test_merge_of_a_merged_db_with_an_unknown_worker_id_in_states_is_left_out(tmp_path):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+    db = sqlite3.connect(str(first))
+    db.execute('UPDATE worker_states SET worker_id = 99 WHERE id = (SELECT MIN(id) FROM worker_states)')
+    db.commit()
+    db.close()
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert result.merged_files == [str(c)]
+    assert result.state_count == 1
+    assert _worker_counts(out, 'worker_states') == {'worker-a': 0, 'worker-b': 0, 'worker-c': 1}
+
+
+def test_merge_of_a_merged_db_with_workers_only_keeps_its_workers(tmp_path):
+    _, _, c = _three_sources(tmp_path)
+    solo = tmp_path / 'solo.db'
+    db = sqlite3.connect(str(solo))
+    db.executescript(MERGED_SCHEMA)
+    db.execute('DROP TABLE events')
+    db.execute('DROP TABLE worker_states')
+    db.execute("INSERT INTO workers (worker_name, cluster_name, source_file) VALUES ('solo', 'main', 'solo-raw.db')")
+    db.commit()
+    db.close()
+
+    out = tmp_path / 'out.db'
+    result = merge_databases([str(solo), str(c)], str(out))
+
+    assert result.worker_count == 2
+    assert result.merged_files == [str(solo), str(c)]
+    assert _source_files(out) == ['solo-raw.db', 'c.db']
+
+
+# ─── atomic merge ────────────────────────────────────────────
+
+
+def test_merge_atomic_publishes_only_the_final_file(tmp_path):
+    a, b = tmp_path / 'a.db', tmp_path / 'b.db'
+    _create_source_db(a, worker_name='worker-a')
+    _create_source_db(b, worker_name='worker-b')
+    out = tmp_path / 'merged.db'
+
+    result = merge_databases_atomic([str(a), str(b)], str(out))
+
+    assert result.output_path == str(out)
+    assert result.worker_count == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['a.db', 'b.db', 'merged.db']
+
+
+def test_merge_atomic_failure_leaves_no_file(tmp_path, monkeypatch):
+    def failing_merge(db_paths, output_path):
+        Path(output_path).write_bytes(b'half-written')
+        Path(output_path + '-wal').write_bytes(b'')
+        raise sqlite3.OperationalError('disk I/O error')
+
+    monkeypatch.setattr(merge_module, 'merge_databases', failing_merge)
+
+    with pytest.raises(sqlite3.OperationalError):
+        merge_databases_atomic([], str(tmp_path / 'merged.db'))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_merge_atomic_publish_failure_leaves_no_temp_file(tmp_path):
+    a, b = tmp_path / 'a.db', tmp_path / 'b.db'
+    _create_source_db(a, worker_name='worker-a')
+    _create_source_db(b, worker_name='worker-b')
+    out = tmp_path / 'merged.db'
+    # A non-empty directory at the final name makes the rename fail.
+    out.mkdir()
+    (out / 'keep').write_text('x')
+
+    with pytest.raises(OSError):
+        merge_databases_atomic([str(a), str(b)], str(out))
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['a.db', 'b.db', 'merged.db']

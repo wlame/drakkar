@@ -17,7 +17,7 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Metrics exporter | `metrics.enabled` | **on** (`:9090`) | Raw Prometheus endpoint on its own port |
 | Operator UI + probes | `ui.enabled` | **on** (`:8080`) | UI server, `/api/v1`, `/ws`, **`/healthz` + `/readyz`**, and the flight recorder |
 | Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/v1/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
-| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes an unreclaimed `merged-<ts>.db` per call; `false` = 403, independently of `auth_token` |
+| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes an unreclaimed `merged-<ts>-<token>.db` per call; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Recorder persistence | `ui.recorder.db_dir` | `/tmp` | Where event history and worker metadata live; empty = memory-only |

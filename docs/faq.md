@@ -249,7 +249,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
-- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
+- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 

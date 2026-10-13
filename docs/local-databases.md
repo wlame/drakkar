@@ -404,7 +404,7 @@ archive can therefore carry a handful of events timestamped slightly past
 its own window end — archives partition by when a file was *opened*, not
 by when each event inside it happened.
 
-### Live databases are never archive candidates
+### Live and merged databases are never archive candidates
 
 Each running worker keeps a `<worker>-live.db` symlink pointing at the file
 it is writing right now. An archive pass excludes every one of those
@@ -413,6 +413,13 @@ database another worker still holds open. This matters when workers in one
 `db_dir` do not share a rotation setting: without the rule, a worker on
 `rotation_interval_hours: 1` would judge a worker on `24` by its own
 schedule and delete a file still in use.
+
+Merged files are not archive candidates either. A UI merge can copy a file
+that a worker is still writing, and the merged file records the names of
+its source files. Archived, those names would mark the source file as
+already archived, and a later pass would delete it with the events written
+after the merge. A `merged-<ts>-<token>.db` stays in `db_dir` until you
+remove it.
 
 Settledness is judged from both the database file and its `-wal` sidecar.
 Under WAL the main file's modification time only moves on checkpoint, so a
