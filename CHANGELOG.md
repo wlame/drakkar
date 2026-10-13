@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no committed offset.** The worker uses its own last commit instead. If no
   offset is known, `committed_offset` is `null` and lag counts from the
   `auto.offset.reset` start. Failed lag queries log `lag_query_failed`.
+- **The archive footprint gauges count only this cluster.** A cluster whose
+  name extends this one after a `-` (`search` and `search-hot`) was counted
+  too. `drakkar_recorder_archive_bytes` and `drakkar_recorder_archive_files`
+  now match the cluster exactly.
 
 ## [2.3.0] - 2026-09-22
 

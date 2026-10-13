@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import glob
 import gzip
 import json
 import os
@@ -741,11 +740,18 @@ def _observe_archive_footprint(db_dir: str, cluster: str) -> None:
 
     Names carry the cluster, so a shared ``db_dir`` is filtered down to
     this worker's own archives — the ones its retention setting governs.
-    Only the directory entries are read; no archive is opened.
+    The cluster is read with :data:`ARCHIVE_NAME_RE`, the parser the archive
+    listing uses, and compared exactly: a prefix match would also count a
+    cluster whose name extends this one after a ``-`` (``search`` and
+    ``search-hot``). Only the directory entries are read; no archive is
+    opened.
     """
     total_bytes = 0
     count = 0
-    for path in Path(db_dir).glob(f'{glob.escape(cluster)}-*{ARCHIVE_SUFFIX}'):
+    for path in Path(db_dir).glob(f'*{ARCHIVE_SUFFIX}'):
+        match = ARCHIVE_NAME_RE.match(path.name)
+        if match is None or match['cluster'] != cluster:
+            continue
         try:
             total_bytes += path.stat().st_size
         except OSError:

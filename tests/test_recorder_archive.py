@@ -874,6 +874,23 @@ def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     assert archive_mod.recorder_archive_bytes._value.get() == expected
 
 
+def test_archive_footprint_skips_a_cluster_whose_name_extends_this_one(tmp_path):
+    """``search-fleet-hot`` archives start with ``search-fleet-`` but are not ours.
+
+    A prefix match on the file name would count them, so the gauge would
+    move for archives this worker's retention never expires.
+    """
+    now = time.time()
+    mine = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
+    extended = _make_archive(tmp_path, f'{CLUSTER}-hot', now - 2 * DAY)
+    extended.write_bytes(b'x' * 4096)
+
+    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+
+    assert archive_mod.recorder_archive_files._value.get() == 1
+    assert archive_mod.recorder_archive_bytes._value.get() == mine.stat().st_size
+
+
 def test_archive_pass_reports_the_footprint_when_no_window_is_due(tmp_path):
     """The gauge must refresh on quiet ticks too.
 
