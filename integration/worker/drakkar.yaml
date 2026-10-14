@@ -388,7 +388,7 @@ cache:
   enabled: true
   # The cache file lives in storage.dir (below). Keeping every worker's
   # storage.dir on the one shared volume lets the peer-sync loop discover
-  # other workers' cache DBs alongside their -live.db recorder files.
+  # other workers' cache DBs.
   # Memory → SQLite flush cadence. Shorter = less data lost on a crash;
   # longer = fewer SQLite transactions per worker. 3s matches the
   # recorder's own flush interval for operational consistency.

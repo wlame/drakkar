@@ -563,12 +563,14 @@ async def test_spa_mode_keeps_probes_public(spa_client):
 
 
 async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
-    (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
+    (tmp_path / 'history' / 'main').mkdir(parents=True)
+    (tmp_path / 'history' / 'main' / 'w1.db').write_bytes(b'sqlite-bytes')
     cfg = make_ui_config(enabled=True, port=8080)
     mock_recorder.config = cfg
-    mock_recorder.storage_dir = str(tmp_path)
+    mock_recorder.storage_dir = str(tmp_path / 'storage')
+    mock_recorder.shared_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
-        resp = await c.get('/api/v1/debug/download/w1.db')
+        resp = await c.get('/api/v1/debug/download/history/main/w1.db')
     assert resp.status_code == 200
     assert resp.content == b'sqlite-bytes'
 

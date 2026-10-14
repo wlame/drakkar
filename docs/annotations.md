@@ -98,15 +98,16 @@ Annotations are rows in the flight recorder's `events` table, under the
 `annotation` event type. That has three consequences worth knowing:
 
 **They live and expire like any other event.** An annotation rotates into
-a new raw file every `ui.recorder.rotation_interval_hours` along with
-everything else, and once that file's window is archived
+a new recorder file every `ui.recorder.rotation_interval_hours` along with
+everything else. The finished file is sealed into the cluster history
+folder, and once that file's window is archived
 (`history.archive.enabled`, default true — see
-[Archiving](local-databases.md#archiving)) the raw file is deleted but
+[Archiving](local-databases.md#archiving)) the sealed file is deleted but
 the annotation survives, compressed, inside the archive.
 `history.archive.retention_days` (default `30`) is the only thing
 that expires archives, so by default an annotation survives about a
 month after its window is archived. Set it to `0` to keep archives —
-and the annotations inside them — indefinitely. With `history.archive.enabled: false`, raw
+and the annotations inside them — indefinitely. With `history.archive.enabled: false`, sealed
 files — and the annotations inside them — are never deleted
 automatically at all.
 

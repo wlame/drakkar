@@ -52,7 +52,8 @@ network access.
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
 | **Independent kill switches** | `ui.probe_enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
-| **Path containment** | Database download and merge resolve names inside `storage.dir` and refuse anything that escapes it, is not a recorder database name, or arrives when no directory is configured. |
+| **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served. |
+| **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder and `merged/` are created with mode `0700`. |
 | **Secret masking** | The config reference masks secret-flagged fields, `executor.env` and every `*.client_config` by key name; the flight recorder applies the same redaction before storing task env. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
 
@@ -70,7 +71,10 @@ Stated plainly, so nobody plans around a control that is not there:
 - **No sandbox around your handler binary.** It runs with the worker's
   privileges and receives message bytes on stdin unvalidated.
 - **No authentication between peer workers.** Anything that can write to a
-  shared `storage.dir` is trusted as a peer. The same holds for the
+  shared `storage.dir` or `shared.dir` is trusted as a peer. Every worker of
+  the fleet trusts the shared folder: anyone who can write it can plant
+  files that the workers archive and serve through the download endpoint,
+  or cache entries the cache exchange reads. The same holds for the
   [fleet registry](fleet.md): anyone who can write the card folder can
   publish a card, and the workers list will show it and link to its URL.
   The UI links only `http` and `https` card URLs, but the Live page opens
@@ -130,8 +134,8 @@ in order of how much they buy you:
 4. **Close what you do not need**: `ui.probe_enabled: false`,
    `ui.merge_enabled: false`, and `ui.enabled: false` entirely on workers
    nobody debugs.
-5. **Restrict `storage.dir` permissions** to the worker user, on
-   every host that shares it.
+5. **Restrict `storage.dir` and `shared.dir` permissions** to the worker
+   user, on every host that mounts them.
 
 ## Reporting something
 

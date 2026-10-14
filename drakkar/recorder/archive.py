@@ -1,10 +1,11 @@
-"""Automatic archiving of rotated-out recorder databases.
+"""Archiving of sealed recorder files in a cluster history folder.
 
-Rotation leaves a growing pile of ``<worker>-YYYY-MM-DD__HH_MM_SS.db``
-files in ``db_dir``. This module folds each finished time window into one
-compressed file — ``<cluster>-<from>__<to>.db.gz`` — and deletes the raw
-files it merged. Since pruning was removed from rotation, a successful
-archive pass (or the operator) is the ONLY thing that removes raw files.
+Sealing moves every finished recorder file into ``<shared>/history/<cluster>/``
+(see :mod:`drakkar.recorder.sealing`). This module folds each due time window
+of that folder into one compressed file — ``<cluster>-<from>__<to>.db.gz``,
+in the same folder — and deletes the sealed files (and their meta files) it
+merged. A successful archive pass (or the operator) is the ONLY thing that
+removes sealed files.
 
 Three ideas carry the design:
 
@@ -13,29 +14,33 @@ Three ideas carry the design:
   days. A file belongs to the window holding its START timestamp and is
   never split, which is why an archive can carry events slightly past its
   own end — archives partition by file start time, not by event time.
-* **One archiver per cluster.** Workers can share a ``db_dir``, so the
-  pass groups candidates by the cluster recorded in each file and touches
-  only its own group. A lock file elects one worker per cluster per tick;
-  the others skip and lose nothing.
-* **Sources die last.** Merge, compress, fsync and rename all happen on
-  temporary names. Raw files are deleted only after the final archive is
-  in place, so any failure costs one tick and no data.
+* **One archiver per cluster folder.** Every worker of the cluster runs the
+  pass; ``.archive.lock`` (:mod:`drakkar.recorder.archive_lock`) lets one
+  of them work at a time. Every ``*.db`` in the folder is sealed, so the
+  pass needs no in-use or settled check and reads sources with
+  ``immutable=1``.
+* **Sources die last, and only by the lock holder.** Merge, compress,
+  fsync and rename all happen on dot-prefixed work files named with the
+  lock token. Right before publishing, the pass checks the lock still
+  holds its token; a pass that lost the lock publishes and deletes
+  nothing. Sealed files are deleted only after the archive is in place,
+  so any failure costs one tick and no data.
 
 Everything here is synchronous and does real file, SQLite and gzip work.
-Callers on the event loop MUST wrap :func:`run_archive_pass` in
-``asyncio.to_thread`` — see ``EventRecorder._archive_pass``.
+Callers on the event loop MUST run :func:`run_archive_pass` in a thread —
+see ``EventRecorder._archive_pass``.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import gzip
-import json
 import os
 import re
 import shutil
 import sqlite3
+import stat
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,16 +51,23 @@ import structlog
 
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import merge_databases
-from drakkar.metrics import recorder_archive_bytes, recorder_archive_files
+from drakkar.metrics import recorder_archive_bytes, recorder_archive_failures, recorder_archive_files
+from drakkar.recorder.archive_lock import CLOCK_PREFIX, STALE_PREFIX, ArchiveLock
+from drakkar.recorder.history import (
+    DEFAULT_CLUSTER,  # noqa: F401  (re-exported: archive names fall back to it)
+    META_SUFFIX,
+    history_dir,
+    list_sealed,
+    merged_dir,
+    meta_path,
+    sanitize_cluster,
+)
+from drakkar.recorder.sealing import INCOMING_SUFFIX
 
 if TYPE_CHECKING:
     from drakkar.config import HistoryArchiveConfig
 
 logger = structlog.get_logger()
-
-# Cluster used for files whose cluster name is empty, missing or
-# unreadable. Also the archive-name prefix those files end up under.
-DEFAULT_CLUSTER = 'default'
 
 ARCHIVE_SUFFIX = '.db.gz'
 
@@ -64,26 +76,29 @@ ARCHIVE_SUFFIX = '.db.gz'
 # keeping the data on disk for an operator to look at.
 UNREADABLE_SUFFIX = '.unreadable'
 
-# Temporaries, all dot-prefixed and pid-stamped so two workers racing on
-# the same window can never write to each other's files.
+# Work files of a pass, all dot-prefixed and named with the lock token.
 _MERGE_TEMP_SUFFIX = '.merge.db'
 _COMPRESS_TEMP_SUFFIX = '.tmp'
 _PREVIOUS_TEMP_SUFFIX = '.previous.db'
-_TEMP_SUFFIXES = (_MERGE_TEMP_SUFFIX, _COMPRESS_TEMP_SUFFIX, _PREVIOUS_TEMP_SUFFIX)
+
+# What the sweep removes once it is older than ``lock_stale_seconds``: dot
+# files ending in one of these (a pass's work files, a sealing copy in
+# progress) or starting with one of these (an age-check marker, a lock set
+# aside by a takeover), together with their SQLite sidecars.
+_SWEPT_SUFFIXES = (_MERGE_TEMP_SUFFIX, _COMPRESS_TEMP_SUFFIX, _PREVIOUS_TEMP_SUFFIX, INCOMING_SUFFIX)
+_SWEPT_PREFIXES = (CLOCK_PREFIX, STALE_PREFIX)
 
 # Minute precision in archive names: window bounds always land on a
 # multiple of the window width, so seconds carry no information.
 ARCHIVE_TS_FORMAT = '%Y-%m-%d_%H-%M'
 
-# SQLite sidecars removed alongside every raw file we merge. Left behind,
-# they would accumulate forever — nothing else in db_dir ever cleans them.
-_SIDECAR_SUFFIXES = ('-wal', '-shm')
+# SQLite sidecars removed alongside every file the pass deletes. A sealed
+# file has none, but a work file of a pass that died may.
+_SIDECAR_SUFFIXES = ('-wal', '-shm', '-journal')
 
 # Trailing timestamp of a raw recorder file. Anchored at the END so worker
 # names containing dashes ('search-worker-7') parse correctly.
 _DB_NAME_RE = re.compile(r'-(\d{4})-(\d{2})-(\d{2})__(\d{2})_(\d{2})_(\d{2})\.db$')
-
-_UNSAFE_CLUSTER_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
 
 # Copy buffer for the gzip stream. A merged window can be hundreds of MB,
 # so the file is streamed rather than read into memory.
@@ -92,11 +107,15 @@ _COPY_CHUNK_BYTES = 1 << 20
 
 @dataclass(frozen=True)
 class ArchiveCandidate:
-    """One raw recorder file considered for archiving."""
+    """One sealed recorder file considered for archiving."""
 
     path: str
     start_ts: float
     window_start: float
+
+
+class ArchiveFencedError(RuntimeError):
+    """The pass lost the archive lock: another worker took it over."""
 
 
 @dataclass(frozen=True)
@@ -126,17 +145,6 @@ def parse_db_start_ts(path: str) -> float:
         return os.path.getmtime(path)
     except OSError:
         return 0.0
-
-
-def sanitize_cluster(name: str | None) -> str:
-    """Return a cluster name safe to embed in a file name.
-
-    Everything outside ``[a-zA-Z0-9_-]`` becomes ``_``; an empty or
-    missing name becomes :data:`DEFAULT_CLUSTER`.
-    """
-    if not name:
-        return DEFAULT_CLUSTER
-    return _UNSAFE_CLUSTER_CHARS.sub('_', name)
 
 
 def archive_file_name(cluster: str, start: float, end: float) -> str:
@@ -178,8 +186,8 @@ class ArchiveInfo:
     size_bytes: int
 
 
-def list_archives(db_dir: str) -> list[ArchiveInfo]:
-    """Return every archive file in ``db_dir``, newest-first by ``to_ts``.
+def list_archives(folder: str) -> list[ArchiveInfo]:
+    """Return every archive file in ``folder``, newest-first by ``to_ts``.
 
     Name-only, like :func:`parse_db_start_ts`: cluster and window bounds
     come from the file name :func:`archive_file_name` wrote, never from
@@ -190,14 +198,14 @@ def list_archives(db_dir: str) -> list[ArchiveInfo]:
     and raw ``*.db`` files never match.
     """
     results: list[ArchiveInfo] = []
-    if not db_dir or not os.path.isdir(db_dir):
+    if not folder or not os.path.isdir(folder):
         return results
-    for entry in os.listdir(db_dir):
+    for entry in os.listdir(folder):
         match = ARCHIVE_NAME_RE.fullmatch(entry)
         if not match:
             continue
         try:
-            size_bytes = os.stat(os.path.join(db_dir, entry)).st_size
+            size_bytes = os.stat(os.path.join(folder, entry)).st_size
         except OSError:
             # Raced with a delete/rename between listdir and stat — drop it
             # rather than fail the whole listing.
@@ -229,18 +237,13 @@ def assign_windows(
     window_seconds: float,
     due_after_seconds: float,
     now: float,
-    rotation_seconds: float,
 ) -> list[ArchiveWindow]:
     """Group ``paths`` into epoch-aligned windows, returning only due ones.
 
-    A window ``[start, end)`` is DUE when both hold:
-
-    * ``now >= end + due_after_seconds`` — the due delay
-      (``history.archive.due_after_hours``) has passed, so no worker can
-      still be opening files that belong to it.
-    * every assigned file was last written before ``now - rotation_seconds``
-      — belt-and-braces against a stalled writer that still holds an old
-      file open. A file we cannot stat vetoes its window for this tick.
+    A window ``[start, end)`` is DUE when ``now >= end + due_after_seconds``
+    (``history.archive.due_after_hours``): the delay lets every worker of
+    the cluster seal the files that belong to it. Nothing else holds a
+    window back — every file in a history folder is sealed.
 
     Windows come back oldest first, with each window's files sorted by
     path so the merge order is deterministic.
@@ -254,12 +257,9 @@ def assign_windows(
         )
 
     due: list[ArchiveWindow] = []
-    mtime_cutoff = now - rotation_seconds
     for window_start, candidates in sorted(grouped.items()):
         window_end = window_start + window_seconds
         if now < window_end + due_after_seconds:
-            continue
-        if not all(_is_settled(candidate.path, mtime_cutoff) for candidate in candidates):
             continue
         due.append(
             ArchiveWindow(
@@ -271,246 +271,156 @@ def assign_windows(
     return due
 
 
-def _is_settled(path: str, mtime_cutoff: float) -> bool:
-    """Whether ``path`` stopped being written before ``mtime_cutoff``.
-
-    The ``-wal`` sidecar is consulted alongside the main file because under
-    WAL the main file's mtime only moves on checkpoint — a database written
-    to continuously can look untouched for hours. The sidecar moves on every
-    write, so the newer of the two is the real answer. A missing sidecar
-    (checkpointed and cleaned up, or never in WAL mode) leaves the main
-    file's mtime as the answer; an unreadable path is never settled.
-    """
-    try:
-        newest = os.path.getmtime(path)
-    except OSError:
-        return False
-    try:
-        newest = max(newest, os.path.getmtime(path + '-wal'))
-    except OSError:
-        pass
-    return newest < mtime_cutoff
-
-
 def run_archive_pass(
-    db_dir: str,
-    worker_name: str,
+    shared_dir: str,
+    *,
     cluster: str,
+    worker: str,
+    instance: str,
     archive: HistoryArchiveConfig,
-    rotation_interval_hours: int,
-    exclude_path: str = '',
+    merged_retention_days: int,
+    stop: threading.Event | None = None,
 ) -> None:
-    """Archive every due window of this worker's cluster, then expire.
+    """Archive every due window of this cluster's history folder, then expire and prune.
 
-    Blocking by nature (stat, SQLite merge, gzip) — call it through
-    ``asyncio.to_thread``, never on the event loop.
+    Blocking by nature (stat, SQLite merge, gzip) — run it in a thread,
+    never on the event loop. Every worker of the cluster calls it; the
+    archive lock lets one of them work at a time, and the others return
+    right after refreshing the footprint gauges. A pass that took the lock
+    and did not finish cleanly (a window failed, the lock was lost, an
+    unexpected error) counts in ``drakkar_recorder_archive_failures_total``.
 
-    ``exclude_path`` is the live database. It is dropped before window
-    assignment, so the file the recorder is writing right now can never be
-    merged away underneath it.
-
-    The pass is a no-op unless it finds a due window: nothing is created,
-    no lock is taken, and expiry does not run.
+    ``stop`` ends the pass after the window in progress: a worker that
+    shuts down does not wait for a long backlog of windows. Expiry and
+    pruning are skipped too; the next pass of any worker does them.
     """
+    folder = history_dir(shared_dir, cluster)
     own_cluster = sanitize_cluster(cluster)
-    window_seconds = archive.window_hours * 3600
-    due_after_seconds = archive.due_after_hours * 3600
-    rotation_seconds = rotation_interval_hours * 3600
-    now = time.time()
-
-    # Before the due-window check below can return early: the footprint is
-    # most worth reporting on the ticks that archive nothing.
-    _observe_archive_footprint(db_dir, own_cluster)
-
-    candidates = [path for path in _list_raw_dbs(db_dir, exclude_path) if _read_cluster(path) == own_cluster]
-    windows = assign_windows(candidates, window_seconds, due_after_seconds, now, rotation_seconds)
-    if not windows:
+    # Before the lock: the footprint is most worth reporting on the ticks
+    # where another worker does the archiving.
+    _observe_archive_footprint(folder, own_cluster)
+    if not os.path.isdir(folder):
         return
-
-    lock_path = os.path.join(db_dir, f'.archive-{own_cluster}.lock')
-    lock_fd = _acquire_lock(lock_path, worker_name, now)
-    if lock_fd is None:
+    lock = ArchiveLock(folder, worker=worker, instance=instance, stale_seconds=archive.lock_stale_seconds)
+    if not lock.acquire():
         return
+    completed = False
     try:
-        # Elected: no other pass of this cluster is running, so any
-        # leftover temporary here belongs to a dead one.
-        _sweep_stale_temps(db_dir, own_cluster, now, archive.lock_stale_seconds)
-        for window in windows:
-            _archive_window(db_dir, own_cluster, window)
-        if archive.retention_days > 0:
-            _expire_archives(db_dir, own_cluster, now, archive.retention_days)
+        completed = _archive_locked(
+            folder,
+            own_cluster,
+            lock,
+            archive,
+            merged_dir(shared_dir),
+            merged_retention_days,
+            stop or threading.Event(),
+        )
+    except ArchiveFencedError as exc:
+        logger.warning(
+            'recorder_archive_fenced',
+            category='recorder',
+            cluster=own_cluster,
+            name=str(exc),
+            detail='another worker took the archive lock over; this pass published and deleted nothing',
+        )
     finally:
-        # Released on both paths: a failed window logged itself and the
-        # next tick retries, and holding the lock after a crash-free
-        # failure would just idle the whole cluster.
-        _release_lock(lock_fd, lock_path)
+        # Deletes the lock only while it still holds our token.
+        lock.release()
+        if not completed:
+            recorder_archive_failures.inc()
 
 
-def _live_targets(db_dir: str) -> set[str]:
-    """Resolved paths of every worker's currently-open recorder database.
-
-    The ``<worker>-live.db`` symlinks are the in-use markers: each points at
-    the file that worker is writing right now. A shared ``db_dir`` holds one
-    per worker, and every one of them is off limits to an archive pass —
-    including peers'. Without this a fleet whose workers rotate on different
-    schedules eats itself: a worker rotating hourly sees a peer that rotates
-    daily as settled, merges its live database and unlinks the inode the
-    peer is still writing to.
-
-    Dangling links (crashed worker, target already archived) are skipped —
-    they mark nothing. Resolution is through ``realpath`` on both sides so a
-    symlinked or relative ``db_dir`` cannot hide a match.
-    """
-    targets: set[str] = set()
-    for link in Path(db_dir).glob('*-live.db'):
-        if not link.is_symlink():
-            continue
-        try:
-            target = os.path.realpath(str(link))
-        except OSError:
-            continue
-        if os.path.isfile(target):
-            targets.add(target)
-    return targets
-
-
-def _list_raw_dbs(db_dir: str, exclude_path: str) -> list[str]:
-    """Return the raw recorder files in ``db_dir`` worth considering.
-
-    Skips the live symlinks and any other link, every worker's live database
-    (this one's and its peers' — see :func:`_live_targets`), and dot-prefixed
-    names: the latter are the intermediate merge files a pass writes, and in
-    a shared ``db_dir`` one worker must not merge away another worker's work
-    in progress.
-
-    Live databases are compared through ``realpath`` on both sides, so a
-    symlinked or relative ``db_dir`` cannot make a running worker's file look
-    like a different one. ``exclude_path`` stays in the check as well as the
-    symlink map: the caller's own file must be safe even in the window where
-    its live link is missing or has not been repointed yet.
-    """
-    live = _live_targets(db_dir)
-    if exclude_path:
-        live.add(os.path.realpath(exclude_path))
-    paths: list[str] = []
-    for path in Path(db_dir).glob('*.db'):
-        if path.name.startswith('.'):
-            continue
-        if path.is_symlink() or not path.is_file():
-            continue
-        if live and os.path.realpath(str(path)) in live:
-            continue
-        paths.append(str(path))
-    return paths
+def _archive_locked(
+    folder: str,
+    cluster: str,
+    lock: ArchiveLock,
+    archive: HistoryArchiveConfig,
+    merged_folder: str,
+    merged_retention_days: int,
+    stop: threading.Event,
+) -> bool:
+    """The pass body, run while holding the lock; False when a window failed."""
+    now = time.time()
+    # Ages of files in the shared folder are measured on the file server's
+    # clock, like the lock's own age.
+    server_now = lock.server_now()
+    _sweep(folder, cluster, server_now, archive.lock_stale_seconds)
+    windows = assign_windows(
+        list_sealed(folder),
+        archive.window_hours * 3600,
+        archive.due_after_hours * 3600,
+        now,
+    )
+    completed = True
+    for window in windows:
+        # A stop is not a failure: the windows left stay due, and the next
+        # pass of any worker of the cluster takes them.
+        if stop.is_set():
+            return completed
+        completed = _archive_window(folder, cluster, window, lock) and completed
+    if stop.is_set():
+        return completed
+    if archive.retention_days > 0:
+        _expire_archives(folder, cluster, now, archive.retention_days)
+    if merged_retention_days > 0:
+        _prune_merged(merged_folder, server_now, merged_retention_days)
+    return completed
 
 
-def _sweep_stale_temps(db_dir: str, cluster: str, now: float, stale_seconds: int) -> None:
-    """Delete this cluster's abandoned merge/compress temporaries.
+def _is_work_file(name: str) -> bool:
+    """A work file the sweep may remove once it is old enough (sidecars included)."""
+    base = name
+    for suffix in _SIDECAR_SUFFIXES:
+        base = base.removesuffix(suffix)
+    return base.startswith('.') and (base.endswith(_SWEPT_SUFFIXES) or base.startswith(_SWEPT_PREFIXES))
 
-    Only reachable while holding the lock, so nothing being written right
-    now can be swept — and the age floor (``history.archive.lock_stale_seconds``)
-    keeps a long merge started by a worker that is somehow still alive out
-    of reach as well.
+
+def _is_orphan_meta(folder: str, name: str) -> bool:
+    """A meta file whose sealed database is not next to it (archived, set aside, or a crash between the two)."""
+    if name.startswith('.') or not name.endswith(META_SUFFIX):
+        return False
+    return not os.path.lexists(os.path.join(folder, name.removesuffix(META_SUFFIX)))
+
+
+def _sweep(folder: str, cluster: str, now: float, stale_seconds: int) -> None:
+    """Delete work files and orphan meta files older than ``stale_seconds``.
+
+    Only reachable while holding the lock, and the age floor keeps
+    anything still being written out of reach: a sealing copy in progress
+    keeps moving its mtime, and a fresh orphan meta file is a publish
+    whose database rename is still to come.
     """
     cutoff = now - stale_seconds
-    for path in Path(db_dir).glob(f'.{cluster}-*'):
-        if not path.name.endswith(_TEMP_SUFFIXES):
+    for name in sorted(os.listdir(folder)):
+        if not (_is_work_file(name) or _is_orphan_meta(folder, name)):
             continue
+        path = os.path.join(folder, name)
         try:
-            if path.stat().st_mtime >= cutoff:
+            if os.lstat(path).st_mtime >= cutoff:
                 continue
+            os.unlink(path)
         except OSError:
+            # Gone already, or not a file this protocol wrote (a folder):
+            # leave it.
             continue
-        _remove_with_sidecars(str(path))
         logger.warning(
             'recorder_archive_temp_swept',
             category='recorder',
             cluster=cluster,
-            name=path.name,
+            name=name,
         )
 
 
-def _read_cluster(path: str) -> str | None:
-    """Return the sanitized cluster a raw file belongs to.
+def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: ArchiveLock) -> bool:
+    """Merge, compress and publish one window, then delete its sources; False when it failed.
 
-    Read-only URI connection, one or two small SELECTs. A file with no
-    ``worker_config`` table, an unreadable file, or one recorded without a
-    cluster name groups under :data:`DEFAULT_CLUSTER`.
-
-    A merge output (it carries a ``workers`` table) belongs to no cluster
-    and returns ``None``, so it is never an archive source. A UI merge can
-    snapshot a raw file that is still being written; archived, the merged
-    file's ``source_file`` names would mark that raw file as already
-    archived, and a later pass would delete it with the events written
-    after the snapshot.
-    """
-    try:
-        conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
-    except sqlite3.Error:
-        return DEFAULT_CLUSTER
-    try:
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workers'").fetchone():
-            return None
-        row = conn.execute('SELECT cluster_name FROM worker_config WHERE id = 1').fetchone()
-    except sqlite3.Error:
-        return DEFAULT_CLUSTER
-    finally:
-        conn.close()
-    return sanitize_cluster(row[0] if row else None)
-
-
-def _acquire_lock(lock_path: str, worker_name: str, now: float) -> int | None:
-    """Try to become this cluster's archiver, returning the held lock fd.
-
-    Ownership is decided by ``flock``, not by the file's existence: the
-    kernel drops the lock when the holder dies, so a crashed worker never
-    leaves a lock that outlives it. The file itself is informational — the
-    JSON payload names the pid and worker for an operator reading the
-    directory — and a leftover unlocked file is simply re-locked and
-    rewritten by the next elected worker.
-
-    The inode check closes the classic unlink race: if the previous holder
-    unlinked the file between our ``open`` and our ``flock``, we now hold a
-    lock on a detached inode that grants nothing, so we stand down and let
-    the next tick retry against the new file.
-
-    Returns the file descriptor to pass to :func:`_release_lock`, or
-    ``None`` when another worker owns the lock.
-    """
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-    except OSError:
-        return None
-    try:
-        # LOCK_NB: losing the election must cost a syscall, not a wait —
-        # this runs on a worker thread every rotation tick.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if os.stat(lock_path).st_ino != os.fstat(fd).st_ino:
-            os.close(fd)
-            return None
-        os.ftruncate(fd, 0)
-        os.write(fd, json.dumps({'pid': os.getpid(), 'worker': worker_name, 'ts': now}).encode())
-    except OSError:
-        os.close(fd)
-        return None
-    return fd
-
-
-def _release_lock(fd: int, lock_path: str) -> None:
-    """Unlink the lock file and drop the lock by closing its descriptor."""
-    with contextlib.suppress(OSError):
-        os.unlink(lock_path)
-    with contextlib.suppress(OSError):
-        os.close(fd)
-
-
-def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
-    """Merge, compress and publish one window, then delete its sources.
-
-    Order is what makes this safe: everything lands on temporary names
-    carrying our pid, the rename publishes the archive atomically, and only
-    then are the raw files removed. Any failure before the rename leaves
-    every source untouched for the next tick.
+    Order is what makes this safe: everything lands on work files named
+    with the lock token, the rename publishes the archive atomically, and
+    only then are the sealed files removed. Any failure before the rename
+    leaves every source untouched for the next tick. Right before the
+    rename (and before the deletions of the reclaim path) the lock must
+    still hold our token; otherwise :class:`ArchiveFencedError` stops the
+    whole pass with nothing published and nothing deleted.
 
     Two rules protect data that a naive "merge everything, delete
     everything" would lose:
@@ -518,7 +428,8 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
     * Only the sources the merge engine actually read are deleted. One it
       could not read is moved aside as ``<name>.unreadable`` — off the
       candidate list so it cannot stall the window forever, but still on
-      disk for an operator.
+      disk for an operator. Its meta file is left; the sweep removes it as
+      an orphan once it is old.
     * An archive already at the final name is folded back in rather than
       overwritten. It happens when an earlier pass died between publishing
       the archive and finishing the deletion of its sources; the surviving
@@ -528,8 +439,8 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
       twice.
     """
     final_name = archive_file_name(cluster, window.start, window.end)
-    final_path = os.path.join(db_dir, final_name)
-    prefix = os.path.join(db_dir, f'.{final_name}.{os.getpid()}')
+    final_path = os.path.join(folder, final_name)
+    prefix = os.path.join(folder, f'.{final_name}.{lock.token}')
     tmp_path = prefix + _COMPRESS_TEMP_SUFFIX
     merged_path = prefix + _MERGE_TEMP_SUFFIX
     previous_path = prefix + _PREVIOUS_TEMP_SUFFIX
@@ -551,7 +462,8 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
                 # The whole window is already inside the published archive.
                 # Nothing to rewrite — just finish the interrupted cleanup.
                 _remove_with_sidecars(previous_path)
-                _delete_sources(db_dir, sources)
+                _fence(lock, final_name)
+                _delete_sources(folder, sources)
                 logger.info(
                     'recorder_archive_sources_reclaimed',
                     category='recorder',
@@ -561,7 +473,7 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
                     name=final_name,
                     file_count=len(sources),
                 )
-                return
+                return True
             merge_sources.append(previous_path)
 
         raw_bytes = sum(_file_size(path) for path in merge_sources)
@@ -574,17 +486,18 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
         # ``merge_databases`` deletes and recreates its output, so SQLite
         # owns the mode by the time it returns — tighten it now, before the
         # data is compressed. The archive holds the same task args and
-        # subprocess output as the raw files, and the final name inherits
+        # subprocess output as the sealed files, and the final name inherits
         # the compressed temp's mode through the rename.
         secure_db_file(merged_path)
         secure_db_file(tmp_path)
         _compress(merged_path, tmp_path)
+        _fence(lock, final_name)
         os.rename(tmp_path, final_path)
+    except ArchiveFencedError:
+        _remove_work_files(merged_path, previous_path, tmp_path)
+        raise
     except Exception as exc:
-        _remove_with_sidecars(merged_path)
-        _remove_with_sidecars(previous_path)
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
+        _remove_work_files(merged_path, previous_path, tmp_path)
         logger.error(
             'recorder_archive_failed',
             category='recorder',
@@ -594,12 +507,12 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
             error=str(exc),
             error_type=type(exc).__name__,
         )
-        return
+        return False
 
     _remove_with_sidecars(merged_path)
     _remove_with_sidecars(previous_path)
     covered = merged.union(already_covered)
-    deleted = _delete_sources(db_dir, [path for path in sources if path in covered])
+    deleted = _delete_sources(folder, [path for path in sources if path in covered])
     for path in sources:
         if path in covered:
             continue
@@ -615,18 +528,32 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
         raw_bytes=raw_bytes,
         compressed_bytes=_file_size(final_path),
     )
+    return True
 
 
-def _delete_sources(db_dir: str, sources: list[str]) -> int:
-    """Delete merged raw files once the archive is durably in place.
+def _fence(lock: ArchiveLock, name: str) -> None:
+    """Stop the pass when the lock no longer holds our token (another worker took it over)."""
+    if not lock.is_ours():
+        raise ArchiveFencedError(name)
 
-    The directory entry for the new archive is fsynced first: without it a
-    crash could leave a directory where the sources are gone and the
+
+def _remove_work_files(*paths: str) -> None:
+    for path in paths:
+        _remove_with_sidecars(path)
+
+
+def _delete_sources(folder: str, sources: list[str]) -> int:
+    """Delete merged sealed files and their meta files once the archive is durably in place.
+
+    The folder entry for the new archive is fsynced first: without it a
+    crash could leave a folder where the sources are gone and the
     archive's name never made it to disk.
     """
-    _sync_dir(db_dir)
+    _sync_dir(folder)
     for path in sources:
         _remove_with_sidecars(path)
+        with contextlib.suppress(OSError):
+            os.unlink(meta_path(path))
     return len(sources)
 
 
@@ -701,10 +628,10 @@ def _decompress(source_path: str, dest_path: str) -> None:
         shutil.copyfileobj(compressed, raw, _COPY_CHUNK_BYTES)
 
 
-def _sync_dir(db_dir: str) -> None:
-    """Flush ``db_dir``'s own entries so a rename survives a crash."""
+def _sync_dir(folder: str) -> None:
+    """Flush ``folder``'s own entries so a rename survives a crash."""
     try:
-        fd = os.open(db_dir, os.O_RDONLY)
+        fd = os.open(folder, os.O_RDONLY)
     except OSError:
         return
     try:
@@ -715,7 +642,7 @@ def _sync_dir(db_dir: str) -> None:
         os.close(fd)
 
 
-def warn_if_archives_unbounded(archive: HistoryArchiveConfig, storage_dir: str) -> None:
+def warn_if_archives_unbounded(archive: HistoryArchiveConfig, folder: str) -> None:
     """Warn at startup when archives are configured to accumulate forever.
 
     ``history.archive.retention_days: 0`` disables expiry outright, and nothing
@@ -732,11 +659,11 @@ def warn_if_archives_unbounded(archive: HistoryArchiveConfig, storage_dir: str) 
     logger.warning(
         'recorder_archives_unbounded',
         category='recorder',
-        storage_dir=storage_dir,
+        folder=folder,
         window_hours=archive.window_hours,
         message=(
             f'history.archive.retention_days is 0, so compressed recorder archives in '
-            f'{storage_dir} are kept forever and nothing reclaims that disk. Watch '
+            f'{folder} are kept forever and nothing reclaims that disk. Watch '
             f'drakkar_recorder_archive_bytes, prune the folder yourself, or set '
             f'history.archive.retention_days (or DK_HISTORY__ARCHIVE__RETENTION_DAYS) '
             f'to a number of days covering the {archive.due_after_hours}h due delay plus one '
@@ -745,11 +672,11 @@ def warn_if_archives_unbounded(archive: HistoryArchiveConfig, storage_dir: str) 
     )
 
 
-def _observe_archive_footprint(db_dir: str, cluster: str) -> None:
+def _observe_archive_footprint(folder: str, cluster: str) -> None:
     """Publish this cluster's archive disk footprint as gauges.
 
-    Names carry the cluster, so a shared ``db_dir`` is filtered down to
-    this worker's own archives — the ones its retention setting governs.
+    Names carry the cluster, so the folder is filtered down to this
+    worker's own archives — the ones its retention setting governs.
     The cluster is read with :data:`ARCHIVE_NAME_RE`, the parser the archive
     listing uses, and compared exactly: a prefix match would also count a
     cluster whose name extends this one after a ``-`` (``search`` and
@@ -758,7 +685,7 @@ def _observe_archive_footprint(db_dir: str, cluster: str) -> None:
     """
     total_bytes = 0
     count = 0
-    for path in Path(db_dir).glob(f'*{ARCHIVE_SUFFIX}'):
+    for path in Path(folder).glob(f'*{ARCHIVE_SUFFIX}'):
         match = ARCHIVE_NAME_RE.match(path.name)
         if match is None or match['cluster'] != cluster:
             continue
@@ -771,19 +698,19 @@ def _observe_archive_footprint(db_dir: str, cluster: str) -> None:
     recorder_archive_files.set(count)
 
 
-def _expire_archives(db_dir: str, cluster: str, now: float, retention_days: int) -> None:
+def _expire_archives(folder: str, cluster: str, now: float, retention_days: int) -> None:
     """Delete this cluster's archives whose window ended too long ago.
 
     The end timestamp comes from the file name, so no archive is opened.
-    Other clusters' archives in a shared ``db_dir`` belong to their own
-    workers and are never touched.
+    An archive named for another cluster belongs to that cluster's
+    workers and is never touched.
     """
     cutoff = now - retention_days * 86400
     pattern = re.compile(
         rf'^{re.escape(cluster)}-\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}__'
         rf'(\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}){re.escape(ARCHIVE_SUFFIX)}$'
     )
-    for path in Path(db_dir).glob(f'*{ARCHIVE_SUFFIX}'):
+    for path in Path(folder).glob(f'*{ARCHIVE_SUFFIX}'):
         match = pattern.match(path.name)
         if not match:
             continue
@@ -812,6 +739,35 @@ def _expire_archives(db_dir: str, cluster: str, now: float, retention_days: int)
             window_end=end_ts,
             retention_days=retention_days,
         )
+
+
+def _prune_merged(merged_folder: str, now: float, retention_days: int) -> None:
+    """Delete UI merge results (``merged/*.db``) older than ``retention_days``.
+
+    The archivers of every cluster run this on the same folder, so a file
+    another one deleted first is simply skipped. Dot-prefixed names are
+    merges still being written.
+    """
+    cutoff = now - retention_days * 86400
+    try:
+        names = os.listdir(merged_folder)
+    except FileNotFoundError:
+        return
+    for name in sorted(names):
+        if name.startswith('.') or not name.endswith('.db'):
+            continue
+        path = os.path.join(merged_folder, name)
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            os.unlink(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning('recorder_merged_prune_failed', category='recorder', name=name, error=str(exc))
+            continue
+        logger.info('recorder_merged_pruned', category='recorder', name=name, retention_days=retention_days)
 
 
 def _file_size(path: str) -> int:

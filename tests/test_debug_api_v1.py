@@ -192,30 +192,34 @@ class TestSingleAPISurface:
         assert (await client.get('/api/v1/events')).status_code == 200
 
     async def test_download_serves_only_under_v1(self, tmp_path, mock_recorder, mock_app):
-        (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
+        (tmp_path / 'history' / 'main').mkdir(parents=True)
+        (tmp_path / 'history' / 'main' / 'w1.db').write_bytes(b'sqlite-bytes')
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder.config = cfg
-        mock_recorder.storage_dir = str(tmp_path)
+        mock_recorder.storage_dir = str(tmp_path / 'storage')
+        mock_recorder.shared_dir = str(tmp_path)
 
         async with make_client(cfg, mock_recorder, mock_app) as c:
-            v1 = await c.get('/api/v1/debug/download/w1.db')
+            v1 = await c.get('/api/v1/debug/download/history/main/w1.db')
 
         assert v1.status_code == 200
         assert v1.content == b'sqlite-bytes'
         assert v1.headers['content-type'] == 'application/x-sqlite3'
         assert v1.headers['cache-control'] == 'no-store, private'
 
-    async def test_archive_download_serves_under_v1(self, tmp_path, mock_recorder, mock_app):
+    async def test_archive_download_serves_through_the_download_route(self, tmp_path, mock_recorder, mock_app):
         from drakkar.recorder.archive import archive_file_name
 
         name = archive_file_name('search-fleet', 0.0, 86400.0)
-        (tmp_path / name).write_bytes(b'gzip-bytes')
+        (tmp_path / 'history' / 'search-fleet').mkdir(parents=True)
+        (tmp_path / 'history' / 'search-fleet' / name).write_bytes(b'gzip-bytes')
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder.config = cfg
-        mock_recorder.storage_dir = str(tmp_path)
+        mock_recorder.storage_dir = str(tmp_path / 'storage')
+        mock_recorder.shared_dir = str(tmp_path)
 
         async with make_client(cfg, mock_recorder, mock_app) as c:
-            v1 = await c.get(f'/api/v1/debug/archives/{name}')
+            v1 = await c.get(f'/api/v1/debug/download/history/search-fleet/{name}')
 
         assert v1.status_code == 200
         assert v1.content == b'gzip-bytes'
@@ -774,15 +778,22 @@ class TestDownloadFilenameHardening:
         'bad_name',
         ['evil".db', 'evil;.db', 'evil\n.db', 'evil\x1f.db', 'evil\x7f.db'],
     )
-    async def test_unsafe_filename_chars_rejected(self, client, bad_name):
-        resp = await client.get('/api/v1/debug/download/' + quote(bad_name, safe=''))
-        assert resp.status_code == 400
-        assert resp.json() == {'error': 'Invalid filename'}
+    async def test_unsafe_filename_chars_rejected(self, tmp_path, mock_recorder, mock_app, bad_name):
+        """Names that would break out of the Content-Disposition header are never served, even when present."""
+        folder = tmp_path / 'history' / 'main'
+        folder.mkdir(parents=True)
+        (folder / bad_name).write_bytes(b'sqlite-bytes')
+        cfg = make_ui_config(enabled=True, port=8080)
+        mock_recorder.config = cfg
+        mock_recorder.shared_dir = str(tmp_path)
 
-    async def test_v1_download_rejects_unsafe_chars_too(self, client):
-        resp = await client.get('/api/v1/debug/download/' + quote('evil;.db', safe=''))
-        assert resp.status_code == 400
-        assert resp.json() == {'error': 'Invalid filename'}
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/debug/download/history/main/' + quote(bad_name, safe=''))
+
+        # A newline matches no route at all; every other name reaches the
+        # download route and is refused there. Either way: 404, no bytes.
+        assert resp.status_code == 404
+        assert b'sqlite-bytes' not in resp.content
 
 
 class TestTraceInt32Range:

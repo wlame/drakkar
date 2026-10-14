@@ -39,7 +39,8 @@ After `on_startup`, the framework builds all components in this order:
 4. **If `ui.enabled`** (default: `True`):
    - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
    - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `ui.recorder.state_sync_interval_seconds` (default: `10`) seconds.
-   - Starts the recorder (creates/opens the SQLite database, starts flush/retention/state-sync background tasks).
+   - Starts the recorder (creates/opens the SQLite database, starts flush/rotation/state-sync background tasks).
+     Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
    - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
    - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
    - Starts the [fleet registry](fleet.md) service (when `ui.enabled` and a provider other than `none`): it publishes this worker's card with state `starting` and reads the peer cards in the background. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
@@ -717,7 +718,7 @@ follow describe what the **Kafka** source does inside its share of it.
 - This runs **before** the consumer is closed so those tasks can still use `self._consumer` safely. Skipping this step caused use-after-close errors and missed final commits under revoke-then-shutdown sequences.
 
 ### Step 7: Stop the Flight Recorder
-- If the UI is enabled: flushes any buffered events to SQLite, cancels background tasks (flush, retention, state sync), removes the `-live.db` symlink.
+- If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout_seconds` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
 
 ### Step 8: Stop the UI Server
 - If the UI is enabled: stops the FastAPI server.
@@ -912,7 +913,7 @@ Each sink type is a dict mapping instance names to their config:
 |-------|------|---------|-------------|
 | `storage.dir` | str | `'/tmp/drakkar'` | This worker's own files; `''` = no disk persistence |
 | `shared.dir` | str | `''` | Folder every worker sees; `''` = `storage.dir` |
-| `history.archive.enabled` | bool | `True` | Merge rotated-out files into windowed `.db.gz` archives instead of leaking them |
+| `history.archive.enabled` | bool | `True` | Merge sealed files of the cluster history folder into windowed `.db.gz` archives instead of leaking them |
 | `history.archive.window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
 | `history.archive.due_after_hours` | int | `48` | A window is archived this long after it ends |
 | `history.archive.retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |

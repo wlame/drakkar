@@ -29,8 +29,6 @@ from drakkar.recorder import (
     EventRecorder,
     detect_worker_ip,
     format_dt,
-    list_db_files,
-    live_link_path,
     make_db_path,
 )
 from drakkar.recorder.fanout import WSSubscriber
@@ -124,27 +122,6 @@ def test_make_db_path_includes_timestamp():
 def test_make_db_path_uses_worker_name():
     path = make_db_path('/var/log', 'my-worker')
     assert path.startswith('/var/log/my-worker-')
-
-
-def test_list_db_files_returns_sorted(tmp_path):
-    for name in [
-        'test-worker-2026-03-16__14_00_00.db',
-        'test-worker-2026-03-15__10_00_00.db',
-        'test-worker-2026-03-16__15_00_00.db',
-    ]:
-        (tmp_path / name).touch()
-    files = list_db_files(str(tmp_path), 'test-worker')
-    assert len(files) == 3
-    assert '10_00' in files[0]  # sorted oldest first
-
-
-def test_list_db_files_excludes_live_symlink(tmp_path):
-    (tmp_path / 'test-worker-2026-03-16__14_00_00.db').touch()
-    live = tmp_path / 'test-worker-live.db'
-    live.symlink_to('test-worker-2026-03-16__14_00_00.db')
-    files = list_db_files(str(tmp_path), 'test-worker')
-    assert len(files) == 1
-    assert 'live' not in files[0]
 
 
 # --- Start/stop ---
@@ -921,7 +898,7 @@ async def test_record_store_events_off_does_not_buffer(tmp_path):
 # --- Rotation ---
 
 
-async def test_rotate_creates_new_db_and_flushes(tmp_path):
+async def test_rotate_creates_new_db_and_flushes(tmp_path, unique_db_paths):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
@@ -940,31 +917,7 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path):
     await rec.stop()
 
 
-async def test_rotate_precomputes_stats_for_the_closed_db(tmp_path):
-    """The just-rotated file is immutable — its databases-page stats are
-    computed by the rotation hook, so the page never full-scans it."""
-    from drakkar.dbstats import DbStatsCache
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-    old_path = rec.db_path
-    rec.record_consumed(make_msg(offset=0))
-
-    await rec._rotate()
-    # The hook is fire-and-forget; drain the tracked task(s).
-    for task in list(rec._dbstats_rotate_tasks):
-        await task
-
-    cached = DbStatsCache(str(tmp_path)).load_all()
-    assert old_path in cached
-    assert cached[old_path].stats.kind == 'recorder'
-    assert cached[old_path].stats.event_count == 1
-
-    await rec.stop()
-
-
-async def test_rotate_flushes_buffer_to_old_db(tmp_path):
+async def test_rotate_flushes_buffer_to_old_db(tmp_path, unique_db_paths):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
@@ -988,7 +941,7 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
     await rec.stop()
 
 
-async def test_rotate_creates_schema_before_swap(tmp_path):
+async def test_rotate_creates_schema_before_swap(tmp_path, unique_db_paths):
     """_create_schema(new_db) must run BEFORE self._db is swapped.
 
     Previously the swap happened first, leaving a schemaless window during
@@ -1026,7 +979,7 @@ async def test_rotate_creates_schema_before_swap(tmp_path):
     await rec.stop()
 
 
-async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path):
+async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path, unique_db_paths):
     """A flush running concurrently with _rotate must never hit 'no such table'.
 
     This exercises the real race that motivated the fix: _rotate previously
@@ -1180,7 +1133,7 @@ async def test_reader_sees_writer_writes(tmp_path):
     await rec.stop()
 
 
-async def test_rotate_rotates_reader_too(tmp_path):
+async def test_rotate_rotates_reader_too(tmp_path, unique_db_paths):
     """_rotate() must swap both writer AND reader to the new DB path."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
@@ -1332,7 +1285,7 @@ async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
     await rec.stop()
 
 
-async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path):
+async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path, unique_db_paths):
     """_rotate logs a warning on old reader/writer close failure but still
     completes. Post-rotation the new writer/reader are live.
     """
@@ -1775,10 +1728,9 @@ async def test_rotation_no_event_loss(tmp_path, unique_db_paths):
     rec.record_consumed(make_msg(offset=3))
     old_path = rec.db_path
 
-    await rec._rotate()  # flushes buffer to old DB, opens new DB
+    await rec._rotate()  # flushes buffer to old DB, opens new DB, seals the old one in place
 
-    # old DB should have all 4 events
-
+    # the sealed old DB should have all 4 events
     async with (
         aiosqlite.connect(old_path) as old_db,
         old_db.execute('SELECT COUNT(*) FROM events') as cur,
@@ -1799,7 +1751,7 @@ async def test_rotation_no_event_loss(tmp_path, unique_db_paths):
     await rec.stop()
 
 
-async def test_rotation_queries_work_on_new_db(tmp_path):
+async def test_rotation_queries_work_on_new_db(tmp_path, unique_db_paths):
     """After rotation, all query methods work on the new DB."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
@@ -1835,7 +1787,7 @@ async def test_rotation_queries_work_on_new_db(tmp_path):
     await rec.stop()
 
 
-async def test_rotation_new_db_has_schema(tmp_path):
+async def test_rotation_new_db_has_schema(tmp_path, unique_db_paths):
     """The new DB file after rotation has the full schema (tables + indexes)."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
@@ -2613,52 +2565,18 @@ async def test_stop_syncs_state_before_shutdown(tmp_path):
     rec.set_state_provider(lambda: {'uptime_seconds': 77.0})
     rec._counters['consumed'] = 999
 
-    db_path = rec.db_path
+    sealed_path = os.path.join(rec.history_dir, os.path.basename(rec.db_path))
     await rec.stop()
 
-    # verify by reopening the DB
-
+    # verify by reopening the sealed DB
     async with (
-        aiosqlite.connect(db_path) as db,
+        aiosqlite.connect(sealed_path) as db,
         db.execute('SELECT consumed_count, uptime_seconds FROM worker_state ORDER BY id DESC LIMIT 1') as cur,
     ):
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == 999
     assert row[1] == 77.0
-
-
-async def test_stop_removes_live_link(tmp_path):
-    """Graceful stop removes the -live.db symlink."""
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = live_link_path(str(tmp_path), WORKER_NAME)
-    assert os.path.islink(link)
-
-    await rec.stop()
-    assert not os.path.exists(link)
-
-
-async def test_live_link_updates_after_a_crash_left_a_stale_tmp(tmp_path):
-    """A crash between symlink() and replace() must not wedge the link.
-
-    Before the shared helper, the leftover ``.tmp`` made every later
-    ``os.symlink`` raise FileExistsError inside a bare ``except OSError:
-    pass`` — so peers and the UI kept resolving this worker to whichever
-    database it had rotated away from when it died.
-    """
-    config = make_debug_config(tmp_path)
-    link = live_link_path(str(tmp_path), WORKER_NAME)
-    os.symlink('a-database-from-the-crashed-run.db', link + '.tmp')
-
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-    try:
-        assert os.readlink(link) == os.path.basename(rec.db_path)
-    finally:
-        await rec.stop()
 
 
 # --- cross_trace ---
@@ -2741,92 +2659,6 @@ async def test_cross_trace_finds_in_current_worker(recorder):
     events = await recorder.cross_trace(partition=3, msg_offset=42)
     assert len(events) >= 2
     assert all(e['worker_name'] == WORKER_NAME for e in events)
-
-
-async def test_cross_trace_fallback_to_other_live_worker(tmp_path):
-    """cross_trace falls back to another worker's live DB if local has no match."""
-    # create other worker's DB with events for partition=5 offset=99
-    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db(other_db_path, 'other-worker', partition=5, offset=99)
-
-    # create live symlink
-    link = live_link_path(str(tmp_path), 'other-worker')
-    os.symlink(other_db_path.name, link)
-
-    # start our recorder (has no events for partition=5 offset=99)
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace(partition=5, msg_offset=99)
-    assert len(events) >= 1
-    assert all(e['worker_name'] == 'other-worker' for e in events)
-
-    await rec.stop()
-
-
-async def test_cross_trace_fallback_to_rotated_db(tmp_path):
-    """cross_trace searches rotated DB files when live workers have no match."""
-    # create a rotated (non-symlinked) DB with events
-    rotated_path = tmp_path / 'old-worker-2026-03-20__08_00_00.db'
-    await _create_worker_db(rotated_path, 'old-worker', partition=7, offset=200)
-
-    # start our recorder (has no events for partition=7 offset=200)
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace(partition=7, msg_offset=200)
-    assert len(events) >= 1
-    assert all(e['worker_name'] == 'old-worker' for e in events)
-
-    await rec.stop()
-
-
-async def test_cross_trace_cluster_filtering(tmp_path):
-    """cross_trace only searches DBs in the same cluster."""
-    # create other worker's DB in a DIFFERENT cluster
-    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db(
-        other_db_path,
-        'other-worker',
-        cluster_name='other-cluster',
-        partition=5,
-        offset=99,
-    )
-    link = live_link_path(str(tmp_path), 'other-worker')
-    os.symlink(other_db_path.name, link)
-
-    # our recorder is in 'my-cluster'
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, cluster_name='my-cluster', storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace(partition=5, msg_offset=99)
-    assert events == []
-
-    await rec.stop()
-
-
-async def test_cross_trace_prefers_newest_rotated_db(tmp_path):
-    """cross_trace searches rotated DBs newest-first."""
-    # create two rotated DBs for different timestamps
-    old_path = tmp_path / 'wk-2026-03-20__08_00_00.db'
-    await _create_worker_db(old_path, 'wk', partition=1, offset=10)
-
-    new_path = tmp_path / 'wk-2026-03-25__12_00_00.db'
-    await _create_worker_db(new_path, 'wk', partition=1, offset=10)
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace(partition=1, msg_offset=10)
-    assert len(events) >= 1
-    # both DBs have events — should find from newest first
-    assert events[0]['worker_name'] == 'wk'
-
-    await rec.stop()
 
 
 async def test_cross_trace_empty_when_no_match(recorder):
@@ -4047,8 +3879,9 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         events = await rec.get_events(partition=0)
         assert any(ev['offset'] == 0 for ev in events)
 
-        # Old DB file: row was never committed (executemany kept failing
-        # on the old connection before the rotate swapped it out).
+        # Old DB file (sealed in place): row was never committed
+        # (executemany kept failing on the old connection before the
+        # rotate swapped it out).
         async with (
             aiosqlite.connect(f'file:{old_db_path}?mode=ro', uri=True) as old_db,
             old_db.execute('SELECT COUNT(*) FROM events WHERE partition = 0') as cur,
@@ -4279,75 +4112,6 @@ def test_encode_json_sort_keys_deterministic():
 # which mirrors ``cross_trace`` (partition+offset) for label-based lookups.
 
 
-async def _create_worker_db_with_labels(
-    db_path,
-    worker_name,
-    cluster_name='',
-    task_id='task-labeled',
-    labels=None,
-):
-    """Create a DB with worker_config + events whose tasks carry labels."""
-    labels = labels or {'request_id': 'req-find-me'}
-    async with aiosqlite.connect(str(db_path)) as db:
-        await db.executescript(SCHEMA_WORKER_CONFIG)
-        await db.executescript(SCHEMA_EVENTS)
-        await db.execute(
-            """INSERT INTO worker_config
-               (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
-                source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
-                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                worker_name,
-                cluster_name,
-                '10.0.0.1',
-                8080,
-                '',
-                'kafka:9092',
-                'test',
-                'grp',
-                '/bin/test',
-                4,
-                60,
-                2,
-                5,
-                '{}',
-                '{}',
-                1000.0,
-                format_dt(1000.0),
-            ],
-        )
-        await db.execute(
-            """INSERT INTO events (ts, dt, event, partition, offset, task_id, metadata, labels)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                1000.0,
-                format_dt(1000.0),
-                'task_started',
-                0,
-                None,
-                task_id,
-                None,
-                json.dumps(labels),
-            ],
-        )
-        await db.execute(
-            """INSERT INTO events (ts, dt, event, partition, offset, task_id, metadata, labels)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                1001.0,
-                format_dt(1001.0),
-                'task_completed',
-                0,
-                None,
-                task_id,
-                None,
-                json.dumps(labels),
-            ],
-        )
-        await db.commit()
-
-
 async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
     """Local DB has matching label — returns events with worker_name attached."""
     config = make_debug_config(tmp_path, ws_min_duration_ms=0)
@@ -4369,28 +4133,6 @@ async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
     await rec.stop()
 
 
-async def test_cross_trace_by_label_fallback_to_other_live_worker(tmp_path):
-    """Local has no match — search other workers' live DBs."""
-    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db_with_labels(
-        other_db_path,
-        'other-worker',
-        task_id='t-remote',
-        labels={'request_id': 'req-remote'},
-    )
-    link = live_link_path(str(tmp_path), 'other-worker')
-    os.symlink(other_db_path.name, link)
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace_by_label('request_id', 'req-remote')
-    assert len(events) >= 1
-    assert all(e['worker_name'] == 'other-worker' for e in events)
-    await rec.stop()
-
-
 async def test_cross_trace_by_label_returns_empty_when_no_storage_dir():
     """Without ``storage_dir`` the cross-worker fallback short-circuits to []."""
     # ``UIConfig`` requires ``db_dir`` for its other validators, so build
@@ -4400,135 +4142,6 @@ async def test_cross_trace_by_label_returns_empty_when_no_storage_dir():
     await rec.start()
 
     events = await rec.cross_trace_by_label('request_id', 'whatever')
-    assert events == []
-    await rec.stop()
-
-
-async def test_cross_trace_by_label_skips_self_via_realpath(tmp_path):
-    """Own live symlink resolves to the local writer DB and must be skipped
-    so we don't open the writer file twice (which would either fail or
-    return the same already-empty events)."""
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    # Force a live symlink to exist for our own worker, pointing at our DB.
-    self_link = live_link_path(str(tmp_path), WORKER_NAME)
-    if not os.path.lexists(self_link):
-        os.symlink(os.path.basename(rec.db_path), self_link)
-
-    # No labels anywhere — fallback walk must visit the self-link, skip it,
-    # and return [] without raising.
-    events = await rec.cross_trace_by_label('request_id', 'no-such-id')
-    assert events == []
-    await rec.stop()
-
-
-async def test_cross_trace_by_label_cluster_filtering(tmp_path):
-    """A live worker in a different cluster is filtered out even if it has
-    a matching label."""
-    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db_with_labels(
-        other_db_path,
-        'other-worker',
-        cluster_name='other-cluster',
-        task_id='t-other',
-        labels={'request_id': 'req-other'},
-    )
-    link = live_link_path(str(tmp_path), 'other-worker')
-    os.symlink(other_db_path.name, link)
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, cluster_name='my-cluster', storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace_by_label('request_id', 'req-other')
-    assert events == []
-    await rec.stop()
-
-
-async def test_cross_trace_by_label_skips_db_without_events_table(tmp_path):
-    """A DB whose ``events`` table was dropped (or never created) is skipped
-    rather than raising 'no such table'."""
-    # Build a DB with worker_config but no events table.
-    broken_db_path = tmp_path / 'broken-worker-2026-03-25__10_00_00.db'
-    async with aiosqlite.connect(str(broken_db_path)) as db:
-        await db.executescript(SCHEMA_WORKER_CONFIG)
-        await db.execute(
-            """INSERT INTO worker_config
-               (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
-                source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
-                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                'broken-worker',
-                '',
-                '10.0.0.2',
-                8080,
-                '',
-                'kafka:9092',
-                'test',
-                'grp',
-                '/bin/test',
-                4,
-                60,
-                2,
-                5,
-                '{}',
-                '{}',
-                1000.0,
-                format_dt(1000.0),
-            ],
-        )
-        await db.commit()
-    link = live_link_path(str(tmp_path), 'broken-worker')
-    os.symlink(broken_db_path.name, link)
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.cross_trace_by_label('request_id', 'whatever')
-    assert events == []
-    await rec.stop()
-
-
-async def test_cross_trace_by_label_swallows_db_open_exception(tmp_path, monkeypatch):
-    """An ``aiosqlite.connect`` failure on a peer DB must not abort the
-    walk — the loop is wrapped in ``try/except Exception: continue`` so a
-    transiently-locked or corrupt peer DB does not poison cross-worker
-    queries."""
-    # Place a peer live symlink so the walk has something to visit.
-    peer_db_path = tmp_path / 'peer-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db_with_labels(
-        peer_db_path,
-        'peer-worker',
-        task_id='t-peer',
-        labels={'request_id': 'req-peer'},
-    )
-    link = live_link_path(str(tmp_path), 'peer-worker')
-    os.symlink(peer_db_path.name, link)
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    from drakkar.recorder import core as recorder_module
-
-    real_connect = recorder_module.aiosqlite.connect
-
-    def failing_connect(uri, *args, **kwargs):
-        # Only fail when the cross-worker walk dials the peer DB. Other
-        # callers (the recorder's own writer/reader) keep working.
-        if 'peer-worker' in uri:
-            raise OSError('simulated peer DB lock')
-        return real_connect(uri, *args, **kwargs)
-
-    monkeypatch.setattr(recorder_module.aiosqlite, 'connect', failing_connect)
-
-    # Even though our peer DB has the matching label, the simulated open
-    # failure makes the walk fall through to the empty return.
-    events = await rec.cross_trace_by_label('request_id', 'req-peer')
     assert events == []
     await rec.stop()
 
@@ -4677,53 +4290,6 @@ async def test_trace_by_label_returns_empty_when_store_events_false(tmp_path):
 # --- cross_trace corner cases -----------------------------------------------
 
 
-async def test_trace_db_file_returns_empty_when_events_table_missing(tmp_path):
-    """A peer DB whose ``events`` table was never created (or got dropped)
-    must be skipped via the ``not await cur.fetchone()`` branch in
-    ``_trace_db_file`` instead of raising 'no such table'."""
-    # Build a peer DB with worker_config but no events table.
-    broken_db_path = tmp_path / 'broken-worker-2026-03-25__10_00_00.db'
-    async with aiosqlite.connect(str(broken_db_path)) as db:
-        await db.executescript(SCHEMA_WORKER_CONFIG)
-        await db.execute(
-            """INSERT INTO worker_config
-               (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
-                source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
-                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                'broken-worker',
-                '',
-                '10.0.0.2',
-                8080,
-                '',
-                'kafka:9092',
-                'test',
-                'grp',
-                '/bin/test',
-                4,
-                60,
-                2,
-                5,
-                '{}',
-                '{}',
-                1000.0,
-                format_dt(1000.0),
-            ],
-        )
-        await db.commit()
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    # Drive the trace through ``_trace_db_file`` directly — it's the
-    # internal helper that owns the events-table existence check.
-    events = await rec.queries._trace_db_file(str(broken_db_path), partition=0, msg_offset=0)
-    assert events == []
-    await rec.stop()
-
-
 async def test_cross_trace_returns_empty_when_no_storage_dir():
     """Without ``storage_dir`` ``cross_trace`` short-circuits to [] before any
     glob/symlink walk."""
@@ -4733,43 +4299,6 @@ async def test_cross_trace_returns_empty_when_no_storage_dir():
 
     events = await rec.cross_trace(partition=0, msg_offset=0)
     assert events == []
-    await rec.stop()
-
-
-async def test_cross_trace_skips_non_symlink_files(tmp_path):
-    """A regular file (not a symlink) matching the ``*-live.db`` glob
-    pattern must be skipped — ``cross_trace`` only follows real live links
-    so a stray file doesn't get treated as a peer worker."""
-    # Plant a non-symlink that matches the glob pattern. cross_trace must
-    # ignore it. (A worker would never legitimately write a *-live.db
-    # regular file, but defensive code is defensive code.)
-    fake_live = tmp_path / 'fake-worker-live.db'
-    async with aiosqlite.connect(str(fake_live)) as db:
-        await db.executescript(SCHEMA_WORKER_CONFIG)
-        await db.executescript(SCHEMA_EVENTS)
-        await db.execute(
-            """INSERT INTO events (ts, dt, event, partition, offset, task_id, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [1.0, format_dt(1.0), 'consumed', 5, 99, None, None],
-        )
-        await db.commit()
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    # Even though the file has a matching event, cross_trace must skip it
-    # because it isn't a symlink. With no rotated files either, the trace
-    # falls through to [].
-    events = await rec.cross_trace(partition=5, msg_offset=99)
-    # The events MAY come back via the rotated-DB phase (since the file
-    # also matches that glob), so the assertion is on the live-symlink
-    # path: if it were treated as a live link the query would short-circuit
-    # and never visit the rotated path. We can't easily prove the negative
-    # here without observation hooks, so make the weaker assertion that
-    # the call returns successfully and the file was treated as a regular
-    # DB file (events ARE found via the rotated-files fallback).
-    assert isinstance(events, list)
     await rec.stop()
 
 
@@ -4800,44 +4329,9 @@ async def test_start_rolls_back_when_reader_open_fails(tmp_path, monkeypatch):
     assert rec._running is False
 
 
-async def test_update_live_link_swallows_oserror(tmp_path, monkeypatch):
-    """``_update_live_link`` is best-effort — an OSError from os.symlink or
-    os.replace must be swallowed so a failure to refresh the link never
-    aborts ``start()`` or ``_rotate()``."""
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    def failing_symlink(*_args, **_kwargs):
-        raise OSError('simulated symlink failure')
-
-    monkeypatch.setattr(os, 'symlink', failing_symlink)
-
-    # Must not raise — the OSError is swallowed.
-    rec._update_live_link()
-
-    await rec.stop()
-
-
-async def test_remove_live_link_swallows_oserror(tmp_path, monkeypatch):
-    """``_remove_live_link`` is best-effort — a permissions error during
-    ``os.remove`` on shutdown must not propagate out of ``stop()``."""
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    def failing_remove(_path):
-        raise OSError('simulated remove failure')
-
-    monkeypatch.setattr(os, 'remove', failing_remove)
-
-    # Must not raise — _remove_live_link swallows OSError.
-    rec._remove_live_link()
-
-
 async def test_stop_logs_warning_on_writer_close_failure(tmp_path):
-    """If the writer's ``close()`` raises during ``stop()`` the recorder
-    logs a warning and continues to the live-link cleanup + final
+    """If sealing the writer fails during ``stop()`` (here: its ``close()``
+    raises) the recorder logs a seal failure and continues to the final
     ``recorder_stopped`` log so shutdown completes cleanly."""
     import contextlib
 
@@ -4864,38 +4358,21 @@ async def test_stop_logs_warning_on_writer_close_failure(tmp_path):
     with structlog.testing.capture_logs() as captured:
         await rec.stop()
 
-    close_failures = [ev for ev in captured if ev.get('event') == 'recorder_writer_close_failed']
+    close_failures = [ev for ev in captured if ev.get('event') == 'recorder_seal_failed']
     stop_events = [ev for ev in captured if ev.get('event') == 'recorder_stopped']
     assert len(close_failures) == 1
     assert close_failures[0]['log_level'] == 'warning'
+    assert close_failures[0]['stage'] == 'seal'
     # The final recorder_stopped log still fires — proving the close failure
     # didn't abort the rest of stop().
     assert len(stop_events) == 1
 
 
-async def test_trace_db_file_returns_empty_on_corrupt_db(tmp_path):
-    """An exception thrown anywhere inside ``_trace_db_file`` (e.g. a
-    truncated or locked SQLite file) must be swallowed and turned into
-    [] — the catch-all is the last line of defence for the cross-trace
-    walk so one bad peer DB never poisons the search."""
-    # A non-SQLite file: aiosqlite raises ``DatabaseError`` on first query.
-    bogus_path = tmp_path / 'not-actually-a-db.db'
-    bogus_path.write_text('this is not sqlite')
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-
-    events = await rec.queries._trace_db_file(str(bogus_path), partition=0, msg_offset=0)
-    assert events == []
-    await rec.stop()
-
-
 async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
-    """``_rotate`` must finish even if closing the OLD writer fails — the
+    """``_rotate`` must finish even if sealing the OLD writer fails — the
     new writer is already live, so propagating a stale-close exception
-    would falsely abort the rotate. Verify the warning fires AND the new
-    writer is usable post-rotate."""
+    would falsely abort the rotate. Verify the seal failure is logged AND
+    the new writer is usable post-rotate."""
     import contextlib
 
     import structlog.testing
@@ -4918,9 +4395,10 @@ async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
     with structlog.testing.capture_logs() as captured:
         await rec._rotate()
 
-    close_failures = [ev for ev in captured if ev.get('event') == 'recorder_old_db_close_failed']
+    close_failures = [ev for ev in captured if ev.get('event') == 'recorder_seal_failed']
     assert len(close_failures) == 1
     assert close_failures[0]['log_level'] == 'warning'
+    assert close_failures[0]['stage'] == 'seal'
     # New writer must be live and usable.
     assert rec._db is not None
     rec.record_consumed(make_msg(partition=4, offset=77))
@@ -4954,20 +4432,6 @@ async def test_flush_public_alias_drains_buffer(recorder):
     assert len(recorder._buffer) == 0
     events = await recorder.get_events()
     assert any(e.get('offset') == 11 for e in events)
-
-
-async def test_update_live_link_no_op_when_no_db_path(tmp_path):
-    """Without ``db_dir``/``db_path`` the recorder skips the symlink dance
-    entirely — there's nothing to point at."""
-    config = make_ui_config(enabled=True, flush_interval_seconds=60)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir='')
-    await rec.start()
-
-    # _db_path stays empty when db_dir is empty (early-skip in start()).
-    assert not rec._db_path
-    # No DB path → early return. No exception, no symlink created.
-    rec._update_live_link()
-    await rec.stop()
 
 
 # --- Pinned event-row shape (on-disk + API contract) -----------------------
@@ -5438,7 +4902,7 @@ class TestLastBreathFlush:
     async def test_noop_after_clean_stop(self, tmp_path):
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
         await rec.start()
-        db_path = rec.db_path
+        db_path = os.path.join(rec.history_dir, os.path.basename(rec.db_path))
         await rec.stop()
         # Simulate a stray late event after shutdown — it must NOT reopen the DB.
         rec._buffer.append({'ts': time.time(), 'dt': 'x', 'event': 'consumed'})

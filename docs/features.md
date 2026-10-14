@@ -17,15 +17,15 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Metrics exporter | `metrics.enabled` | **on** (`:9090`) | Raw Prometheus endpoint on its own port |
 | Operator UI + probes | `ui.enabled` | **on** (`:8080`) | UI server, `/api/v1`, `/ws`, **`/healthz` + `/readyz`**, and the flight recorder |
 | Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/v1/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
-| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes an unreclaimed `merged-<ts>-<token>.db` per call; `false` = 403, independently of `auth_token` |
+| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes a `merged-<ts>-<token>.db` into `<shared.dir>/merged/` per call, deleted after `history.merged_retention_days` while archiving is on; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Own storage | `storage.dir` | `/tmp/drakkar` | Where this worker's event history, cache file and crash marker live; empty = memory-only |
-| Recorder archiving | `history.archive.enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
+| Recorder archiving | `history.archive.enabled` | **on** | Fold the sealed files of each cluster history folder into per-cluster `.db.gz` window archives; off = sealed files and merge results are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
 | Worker registry | `fleet.registry.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, peer clusters for the cache exchange; needs `ui.enabled` |
-| Cross-worker fleet view | shared `storage.dir` | — | Cross-tracing, cluster-wide database view |
+| Cross-worker fleet view | a `shared.dir` every worker mounts (or one shared `storage.dir`) | — | History trace over the cluster's sealed files, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
@@ -75,14 +75,16 @@ the failure mode so you can decide what your deployment needs.
    `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
    internal mirror.
 5. **The workers list needs the registry; cross-tracing needs a SHARED
-   `storage.dir`.** Workers find each other through the
+   folder.** Workers find each other through the
    [fleet registry](fleet.md), which needs `ui.enabled` and, for the
    default `filesystem` provider, a card folder all workers see
-   (`shared.dir`, else `storage.dir`). Cross-worker tracing still scans
-   one shared directory for other workers' DB files (see
-   [Local Databases](local-databases.md)); every worker must mount it at
-   the **same path**. Unshared folders are silent: each worker simply sees
-   only itself. Set `ui.public_url` per worker so the card and
+   (`shared.dir`, else `storage.dir`). Every worker seals its finished
+   recorder files into `<shared.dir>/history/<cluster>/`, and a history
+   trace reads the sealed files there (see
+   [Local Databases](local-databases.md#sealing-and-the-history-folder));
+   every worker must see the same shared folder (the mount path may
+   differ: no file stores an absolute path). Unshared
+   folders are silent: each worker simply sees only itself. Set `ui.public_url` per worker so the card and
    cross-links carry a reachable address instead of the bind IP.
 6. **The cache engine needs `storage.dir` too.** The cache file lives
    there; with `storage.dir` empty the cache runs memory-only (WARN
@@ -185,7 +187,7 @@ deep-links.
 
 ```yaml
 storage:
-  dir: /shared/drakkar      # same volume, same path, EVERY worker
+  dir: /shared/drakkar      # the same volume on EVERY worker (any mount path)
 ```
 
 Workers discover each other, the UI's worker switcher fills in, and
@@ -224,8 +226,7 @@ config and the worker serves HTTP only.
 
 - Kubernetes? → `ui.enabled: true` (rule 1), probes pointed at the UI
   port.
-- More than one worker? → shared `storage.dir`, same mount path everywhere
-  (rule 5), `ui.public_url` set per worker.
+- More than one worker? → one shared folder on every worker (rule 5), `ui.public_url` set per worker.
 - Cache not syncing? → check that the peers appear in the workers list
   (rule 7), the shared directory (rule 6), and that both workers are in
   the same cluster for `cluster`-scoped keys.

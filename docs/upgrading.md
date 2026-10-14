@@ -40,9 +40,10 @@ are `DK_` plus the YAML path with `__` between the levels.
 - **A fleet across hosts.** Give every worker its own `storage.dir` on a
   local disk (for example a per-pod volume), and mount one shared folder
   on every worker as `shared.dir` (for example a `ReadWriteMany` volume).
-  Each worker writes its own files only to `storage.dir`. The shared folder
-  holds the worker registry, the history, the archives and the merge
-  results.
+  Each worker writes its live files only to `storage.dir`. The shared
+  folder holds the worker registry, the history, the archives and the merge
+  results. A finished recorder file is sealed and moved from `storage.dir`
+  into `<shared.dir>/history/<cluster>/` in the background.
 
 `shared.dir` empty means "the same folder as `storage.dir`".
 
@@ -150,10 +151,41 @@ volumeMounts:
    and `fleet=<provider>` (`fleet=off` when the UI is off or no folder
    resolves).
 3. Start the other workers. The workers list in the UI shows every peer.
+4. Wait for one rotation (`ui.recorder.rotation_interval_hours`, default 1
+   hour), or stop one worker cleanly. Then look in
+   `<shared.dir>/history/<cluster>/` (`<storage.dir>/history/<cluster>/`
+   when `shared.dir` is empty). It holds a sealed recorder file
+   `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` and its meta file
+   `<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json`. `<cluster>` is the
+   cluster name with every character outside `[a-zA-Z0-9_-]` replaced by
+   `_`, or `default` when the cluster name is empty. If the folder stays
+   empty, check `drakkar_recorder_unsealed_files` and the log event
+   `recorder_seal_failed`. See
+   [Sealing](local-databases.md#sealing-and-the-history-folder).
 
 ## 8. Old files
 
 Upgrade with all workers stopped. The new release does not read the files
-an older release wrote: delete the old folder, or point `storage.dir` and
-`shared.dir` at empty folders. A rolling upgrade from the older release is
-not supported.
+an older release wrote and does not migrate them: after the upgrade the
+history folders start empty. Delete the old folder, or point `storage.dir`
+and `shared.dir` at empty folders. A rolling upgrade from the older release
+is not supported.
+
+The worker does not delete the old files. Delete them yourself:
+
+| Old file | What it was |
+|---|---|
+| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` (and its `-wal`, `-shm`) | Rotated recorder files. |
+| `<worker>-live.db` | Link to the live recorder file. Workers no longer open each other's live files. |
+| `.dbstats.db` | Statistics cache of the Databases page. Sealed files now carry a meta file. |
+| `.archive-<cluster>.lock` | The old archive lock. The lock is now `history/<cluster>/.archive.lock`. |
+| `<cluster>-<from>__<to>.db.gz` in `storage.dir` | Old archives. The archive pass now works only inside `<shared.dir>/history/<cluster>/`. |
+| `merged-*.db` in `storage.dir` | Old UI merge results. New ones go to `<shared.dir>/merged/`. |
+
+!!! note "Old recorder files with the worker's own name"
+    An old rotated file named `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` matches
+    the [leftover](local-databases.md#leftovers) rule for that worker name.
+    If it is still in `storage.dir` when that worker starts, the worker
+    seals it and moves it into the history folder like a file of its own.
+    Delete the old files before the first start if you do not want them in
+    the history.

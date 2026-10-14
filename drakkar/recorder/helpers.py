@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
-import glob
 import json
-import os
 import socket
 from datetime import UTC, datetime
 from pathlib import Path
@@ -209,27 +207,10 @@ def make_db_path(db_dir: str, worker_name: str) -> str:
     return str(Path(db_dir) / f'{worker_name}-{ts}.db')
 
 
-def live_link_path(db_dir: str, worker_name: str) -> str:
-    """Path for the live symlink: {db_dir}/{worker_name}-live.db."""
-    return str(Path(db_dir) / f'{worker_name}-live.db')
-
-
-def list_db_files(db_dir: str, worker_name: str) -> list[str]:
-    """List all timestamped DB files for a worker, oldest first.
-
-    Excludes the -live.db symlink.
-    """
-    pattern = str(Path(db_dir) / f'{worker_name}-*.db')
-    live = live_link_path(db_dir, worker_name)
-    files = [f for f in glob.glob(pattern) if f != live and not os.path.islink(f)]
-    files.sort()
-    return files
-
-
 # Canonical recorder busy_timeout, in milliseconds — set explicitly on
-# every recorder connection (writer, own reader, peer reads) on BOTH
-# backends so cross-process WAL contention in a shared db_dir behaves
-# identically no matter which backend opened the file. The cache uses
+# every recorder connection that takes locks (writer, own reader, sealing)
+# so lock contention behaves the same whichever implementation opened the
+# file. The cache uses
 # its own values (drakkar/cache/sql.py). See docs/local-databases.md.
 BUSY_TIMEOUT_MS = 5000
 

@@ -248,7 +248,7 @@ def _runnable_app(tmp_path, monkeypatch, provider_factory) -> tuple[DrakkarApp, 
     ui_server = MagicMock()
     ui_server.stop = AsyncMock(side_effect=lambda: order.append('ui_server.stop'))
     recorder = MagicMock()
-    recorder.stop = AsyncMock(side_effect=lambda: order.append('recorder.stop'))
+    recorder.stop = AsyncMock(side_effect=lambda **_kwargs: order.append('recorder.stop'))
 
     async def start_ui_and_recorder() -> None:
         order.append('ui_and_recorder')

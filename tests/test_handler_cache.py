@@ -339,7 +339,7 @@ async def test_shutdown_stops_cache_before_recorder(tmp_path) -> None:
 
     mock_recorder = AsyncMock()
 
-    async def recorder_stop() -> None:
+    async def recorder_stop(timeout: float | None = None) -> None:
         order.append('recorder_stop')
 
     mock_recorder.stop = recorder_stop

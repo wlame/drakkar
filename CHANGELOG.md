@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two `ui.recorder.dbstats_*` keys are removed. An old key in YAML
   or in a `DK_*` variable fails the load with one message that lists every
   old key. See `docs/upgrading.md`.
+- **Recorder files move into a shared history folder.** At rotation and at
+  a clean stop the worker seals its recorder file and moves it into
+  `<shared.dir>/history/<cluster>/`. Old files are not migrated and the
+  history folders start empty. At the first start, old recorder files with
+  the worker's own name are sealed into the history folder like any
+  leftover; delete them first if you do not want them there. See
+  `docs/upgrading.md`.
+- **Debug API changes (UI contract v1.23).** `GET /api/v1/debug/databases`
+  answers `{"own": [...], "history": {"folders": [...]}}`. Files are
+  downloaded with `GET /api/v1/debug/download/{path}`, where `path` is
+  relative to `shared.dir`; own files in `storage.dir` are not
+  downloadable. `POST /api/v1/debug/merge` takes the same paths.
+  `GET /api/v1/debug/archives/{name}` is removed.
 
 ### Added
 
@@ -38,6 +51,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_fleet_duplicate_worker_name_total`. See `docs/fleet.md`.
 - **`GET /api/v1/workers` rows carry `backend`, `version`, `state`,
   `started_at` and `instance`** (UI contract v1.23).
+- **Sealing.** A sealed recorder file uses a rollback journal and never
+  changes again. Next to it a meta file `<name>.db.meta.json` (schema 1)
+  holds its statistics, so readers never open the file to count rows. The
+  move into the history folder runs in a background job. A file whose seal
+  or move fails stays in a backlog and is retried on every rotation tick.
+  Files that a crashed process left behind are sealed after the next start.
+  See `docs/local-databases.md`.
+- **New metrics** `drakkar_recorder_unsealed_files`,
+  `drakkar_recorder_seal_failures_total` and
+  `drakkar_recorder_archive_failures_total`. Alert when
+  `drakkar_recorder_unsealed_files > 0` for two rotation intervals.
+- **New log events** `recorder_sealed`, `recorder_seal_failed`,
+  `recorder_leftover_sealed`, `recorder_archive_lock_taken_over`,
+  `recorder_archive_lock_put_back_failed`, `recorder_archive_fenced`,
+  `recorder_merged_pruned` and `recorder_background_job_failed`.
+- **Trace over history.** `GET /api/v1/debug/trace?history=1` searches the
+  sealed files of the worker's cluster, newest first, within
+  `ui.trace.history_max_files` and `ui.trace.history_max_seconds`.
+- **Merge results expire.** The archive pass deletes merge results older
+  than `history.merged_retention_days` (default 32 days).
 
 ### Changed
 
@@ -63,8 +96,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recorder_storage_dir_world_writable`, `recorder_storage_dir_network_fs`,
   `watchdog_disabled_no_storage_dir`, `cache_engine_disabled_no_storage_dir`.
   In `recorder_archives_unbounded` and `recorder_archiving_disabled` the
-  `db_dir` field is now `storage_dir`, and `archive_window_hours` is
-  `window_hours`.
+  `db_dir` field is now `folder` (the history folder), and
+  `archive_window_hours` is `window_hours`.
+- **The archive pass works on the history folder of the worker's
+  cluster.** Every worker runs it after each rotation tick, in the
+  background. Archives are written into that folder. Every file there is
+  sealed, so the pass has no in-use check any more and reads its sources
+  with `immutable=1`. `drakkar_recorder_archive_bytes` and
+  `drakkar_recorder_archive_files` measure that folder.
+- **The archive lock is `history/<cluster>/.archive.lock`.** One worker
+  takes it with an exclusive create. A lock older than
+  `history.archive.lock_stale_seconds` is taken over; ages use the file
+  server's clock. A worker that lost its lock publishes and deletes
+  nothing.
+- **Message trace reads only this worker's own files by default.**
+  `trace-by-label` reads only the live file. Workers no longer open each
+  other's live files.
+- **`GET /api/v1/debug/archives` lists the archives of every cluster
+  folder**, each with `folder` and `path`.
+- **Merge results go to `<shared.dir>/merged/`** (folder mode 0700). The
+  merge answer has an extra `path`. An archive path answers 400. Merge
+  results and archives use a rollback journal.
+
+### Removed
+
+- **The `<worker>-live.db` link, the `.dbstats.db` statistics file and the
+  `flock` archive lock `.archive-<cluster>.lock`.** The Databases page reads
+  sealed-file statistics from meta files and keeps own-file statistics in
+  memory. It no longer lists cache files.
+- **Log events** `dbstats_cache_reset`, `recorder_dbstats_purged` and
+  `recorder_dbstats_warm_failed`.
 
 ### Fixed
 
@@ -85,7 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed merge leaves nothing behind and answers 500.
 - **A UI-merged file is never archived.** With no cluster name set, the
   archive pass took `merged-*.db` files in `db_dir` as sources and deleted
-  them. Merged files now stay until you remove them, as the docs say.
+  them. Merge results now live in `<shared.dir>/merged/`, outside every
+  history folder, and are deleted only after `history.merged_retention_days`.
 
 ## [2.3.0] - 2026-09-22
 

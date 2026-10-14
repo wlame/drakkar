@@ -20,7 +20,7 @@ datetimes embedded in JSON.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 def format_rfc3339_micro(dt: datetime) -> str:
@@ -32,3 +32,26 @@ def format_rfc3339_micro(dt: datetime) -> str:
     """
     aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
     return aware.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def format_epoch_micro(ts: float) -> str:
+    """Render epoch seconds in the canonical timestamp format.
+
+    The microsecond is ``round(ts * 1_000_000)`` — round half to even on the
+    IEEE double product — so the same float renders to the same text in any
+    implementation that does the same arithmetic. ``datetime.fromtimestamp``
+    is not used: its own rounding is an implementation detail.
+    """
+    return format_rfc3339_micro(_EPOCH + timedelta(microseconds=round(ts * 1_000_000)))
+
+
+def format_epoch_ns(ns: int) -> str:
+    """Render an integer nanosecond epoch time (a file mtime) in the canonical timestamp format.
+
+    Truncated to the microsecond with integer arithmetic, so it is exact:
+    no float rounding, the same text in any implementation.
+    """
+    return format_rfc3339_micro(_EPOCH + timedelta(microseconds=ns // 1000))

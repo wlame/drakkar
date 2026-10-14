@@ -235,7 +235,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache exchange reads peers' cache files from `storage.dir`, so cluster-wide cache peer sync needs a shared `storage.dir` instead.
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
@@ -249,7 +249,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
-- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `storage.dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
+- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<shared.dir>/merged/`. The archive pass deletes it after `history.merged_retention_days` (default 32); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -261,11 +261,11 @@ To a team of operators on a trusted network, yes -- that is what it is for. To a
 
 Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
-Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file that nothing reclaims. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
+Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file into the shared folder. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
-1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/debug/download/{filename}`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
+1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/api/v1/debug/download/{path}`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
 2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The `Origin` header is validated on every handshake, token or not, against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). An untokened worker still accepts the cross-origin handshakes the cluster view is built on, but not a page that is off loopback reaching a worker over loopback — see [Security](security.md#the-loopback-bind-and-the-operators-browser).
 3. **Read-only views remain accessible** — both before and after enabling auth. `/`, `/live`, `/partitions`, `/sinks`, `/history` and the per-task views are SPA routes backed by read-only flight-recorder endpoints; the extra gating listed above is on the mutating / data-exposing ones.
 
@@ -298,7 +298,20 @@ Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a
 
 ### What happens to old recorder database files? Where did `retention_hours` go?
 
-They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either is ignoring an unknown key. In their place, a periodic pass merges each finished UTC time window's rotated-out raw files into one compressed `<cluster>-<from>__<to>.db.gz` per cluster and deletes only the raw files it merged; with the defaults, that lands 48-72h after the data was recorded. `history.archive.retention_days` (default `30`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab → Archives**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `history.archive.enabled: false` if you'd rather prune `storage.dir` yourself.
+They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either is ignoring an unknown key. At rotation each worker seals its finished file and moves it into `<shared.dir>/history/<cluster>/`. A periodic pass merges each finished UTC time window's sealed files into one compressed `<cluster>-<from>__<to>.db.gz` in that folder and deletes only the sealed files it merged; with the defaults, that lands 48-72h after the data was recorded. `history.archive.retention_days` (default `30`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `history.archive.enabled: false` if you'd rather prune the history folders yourself.
+
+### What does the shared folder need from the filesystem?
+
+Each worker writes its live recorder file only to its own `storage.dir`. Only finished, sealed files cross to `shared.dir`, in a background job, so a slow network mount never holds up rotation or the pipeline. A local disk per worker plus one network mount for `shared.dir` is the usual layout; when the two are on different filesystems the worker copies the file across, fsyncs it, and only then deletes the source.
+
+The shared folder needs two things:
+
+- **The same folder on every worker.** The mount path may differ: no file stores an absolute path.
+- **An exclusive create and a rename inside one folder.** The archive lock (`history/<cluster>/.archive.lock`) is taken with an exclusive create, and a sealed file appears in the history folder by a rename. It does not need `flock`.
+
+Clock skew between worker hosts does not matter: lock ages are measured on the file server's clock (a worker touches a marker file and reads its modification time), never by comparing two hosts' clocks.
+
+Watch `drakkar_recorder_unsealed_files`: a value above `0` for two rotation intervals means files cannot reach the shared folder. See [Sharing folders across workers](local-databases.md#sharing-folders-across-workers).
 
 ### Can I customize the debug UI?
 
@@ -414,9 +427,9 @@ See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary 
 
 ### Why are peer workers trusted?
 
-The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache_engine.py::CacheEngine._sync_inner` and `drakkar/recorder.py::EventRecorder.cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `storage.dir` can inject cache entries or event rows that your workers will read.
+The cache exchange reads other workers' cache files in `storage.dir` directly (see `drakkar/cache/engine.py`), and every worker reads, archives and serves the sealed recorder files in `<shared.dir>/history/` (see `drakkar/recorder/archive.py`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared folder can inject cache entries, or plant recorder files that your workers will archive and serve.
 
-Treat a shared `storage.dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
+Treat a shared `storage.dir` or `shared.dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
 ### How is the UI protected?
 

@@ -1,14 +1,14 @@
-"""Tests for recorder DB naming, live symlink, and shutdown cleanup.
+"""Tests for recorder DB naming and what a clean stop leaves behind.
 
-The recorder generates timestamped filenames from db_dir + worker_name,
-maintains a {worker}-live.db symlink, and removes it on stop().
+The recorder generates timestamped filenames from storage.dir + worker
+name; a clean stop seals the live file into the history folder.
 """
 
 import os
 from pathlib import Path
 
 from drakkar.config import UIConfig
-from drakkar.recorder import EventRecorder, list_db_files, live_link_path, make_db_path
+from drakkar.recorder import EventRecorder, make_db_path
 from tests.conftest import make_ui_config
 
 WORKER = 'worker-1'
@@ -63,58 +63,7 @@ def test_different_workers_produce_different_filenames():
     assert 'worker-2' in p2
 
 
-# --- Live symlink ---
-
-
-async def test_start_creates_live_symlink(tmp_path):
-    config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = Path(live_link_path(str(tmp_path), WORKER))
-    assert link.is_symlink()
-    assert os.readlink(link) == os.path.basename(rec.db_path)
-
-    await rec.stop()
-
-
-async def test_live_symlink_name_is_worker_dash_live(tmp_path):
-    config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name='my-cool-worker', storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = tmp_path / 'my-cool-worker-live.db'
-    assert link.is_symlink()
-
-    await rec.stop()
-
-
-async def test_live_symlink_resolves_to_existing_db(tmp_path):
-    config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = Path(live_link_path(str(tmp_path), WORKER))
-    resolved = link.resolve()
-    assert resolved.exists()
-    assert resolved == Path(rec.db_path).resolve()
-
-    await rec.stop()
-
-
-async def test_stop_removes_live_symlink(tmp_path):
-    config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = Path(live_link_path(str(tmp_path), WORKER))
-    assert link.is_symlink()
-
-    await rec.stop()
-    assert not link.exists()
-
-
-async def test_stop_preserves_db_file(tmp_path):
+async def test_stop_keeps_the_db_file_in_the_history_folder(tmp_path):
     config = _make_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
@@ -123,10 +72,11 @@ async def test_stop_preserves_db_file(tmp_path):
     assert os.path.exists(db_file)
 
     await rec.stop()
-    assert os.path.exists(db_file)  # file itself remains
+    assert not os.path.exists(db_file)
+    assert os.path.exists(os.path.join(rec.history_dir, os.path.basename(db_file)))
 
 
-async def test_stop_flushes_before_removing_symlink(tmp_path):
+async def test_stop_flushes_before_sealing(tmp_path):
     config = _make_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
@@ -142,73 +92,19 @@ async def test_stop_flushes_before_removing_symlink(tmp_path):
     # verify the event was flushed to the DB before shutdown
     import aiosqlite
 
+    sealed = os.path.join(rec.history_dir, os.path.basename(rec.db_path))
     async with (
-        aiosqlite.connect(rec.db_path) as db,
+        aiosqlite.connect(sealed) as db,
         db.execute('SELECT COUNT(*) FROM events') as cur,
     ):
         row = await cur.fetchone()
         assert row[0] == 1
 
 
-# --- Rotation updates symlink ---
-
-
-async def test_rotation_updates_live_symlink(tmp_path, monkeypatch):
-    # make_db_path stamps to the second — patch in a counter so the
-    # rotation opens a genuinely new path without a wall-clock sleep.
-    import drakkar.recorder.core as recorder_core
-
-    real_make_db_path = recorder_core.make_db_path
-    counter = iter(range(1, 100))
-    monkeypatch.setattr(
-        recorder_core,
-        'make_db_path',
-        lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
-    )
-
-    config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
-    await rec.start()
-
-    link = Path(live_link_path(str(tmp_path), WORKER))
-    first_target = os.readlink(link)
-
-    await rec._rotate()
-
-    second_target = os.readlink(link)
-    assert second_target != first_target
-    assert second_target == os.path.basename(rec.db_path)
-
-    await rec.stop()
-
-
-# --- File listing ---
-
-
-def test_list_db_files_excludes_live_symlink(tmp_path):
-    (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
-    (tmp_path / 'worker-1-2026-03-16__15_00_00.db').touch()
-    live = tmp_path / 'worker-1-live.db'
-    live.symlink_to('worker-1-2026-03-16__15_00_00.db')
-
-    files = list_db_files(str(tmp_path), 'worker-1')
-    assert len(files) == 2
-    assert all('live' not in f for f in files)
-
-
-def test_list_db_files_excludes_other_workers(tmp_path):
-    (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
-    (tmp_path / 'worker-2-2026-03-16__14_00_00.db').touch()
-
-    files = list_db_files(str(tmp_path), 'worker-1')
-    assert len(files) == 1
-    assert 'worker-1' in files[0]
-
-
 # --- Memory-only mode ---
 
 
-async def test_no_symlink_when_storage_dir_empty():
+async def test_no_db_file_when_storage_dir_empty():
     config = make_ui_config(enabled=True)
     rec = EventRecorder(config, worker_name=WORKER, storage_dir='')
     await rec.start()

@@ -363,32 +363,9 @@ def scan_db(path: str) -> DbStats:
     return stats
 
 
-def scan_directory(db_dir: str) -> list[DbStats]:
-    """Scan a directory for debug database files and return their stats.
-
-    Excludes ``-live.db`` symlinks (they point to active DBs that may be
-    written to) and returns results sorted by filename.
-    """
-    results: list[DbStats] = []
-    if not db_dir or not os.path.isdir(db_dir):
-        return results
-    for entry in sorted(os.listdir(db_dir)):
-        # Dot-prefixed names are pass-internal state, never a finished
-        # database — archiving's in-flight merge temporaries
-        # (``.<name>.<pid>.merge.db``) end in ``.db`` and would otherwise
-        # show up here mid-merge.
-        if entry.startswith('.'):
-            continue
-        if not entry.endswith('.db'):
-            continue
-        full = os.path.join(db_dir, entry)
-        # skip live symlinks — they point to active DBs
-        if os.path.islink(full):
-            continue
-        if not os.path.isfile(full):
-            continue
-        results.append(scan_db(full))
-    return results
+def _open_sealed(path: str) -> sqlite3.Connection:
+    """Open a finished database file read-only, without locks (``immutable=1``)."""
+    return sqlite3.connect(f'file:{path}?mode=ro&immutable=1', uri=True)
 
 
 def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
@@ -405,6 +382,13 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     A source that cannot be opened or read is skipped rather than failing
     the whole merge; ``MergeResult.merged_files`` reports which paths
     actually contributed.
+
+    Every source must be a finished file that nothing writes any more: a
+    sealed recorder file, a merge result or an unpacked archive. Sources
+    are read with ``immutable=1``, which takes no file locks (unreliable
+    on network mounts) and never creates ``-wal``/``-shm`` files next to
+    them. The output is left with a rollback journal, so it is finished in
+    the same sense once this returns.
 
     Args:
         db_paths: Paths to source .db files.
@@ -439,7 +423,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         result.source_files.append(basename)
         src: sqlite3.Connection | None = None
         try:
-            src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            src = _open_sealed(db_path)
             src.row_factory = _dict_factory
             if _is_merged_db(src):
                 merged_ids[db_path] = _copy_merged_workers(src, out, cluster_names)
@@ -501,7 +485,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             continue
         src: sqlite3.Connection | None = None
         try:
-            src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            src = _open_sealed(db_path)
             src.row_factory = _dict_factory
             if _table_exists(src, 'events'):
                 rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
@@ -525,7 +509,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             continue
         src: sqlite3.Connection | None = None
         try:
-            src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            src = _open_sealed(db_path)
             src.row_factory = _dict_factory
             # A recorder file keeps snapshots in ``worker_state``; a merge
             # output keeps them, already worker-tagged, in ``worker_states``.
@@ -552,6 +536,9 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     ]
 
     out.commit()
+    # Leave WAL mode: readers of the result (other workers, an operator's
+    # sqlite3 shell) then need no -shm file and no write access.
+    out.execute('PRAGMA journal_mode=DELETE')
     out.close()
 
     # determine cluster: if all sources share the same non-empty cluster

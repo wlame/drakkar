@@ -833,18 +833,40 @@ recorder_archive_bytes = Gauge(
     'drakkar_recorder_archive_bytes',
     (
         'Total size on disk of this cluster compressed recorder archives in '
-        'storage.dir. Bounded by history.archive.retention_days; grows without '
-        'limit while that is 0.'
+        'its history folder. Bounded by history.archive.retention_days; grows '
+        'without limit while that is 0.'
     ),
 )
 
 recorder_archive_files = Gauge(
     'drakkar_recorder_archive_files',
     (
-        'Number of this cluster compressed recorder archives in storage.dir. '
+        'Number of this cluster compressed recorder archives in its history folder. '
         'Read together with drakkar_recorder_archive_bytes to tell a slow '
         'accumulation of small windows from a few very large ones.'
     ),
+)
+
+# Sealing and archiving failures. A file the recorder could not seal (or
+# publish into the history folder) stays in storage.dir and is retried on
+# every rotation tick; a nonzero gauge that does not return to zero means
+# the history folder is unwritable or another process holds the file.
+#
+# Alert suggestion:
+#   drakkar_recorder_unsealed_files > 0 for 2 rotation intervals  — warn
+recorder_unsealed_files = Gauge(
+    'drakkar_recorder_unsealed_files',
+    'Own recorder files closed but not yet sealed into the history folder.',
+)
+
+recorder_seal_failures = Counter(
+    'drakkar_recorder_seal_failures_total',
+    'Recorder files whose sealing failed; they stay in the backlog and are retried.',
+)
+
+recorder_archive_failures = Counter(
+    'drakkar_recorder_archive_failures_total',
+    'Archive passes that failed after taking the archive lock.',
 )
 
 

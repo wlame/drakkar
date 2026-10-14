@@ -14,7 +14,6 @@ from drakkar.merge import (
     merge_databases,
     merge_databases_atomic,
     scan_db,
-    scan_directory,
 )
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE, format_dt
 from tests.test_dbfiles import assert_db_files_owner_only
@@ -206,80 +205,6 @@ def test_scan_db_handles_corrupt_file(tmp_path):
     assert stats.worker_name == ''
 
 
-# ─── scan_directory ───────────────────────────────────────────
-
-
-def test_scan_directory_lists_db_files(tmp_path):
-    _create_source_db(tmp_path / 'w1-2026-03-24__10_00_00.db', worker_name='w1')
-    _create_source_db(tmp_path / 'w2-2026-03-24__10_00_00.db', worker_name='w2')
-
-    results = scan_directory(str(tmp_path))
-
-    assert len(results) == 2
-    names = [r.worker_name for r in results]
-    assert 'w1' in names
-    assert 'w2' in names
-
-
-def test_scan_directory_skips_symlinks(tmp_path):
-    db_path = tmp_path / 'w1-2026-03-24__10_00_00.db'
-    _create_source_db(db_path, worker_name='w1')
-    link = tmp_path / 'w1-live.db'
-    os.symlink(db_path.name, str(link))
-
-    results = scan_directory(str(tmp_path))
-
-    assert len(results) == 1
-    assert results[0].filename == 'w1-2026-03-24__10_00_00.db'
-
-
-def test_scan_directory_skips_non_db_files(tmp_path):
-    _create_source_db(tmp_path / 'w1.db', worker_name='w1')
-    (tmp_path / 'readme.txt').write_text('hello')
-    (tmp_path / 'data.json').write_text('{}')
-
-    results = scan_directory(str(tmp_path))
-
-    assert len(results) == 1
-
-
-def test_scan_directory_empty(tmp_path):
-    results = scan_directory(str(tmp_path))
-    assert results == []
-
-
-def test_scan_directory_skips_dot_prefixed_db_files(tmp_path):
-    """Dot-prefixed ``*.db`` names are pass-internal state, not finished databases.
-
-    Archiving writes in-flight merge temporaries as
-    ``.<name>.<pid>.merge.db`` — these end in ``.db`` and would otherwise
-    show up mid-merge in the Debug -> Databases list. ``*.db.unreadable``
-    quarantine files already fail the ``.endswith('.db')`` check, but a
-    dot-temp does not, so it needs its own exclusion.
-    """
-    _create_source_db(tmp_path / 'w1.db', worker_name='w1')
-    (tmp_path / '.search-fleet-2026-08-08_00-00__2026-08-09_00-00.db.gz.4242.merge.db').write_bytes(b'partial')
-
-    results = scan_directory(str(tmp_path))
-
-    assert [r.filename for r in results] == ['w1.db']
-
-
-def test_scan_directory_nonexistent():
-    results = scan_directory('/no/such/dir')
-    assert results == []
-
-
-def test_scan_directory_sorted_by_filename(tmp_path):
-    _create_source_db(tmp_path / 'c.db')
-    _create_source_db(tmp_path / 'a.db')
-    _create_source_db(tmp_path / 'b.db')
-
-    results = scan_directory(str(tmp_path))
-
-    assert [r.filename for r in results] == ['a.db', 'b.db', 'c.db']
-
-
 # ─── merge_databases — basic ─────────────────────────────────
 
 
@@ -310,6 +235,40 @@ def test_merge_output_is_owner_only(tmp_path):
     merge_databases([str(db1)], output)
 
     assert_db_files_owner_only(output)
+
+
+def test_merge_reads_sources_without_taking_locks(tmp_path):
+    """Sources are sealed files: they are read with ``immutable=1``, which
+    takes no file locks (unreliable on network mounts). A writer holding an
+    exclusive lock on a source does not keep it out of the merge."""
+    source = tmp_path / 'w1.db'
+    _create_source_db(source, events=[{'ts': 1000.0, 'event': 'consumed'}])
+    holder = sqlite3.connect(str(source))
+    holder.execute('BEGIN EXCLUSIVE')
+    try:
+        result = merge_databases([str(source)], str(tmp_path / 'merged.db'))
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert result.merged_files == [str(source)]
+    assert result.event_count == 1
+
+
+def test_merge_output_uses_a_rollback_journal(tmp_path):
+    """A merge result is a finished file other workers read: no WAL, no sidecars."""
+    _create_source_db(tmp_path / 'w1.db')
+    output = tmp_path / 'out' / 'merged.db'
+    output.parent.mkdir()
+
+    merge_databases([str(tmp_path / 'w1.db')], str(output))
+
+    conn = sqlite3.connect(f'file:{output}?mode=ro', uri=True)
+    try:
+        assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'delete'
+    finally:
+        conn.close()
+    assert sorted(p.name for p in output.parent.iterdir()) == ['merged.db']
 
 
 def test_merge_reports_the_sources_that_contributed(tmp_path):
@@ -1052,15 +1011,6 @@ def test_scan_db_no_state_table(tmp_path):
     stats = scan_db(str(db_path))
 
     assert stats.has_state is False
-
-
-# ─── scan_directory — edge cases ─────────────────────────────
-
-
-def test_scan_directory_empty_string():
-    """Empty string as db_dir returns empty list immediately."""
-    results = scan_directory('')
-    assert results == []
 
 
 # ─── merge_databases — corrupt source DB handling ────────────

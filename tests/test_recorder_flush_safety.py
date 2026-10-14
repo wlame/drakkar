@@ -6,18 +6,16 @@ the final flush or state sync.
 """
 
 import asyncio
-import os
 import sqlite3
 from collections import deque
 
 import pytest
 
-from drakkar.recorder import EventRecorder, live_link_path
+from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.core import _LIVE_RECORDERS
 from tests.test_recorder import (
     WORKER_NAME,
-    _create_worker_db_with_labels,
     make_debug_config,
     make_msg,
 )
@@ -190,7 +188,6 @@ async def test_stop_completes_teardown_when_final_flush_fails(tmp_path):
     assert rec._db is None
     assert rec._reader_db is None
     assert rec not in _LIVE_RECORDERS
-    assert not os.path.lexists(live_link_path(str(tmp_path), WORKER_NAME))
 
 
 async def test_stop_completes_teardown_when_state_sync_fails(tmp_path):
@@ -209,31 +206,6 @@ async def test_stop_completes_teardown_when_state_sync_fails(tmp_path):
     assert rec._db is None
     assert rec._reader_db is None
     assert rec not in _LIVE_RECORDERS
-
-
-async def test_cross_trace_by_label_respects_scan_budget(tmp_path, monkeypatch):
-    """A zero-file scan budget stops the peer sweep before any DB is opened,
-    even when a peer holds a matching label."""
-    from drakkar.recorder import queries as recorder_queries
-
-    peer_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
-    await _create_worker_db_with_labels(
-        peer_db_path,
-        'other-worker',
-        task_id='t-remote',
-        labels={'request_id': 'req-remote'},
-    )
-    os.symlink(peer_db_path.name, live_link_path(str(tmp_path), 'other-worker'))
-
-    config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
-    await rec.start()
-    try:
-        monkeypatch.setattr(recorder_queries, 'CROSS_TRACE_MAX_FILES', 0)
-        events = await rec.cross_trace_by_label('request_id', 'req-remote')
-        assert events == []
-    finally:
-        await rec.stop()
 
 
 # --- Chunked flush -----------------------------------------------------

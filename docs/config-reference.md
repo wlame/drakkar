@@ -498,7 +498,8 @@ ui:
   probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
   merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
-                                   # storage.dir, never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
+                                   # <shared.dir>/merged/, deleted after history.merged_retention_days.
+                                   # false = 403. env: DK_UI__MERGE_ENABLED
   kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 

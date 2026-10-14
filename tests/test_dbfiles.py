@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+import drakkar.recorder.core as recorder_core
 from drakkar.cache import CacheEngine
 from drakkar.config import CacheConfig, CacheExchangeConfig, UIConfig
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE, secure_db_file
@@ -264,9 +265,14 @@ async def test_recorder_writer_uses_normal_synchronous(tmp_path):
         await rec.stop()
 
 
-async def test_rotated_recorder_writer_uses_normal_synchronous(tmp_path):
+async def test_rotated_recorder_writer_uses_normal_synchronous(tmp_path, monkeypatch):
     """``synchronous`` is per-connection and not stored in the DB header, so
     rotation has to set it again on the new writer."""
+    # A rotation inside the same second would reuse the file name.
+    names = iter(['first', 'second'])
+    monkeypatch.setattr(
+        recorder_core, 'make_db_path', lambda folder, worker: os.path.join(folder, f'{worker}-{next(names)}.db')
+    )
     rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
@@ -295,14 +301,3 @@ async def test_cache_writer_uses_normal_synchronous(tmp_path):
             assert (await cur.fetchone())[0] == _SYNCHRONOUS_NORMAL
     finally:
         await engine.stop()
-
-
-def test_dbstats_cache_uses_normal_synchronous(tmp_path):
-    """The stats cache holds only derived data — stronger durability is waste."""
-    from drakkar.dbstats import DbStatsCache
-
-    db = DbStatsCache(str(tmp_path))._connect()
-    try:
-        assert db.execute('PRAGMA synchronous').fetchone()[0] == _SYNCHRONOUS_NORMAL
-    finally:
-        db.close()

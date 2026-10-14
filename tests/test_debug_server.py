@@ -8,7 +8,6 @@ import time
 import typing
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from urllib.parse import quote
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -21,7 +20,6 @@ from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.recorder import EventRecorder
-from drakkar.recorder.archive import archive_file_name
 from drakkar.timeline_events import TimelineEventEmitter
 from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
@@ -79,6 +77,10 @@ def mock_recorder():
     # Memory-only unless a test points it at a folder: the file endpoints
     # then have no root and must answer 404 rather than read the CWD.
     rec.storage_dir = ''
+    rec.shared_dir = ''
+    rec.history_dir = ''
+    rec.db_path = ''
+    rec.worker_name = 'test-worker'
     rec.get_stats.return_value = {
         'total_events': 42,
         'consumed': 20,
@@ -440,106 +442,6 @@ class TestApiSinks:
         assert pg_sink['last_error'] is None
 
 
-class TestApiDebugDatabases:
-    async def test_empty_dir_returns_empty_list(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/databases')
-        assert resp.status_code == 200
-        assert resp.json() == []
-
-    async def test_lists_db_files(self, tmp_path, mock_recorder, mock_app):
-        import sqlite3
-
-        from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
-
-        db_path = tmp_path / 'worker-1-2026-03-24__10_00_00.db'
-        db = sqlite3.connect(str(db_path))
-        db.executescript(SCHEMA_WORKER_CONFIG)
-        db.execute(
-            """INSERT INTO worker_config
-               (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
-                kafka_brokers, source_topic, consumer_group, binary_path,
-                max_executors, task_timeout_seconds, max_retries, window_size,
-                sinks_json, env_vars_json, created_at, created_at_dt)
-               VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
-                       'kafka:9092', 'topic', 'grp', '/bin/rg',
-                       4, 120, 3, 10, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
-        )
-        db.executescript(SCHEMA_EVENTS)
-        db.execute(
-            "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
-        )
-        db.execute(
-            "INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)"
-        )
-        db.commit()
-        db.close()
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/databases')
-
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data) == 1
-        assert data[0]['worker_name'] == 'worker-1'
-        assert data[0]['cluster_name'] == 'main'
-        assert data[0]['event_count'] == 2
-        assert data[0]['event_counts']['consumed'] == 1
-        assert data[0]['event_counts']['task_completed'] == 1
-        # Contract v1.12 fields.
-        assert data[0]['kind'] == 'recorder'
-        assert data[0]['live_for'] == ''
-        assert data[0]['stats_pending'] is False
-        assert data[0]['cache_entry_count'] is None
-
-    async def test_live_symlink_marks_in_use_and_cache_db_is_typed(self, tmp_path, mock_recorder, mock_app):
-        import sqlite3
-
-        from drakkar.recorder import SCHEMA_EVENTS
-
-        current = tmp_path / 'worker-1-2026-03-24__11_00_00.db'
-        db = sqlite3.connect(str(current))
-        db.executescript(SCHEMA_EVENTS)
-        db.commit()
-        db.close()
-        os.symlink(str(current), str(tmp_path / 'worker-1-live.db'))
-
-        cache_target = tmp_path / 'worker-1-cache.db.actual'
-        db = sqlite3.connect(str(cache_target))
-        db.execute('CREATE TABLE cache_entries (key TEXT PRIMARY KEY, value TEXT)')
-        db.execute("INSERT INTO cache_entries VALUES ('k', 'v')")
-        db.commit()
-        db.close()
-        os.symlink(str(cache_target), str(tmp_path / 'worker-1-cache.db'))
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/databases')
-
-        rows = {r['filename']: r for r in resp.json()}
-        # The recorder DB currently written by worker-1 is highlighted.
-        assert rows[current.name]['live_for'] == 'worker-1'
-        assert rows[current.name]['kind'] == 'recorder'
-        # The cache DB appears under its stable symlink name, typed, and
-        # in-use because its worker's recorder is live in the same dir.
-        assert rows['worker-1-cache.db']['kind'] == 'cache'
-        assert rows['worker-1-cache.db']['cache_entry_count'] == 1
-        assert rows['worker-1-cache.db']['live_for'] == 'worker-1'
-        # The symlinks themselves are not rows.
-        assert 'worker-1-live.db' not in rows
-
-
 class TestApiDebugProcessors:
     async def test_returns_200_with_empty_processors(self, client):
         resp = await client.get('/api/v1/debug/processors')
@@ -610,44 +512,6 @@ class TestApiWorkers:
 # ---------------------------------------------------------------------------
 
 
-class TestDebugDownload:
-    async def test_download_existing_file(self, tmp_path, mock_recorder, mock_app):
-        db_path = tmp_path / 'test.db'
-        db_path.write_bytes(b'fake-sqlite')
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/test.db')
-
-        assert resp.status_code == 200
-        assert resp.content == b'fake-sqlite'
-
-    async def test_download_directory_traversal_blocked(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/../etc/passwd')
-
-        # The client normalises the ``..`` before sending, so the request
-        # reaches no download route at all — whatever answers it, nothing
-        # outside db_dir may come back.
-        assert resp.status_code != 200
-
-    async def test_download_nonexistent_file(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/nonexistent.db')
-        assert resp.status_code == 404
-
-
 class TestMemoryOnlyRecorderServesNoFiles:
     """``storage.dir: ""`` is the documented memory-only mode.
 
@@ -700,12 +564,6 @@ class TestMemoryOnlyRecorderServesNoFiles:
         assert resp.status_code == 404
         assert not list(tmp_path.glob('merged-*.db'))
 
-    async def test_archive_download_is_refused(self, tmp_path, monkeypatch, mock_recorder, mock_app):
-        transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives/drakkar-c1-20260823__10_00_00-20260823__11_00_00.db.gz')
-        assert resp.status_code == 404
-
 
 class TestDownloadContainment:
     """A resolved path must stay inside db_dir, whatever the name looks like."""
@@ -727,205 +585,9 @@ class TestDownloadContainment:
         assert b'not-yours' not in resp.content
 
 
-class TestDownloadServesRecorderFilesOnly:
-    """The endpoint exists to hand over recorder databases, nothing else.
-
-    ``db_dir`` defaults to ``/tmp``, which is shared with every other
-    program on the host, and the debug UI is unauthenticated by design.
-    Checking only for separators and header-injection characters meant any
-    readable file in that directory could be fetched by exact name.
-    """
-
-    @pytest.mark.parametrize(
-        'name',
-        [
-            'other-app-export.json',
-            'id_rsa',
-            'notes.txt',
-            'archive.db.gz',  # archives have their own route + regex
-            'backup.db.bak',
-            'w1.dbx',
-        ],
-    )
-    async def test_non_database_names_are_refused(self, tmp_path, mock_recorder, mock_app, name):
-        (tmp_path / name).write_bytes(b'not-a-recorder-file')
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/' + quote(name, safe=''))
-        assert resp.status_code in (400, 404), name
-        assert b'not-a-recorder-file' not in resp.content
-
-    @pytest.mark.parametrize(
-        'name',
-        [
-            'worker-1-2026-03-16__14_55_00.db',  # make_db_path
-            'worker-1-live.db',  # live symlink
-            'worker-1-cache.db',  # handler-cache symlink
-            'merged-2026-03-16__14_55_00.db',  # merge output
-            'w1.db',
-        ],
-    )
-    async def test_recorder_database_names_are_served(self, tmp_path, mock_recorder, mock_app, name):
-        (tmp_path / name).write_bytes(b'fake-sqlite')
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/' + quote(name, safe=''))
-        assert resp.status_code == 200, name
-        assert resp.content == b'fake-sqlite'
-
-    async def test_merge_sources_are_restricted_the_same_way(self, tmp_path, mock_recorder, mock_app):
-        """Merge reads its sources through the same gate — otherwise the
-        contents of an arbitrary file could be pulled into a merged DB and
-        downloaded from there."""
-        (tmp_path / 'a.db').write_bytes(b'fake-sqlite')
-        (tmp_path / 'secrets.json').write_bytes(b'{}')
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/v1/debug/merge', json={'filenames': ['a.db', 'secrets.json']})
-        assert resp.status_code == 400
-        assert 'secrets.json' in resp.json()['error']
-
-
 # ---------------------------------------------------------------------------
 # 4b. Archive list + download endpoints
 # ---------------------------------------------------------------------------
-
-
-class TestDebugArchivesList:
-    async def test_list_empty_storage_dir(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives')
-        assert resp.status_code == 200
-        assert resp.json() == {'archives': []}
-
-    async def test_list_happy_path_shape_and_sort_order(self, tmp_path, mock_recorder, mock_app):
-        day0 = datetime(2026, 8, 6, 0, 0, 0, tzinfo=UTC).timestamp()
-        day1 = day0 + 86400
-        day2 = day0 + 2 * 86400
-        older_name = archive_file_name('search-fleet', day0, day1)
-        newer_name = archive_file_name('search-fleet', day1, day2)
-        (tmp_path / older_name).write_bytes(b'a' * 11)
-        (tmp_path / newer_name).write_bytes(b'b' * 22)
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives')
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert list(body.keys()) == ['archives']
-        assert body['archives'] == [
-            {
-                'name': newer_name,
-                'cluster': 'search-fleet',
-                'from_ts': day1,
-                'to_ts': day2,
-                'size_bytes': 22,
-            },
-            {
-                'name': older_name,
-                'cluster': 'search-fleet',
-                'from_ts': day0,
-                'to_ts': day1,
-                'size_bytes': 11,
-            },
-        ]
-
-    async def test_list_excludes_dot_temp_unreadable_and_raw_db(self, tmp_path, mock_recorder, mock_app):
-        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-        start = end - 86400
-        real_name = archive_file_name('search-fleet', start, end)
-        (tmp_path / real_name).write_bytes(b'real')
-        # in-flight compress temp for the same window
-        (tmp_path / f'.{real_name}.4242.tmp').write_bytes(b'partial')
-        # quarantined raw source, never matches the archive suffix
-        (tmp_path / 'worker-1-2026-08-08__00_00_00.db.unreadable').write_bytes(b'bad')
-        # a plain raw recorder db, never archived
-        (tmp_path / 'worker-1-2026-08-08__00_00_00.db').write_bytes(b'raw')
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives')
-
-        assert resp.status_code == 200
-        names = [entry['name'] for entry in resp.json()['archives']]
-        assert names == [real_name]
-
-
-class TestDebugArchivesDownload:
-    async def test_download_happy_path_round_trips_bytes(self, tmp_path, mock_recorder, mock_app):
-        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-        name = archive_file_name('search-fleet', end - 86400, end)
-        (tmp_path / name).write_bytes(b'gzip-bytes')
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get(f'/api/v1/debug/archives/{name}')
-
-        assert resp.status_code == 200
-        assert resp.content == b'gzip-bytes'
-        assert resp.headers['content-type'] == 'application/gzip'
-        assert 'attachment' in resp.headers['content-disposition']
-
-    async def test_download_bad_name_returns_404(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives/not-a-valid-archive-name.db.gz')
-        assert resp.status_code == 404
-
-    async def test_download_traversal_attempt_returns_404(self, tmp_path, mock_recorder, mock_app):
-        outside = tmp_path / 'outside'
-        outside.mkdir()
-        secret = outside / 'x.db.gz'
-        secret.write_bytes(b'secret')
-        db_dir = tmp_path / 'db'
-        db_dir.mkdir()
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(db_dir)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/archives/../db.gz')
-
-        # Normalised away by the client before it is sent, so no archive
-        # route sees it — the file outside db_dir must not come back.
-        assert resp.status_code != 200
-        assert b'secret' not in resp.content
-
-    async def test_download_missing_file_returns_404(self, tmp_path, mock_recorder, mock_app):
-        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-        name = archive_file_name('search-fleet', end - 86400, end)
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get(f'/api/v1/debug/archives/{name}')
-        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -1793,35 +1455,11 @@ async def debug_client(tmp_path, mock_recorder, mock_app):
     """Client with a real db_dir for debug database endpoints."""
     cfg = make_ui_config(enabled=True, port=8080)
     mock_recorder.storage_dir = str(tmp_path)
+    mock_recorder.shared_dir = str(tmp_path)
     fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c
-
-
-async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_app):
-    import sqlite3
-
-    from drakkar.recorder import SCHEMA_EVENTS
-
-    db_path = tmp_path / 'w1.db'
-    db = sqlite3.connect(str(db_path))
-    db.executescript(SCHEMA_EVENTS)
-    db.commit()
-    db.close()
-    os.symlink('w1.db', str(tmp_path / 'w1-live.db'))
-
-    cfg = make_ui_config(enabled=True, port=8080)
-    mock_recorder.storage_dir = str(tmp_path)
-    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-    transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/v1/debug/databases')
-
-    data = resp.json()
-    filenames = [d['filename'] for d in data]
-    assert 'w1.db' in filenames
-    assert 'w1-live.db' not in filenames
 
 
 async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
@@ -1829,8 +1467,10 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
 
     from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
 
+    folder = tmp_path / 'history' / 'main'
+    folder.mkdir(parents=True)
     for name in ['w1', 'w2']:
-        p = tmp_path / f'{name}.db'
+        p = folder / f'{name}.db'
         db = sqlite3.connect(str(p))
         db.executescript(SCHEMA_WORKER_CONFIG)
         db.execute(
@@ -1851,13 +1491,14 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
         db.close()
 
     cfg = make_ui_config(enabled=True, port=8080)
-    mock_recorder.storage_dir = str(tmp_path)
+    mock_recorder.storage_dir = str(tmp_path / 'storage')
+    mock_recorder.shared_dir = str(tmp_path)
     fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post(
             '/api/v1/debug/merge',
-            json={'filenames': ['w1.db', 'w2.db']},
+            json={'filenames': ['history/main/w1.db', 'history/main/w2.db']},
         )
 
     assert resp.status_code == 200
@@ -1866,18 +1507,24 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
     assert data['event_count'] == 2
     assert data['cluster_name'] == 'main'
     assert re.fullmatch(r'merged-\d{4}-\d{2}-\d{2}__\d{2}_\d{2}_\d{2}-[0-9a-f]{16}\.db', data['filename'])
-    assert os.path.isfile(os.path.join(str(tmp_path), data['filename']))
-    assert not [p for p in tmp_path.iterdir() if p.name.startswith('.')]
+    assert data['path'] == f'merged/{data["filename"]}'
+    assert os.path.isfile(tmp_path / 'merged' / data['filename'])
+    assert not [p for p in (tmp_path / 'merged').iterdir() if p.name.startswith('.')]
+
+
+MERGE_SOURCES = ['history/main/w1.db', 'history/main/w2.db']
 
 
 def _write_merge_sources(tmp_path) -> None:
-    """Two minimal recorder DBs, w1.db and w2.db, that a merge accepts."""
+    """Two minimal sealed recorder DBs, ``history/main/w1.db`` and ``w2.db``, that a merge accepts."""
     import sqlite3
 
     from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
 
+    folder = tmp_path / 'history' / 'main'
+    folder.mkdir(parents=True)
     for name in ['w1', 'w2']:
-        db = sqlite3.connect(str(tmp_path / f'{name}.db'))
+        db = sqlite3.connect(str(folder / f'{name}.db'))
         db.executescript(SCHEMA_WORKER_CONFIG)
         db.execute(
             'INSERT INTO worker_config (id, worker_name, created_at, created_at_dt) '
@@ -1895,16 +1542,17 @@ def _write_merge_sources(tmp_path) -> None:
 async def test_api_debug_merge_twice_in_one_second_keeps_both_results(tmp_path, mock_recorder, mock_app):
     _write_merge_sources(tmp_path)
     cfg = make_ui_config(enabled=True, port=8080)
-    mock_recorder.storage_dir = str(tmp_path)
+    mock_recorder.storage_dir = str(tmp_path / 'storage')
+    mock_recorder.shared_dir = str(tmp_path)
     transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        first = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
-        second = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
+        first = await c.post('/api/v1/debug/merge', json={'filenames': MERGE_SOURCES})
+        second = await c.post('/api/v1/debug/merge', json={'filenames': MERGE_SOURCES})
 
     assert first.status_code == 200 and second.status_code == 200
     assert first.json()['filename'] != second.json()['filename']
-    assert (tmp_path / first.json()['filename']).is_file()
-    assert (tmp_path / second.json()['filename']).is_file()
+    assert (tmp_path / first.json()['path']).is_file()
+    assert (tmp_path / second.json()['path']).is_file()
 
 
 async def test_api_debug_merge_failure_answers_500_and_leaves_nothing(tmp_path, mock_recorder, mock_app, monkeypatch):
@@ -1921,14 +1569,15 @@ async def test_api_debug_merge_failure_answers_500_and_leaves_nothing(tmp_path, 
 
     monkeypatch.setattr(merge_module, 'merge_databases', failing_merge)
     cfg = make_ui_config(enabled=True, port=8080)
-    mock_recorder.storage_dir = str(tmp_path)
+    mock_recorder.storage_dir = str(tmp_path / 'storage')
+    mock_recorder.shared_dir = str(tmp_path)
     transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/v1/debug/merge', json={'filenames': ['w1.db', 'w2.db']})
+        resp = await c.post('/api/v1/debug/merge', json={'filenames': MERGE_SOURCES})
 
     assert resp.status_code == 500
     assert resp.json()['error'].startswith('Merge failed: ')
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['w1.db', 'w2.db']
+    assert list((tmp_path / 'merged').iterdir()) == []
 
 
 async def test_api_debug_merge_rejects_single_file(debug_client):
@@ -1942,7 +1591,7 @@ async def test_api_debug_merge_rejects_single_file(debug_client):
 async def test_api_debug_merge_rejects_traversal(debug_client):
     resp = await debug_client.post(
         '/api/v1/debug/merge',
-        json={'filenames': ['../etc/passwd', 'a.db']},
+        json={'filenames': ['../etc/passwd', 'history/main/a.db']},
     )
     assert resp.status_code == 400
 
@@ -2055,42 +1704,6 @@ class TestDashboardTotalLag:
         assert resp.json()['total_lag'] == 0, 'a lag lookup failure reports zero, not an error'
 
 
-class TestMergeEndpointDotPrefixed:
-    """Cover merge endpoint rejecting dot-prefixed filenames (line 579)."""
-
-    async def test_merge_rejects_dot_prefixed_filename(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post(
-                '/api/v1/debug/merge',
-                json={'filenames': ['.hidden.db', 'normal.db']},
-            )
-        assert resp.status_code == 400
-
-
-class TestMergeEndpointFileNotFound:
-    """Cover merge endpoint file-not-found branch (line 579)."""
-
-    async def test_merge_nonexistent_file_returns_404(self, tmp_path, mock_recorder, mock_app):
-        # Create one valid file so only the second triggers the 404
-        (tmp_path / 'exists.db').write_bytes(b'fake')
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post(
-                '/api/v1/debug/merge',
-                json={'filenames': ['exists.db', 'missing.db']},
-            )
-        assert resp.status_code == 404
-        assert 'missing.db' in resp.json()['error']
-
-
 class TestApiDebugMetrics:
     """Cover /api/debug/metrics endpoint (lines 611-613)."""
 
@@ -2102,47 +1715,6 @@ class TestApiDebugMetrics:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
-
-
-class TestDownloadRealpathTraversal:
-    """Cover realpath canonicalization in download endpoint."""
-
-    async def test_download_symlink_outside_storage_dir_blocked(self, tmp_path, mock_recorder, mock_app):
-        """A symlink inside db_dir pointing outside is blocked by realpath check."""
-        outside_dir = tmp_path / 'outside'
-        outside_dir.mkdir()
-        secret = outside_dir / 'secret.db'
-        secret.write_bytes(b'secret-data')
-
-        db_dir = tmp_path / 'db'
-        db_dir.mkdir()
-        # create symlink inside db_dir pointing outside
-        link = db_dir / 'escape.db'
-        link.symlink_to(secret)
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(db_dir)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/escape.db')
-        assert resp.status_code == 400
-
-
-class TestDownloadDotPrefixed:
-    """Cover download endpoint blocking dot-prefixed files (line 620)."""
-
-    async def test_download_dot_prefixed_blocked(self, tmp_path, mock_recorder, mock_app):
-        hidden = tmp_path / '.secret.db'
-        hidden.write_bytes(b'secret')
-
-        cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.storage_dir = str(tmp_path)
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/v1/debug/download/.secret.db')
-        assert resp.status_code == 400
 
 
 class TestApiEvents:

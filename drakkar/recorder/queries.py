@@ -10,17 +10,19 @@ Two families live here:
 - **local** — ``get_events``, ``get_trace``, ``get_task_events``,
   ``get_partition_summary``: straight reads of this worker's database
   through the recorder's dedicated reader connection.
-- **cross-worker** — ``cross_trace``, ``cross_trace_by_label``: bounded
-  sweeps over the peer databases in ``storage.dir``, each opened read-only
-  and skipped if it is locked, corrupt, or belongs to another cluster.
+- **trace** — ``cross_trace`` (this worker's live file plus its own closed
+  files not sealed into the history folder yet), ``cross_trace_by_label``
+  (the live file), and :func:`trace_history`, a bounded search over the
+  sealed files of a cluster history folder. Other workers' files are never
+  opened: a worker's live file belongs to its owner alone.
 """
 
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import os
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -30,33 +32,40 @@ import aiosqlite
 import structlog
 
 from drakkar.config import UIConfig, UIRecorderConfig
+from drakkar.recorder.archive import parse_db_start_ts
+from drakkar.recorder.history import list_sealed
 from drakkar.recorder.schema import _LABEL_TRACE_QUERY, _TRACE_QUERY, EventType
+from drakkar.recorder.sealing import own_db_files
 
 logger = structlog.get_logger()
 
-# Cross-worker sweep bounds. A cross-trace MISS — the common case when an
-# operator pastes an offset that is not in this cluster — walks every
-# candidate database in storage.dir, opening each and running a query. Co-located
-# workers may share that folder, so it accumulates live and rotated files from
-# every worker on the host. The sweep is reached from a
-# UI request but executes on the MAIN loop (UI reads of live state hop there),
-# so an unbounded scan stalls Kafka polling — and it is trivially repeatable
-# by refreshing the page.
+# Bounds of the search over this worker's own closed files. Usually there
+# are none (sealing moves them out within one rotation); a backlog that
+# grows because the shared folder is unwritable must not make a trace
+# request open hundreds of files.
 CROSS_TRACE_MAX_FILES = 64
 CROSS_TRACE_BUDGET_SECONDS = 5.0
 
+# How the two kinds of files are opened. Own closed files may still be in
+# WAL mode, so they get a normal read-only connection; sealed history files
+# never change, so they are read without locks (never an unsealed file).
+_OWN_FILE_URI = 'mode=ro'
+_SEALED_FILE_URI = 'mode=ro&immutable=1'
+
 
 class _ScanBudget:
-    """Bounds a cross-worker sweep in file count and wall-clock time.
+    """Bounds a search over database files in file count and wall-clock time.
 
     Records whether it stopped early so the caller can say so, rather than
     silently reporting "not found" for data that was never actually reached —
     a distinction that matters during an incident.
     """
 
-    def __init__(self) -> None:
-        self._deadline = time.monotonic() + CROSS_TRACE_BUDGET_SECONDS
-        self._remaining = CROSS_TRACE_MAX_FILES
+    def __init__(self, max_files: int = CROSS_TRACE_MAX_FILES, max_seconds: float = CROSS_TRACE_BUDGET_SECONDS) -> None:
+        self._max_files = max_files
+        self._max_seconds = max_seconds
+        self._deadline = time.monotonic() + max_seconds
+        self._remaining = max_files
         self.truncated = False
 
     def allow(self) -> bool:
@@ -75,10 +84,74 @@ class _ScanBudget:
             'cross_trace_scan_truncated',
             category='recorder',
             op=op,
-            max_files=CROSS_TRACE_MAX_FILES,
-            budget_seconds=CROSS_TRACE_BUDGET_SECONDS,
-            hint='result may be incomplete; prune rotated databases in storage.dir',
+            max_files=self._max_files,
+            budget_seconds=self._max_seconds,
+            hint='result may be incomplete; raise ui.trace.history_max_files / history_max_seconds',
         )
+
+
+def _query_file(path: str, uri_options: str, query: str, params: list) -> list[dict]:
+    """Run a trace query against one database file; each row is tagged with the file's worker.
+
+    The worker comes from the file's ``worker_config`` (the file name when
+    it has none). A file that is unreadable or has no ``events`` table
+    yields nothing: one bad file must not end the search. Blocking.
+    """
+    try:
+        db = sqlite3.connect(f'file:{path}?{uri_options}', uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        db.row_factory = sqlite3.Row
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'events' not in tables:
+            return []
+        worker_name = os.path.basename(path)
+        if 'worker_config' in tables:
+            row = db.execute('SELECT worker_name FROM worker_config WHERE id = 1').fetchone()
+            if row and row[0]:
+                worker_name = row[0]
+        rows = [dict(row) for row in db.execute(query, params)]
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    for row in rows:
+        row['worker_name'] = worker_name
+    return rows
+
+
+def _query_files(paths: list[str], uri_options: str, query: str, params: list, budget: _ScanBudget) -> list[dict]:
+    """Run a trace query over ``paths`` in order until the budget runs out. Blocking."""
+    rows: list[dict] = []
+    for path in paths:
+        if not budget.allow():
+            break
+        rows.extend(_query_file(path, uri_options, query, params))
+    return rows
+
+
+def _by_time(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=lambda row: row.get('ts') or 0)
+
+
+def trace_history(folder: str, partition: int, msg_offset: int, *, max_files: int, max_seconds: float) -> list[dict]:
+    """Trace a message through the sealed files of a cluster history folder.
+
+    Newest files first, at most ``max_files`` files and ``max_seconds``
+    (``ui.trace.history_max_*``); every match is kept, because a message's
+    lifecycle can span files of several workers. Files are opened with
+    ``immutable=1``: they are sealed and never change. Blocking — run it in
+    a thread; it needs nothing from the worker's event loop.
+    """
+    if not folder:
+        return []
+    paths = sorted(list_sealed(folder), key=parse_db_start_ts, reverse=True)
+    budget = _ScanBudget(max_files, max_seconds)
+    params = [partition, msg_offset, partition, msg_offset, partition, msg_offset]
+    rows = _query_files(paths, _SEALED_FILE_URI, _TRACE_QUERY, params, budget)
+    budget.report('trace_history')
+    return _by_time(rows)
 
 
 @dataclass(frozen=True)
@@ -192,33 +265,11 @@ class EventQueries:
             return await _rows_as_dicts(cursor)
 
     async def cross_trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
-        """Trace by label across all workers in the same cluster."""
-        local_events = await self.trace_by_label(label_key, label_value)
-        for ev in local_events:
+        """Trace by label through this worker's live file; rows carry ``worker_name``."""
+        events = await self.trace_by_label(label_key, label_value)
+        for ev in events:
             ev['worker_name'] = self._ctx.worker_name
-
-        if local_events:
-            return sorted(local_events, key=lambda e: e.get('ts', 0))
-
-        # Fallback: other workers' live DBs. Same shape as ``cross_trace`` —
-        # the blocking directory walk runs in a thread (inline it would stall
-        # the main loop for the whole sweep), and the sweep is bounded so a
-        # directory full of peers cannot pin the caller.
-        if not self._ctx.storage_dir:
-            return []
-
-        json_path = f'$.{label_key}'
-        budget = _ScanBudget()
-        live_targets = await asyncio.to_thread(self._enumerate_peer_live_dbs)
-        for target in live_targets:
-            if not budget.allow():
-                break
-            events = await self._query_db_file(target, _LABEL_TRACE_QUERY, [json_path, label_value])
-            if events:
-                return sorted(events, key=lambda e: e.get('ts', 0))
-
-        budget.report('cross_trace_by_label')
-        return []
+        return _by_time(events)
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
@@ -231,143 +282,33 @@ class EventQueries:
         ) as cursor:
             return await _rows_as_dicts(cursor)
 
-    async def _trace_db_file(
-        self,
-        db_path: str,
-        partition: int,
-        msg_offset: int,
-    ) -> list[dict]:
-        """Run the partition+offset trace query against a DB file."""
-        params = [partition, msg_offset, partition, msg_offset, partition, msg_offset]
-        return await self._query_db_file(db_path, _TRACE_QUERY, params)
-
-    async def _query_db_file(self, db_path: str, query: str, params: list) -> list[dict]:
-        """Run a trace query against a peer DB file read-only.
-
-        Returns matching events tagged with the peer's ``worker_name`` (read
-        from its ``worker_config``), or ``[]`` when the file is unreadable,
-        lacks an ``events`` table, or belongs to a different cluster.
-        """
-        try:
-            async with aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True) as db:
-                # Read worker_name and check cluster membership from worker_config
-                worker_name = os.path.basename(db_path)
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
-                ) as cur:
-                    if await cur.fetchone():
-                        async with db.execute(
-                            'SELECT worker_name, cluster_name FROM worker_config WHERE id = 1'
-                        ) as cfg_cur:
-                            cfg_row = await cfg_cur.fetchone()
-                            if cfg_row:
-                                worker_name = cfg_row[0]
-                                if self._ctx.cluster_name and cfg_row[1] != self._ctx.cluster_name:
-                                    return []
-
-                # Check events table exists
-                async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'") as cur:
-                    if not await cur.fetchone():
-                        return []
-
-                async with db.execute(query, params) as cur:
-                    events = await _rows_as_dicts(cur)
-
-                for ev in events:
-                    ev['worker_name'] = worker_name
-                return events
-        except Exception:
-            # A locked, corrupt, or vanished peer DB must not poison the
-            # cross-worker sweep — skip it and let the caller keep scanning.
-            return []
-
     async def cross_trace(self, partition: int, msg_offset: int) -> list[dict]:
-        """Trace a message across all workers in the same cluster.
+        """Trace a message through this worker's own files.
 
-        Search order:
-        1. Current worker's live DB
-        2. Other workers' live DBs (same cluster)
-        3. Rotated (historical) DB files in storage.dir, newest first
-
-        Every returned event carries a ``worker_name`` field.
+        The live file (through the reader connection) and this worker's
+        closed files that are not sealed into the history folder yet. The
+        sealed history is a separate search (:func:`trace_history`). Every
+        returned event carries a ``worker_name`` field; events come in time
+        order.
         """
-        # 1. Search current worker's live DB
-        local_events = await self.get_trace(partition, msg_offset)
-        for ev in local_events:
+        events = await self.get_trace(partition, msg_offset)
+        for ev in events:
             ev['worker_name'] = self._ctx.worker_name
-        if local_events:
-            return local_events
-
         if not self._ctx.storage_dir:
-            return []
-
-        searched_paths: set[str] = set()
-        db_path = self._ctx.db_path()
-        if db_path:
-            searched_paths.add(os.path.realpath(db_path))
-
-        # 2. Fallback: other workers' live DBs. Sorted so the first-match
-        # scan visits peers in a deterministic order, whatever order the
-        # filesystem happens to list them in.
+            return events
+        # Listing and reading the closed files is blocking file work, and
+        # this coroutine runs on the main loop: it goes to a thread.
+        params = [partition, msg_offset, partition, msg_offset, partition, msg_offset]
         budget = _ScanBudget()
-
-        # The directory walks below are synchronous stat/readlink syscalls, and
-        # this coroutine runs on the MAIN loop — inline they stall Kafka
-        # polling for the whole sweep, unboundedly on a slow or stale mount.
-        # Enumeration is offloaded; only the aiosqlite queries stay here.
-        live_targets = await asyncio.to_thread(self._enumerate_peer_live_dbs)
-        for target in live_targets:
-            searched_paths.add(target)
-            if not budget.allow():
-                break
-            events = await self._trace_db_file(target, partition, msg_offset)
-            if events:
-                return events
-
-        # 3. Fallback: rotated DB files (newest first)
-        rotated = await asyncio.to_thread(self._enumerate_rotated_dbs, searched_paths)
-        for full in rotated:
-            if not budget.allow():
-                break
-            events = await self._trace_db_file(full, partition, msg_offset)
-            if events:
-                return events
-
+        closed = await asyncio.to_thread(self._trace_closed_own_files, params, budget)
         budget.report('cross_trace')
-        return []
+        return _by_time(events + closed)
 
-    def _enumerate_peer_live_dbs(self) -> list[str]:
-        """Resolve other workers' live-DB symlinks. Blocking; call in a thread.
-
-        Sorted so the first-match scan visits peers in a deterministic
-        order, whatever order the filesystem happens to list them in.
-        """
-        targets: list[str] = []
-        live_pattern = os.path.join(self._ctx.storage_dir, '*-live.db')
-        for link_path in sorted(glob.glob(live_pattern)):
-            if not os.path.islink(link_path):
-                continue
-            link_name = os.path.basename(link_path)
-            if link_name.removesuffix('-live.db') == self._ctx.worker_name:
-                continue
-            targets.append(os.path.realpath(link_path))
-        return targets
-
-    def _enumerate_rotated_dbs(self, searched_paths: set[str]) -> list[str]:
-        """List rotated DB files newest first. Blocking; call in a thread."""
-        all_dbs = []
-        for entry in os.listdir(self._ctx.storage_dir):
-            if not entry.endswith('.db'):
-                continue
-            full = os.path.join(self._ctx.storage_dir, entry)
-            if os.path.islink(full) or not os.path.isfile(full):
-                continue
-            if os.path.realpath(full) in searched_paths:
-                continue
-            all_dbs.append((entry, full))
-        # Newest first (the timestamp is in the filename).
-        all_dbs.sort(key=lambda x: x[0], reverse=True)
-        return [full for _entry, full in all_dbs]
+    def _trace_closed_own_files(self, params: list, budget: _ScanBudget) -> list[dict]:
+        """The trace query over this worker's closed own files, newest first. Blocking."""
+        live = os.path.normpath(self._ctx.db_path()) if self._ctx.db_path() else ''
+        paths = [path for path in own_db_files(self._ctx.storage_dir, self._ctx.worker_name) if path != live]
+        return _query_files(list(reversed(paths)), _OWN_FILE_URI, _TRACE_QUERY, params, budget)
 
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""

@@ -1,11 +1,8 @@
-"""Shared helper for discovering peer worker DBs via live symlinks.
+"""Shared helper for discovering peer worker cache DBs via symlinks.
 
-Drakkar workers expose their SQLite state through timestamped DB files
-accompanied by a stable live-symlink:
+Each worker exposes its cache file through a stable symlink next to it:
 
-    /shared/<worker>-<timestamp>.db          # the actual DB (rotated)
-    /shared/<worker>-live.db        -> ...   # points at the current file
-    /shared/<worker>-cache.db       -> ...   # cache DB, same convention
+    /shared/<worker>-cache.db       -> ...   # points at the current cache file
 
 Peers read via the symlink so the target can rotate underneath them
 without breaking lookups. We resolve through `os.path.realpath` once per

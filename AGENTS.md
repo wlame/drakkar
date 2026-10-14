@@ -34,8 +34,15 @@ breaking change, never a refactor:
   hset fields / zadd members) so the bytes are reproducible from a payload
   whose decoded form carries no key order; caller-supplied lists keep the
   order they were given
-- the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads
-  recorder and cache files written by other workers sharing its `storage.dir`
+- the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads the
+  sealed recorder files that other workers of its cluster publish into the
+  shared history folder (`<shared.dir>/history/<cluster>/`), and the cache
+  files of other workers sharing its `storage.dir`
+- the history meta file `<name>.db.meta.json` (schema 1: fields, sorted
+  compact JSON, no trailing newline) and the archive lock body of
+  `history/<cluster>/.archive.lock` (`tests/fixtures/history_meta.json`) —
+  workers of other releases read the meta files and take over each other's
+  locks
 - the worker registry card (schema 1, `tests/fixtures/fleet_card.json`) and
   the filesystem provider layout (`<dir>/workers/<sanitized worker>.json`,
   temp file plus rename) — workers of other releases read these cards

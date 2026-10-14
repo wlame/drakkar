@@ -1,0 +1,103 @@
+{
+  "_comment": "History meta file (schema 1) and archive lock body, shared byte-for-byte by every implementation. meta/bytes: what an owner writes next to a sealed recorder file (sorted keys, compact separators, raw UTF-8, no trailing newline; first/last_event_ts null when the file has no events). lock/lock_bytes: the body of history/<cluster>/.archive.lock. epochs: float epoch seconds and their canonical text — microseconds = round half to even of ts * 1e6 on the IEEE double, then YYYY-MM-DDTHH:MM:SS.ffffffZ. mtimes_ns: integer nanosecond file mtimes (modified_at of the databases answer) and their text — truncated to the microsecond.",
+  "meta": {
+    "schema": 1,
+    "worker": "search-worker-3",
+    "instance": "9c41e0b27fd34a1e",
+    "cluster": "search",
+    "first_event_ts": "2026-10-13T08:00:00.000000Z",
+    "last_event_ts": "2026-10-13T08:59:59.871000Z",
+    "sealed_at": "2026-10-13T09:00:02.410000Z",
+    "size_bytes": 48211968,
+    "tables": {
+      "events": 412093,
+      "worker_config": 1,
+      "worker_state": 360
+    },
+    "event_types": {
+      "task_completed": 120211,
+      "task_started": 120400
+    }
+  },
+  "bytes": "{\"cluster\":\"search\",\"event_types\":{\"task_completed\":120211,\"task_started\":120400},\"first_event_ts\":\"2026-10-13T08:00:00.000000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"last_event_ts\":\"2026-10-13T08:59:59.871000Z\",\"schema\":1,\"sealed_at\":\"2026-10-13T09:00:02.410000Z\",\"size_bytes\":48211968,\"tables\":{\"events\":412093,\"worker_config\":1,\"worker_state\":360},\"worker\":\"search-worker-3\"}",
+  "empty_meta": {
+    "schema": 1,
+    "worker": "search-worker-3",
+    "instance": "9c41e0b27fd34a1e",
+    "cluster": "search",
+    "first_event_ts": null,
+    "last_event_ts": null,
+    "sealed_at": "2026-10-13T09:00:02.410000Z",
+    "size_bytes": 32768,
+    "tables": {
+      "events": 0,
+      "worker_config": 1,
+      "worker_state": 0
+    },
+    "event_types": {}
+  },
+  "empty_bytes": "{\"cluster\":\"search\",\"event_types\":{},\"first_event_ts\":null,\"instance\":\"9c41e0b27fd34a1e\",\"last_event_ts\":null,\"schema\":1,\"sealed_at\":\"2026-10-13T09:00:02.410000Z\",\"size_bytes\":32768,\"tables\":{\"events\":0,\"worker_config\":1,\"worker_state\":0},\"worker\":\"search-worker-3\"}",
+  "lock": {
+    "worker": "search-worker-3",
+    "instance": "9c41e0b27fd34a1e",
+    "token": "5f0c1d2e3a4b6978",
+    "acquired_at": "2026-10-14T02:00:00.125000Z"
+  },
+  "lock_bytes": "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}",
+  "epochs": [
+    {
+      "ts": 0.0,
+      "text": "1970-01-01T00:00:00.000000Z"
+    },
+    {
+      "ts": 1760342400.0,
+      "text": "2025-10-13T08:00:00.000000Z"
+    },
+    {
+      "ts": 1760342399.871,
+      "text": "2025-10-13T07:59:59.871000Z"
+    },
+    {
+      "ts": 1760342400.123456,
+      "text": "2025-10-13T08:00:00.123456Z"
+    },
+    {
+      "ts": 1760342400.9999995,
+      "text": "2025-10-13T08:00:01.000000Z"
+    },
+    {
+      "ts": 1700000000.0000005,
+      "text": "2023-11-14T22:13:20.000000Z"
+    },
+    {
+      "ts": 1.5e-06,
+      "text": "1970-01-01T00:00:00.000002Z"
+    },
+    {
+      "ts": 2.5e-06,
+      "text": "1970-01-01T00:00:00.000002Z"
+    }
+  ],
+  "mtimes_ns": [
+    {
+      "ns": 0,
+      "text": "1970-01-01T00:00:00.000000Z"
+    },
+    {
+      "ns": 1760342400000000000,
+      "text": "2025-10-13T08:00:00.000000Z"
+    },
+    {
+      "ns": 1760342400123456789,
+      "text": "2025-10-13T08:00:00.123456Z"
+    },
+    {
+      "ns": 1760342400999999999,
+      "text": "2025-10-13T08:00:00.999999Z"
+    },
+    {
+      "ns": 1700000000000000999,
+      "text": "2023-11-14T22:13:20.000000Z"
+    }
+  ]
+}

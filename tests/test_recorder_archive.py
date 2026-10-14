@@ -1,9 +1,14 @@
-"""Tests for the recorder archive engine (window math + archive pass)."""
+"""Tests for the recorder archive engine: window math and the archive pass.
 
-import fcntl
+The pass works on one cluster history folder, ``<shared>/history/<cluster>/``,
+where every ``*.db`` is a sealed file with a meta file beside it. One worker
+of the cluster holds ``.archive.lock`` while it archives.
+"""
+
 import gzip
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -14,57 +19,50 @@ import pytest
 from structlog.testing import capture_logs
 
 from drakkar.config import HistoryArchiveConfig
-from drakkar.merge import merge_databases
+from drakkar.metrics import recorder_archive_failures
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, EventRecorder, format_dt
 from drakkar.recorder import archive as archive_mod
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.archive import (
-    _is_settled,
     archive_file_name,
     assign_windows,
     list_archives,
     parse_db_start_ts,
     run_archive_pass,
-    sanitize_cluster,
     warn_if_archives_unbounded,
 )
-from tests.conftest import make_ui_config
+from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
+from drakkar.recorder.history import history_dir, meta_path, write_meta
+from tests.conftest import make_ui_config, wait_for
 
 HOUR = 3600.0
 DAY = 24 * HOUR
 CLUSTER = 'search-fleet'
 OTHER_CLUSTER = 'index-fleet'
+INSTANCE = '1111111111111111'
 
 
 def _db_name(worker: str, start: float) -> str:
-    """Raw recorder file name for a worker whose file opened at ``start``."""
+    """Sealed recorder file name for a worker whose file opened at ``start``."""
     return f'{worker}-{datetime.fromtimestamp(start, tz=UTC).strftime("%Y-%m-%d__%H_%M_%S")}.db'
 
 
-def _make_db(
-    db_dir: Path,
-    worker: str,
-    start: float,
-    cluster: str | None = CLUSTER,
-    *,
-    mtime: float | None = None,
-    event_count: int = 2,
-    sidecars: bool = True,
-) -> str:
-    """Create one synthetic raw recorder DB with real schema + events.
+def _folder(tmp_path, cluster: str = CLUSTER) -> Path:
+    folder = Path(history_dir(str(tmp_path / 'shared'), cluster))
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
-    ``mtime`` defaults to the file's start time, which is what the DUE
-    check reads; ``sidecars`` also drops the ``-wal``/``-shm`` companions
-    so their deletion can be asserted.
-    """
-    path = db_dir / _db_name(worker, start)
+
+def _make_db(folder: Path, worker: str, start: float, *, event_count: int = 2) -> str:
+    """One sealed recorder file (rollback journal) with its meta file, as sealing leaves them."""
+    path = folder / _db_name(worker, start)
     db = sqlite3.connect(str(path))
     db.executescript(SCHEMA_WORKER_CONFIG)
     db.execute(
         """INSERT INTO worker_config
            (id, worker_name, cluster_name, ip_address, debug_port, created_at, created_at_dt)
            VALUES (1, ?, ?, ?, ?, ?, ?)""",
-        [worker, cluster, '10.0.0.1', 8080, start, format_dt(start)],
+        [worker, CLUSTER, '10.0.0.1', 8080, start, format_dt(start)],
     )
     db.executescript(SCHEMA_EVENTS)
     for i in range(event_count):
@@ -75,29 +73,15 @@ def _make_db(
         )
     db.commit()
     db.close()
-    stamp = start if mtime is None else mtime
-    if sidecars:
-        for suffix in ('-wal', '-shm'):
-            sidecar = db_dir / (path.name + suffix)
-            sidecar.write_bytes(b'')
-            # Stamped with the DB itself: settledness reads the -wal mtime
-            # (under WAL the main file only moves on checkpoint), so leaving
-            # the sidecar at "now" would make every backdated fixture look
-            # like a database still being written to.
-            os.utime(sidecar, (stamp, stamp))
-    os.utime(path, (stamp, stamp))
+    write_meta(meta_path(str(path)), {'schema': 1, 'worker': worker})
     return str(path)
 
 
-def _make_archive(db_dir: Path, cluster: str, end: float, *, window: float = DAY) -> Path:
+def _make_archive(folder: Path, cluster: str, end: float, *, window: float = DAY) -> Path:
     """Drop a pre-existing archive file whose window ends at ``end``."""
-    path = db_dir / archive_file_name(cluster, end - window, end)
+    path = folder / archive_file_name(cluster, end - window, end)
     path.write_bytes(b'not-really-gzip')
     return path
-
-
-def _lock_path(db_dir: Path, cluster: str = CLUSTER) -> Path:
-    return db_dir / f'.archive-{sanitize_cluster(cluster)}.lock'
 
 
 def _make_config(**overrides) -> HistoryArchiveConfig:
@@ -106,209 +90,140 @@ def _make_config(**overrides) -> HistoryArchiveConfig:
     return HistoryArchiveConfig(**values)
 
 
+def _age(path: Path, seconds: float) -> None:
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
+
 # --- filename helpers ---------------------------------------------------
 
 
 def test_parse_db_start_ts_reads_the_filename_timestamp_as_utc(tmp_path):
-    path = tmp_path / 'worker-1-2026-08-08__23_00_00.db'
+    path = tmp_path / 'worker-1-2026-07-15__13_45_30.db'
     path.write_bytes(b'')
-    expected = datetime(2026, 8, 8, 23, 0, 0, tzinfo=UTC).timestamp()
 
+    expected = datetime(2026, 7, 15, 13, 45, 30, tzinfo=UTC).timestamp()
     assert parse_db_start_ts(str(path)) == expected
 
 
 def test_parse_db_start_ts_handles_worker_names_containing_dashes(tmp_path):
-    path = tmp_path / 'search-worker-7-2026-01-02__03_04_05.db'
+    path = tmp_path / 'search-worker-7-2026-07-15__13_45_30.db'
     path.write_bytes(b'')
-    expected = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
 
+    expected = datetime(2026, 7, 15, 13, 45, 30, tzinfo=UTC).timestamp()
     assert parse_db_start_ts(str(path)) == expected
 
 
 def test_parse_db_start_ts_falls_back_to_mtime_when_name_is_unparsable(tmp_path):
-    path = tmp_path / 'handmade-copy.db'
+    path = tmp_path / 'hand-made.db'
     path.write_bytes(b'')
     os.utime(path, (1_700_000_000, 1_700_000_000))
 
     assert parse_db_start_ts(str(path)) == 1_700_000_000
 
 
-@pytest.mark.parametrize(
-    ('raw', 'expected'),
-    [
-        ('search-fleet', 'search-fleet'),
-        ('search_fleet_1', 'search_fleet_1'),
-        ('search fleet', 'search_fleet'),
-        ('a/b:c', 'a_b_c'),
-        ('', 'default'),
-        (None, 'default'),
-    ],
-)
-def test_sanitize_cluster_maps_unsafe_characters(raw, expected):
-    assert sanitize_cluster(raw) == expected
-
-
 def test_archive_file_name_uses_utc_minute_precision():
-    start = datetime(2026, 8, 8, 0, 0, 0, tzinfo=UTC).timestamp()
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    start = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    end = datetime(2026, 7, 15, tzinfo=UTC).timestamp()
 
-    assert archive_file_name('search fleet', start, end) == 'search_fleet-2026-08-08_00-00__2026-08-09_00-00.db.gz'
+    assert archive_file_name('a/b c', start, end) == 'a_b_c-2026-07-14_00-00__2026-07-15_00-00.db.gz'
 
 
 # --- list_archives --------------------------------------------------
 
 
-def test_list_archives_empty_when_db_dir_unset():
+def test_list_archives_empty_when_folder_unset():
     assert list_archives('') == []
 
 
-def test_list_archives_empty_when_db_dir_has_nothing(tmp_path):
+def test_list_archives_empty_when_folder_has_nothing(tmp_path):
     assert list_archives(str(tmp_path)) == []
 
 
 def test_list_archives_parses_name_into_fields(tmp_path):
-    start = datetime(2026, 8, 8, 0, 0, 0, tzinfo=UTC).timestamp()
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    path = _make_archive(tmp_path, CLUSTER, end)
-    path.write_bytes(b'x' * 37)
+    start = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    end = datetime(2026, 7, 15, tzinfo=UTC).timestamp()
+    name = archive_file_name(CLUSTER, start, end)
+    (tmp_path / name).write_bytes(b'x' * 10)
 
-    [entry] = list_archives(str(tmp_path))
+    (info,) = list_archives(str(tmp_path))
 
-    assert entry.name == archive_file_name(CLUSTER, start, end)
-    assert entry.cluster == sanitize_cluster(CLUSTER)
-    assert entry.from_ts == start
-    assert entry.to_ts == end
-    assert entry.size_bytes == 37
+    assert (info.name, info.cluster, info.from_ts, info.to_ts, info.size_bytes) == (name, CLUSTER, start, end, 10)
 
 
 def test_list_archives_sorts_newest_first_by_to_ts(tmp_path):
-    day0 = datetime(2026, 8, 6, 0, 0, 0, tzinfo=UTC).timestamp()
-    day1 = day0 + DAY
-    day2 = day0 + 2 * DAY
-    oldest = _make_archive(tmp_path, CLUSTER, day1)
-    newest = _make_archive(tmp_path, CLUSTER, day2)
-    middle = _make_archive(tmp_path, OTHER_CLUSTER, day1 + HOUR)  # unused window end, still < day2
+    now = time.time()
+    older = _make_archive(tmp_path, CLUSTER, now - 3 * DAY)
+    newer = _make_archive(tmp_path, CLUSTER, now - DAY)
 
-    names = [entry.name for entry in list_archives(str(tmp_path))]
-
-    assert names == [newest.name, middle.name, oldest.name]
+    assert [info.name for info in list_archives(str(tmp_path))] == [newer.name, older.name]
 
 
-def test_list_archives_excludes_dot_prefixed_files(tmp_path):
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    real = _make_archive(tmp_path, CLUSTER, end)
-    # A compress-temp for the same window: dot-prefixed, pid-stamped.
-    (tmp_path / f'.{real.name}.4242.tmp').write_bytes(b'partial')
-    # A stale lock file left behind by a dead pass.
-    (tmp_path / f'.archive-{CLUSTER}.lock').write_bytes(b'{}')
+@pytest.mark.parametrize(
+    'name',
+    [
+        f'.{CLUSTER}-2026-07-14_00-00__2026-07-15_00-00.db.gz.0123456789abcdef.tmp',
+        f'{CLUSTER}-2026-07-14_00-00__2026-07-15_00-00.db.gz.unreadable',
+        'worker-1-2026-07-14__00_00_00.db',
+        f'{CLUSTER}-2026-13-14_00-00__2026-07-15_00-00.db.gz',
+    ],
+    ids=['dot-temp', 'unreadable', 'raw-db', 'impossible-date'],
+)
+def test_list_archives_lists_only_archive_names(tmp_path, name):
+    (tmp_path / name).write_bytes(b'x')
 
-    [entry] = list_archives(str(tmp_path))
-
-    assert entry.name == real.name
-
-
-def test_list_archives_excludes_unreadable_quarantine_files(tmp_path):
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    real = _make_archive(tmp_path, CLUSTER, end)
-    (tmp_path / f'{real.name}.unreadable').write_bytes(b'quarantined')
-
-    [entry] = list_archives(str(tmp_path))
-
-    assert entry.name == real.name
-
-
-def test_list_archives_excludes_raw_db_files(tmp_path):
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    real = _make_archive(tmp_path, CLUSTER, end)
-    _make_db(tmp_path, 'worker-1', end - HOUR)
-
-    [entry] = list_archives(str(tmp_path))
-
-    assert entry.name == real.name
-
-
-def test_list_archives_skips_a_name_with_an_impossible_date(tmp_path):
-    # The name regex only checks digit counts, so month 13 matches it but
-    # is not a date. One stray file must not fail the whole listing.
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    real = _make_archive(tmp_path, CLUSTER, end)
-    bogus = tmp_path / f'{CLUSTER}-2026-13-08_00-00__2026-13-09_00-00.db.gz'
-    bogus.write_bytes(b'not a real window')
-
-    [entry] = list_archives(str(tmp_path))
-
-    assert entry.name == real.name
+    assert list_archives(str(tmp_path)) == []
 
 
 # --- window assignment --------------------------------------------------
 
 
+def _file_at(tmp_path, start: float) -> str:
+    path = tmp_path / _db_name('worker-1', start)
+    path.write_bytes(b'')
+    return str(path)
+
+
 def test_assign_windows_assigns_a_late_evening_file_to_its_own_day(tmp_path):
-    start = datetime(2026, 8, 8, 23, 0, 0, tzinfo=UTC).timestamp()
-    path = _make_db(tmp_path, 'worker-1', start)
-    now = start + 3 * DAY
+    day = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    path = _file_at(tmp_path, day + 23 * HOUR + 59 * 60)
 
-    windows = assign_windows([path], DAY, DAY, now, HOUR)
+    (window,) = assign_windows([path], DAY, DAY, now=day + 3 * DAY)
 
-    assert len(windows) == 1
-    assert windows[0].start == datetime(2026, 8, 8, 0, 0, 0, tzinfo=UTC).timestamp()
-    assert windows[0].end == datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    assert [c.path for c in windows[0].files] == [path]
-    assert windows[0].files[0].window_start == windows[0].start
+    assert (window.start, window.end) == (day, day + DAY)
 
 
-def test_assign_windows_returns_the_window_exactly_at_end_plus_one_window(tmp_path):
-    start = datetime(2026, 8, 8, 10, 0, 0, tzinfo=UTC).timestamp()
-    path = _make_db(tmp_path, 'worker-1', start)
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+def test_assign_windows_returns_the_window_exactly_at_its_due_time(tmp_path):
+    day = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    path = _file_at(tmp_path, day + HOUR)
 
-    assert assign_windows([path], DAY, DAY, end + DAY, HOUR) != []
+    assert len(assign_windows([path], DAY, 2 * DAY, now=day + DAY + 2 * DAY)) == 1
 
 
 def test_assign_windows_skips_the_window_one_second_before_it_is_due(tmp_path):
-    start = datetime(2026, 8, 8, 10, 0, 0, tzinfo=UTC).timestamp()
-    path = _make_db(tmp_path, 'worker-1', start)
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    day = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    path = _file_at(tmp_path, day + HOUR)
 
-    assert assign_windows([path], DAY, DAY, end + DAY - 1, HOUR) == []
-
-
-def test_assign_windows_waits_for_the_due_delay_not_one_window(tmp_path):
-    start = datetime(2026, 8, 8, 10, 0, 0, tzinfo=UTC).timestamp()
-    path = _make_db(tmp_path, 'worker-1', start)
-    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
-    due_after = 2 * DAY
-
-    assert assign_windows([path], DAY, due_after, end + DAY, HOUR) == []
-    assert assign_windows([path], DAY, due_after, end + due_after - 1, HOUR) == []
-    assert assign_windows([path], DAY, due_after, end + due_after, HOUR) != []
+    assert assign_windows([path], DAY, 2 * DAY, now=day + DAY + 2 * DAY - 1) == []
 
 
-def test_assign_windows_vetoes_a_window_whose_file_was_written_recently(tmp_path):
-    start = datetime(2026, 8, 8, 10, 0, 0, tzinfo=UTC).timestamp()
-    now = start + 5 * DAY
-    old = _make_db(tmp_path, 'worker-1', start)
-    # Second file of the same window, still being written a minute ago.
-    fresh = _make_db(tmp_path, 'worker-2', start + HOUR, mtime=now - 60)
+def test_assign_windows_ignores_how_recently_a_sealed_file_was_written(tmp_path):
+    """Every file in the history folder is sealed: no mtime check holds a window back."""
+    day = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    path = _file_at(tmp_path, day + HOUR)
+    os.utime(path, None)
 
-    assert assign_windows([old, fresh], DAY, DAY, now, HOUR) == []
-    # Without the still-warm file the same window is due.
-    assert len(assign_windows([old], DAY, DAY, now, HOUR)) == 1
+    assert len(assign_windows([path], DAY, DAY, now=day + 3 * DAY)) == 1
 
 
 def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
-    day_one = datetime(2026, 8, 8, 1, 0, 0, tzinfo=UTC).timestamp()
-    day_two = datetime(2026, 8, 9, 1, 0, 0, tzinfo=UTC).timestamp()
-    first = _make_db(tmp_path, 'worker-1', day_one)
-    second = _make_db(tmp_path, 'worker-1', day_two)
-    now = day_two + 5 * DAY
+    day = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
+    first = _file_at(tmp_path, day + HOUR)
+    second = _file_at(tmp_path, day + DAY + HOUR)
 
-    windows = assign_windows([second, first], DAY, DAY, now, HOUR)
+    windows = assign_windows([second, first], DAY, DAY, now=day + 5 * DAY)
 
-    assert [w.start for w in windows] == [
-        datetime(2026, 8, 8, tzinfo=UTC).timestamp(),
-        datetime(2026, 8, 9, tzinfo=UTC).timestamp(),
-    ]
+    assert [[c.path for c in w.files] for w in windows] == [[first], [second]]
 
 
 # --- archive pass -------------------------------------------------------
@@ -320,328 +235,113 @@ def _due_start(now: float, *, days_back: int = 3) -> float:
     return day_start - days_back * DAY + 10 * HOUR
 
 
-def _run(tmp_path, cfg=None, cluster=CLUSTER, exclude_path=''):
+def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1'):
     run_archive_pass(
-        db_dir=str(tmp_path),
-        worker_name='worker-1',
+        str(tmp_path / 'shared'),
         cluster=cluster,
+        worker=worker,
+        instance=INSTANCE,
         archive=cfg or _make_config(),
-        rotation_interval_hours=1,
-        exclude_path=exclude_path,
+        merged_retention_days=merged_retention_days,
     )
 
 
-def _archives(tmp_path) -> list[str]:
-    return sorted(p.name for p in tmp_path.glob('*.db.gz'))
+def _archives(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.glob('*.db.gz'))
 
 
-def test_run_archive_pass_merges_a_due_window_and_removes_the_sources(tmp_path):
+def _dotfiles(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.iterdir() if p.name.startswith('.'))
+
+
+def test_run_archive_pass_merges_a_due_window_and_removes_sources_and_meta_files(tmp_path):
+    folder = _folder(tmp_path)
     now = time.time()
     start = _due_start(now)
-    first = _make_db(tmp_path, 'worker-1', start, event_count=2)
-    second = _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+    first = _make_db(folder, 'worker-1', start, event_count=2)
+    second = _make_db(folder, 'worker-2', start + HOUR, event_count=3)
 
     _run(tmp_path)
 
-    assert not Path(first).exists()
-    assert not Path(second).exists()
     for source in (first, second):
-        for suffix in ('-wal', '-shm'):
-            assert not Path(source + suffix).exists()
-    names = _archives(tmp_path)
-    assert len(names) == 1
+        assert not Path(source).exists()
+        assert not Path(meta_path(source)).exists()
     window_start = (start // DAY) * DAY
-    assert names[0] == archive_file_name(CLUSTER, window_start, window_start + DAY)
-
-    # The archive gunzips to a valid merged SQLite DB holding both workers.
-    merged = tmp_path / 'unpacked.db'
-    with gzip.open(tmp_path / names[0], 'rb') as gz:
-        merged.write_bytes(gz.read())
-    db = sqlite3.connect(str(merged))
-    try:
-        assert db.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 5
-        workers = {row[0] for row in db.execute('SELECT worker_name FROM workers')}
-    finally:
-        db.close()
-    assert workers == {'worker-1', 'worker-2'}
+    assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
+    assert _events_in_archive(folder / _archives(folder)[0]) == 5
+    assert {row[0] for row in _archive_workers(folder / _archives(folder)[0])} == {'worker-1', 'worker-2'}
+    assert _dotfiles(folder) == []
 
 
 def test_run_archive_pass_logs_the_created_archive(tmp_path):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
+    folder = _folder(tmp_path)
+    _make_db(folder, 'worker-1', _due_start(time.time()))
 
     with capture_logs() as cap:
         _run(tmp_path)
 
-    created = [e for e in cap if e['event'] == 'recorder_archive_created']
-    assert len(created) == 1
-    assert created[0]['cluster'] == CLUSTER
-    assert created[0]['file_count'] == 1
-    assert created[0]['raw_bytes'] > 0
-    assert created[0]['compressed_bytes'] > 0
+    (created,) = [e for e in cap if e['event'] == 'recorder_archive_created']
+    assert created['cluster'] == CLUSTER
+    assert created['file_count'] == 1
+    assert created['raw_bytes'] > 0
+    assert created['compressed_bytes'] > 0
 
 
-def test_run_archive_pass_is_a_no_op_when_no_window_is_due(tmp_path):
-    now = time.time()
-    path = _make_db(tmp_path, 'worker-1', now - HOUR, mtime=now - HOUR)
+def test_run_archive_pass_leaves_a_window_that_is_not_due(tmp_path):
+    folder = _folder(tmp_path)
+    path = _make_db(folder, 'worker-1', time.time() - HOUR)
 
     _run(tmp_path)
 
     assert Path(path).exists()
-    assert _archives(tmp_path) == []
-    assert not _lock_path(tmp_path).exists()
+    assert _archives(folder) == []
+    assert not (folder / LOCK_NAME).exists()
 
 
-def test_run_archive_pass_never_touches_the_live_database(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    live = _make_db(tmp_path, 'worker-1', start)
-    rotated = _make_db(tmp_path, 'worker-1', start + HOUR)
+def test_run_archive_pass_without_a_history_folder_creates_nothing(tmp_path):
+    _run(tmp_path)
 
-    _run(tmp_path, exclude_path=live)
-
-    assert Path(live).exists()
-    assert not Path(rotated).exists()
-    assert len(_archives(tmp_path)) == 1
+    assert not (tmp_path / 'shared').exists()
 
 
-def test_run_archive_pass_never_touches_a_peers_live_database(tmp_path):
-    """A peer's live DB is a plain file to this worker — only its own
-    ``exclude_path`` was checked. In a fleet where workers rotate on
-    different schedules the peer's file looks settled to a faster-rotating
-    archiver, which then merges it away and unlinks the inode the peer is
-    still writing to. The peer keeps running, its ``-live.db`` symlink
-    dangles, and autodiscovery and cache peer sync lose it.
-
-    The ``*-live.db`` symlinks are the in-use markers, so whatever they
-    resolve to is off limits regardless of whose worker it is.
-    """
-    now = time.time()
-    start = _due_start(now)
-    peer_live = _make_db(tmp_path, 'worker-2', start)
-    (tmp_path / 'worker-2-live.db').symlink_to(Path(peer_live).name)
-    rotated = _make_db(tmp_path, 'worker-1', start + HOUR)
+def test_run_archive_pass_never_takes_a_file_still_being_copied_in(tmp_path):
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    _make_db(folder, 'worker-1', start)
+    incoming = folder / f'.{_db_name("worker-2", start)}.0123456789abcdef.incoming'
+    incoming.write_bytes(b'half a copy')
 
     _run(tmp_path)
 
-    assert Path(peer_live).exists(), "a peer's live database was archived away"
-    assert not Path(rotated).exists()
-    assert len(_archives(tmp_path)) == 1
-
-
-def test_run_archive_pass_archives_a_peer_file_whose_live_link_moved_on(tmp_path):
-    """Only the *current* target is protected. Once a peer rotates, its old
-    file is an ordinary rotated DB and must still be archivable — otherwise
-    a shared db_dir would never shrink.
-    """
-    now = time.time()
-    start = _due_start(now)
-    old = _make_db(tmp_path, 'worker-2', start)
-    current = _make_db(tmp_path, 'worker-2', now - 60, mtime=now - 60)
-    (tmp_path / 'worker-2-live.db').symlink_to(Path(current).name)
-
-    _run(tmp_path)
-
-    assert not Path(old).exists()
-    assert Path(current).exists()
-    assert len(_archives(tmp_path)) == 1
-
-
-def test_is_settled_reads_the_wal_sidecar(tmp_path):
-    """Under WAL the main DB file's mtime only moves on checkpoint, so a
-    busy database can look untouched for hours. The ``-wal`` sidecar moves
-    on every write, so settledness must consider it too.
-    """
-    now = time.time()
-    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY))
-    wal = tmp_path / (path.name + '-wal')
-    os.utime(wal, (now, now))
-
-    assert not _is_settled(str(path), now - HOUR)
-
-
-def test_is_settled_ignores_a_settled_wal_sidecar(tmp_path):
-    now = time.time()
-    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY))
-    wal = tmp_path / (path.name + '-wal')
-    os.utime(wal, (now - DAY, now - DAY))
-
-    assert _is_settled(str(path), now - HOUR)
-
-
-def test_is_settled_without_a_wal_sidecar_uses_the_main_file(tmp_path):
-    now = time.time()
-    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY, sidecars=False))
-
-    assert _is_settled(str(path), now - HOUR)
-
-
-def test_run_archive_pass_ignores_another_workers_in_flight_merge_file(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    mine = _make_db(tmp_path, 'worker-1', start)
-    # A peer worker's intermediate merge file, dot-prefixed and old.
-    in_flight = tmp_path / '.index-fleet-2026-01-01_00-00__2026-01-02_00-00.db.gz.merge.db'
-    in_flight.write_bytes(b'')
-    os.utime(in_flight, (start, start))
-
-    _run(tmp_path)
-
-    assert in_flight.exists()
-    assert not Path(mine).exists()
-
-
-def test_run_archive_pass_leaves_other_clusters_files_alone(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    mine = _make_db(tmp_path, 'worker-1', start)
-    theirs = _make_db(tmp_path, 'worker-9', start + HOUR, cluster=OTHER_CLUSTER)
-
-    _run(tmp_path)
-
-    assert not Path(mine).exists()
-    assert Path(theirs).exists()
-    assert _archives(tmp_path) == [archive_file_name(CLUSTER, (start // DAY) * DAY, (start // DAY) * DAY + DAY)]
-
-
-def test_run_archive_pass_groups_a_file_without_worker_config_under_default(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    orphan = tmp_path / _db_name('worker-x', start)
-    orphan.write_bytes(b'')
-    os.utime(orphan, (start, start))
-
-    _run(tmp_path, cluster='')
-
-    assert not orphan.exists()
-    assert len(_archives(tmp_path)) == 1
-    assert _archives(tmp_path)[0].startswith('default-')
+    assert incoming.exists()
+    assert len(_archives(folder)) == 1
 
 
 def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    healthy = _make_db(tmp_path, 'worker-1', start, cluster=None, event_count=2)
-    corrupt = tmp_path / _db_name('worker-2', start + HOUR)
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    healthy = _make_db(folder, 'worker-1', start)
+    corrupt = folder / _db_name('worker-2', start + HOUR)
     corrupt.write_bytes(b'this file is not a SQLite database at all' * 8)
-    for suffix in ('-wal', '-shm'):
-        sidecar = tmp_path / (corrupt.name + suffix)
-        sidecar.write_bytes(b'sidecar')
-        os.utime(sidecar, (start, start))
-    os.utime(corrupt, (start, start))
 
     with capture_logs() as cap:
-        _run(tmp_path, cluster='')
+        _run(tmp_path)
 
-    # The unreadable file survives under a name that leaves the candidate set.
+    set_aside = folder / (corrupt.name + '.unreadable')
     assert not corrupt.exists()
-    set_aside = tmp_path / (corrupt.name + '.unreadable')
-    assert set_aside.exists()
     assert set_aside.read_bytes().startswith(b'this file is not a SQLite database')
-    # The write-ahead log moves with it — it may hold the newest rows.
-    for suffix in ('-wal', '-shm'):
-        assert not (tmp_path / (corrupt.name + suffix)).exists()
-        assert (tmp_path / (set_aside.name + suffix)).exists()
-    # The healthy source was archived and only then deleted.
     assert not Path(healthy).exists()
-    assert len(_archives(tmp_path)) == 1
-    skipped = [e for e in cap if e['event'] == 'recorder_archive_source_skipped']
-    assert [e['name'] for e in skipped] == [corrupt.name]
-    assert skipped[0]['renamed_to'] == set_aside.name
-    created = [e for e in cap if e['event'] == 'recorder_archive_created']
-    assert created[0]['file_count'] == 1
+    assert len(_archives(folder)) == 1
+    (skipped,) = [e for e in cap if e['event'] == 'recorder_archive_source_skipped']
+    assert (skipped['name'], skipped['renamed_to']) == (corrupt.name, set_aside.name)
 
 
-def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
-    """A source that outlived its archive must not overwrite it."""
-    now = time.time()
-    start = _due_start(now)
-    first = _make_db(tmp_path, 'worker-1', start, event_count=2)
-    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
-
-    _run(tmp_path)
-    name = _archives(tmp_path)[0]
-    published = (tmp_path / name).read_bytes()
-
-    # A pass that died between publishing and deleting leaves a source behind.
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-    assert Path(first).exists()
-
-    with capture_logs() as cap:
-        _run(tmp_path)
-
-    assert not Path(first).exists()
-    assert _archives(tmp_path) == [name]
-    # Already covered by the archive, so the file is reclaimed, not remerged.
-    assert (tmp_path / name).read_bytes() == published
-    assert [e['event'] for e in cap if e['event'].startswith('recorder_archive_')] == [
-        'recorder_archive_sources_reclaimed'
-    ]
-    assert _events_in_archive(tmp_path / name) == 5
-
-
-def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-
-    _run(tmp_path)
-    name = _archives(tmp_path)[0]
-
-    # A third worker's file for the same window settles only afterwards.
-    late = _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
-
-    _run(tmp_path)
-
-    assert not Path(late).exists()
-    assert _archives(tmp_path) == [name]
-    assert _events_in_archive(tmp_path / name) == 6
-
-
-def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path):
-    """Sources skipped as already-archived are healthy — delete, never quarantine."""
-    now = time.time()
-    start = _due_start(now)
-    first = _make_db(tmp_path, 'worker-1', start, event_count=2)
-    second = _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
-
-    _run(tmp_path)
-    name = _archives(tmp_path)[0]
-
-    # A pass died after the rename: both sources are back, and a new file
-    # for the same window has settled since.
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
-    late = _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
-
-    with capture_logs() as cap:
-        _run(tmp_path)
-
-    assert not Path(first).exists()
-    assert not Path(second).exists()
-    assert not Path(late).exists()
-    assert list(tmp_path.glob('*.unreadable')) == []
-    assert [e for e in cap if e['event'] == 'recorder_archive_source_skipped'] == []
-    assert _archives(tmp_path) == [name]
-    # Both already-archived sources kept their single copy of each event.
-    assert _events_in_archive(tmp_path / name) == 9
-
-
-def test_run_archive_pass_leaves_no_temporaries_on_the_reclaim_path(tmp_path):
-    now = time.time()
-    start = _due_start(now)
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-
-    _run(tmp_path)
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-    _run(tmp_path)
-
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith('.')] == []
+# --- fold-in --------------------------------------------------------------
 
 
 def _events_in_archive(path: Path) -> int:
     """Unpack an archive and count the events it carries."""
-    unpacked = path.parent / f'unpacked-{path.name}.db'
+    unpacked = path.parent.parent / f'unpacked-{path.name}.db'
     with gzip.open(path, 'rb') as gz:
         unpacked.write_bytes(gz.read())
     db = sqlite3.connect(str(unpacked))
@@ -654,7 +354,7 @@ def _events_in_archive(path: Path) -> int:
 
 def _archive_workers(path: Path) -> list[tuple]:
     """Unpack an archive; return (worker_name, source_file, event count) per worker."""
-    unpacked = path.parent / f'unpacked-{path.name}.db'
+    unpacked = path.parent.parent / f'unpacked-{path.name}.db'
     with gzip.open(path, 'rb') as gz:
         unpacked.write_bytes(gz.read())
     db = sqlite3.connect(str(unpacked))
@@ -668,133 +368,142 @@ def _archive_workers(path: Path) -> list[tuple]:
         unpacked.unlink()
 
 
+def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
+    """A source that outlived its archive must not overwrite it."""
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    first = _make_db(folder, 'worker-1', start, event_count=2)
+    _make_db(folder, 'worker-2', start + HOUR, event_count=3)
+    _run(tmp_path)
+    (name,) = _archives(folder)
+    published = (folder / name).read_bytes()
+
+    # A pass that died between publishing and deleting leaves a source behind.
+    _make_db(folder, 'worker-1', start, event_count=2)
+
+    with capture_logs() as cap:
+        _run(tmp_path)
+
+    assert not Path(first).exists()
+    assert not Path(meta_path(first)).exists()
+    assert (folder / name).read_bytes() == published
+    assert [e['event'] for e in cap if e['event'].startswith('recorder_archive_')] == [
+        'recorder_archive_sources_reclaimed'
+    ]
+
+
+def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    _make_db(folder, 'worker-1', start, event_count=2)
+    _run(tmp_path)
+    (name,) = _archives(folder)
+    late = _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
+
+    _run(tmp_path)
+
+    assert not Path(late).exists()
+    assert _archives(folder) == [name]
+    assert _events_in_archive(folder / name) == 6
+
+
+def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path):
+    """Sources skipped as already-archived are healthy — delete, never quarantine."""
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    _make_db(folder, 'worker-1', start, event_count=2)
+    _make_db(folder, 'worker-2', start + HOUR, event_count=3)
+    _run(tmp_path)
+    (name,) = _archives(folder)
+    _make_db(folder, 'worker-1', start, event_count=2)
+    _make_db(folder, 'worker-2', start + HOUR, event_count=3)
+    _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
+
+    with capture_logs() as cap:
+        _run(tmp_path)
+
+    assert list(folder.glob('*.db')) == []
+    assert list(folder.glob('*.unreadable')) == []
+    assert [e for e in cap if e['event'] == 'recorder_archive_source_skipped'] == []
+    assert _events_in_archive(folder / name) == 9
+
+
 def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
-    """Folding an archive into its successor keeps every worker and its events."""
-    now = time.time()
-    start = _due_start(now)
-    _make_db(tmp_path, 'worker-1', start, event_count=2)
-    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    _make_db(folder, 'worker-1', start, event_count=2)
+    _make_db(folder, 'worker-2', start + HOUR, event_count=3)
     _run(tmp_path)
-    name = _archives(tmp_path)[0]
-
-    _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
+    (name,) = _archives(folder)
+    _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
     _run(tmp_path)
-    _make_db(tmp_path, 'worker-4', start + 3 * HOUR, event_count=1)
+    _make_db(folder, 'worker-4', start + 3 * HOUR, event_count=1)
     _run(tmp_path)
 
-    assert _archives(tmp_path) == [name]
-    assert _archive_workers(tmp_path / name) == [
+    assert _archives(folder) == [name]
+    assert _archive_workers(folder / name) == [
         ('worker-1', _db_name('worker-1', start), 2),
         ('worker-2', _db_name('worker-2', start + HOUR), 3),
         ('worker-3', _db_name('worker-3', start + 2 * HOUR), 4),
         ('worker-4', _db_name('worker-4', start + 3 * HOUR), 1),
     ]
+    assert _dotfiles(folder) == []
 
 
-def _backdate_sidecars(path: Path, ts: float) -> None:
-    """Give a WAL-mode file's -wal/-shm the time ``ts`` (a read-only open re-creates them now)."""
-    for suffix in ('-wal', '-shm'):
-        sidecar = Path(str(path) + suffix)
-        if sidecar.exists():
-            os.utime(sidecar, (ts, ts))
-
-
-def test_run_archive_pass_never_takes_a_merged_file_as_a_source(tmp_path):
-    """A UI merge can snapshot a raw file that is still being written.
-
-    Archived, the merged file's source names would mark that raw file as
-    archived, and a later pass would delete it together with the events
-    written after the snapshot.
-    """
-    now = time.time()
-    start = _due_start(now)
-    raw = _make_db(tmp_path, 'worker-1', start, cluster=None, event_count=2, sidecars=False)
-    merged = tmp_path / 'merged-snapshot.db'
-    merge_databases([raw], str(merged))
-    os.utime(merged, (start + HOUR, start + HOUR))
-    # worker-1 writes five more events after the snapshot.
-    db = sqlite3.connect(raw)
-    for offset in range(10, 15):
-        db.execute(
-            'INSERT INTO events (ts, dt, event, partition, offset) VALUES (?, ?, ?, ?, ?)',
-            [start + offset, format_dt(start + offset), 'consumed', 0, offset],
-        )
-    db.commit()
-    db.close()
-    os.utime(raw, (start + 2 * HOUR, start + 2 * HOUR))
-
-    # Two passes while the raw file is still live; between them an hour
-    # passes for the sidecars a read-only open left on the merged file.
-    _run(tmp_path, cluster='', exclude_path=raw)
-    _backdate_sidecars(merged, start + HOUR)
-    _run(tmp_path, cluster='', exclude_path=raw)
-    # The worker has moved on to a new file.
-    _run(tmp_path, cluster='')
-
-    assert merged.exists()
-    assert not Path(raw).exists()
-    names = _archives(tmp_path)
-    assert len(names) == 1
-    assert _events_in_archive(tmp_path / names[0]) == 7
-
-
-# --- election -----------------------------------------------------------
+# --- the archive lock ---------------------------------------------------
 
 
 def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
-    now = time.time()
-    source = _make_db(tmp_path, 'worker-1', _due_start(now))
-    lock = _lock_path(tmp_path)
-    # A live holder: the lock is an flock, not the file's existence, so the
-    # test takes the real thing on its own descriptor.
-    holder = os.open(str(lock), os.O_CREAT | os.O_WRONLY, 0o600)
-    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
+    holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
+    assert holder.acquire()
     try:
         _run(tmp_path)
+
+        assert Path(source).exists()
+        assert _archives(folder) == []
+        assert holder.is_ours()
     finally:
-        os.close(holder)
-
-    assert Path(source).exists()
-    assert _archives(tmp_path) == []
-    assert lock.exists()
+        holder.release()
 
 
-def test_run_archive_pass_takes_over_a_lock_file_left_by_a_dead_worker(tmp_path):
-    now = time.time()
-    source = _make_db(tmp_path, 'worker-1', _due_start(now))
-    lock = _lock_path(tmp_path)
-    # No process holds the flock — a dead worker's file, whatever its age.
-    lock.write_text(json.dumps({'pid': 999, 'worker': 'worker-2', 'ts': 0}))
-    stale = now - HistoryArchiveConfig().lock_stale_seconds - 1
-    os.utime(lock, (stale, stale))
+def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path):
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
+    lock = folder / LOCK_NAME
+    lock.write_text(json.dumps({'acquired_at': '', 'instance': 'dead', 'token': 'dead', 'worker': 'worker-2'}))
+    _age(lock, HistoryArchiveConfig().lock_stale_seconds + 60)
 
     _run(tmp_path)
 
     assert not Path(source).exists()
-    assert len(_archives(tmp_path)) == 1
+    assert len(_archives(folder)) == 1
     assert not lock.exists()
 
 
-def test_run_archive_pass_stamps_its_pid_on_the_temporary_files(tmp_path, monkeypatch):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
+def test_run_archive_pass_names_its_work_files_with_the_lock_token(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    _make_db(folder, 'worker-1', _due_start(time.time()))
     seen: dict = {}
     real_merge = archive_mod.merge_databases
 
     def spy(paths, output_path):
         seen['output'] = os.path.basename(output_path)
+        seen['token'] = json.loads((folder / LOCK_NAME).read_text())['token']
         return real_merge(paths, output_path)
 
     monkeypatch.setattr(archive_mod, 'merge_databases', spy)
 
     _run(tmp_path)
 
-    assert seen['output'].endswith(f'.{os.getpid()}.merge.db')
+    assert seen['output'].endswith(f'.{seen["token"]}.merge.db')
+    assert re.fullmatch(r'[0-9a-f]{16}', seen['token'])
 
 
 def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
+    folder = _folder(tmp_path)
+    _make_db(folder, 'worker-1', _due_start(time.time()))
     seen: dict = {}
     real_compress = archive_mod._compress
 
@@ -807,52 +516,48 @@ def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch)
 
     _run(tmp_path)
 
-    assert seen['merge_mode'] == 0o600
-    assert seen['archive_mode'] == 0o600
-    assert os.stat(tmp_path / _archives(tmp_path)[0]).st_mode & 0o777 == 0o600
+    assert seen == {'merge_mode': 0o600, 'archive_mode': 0o600}
+    assert os.stat(folder / _archives(folder)[0]).st_mode & 0o777 == 0o600
 
 
-def test_run_archive_pass_sweeps_temporaries_left_by_a_dead_pass(tmp_path):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
-    orphan = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4242.merge.db'
-    orphan.write_bytes(b'leftover')
-    fresh = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4243.merge.db'
-    fresh.write_bytes(b'still warm')
-    stale = now - HistoryArchiveConfig().lock_stale_seconds - 1
-    os.utime(orphan, (stale, stale))
+def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, monkeypatch):
+    """A holder that lost its lock (it stalled past the stale age and a peer
+    took over) must not publish or delete: the new holder owns the folder."""
+    folder = _folder(tmp_path)
+    start = _due_start(time.time())
+    source = _make_db(folder, 'worker-1', start)
+    real_merge = archive_mod.merge_databases
+
+    def taken_over_during_merge(paths, output_path):
+        result = real_merge(paths, output_path)
+        body = {'acquired_at': '', 'instance': 'peer', 'token': 'f' * 16, 'worker': 'worker-2'}
+        (folder / LOCK_NAME).write_text(json.dumps(body))
+        return result
+
+    monkeypatch.setattr(archive_mod, 'merge_databases', taken_over_during_merge)
+    failures_before = recorder_archive_failures._value.get()
 
     with capture_logs() as cap:
         _run(tmp_path)
 
-    assert not orphan.exists()
-    assert fresh.exists()
-    swept = [e for e in cap if e['event'] == 'recorder_archive_temp_swept']
-    assert [e['name'] for e in swept] == [orphan.name]
+    assert Path(source).exists()
+    assert Path(meta_path(source)).exists()
+    assert _archives(folder) == []
+    assert _dotfiles(folder) == [LOCK_NAME]
+    assert json.loads((folder / LOCK_NAME).read_text())['token'] == 'f' * 16
+    (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
+    window_start = (start // DAY) * DAY
+    assert fenced['name'] == archive_file_name(CLUSTER, window_start, window_start + DAY)
+    assert recorder_archive_failures._value.get() == failures_before + 1
 
 
-def test_run_archive_pass_sweeps_temporaries_older_than_lock_stale_seconds(tmp_path):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
-    old = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4242.tmp'
-    old.write_bytes(b'leftover')
-    young = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4243.tmp'
-    young.write_bytes(b'still warm')
-    os.utime(old, (now - 101, now - 101))
-    os.utime(young, (now - 50, now - 50))
-
-    _run(tmp_path, cfg=_make_config(lock_stale_seconds=100))
-
-    assert not old.exists()
-    assert young.exists()
-
-
-def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path):
+def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
     now = time.time()
     first_start = _due_start(now, days_back=4)
     second_start = _due_start(now, days_back=3)
-    first_source = _make_db(tmp_path, 'worker-1', first_start)
-    second_source = _make_db(tmp_path, 'worker-1', second_start)
+    first_source = _make_db(folder, 'worker-1', first_start)
+    second_source = _make_db(folder, 'worker-1', second_start)
     real_merge = archive_mod.merge_databases
     calls = 0
 
@@ -863,61 +568,85 @@ def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path)
             raise OSError('second window blew up')
         return real_merge(paths, output_path)
 
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(archive_mod, 'merge_databases', flaky)
-        _run(tmp_path)
-
-    # First window: archived and cleaned up. Second: untouched, retried next tick.
-    assert not Path(first_source).exists()
-    assert Path(second_source).exists()
-    window_start = (first_start // DAY) * DAY
-    assert _archives(tmp_path) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
-    assert not _lock_path(tmp_path).exists()
-
-
-def test_run_archive_pass_writes_owner_identity_into_the_lock(tmp_path, monkeypatch):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
-    seen: dict = {}
-
-    real_merge = archive_mod.merge_databases
-
-    def spy(paths, output_path):
-        seen['lock'] = json.loads(_lock_path(tmp_path).read_text())
-        return real_merge(paths, output_path)
-
-    monkeypatch.setattr(archive_mod, 'merge_databases', spy)
+    monkeypatch.setattr(archive_mod, 'merge_databases', flaky)
 
     _run(tmp_path)
 
-    assert seen['lock']['pid'] == os.getpid()
-    assert seen['lock']['worker'] == 'worker-1'
-    assert seen['lock']['ts'] > 0
+    assert not Path(first_source).exists()
+    assert Path(second_source).exists()
+    window_start = (first_start // DAY) * DAY
+    assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
+    assert not (folder / LOCK_NAME).exists()
 
 
-def test_run_archive_pass_releases_the_lock_after_a_failure(tmp_path, monkeypatch):
-    now = time.time()
-    source = _make_db(tmp_path, 'worker-1', _due_start(now))
+def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
 
     def boom(paths, output_path):
         raise OSError('merge blew up')
 
     monkeypatch.setattr(archive_mod, 'merge_databases', boom)
+    failures_before = recorder_archive_failures._value.get()
 
     with capture_logs() as cap:
         _run(tmp_path)
 
-    assert not _lock_path(tmp_path).exists()
+    assert not (folder / LOCK_NAME).exists()
     assert Path(source).exists()
-    assert _archives(tmp_path) == []
-    failures = [e for e in cap if e['event'] == 'recorder_archive_failed']
-    assert len(failures) == 1
-    assert failures[0]['cluster'] == CLUSTER
+    (failure,) = [e for e in cap if e['event'] == 'recorder_archive_failed']
+    assert failure['cluster'] == CLUSTER
+    assert recorder_archive_failures._value.get() == failures_before + 1
+
+
+def test_a_clean_pass_counts_no_failure(tmp_path):
+    folder = _folder(tmp_path)
+    _make_db(folder, 'worker-1', _due_start(time.time()))
+    failures_before = recorder_archive_failures._value.get()
+
+    _run(tmp_path)
+
+    assert recorder_archive_failures._value.get() == failures_before
+
+
+def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    now = time.time()
+    first_start = _due_start(now, days_back=4)
+    first_source = _make_db(folder, 'worker-1', first_start)
+    second_source = _make_db(folder, 'worker-1', _due_start(now, days_back=3))
+    stop = threading.Event()
+    real_merge = archive_mod.merge_databases
+
+    def merge_then_stop(paths, output_path):
+        # The worker starts its shutdown while the first window merges.
+        stop.set()
+        return real_merge(paths, output_path)
+
+    monkeypatch.setattr(archive_mod, 'merge_databases', merge_then_stop)
+    failures_before = recorder_archive_failures._value.get()
+
+    run_archive_pass(
+        str(tmp_path / 'shared'),
+        cluster=CLUSTER,
+        worker='worker-1',
+        instance=INSTANCE,
+        archive=_make_config(),
+        merged_retention_days=0,
+        stop=stop,
+    )
+
+    window_start = (first_start // DAY) * DAY
+    assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
+    assert not Path(first_source).exists()
+    assert Path(second_source).exists()
+    assert not (folder / LOCK_NAME).exists()
+    assert recorder_archive_failures._value.get() == failures_before
 
 
 def test_run_archive_pass_keeps_sources_when_compression_fails(tmp_path, monkeypatch):
-    now = time.time()
-    source = _make_db(tmp_path, 'worker-1', _due_start(now))
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
 
     def boom(*args, **kwargs):
         raise OSError('disk full')
@@ -927,108 +656,188 @@ def test_run_archive_pass_keeps_sources_when_compression_fails(tmp_path, monkeyp
     _run(tmp_path)
 
     assert Path(source).exists()
-    for suffix in ('-wal', '-shm'):
-        assert Path(source + suffix).exists()
-    assert _archives(tmp_path) == []
-    # No temporary or intermediate files survive the failure.
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith('.')] == []
+    assert _archives(folder) == []
+    assert _dotfiles(folder) == []
 
 
-# --- expiry -------------------------------------------------------------
+# --- sweep ---------------------------------------------------------------
+
+
+WORK_FILES = [
+    f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.merge.db',
+    f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.merge.db-journal',
+    f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.merge.db-wal',
+    f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.tmp',
+    f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.previous.db',
+    '.worker-2-2020-01-01__00_00_00.db.0123456789abcdef.incoming',
+    '.clock.2222222222222222',
+    '.archive.lock.stale.0123456789abcdef',
+]
+
+
+@pytest.mark.parametrize('name', WORK_FILES)
+def test_the_sweep_removes_a_work_file_older_than_the_stale_age(tmp_path, name):
+    folder = _folder(tmp_path)
+    work_file = folder / name
+    work_file.write_bytes(b'left by a dead pass')
+    _age(work_file, 101)
+
+    with capture_logs() as cap:
+        _run(tmp_path, _make_config(lock_stale_seconds=100))
+
+    assert not work_file.exists()
+    assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [name]
+
+
+@pytest.mark.parametrize('name', WORK_FILES)
+def test_the_sweep_keeps_a_work_file_younger_than_the_stale_age(tmp_path, name):
+    folder = _folder(tmp_path)
+    work_file = folder / name
+    work_file.write_bytes(b'still being written')
+    _age(work_file, 50)
+
+    _run(tmp_path, _make_config(lock_stale_seconds=100))
+
+    assert work_file.exists()
+
+
+def test_the_sweep_removes_an_old_meta_file_whose_database_is_missing(tmp_path):
+    folder = _folder(tmp_path)
+    orphan = folder / 'worker-2-2020-01-01__00_00_00.db.meta.json'
+    orphan.write_bytes(b'{"schema":1}')
+    _age(orphan, 101)
+
+    _run(tmp_path, _make_config(lock_stale_seconds=100))
+
+    assert not orphan.exists()
+
+
+def test_the_sweep_keeps_a_fresh_meta_file_whose_database_is_still_on_its_way(tmp_path):
+    """Sealing writes the meta file first and moves the database next."""
+    folder = _folder(tmp_path)
+    orphan = folder / 'worker-2-2020-01-01__00_00_00.db.meta.json'
+    orphan.write_bytes(b'{"schema":1}')
+    _age(orphan, 50)
+
+    _run(tmp_path, _make_config(lock_stale_seconds=100))
+
+    assert orphan.exists()
+
+
+def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', time.time() - HOUR)
+    _age(Path(meta_path(source)), 101)
+
+    _run(tmp_path, _make_config(lock_stale_seconds=100))
+
+    assert Path(meta_path(source)).exists()
+
+
+# --- expiry ---------------------------------------------------------------
 
 
 def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
+    folder = _folder(tmp_path)
     now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now, days_back=3))
-    old_mine = _make_archive(tmp_path, CLUSTER, now - 10 * DAY)
-    recent_mine = _make_archive(tmp_path, CLUSTER, now - 1 * DAY)
-    old_theirs = _make_archive(tmp_path, OTHER_CLUSTER, now - 10 * DAY)
+    _make_db(folder, 'worker-1', _due_start(now, days_back=3))
+    old_mine = _make_archive(folder, CLUSTER, now - 10 * DAY)
+    recent_mine = _make_archive(folder, CLUSTER, now - 1 * DAY)
+    old_theirs = _make_archive(folder, OTHER_CLUSTER, now - 10 * DAY)
 
     with capture_logs() as cap:
-        _run(tmp_path, cfg=_make_config(retention_days=3))
+        _run(tmp_path, _make_config(retention_days=3))
 
     assert not old_mine.exists()
     assert recent_mine.exists()
     assert old_theirs.exists()
-    # The archive this pass just wrote (window ended ~2 days ago) survives.
-    assert len(_archives(tmp_path)) == 3
-    expired = [e for e in cap if e['event'] == 'recorder_archive_expired']
-    assert [e['name'] for e in expired] == [old_mine.name]
+    assert len(_archives(folder)) == 3
+    assert [e['name'] for e in cap if e['event'] == 'recorder_archive_expired'] == [old_mine.name]
 
 
 def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_path):
-    now = time.time()
-    _make_db(tmp_path, 'worker-1', _due_start(now))
-    old_mine = _make_archive(tmp_path, CLUSTER, now - 100 * DAY)
+    folder = _folder(tmp_path)
+    old_mine = _make_archive(folder, CLUSTER, time.time() - 100 * DAY)
 
-    _run(tmp_path, cfg=_make_config(retention_days=0))
+    _run(tmp_path, _make_config(retention_days=0))
 
     assert old_mine.exists()
+
+
+# --- merged results -------------------------------------------------------
+
+
+def _merged_file(tmp_path, name: str, age_days: float) -> Path:
+    folder = tmp_path / 'shared' / 'merged'
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(b'merged')
+    _age(path, age_days * DAY)
+    return path
+
+
+def test_run_archive_pass_prunes_merge_results_past_their_retention(tmp_path):
+    _folder(tmp_path)
+    old = _merged_file(tmp_path, 'merged-2026-09-01__10_00_00-0123456789abcdef.db', 40)
+    young = _merged_file(tmp_path, 'merged-2026-10-10__10_00_00-0123456789abcdef.db', 3)
+    in_progress = _merged_file(tmp_path, '.merged-2026-09-01__10_00_00-0123456789abcdef.tmp', 40)
+
+    with capture_logs() as cap:
+        _run(tmp_path, merged_retention_days=32)
+
+    assert not old.exists()
+    assert young.exists()
+    assert in_progress.exists()
+    assert [e['name'] for e in cap if e['event'] == 'recorder_merged_pruned'] == [old.name]
+
+
+def test_run_archive_pass_keeps_merge_results_when_their_retention_is_zero(tmp_path):
+    _folder(tmp_path)
+    old = _merged_file(tmp_path, 'merged-2026-01-01__10_00_00-0123456789abcdef.db', 300)
+
+    _run(tmp_path, merged_retention_days=0)
+
+    assert old.exists()
 
 
 # --- archive footprint --------------------------------------------------
 
 
 def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
-    """A shared db_dir must not bill one cluster for another's archives.
-
-    Retention is per-cluster, so a gauge covering the whole directory
-    would move for archives this worker's setting cannot expire.
-    """
+    folder = _folder(tmp_path)
     now = time.time()
-    mine_a = _make_archive(tmp_path, CLUSTER, now - 3 * DAY)
-    mine_b = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
-    theirs = _make_archive(tmp_path, OTHER_CLUSTER, now - 3 * DAY)
-    theirs.write_bytes(b'x' * 4096)
-
-    _run(tmp_path, cfg=_make_config(retention_days=0))
-
-    expected = mine_a.stat().st_size + mine_b.stat().st_size
-    assert archive_mod.recorder_archive_files._value.get() == 2
-    assert archive_mod.recorder_archive_bytes._value.get() == expected
-
-
-def test_archive_footprint_skips_a_cluster_whose_name_extends_this_one(tmp_path):
-    """``search-fleet-hot`` archives start with ``search-fleet-`` but are not ours.
-
-    A prefix match on the file name would count them, so the gauge would
-    move for archives this worker's retention never expires.
-    """
-    now = time.time()
-    mine = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
-    extended = _make_archive(tmp_path, f'{CLUSTER}-hot', now - 2 * DAY)
+    mine_a = _make_archive(folder, CLUSTER, now - 3 * DAY)
+    mine_b = _make_archive(folder, CLUSTER, now - 2 * DAY)
+    extended = _make_archive(folder, f'{CLUSTER}-hot', now - 2 * DAY)
     extended.write_bytes(b'x' * 4096)
 
-    _run(tmp_path, cfg=_make_config(retention_days=0))
+    _run(tmp_path, _make_config(retention_days=0))
 
-    assert archive_mod.recorder_archive_files._value.get() == 1
-    assert archive_mod.recorder_archive_bytes._value.get() == mine.stat().st_size
+    assert archive_mod.recorder_archive_files._value.get() == 2
+    assert archive_mod.recorder_archive_bytes._value.get() == mine_a.stat().st_size + mine_b.stat().st_size
 
 
-def test_archive_pass_reports_the_footprint_when_no_window_is_due(tmp_path):
-    """The gauge must refresh on quiet ticks too.
-
-    A pass with nothing to archive returns before it takes the lock. That
-    is precisely when an operator asks why the volume is full, so the
-    footprint is published before that early return.
-    """
-    now = time.time()
-    existing = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
+def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(tmp_path):
+    folder = _folder(tmp_path)
+    existing = _make_archive(folder, CLUSTER, time.time() - 2 * DAY)
     archive_mod.recorder_archive_bytes.set(0)
     archive_mod.recorder_archive_files.set(0)
+    holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
+    assert holder.acquire()
+    try:
+        _run(tmp_path, _make_config(retention_days=0))
+    finally:
+        holder.release()
 
-    _run(tmp_path, cfg=_make_config(retention_days=0))  # no raw db: nothing is due
-
-    assert _archives(tmp_path) == [existing.name]
     assert archive_mod.recorder_archive_files._value.get() == 1
     assert archive_mod.recorder_archive_bytes._value.get() == existing.stat().st_size
 
 
-def test_archive_pass_reports_a_zero_footprint_for_an_empty_dir(tmp_path):
+def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
     archive_mod.recorder_archive_bytes.set(999)
     archive_mod.recorder_archive_files.set(9)
 
-    _run(tmp_path, cfg=_make_config(retention_days=0))
+    _run(tmp_path, _make_config(retention_days=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 0
     assert archive_mod.recorder_archive_bytes._value.get() == 0
@@ -1039,37 +848,23 @@ def test_archive_pass_reports_a_zero_footprint_for_an_empty_dir(tmp_path):
 
 def test_warn_if_archives_unbounded_warns_when_retention_is_zero():
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(retention_days=0), '/var/lib/drakkar')
+        warn_if_archives_unbounded(_make_config(retention_days=0), '/shared/history/search')
 
-    warnings = [e for e in cap if e['event'] == 'recorder_archives_unbounded']
-    assert len(warnings) == 1
-    assert warnings[0]['log_level'] == 'warning'
-    assert warnings[0]['storage_dir'] == '/var/lib/drakkar'
-    # The message has to name the knob and the metric, or it tells an
-    # operator there is a problem without telling them what to do.
-    assert 'history.archive.retention_days' in warnings[0]['message']
-    assert 'drakkar_recorder_archive_bytes' in warnings[0]['message']
+    (warning,) = [e for e in cap if e['event'] == 'recorder_archives_unbounded']
+    assert warning['log_level'] == 'warning'
+    assert warning['folder'] == '/shared/history/search'
+    assert 'history.archive.retention_days' in warning['message']
+    assert 'drakkar_recorder_archive_bytes' in warning['message']
 
 
-def test_warn_if_archives_unbounded_is_silent_when_retention_is_set():
+@pytest.mark.parametrize(
+    'cfg',
+    [_make_config(retention_days=30), _make_config(enabled=False, retention_days=0), HistoryArchiveConfig()],
+    ids=['retention-set', 'archiving-disabled', 'defaults'],
+)
+def test_warn_if_archives_unbounded_is_silent_otherwise(cfg):
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(retention_days=30), '/var/lib/drakkar')
-
-    assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
-
-
-def test_warn_if_archives_unbounded_is_silent_when_archiving_is_disabled():
-    """Nothing accumulates when no archive is ever written."""
-    with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(enabled=False, retention_days=0), '/var/lib/drakkar')
-
-    assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
-
-
-def test_warn_if_archives_unbounded_is_silent_on_the_shipped_defaults():
-    """The default config must not warn — a warning nobody can act on is noise."""
-    with capture_logs() as cap:
-        warn_if_archives_unbounded(HistoryArchiveConfig(), '/tmp/drakkar')
+        warn_if_archives_unbounded(cfg, '/shared/history/search')
 
     assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
@@ -1078,39 +873,46 @@ def test_warn_if_archives_unbounded_is_silent_on_the_shipped_defaults():
 
 
 def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> EventRecorder:
+    (tmp_path / 'storage').mkdir(exist_ok=True)
     config = make_ui_config(enabled=True, flush_interval_seconds=60)
     return EventRecorder(
-        config, worker_name='worker-1', cluster_name=CLUSTER, storage_dir=str(tmp_path), archive=archive
+        config,
+        worker_name='worker-1',
+        cluster_name=CLUSTER,
+        storage_dir=str(tmp_path / 'storage'),
+        shared_dir=str(tmp_path / 'shared'),
+        instance=INSTANCE,
+        archive=archive,
+        merged_retention_days=7,
     )
 
 
-async def test_archive_pass_runs_off_the_event_loop_with_the_live_db_excluded(tmp_path, monkeypatch):
+async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_path, monkeypatch):
     rec = _make_recorder(tmp_path)
-    rec._db_path = str(tmp_path / 'worker-1-live-now.db')
     seen: dict = {}
 
-    def spy(**kwargs) -> None:
-        seen.update(kwargs)
-        seen['thread'] = threading.current_thread().ident
+    def spy(shared_dir, **kwargs) -> None:
+        seen.update(kwargs, shared_dir=shared_dir, thread=threading.current_thread().ident)
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
 
     await rec._archive_pass()
 
-    assert seen['db_dir'] == str(tmp_path)
-    assert seen['worker_name'] == 'worker-1'
-    assert seen['cluster'] == CLUSTER
-    assert seen['exclude_path'] == rec._db_path
+    assert seen['shared_dir'] == str(tmp_path / 'shared')
+    assert (seen['cluster'], seen['worker'], seen['instance']) == (CLUSTER, 'worker-1', INSTANCE)
     assert seen['archive'] is rec._archive
-    assert seen['rotation_interval_hours'] == 1
+    assert seen['merged_retention_days'] == 7
     assert seen['thread'] != threading.current_thread().ident
 
 
-async def test_archive_pass_does_nothing_when_archiving_is_disabled(tmp_path, monkeypatch):
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=False))
+@pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
+async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage):
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=not storage))
+    if not storage:
+        rec._storage_dir = ''
     calls = 0
 
-    def spy(**kwargs) -> None:
+    def spy(*args, **kwargs) -> None:
         nonlocal calls
         calls += 1
 
@@ -1121,20 +923,58 @@ async def test_archive_pass_does_nothing_when_archiving_is_disabled(tmp_path, mo
     assert calls == 0
 
 
-async def test_archive_pass_does_nothing_without_a_storage_dir(tmp_path, monkeypatch):
+async def test_a_blocked_archive_pass_never_holds_up_rotation(tmp_path, monkeypatch):
+    names = iter(range(1, 100))
+    monkeypatch.setattr(
+        core_mod,
+        'make_db_path',
+        lambda folder, worker: os.path.join(folder, f'{worker}-2026-10-14__08_00_{next(names):02d}.db'),
+    )
+    unblock = threading.Event()
+    passes = 0
+
+    def blocked_pass(*args, **kwargs) -> None:
+        nonlocal passes
+        passes += 1
+        unblock.wait(10)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', blocked_pass)
     rec = _make_recorder(tmp_path)
-    rec._storage_dir = ''
-    calls = 0
+    rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.02 / 3600})
+    await rec.start()
+    try:
+        first = rec.db_path
+        await wait_for(lambda: passes == 1)
+        seen = {first}
+        await wait_for(lambda: seen.add(rec.db_path) or len(seen) >= 4)
 
-    def spy(**kwargs) -> None:
-        nonlocal calls
-        calls += 1
+        assert passes == 1
+    finally:
+        unblock.set()
+        await rec.stop()
 
-    monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
 
-    await rec._archive_pass()
+async def test_a_recorder_stop_asks_a_running_archive_pass_to_end(tmp_path, monkeypatch):
+    started = threading.Event()
+    seen: dict = {}
 
-    assert calls == 0
+    def watching_pass(*args, stop=None, **kwargs) -> None:
+        seen['stop'] = stop
+        started.set()
+        if stop is not None:
+            stop.wait(10)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', watching_pass)
+    rec = _make_recorder(tmp_path)
+    await rec.start()
+    try:
+        rec._start_archive_pass()
+        await wait_for(started.is_set)
+    finally:
+        await rec.stop()
+
+    assert seen['stop'] is not None
+    assert seen['stop'].is_set()
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):
@@ -1144,9 +984,9 @@ async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):
         await rec.start()
         await rec.stop()
 
-    notices = [e for e in cap if e['event'] == 'recorder_archiving_disabled']
-    assert len(notices) == 1
-    assert notices[0]['log_level'] == 'info'
+    (notice,) = [e for e in cap if e['event'] == 'recorder_archiving_disabled']
+    assert notice['log_level'] == 'info'
+    assert notice['folder'] == rec.history_dir
 
 
 async def test_start_stays_quiet_when_archiving_is_enabled(tmp_path):
@@ -1157,3 +997,18 @@ async def test_start_stays_quiet_when_archiving_is_enabled(tmp_path):
         await rec.stop()
 
     assert [e for e in cap if e['event'] == 'recorder_archiving_disabled'] == []
+
+
+def test_sealed_sources_are_archived_while_a_reader_holds_a_lock(tmp_path):
+    """Sources are read with immutable=1: a stray reader's lock does not stall the window."""
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
+    reader = sqlite3.connect(source)
+    reader.execute('BEGIN EXCLUSIVE')
+    try:
+        _run(tmp_path)
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert len(_archives(folder)) == 1

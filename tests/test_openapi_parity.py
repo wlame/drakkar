@@ -409,13 +409,16 @@ async def test_archives_payload_matches_schema(tmp_path):
     from_ts = datetime(2023, 11, 14, 0, 0, 0, tzinfo=UTC).timestamp()
     to_ts = datetime(2023, 11, 15, 0, 0, 0, tzinfo=UTC).timestamp()
     name = archive_file_name('search-fleet', from_ts, to_ts)
-    with gzip.open(tmp_path / name, 'wb') as f:
+    folder = tmp_path / 'history' / 'search-fleet'
+    folder.mkdir(parents=True)
+    with gzip.open(folder / name, 'wb') as f:
         f.write(b'archived-bytes')
 
     cfg = make_ui_config(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
-    recorder.storage_dir = str(tmp_path)
+    recorder.storage_dir = str(tmp_path / 'storage')
+    recorder.shared_dir = str(tmp_path)
     app = MagicMock()
     app._worker_id = 'schema-worker'
     app._cluster_name = ''
@@ -434,7 +437,9 @@ async def test_archives_payload_matches_schema(tmp_path):
                 'cluster': 'search-fleet',
                 'from_ts': from_ts,
                 'to_ts': to_ts,
-                'size_bytes': (tmp_path / name).stat().st_size,
+                'size_bytes': (folder / name).stat().st_size,
+                'folder': 'history/search-fleet',
+                'path': f'history/search-fleet/{name}',
             }
         ]
     }

@@ -6,10 +6,12 @@ fan-out live in sibling modules:
 
 - :mod:`drakkar.recorder.schema`  — DDL constants + canned trace queries.
 - :mod:`drakkar.recorder.helpers` — orjson-or-stdlib codec, secret patterns,
-  ``format_dt``, ``make_db_path``, ``live_link_path``, ``open_reader``,
+  ``format_dt``, ``make_db_path``, ``open_reader``,
   ``detect_worker_ip``.
+- :mod:`drakkar.recorder.sealing` — sealing a closed file (rollback
+  journal, meta file) and moving it into the shared history folder.
 - :mod:`drakkar.recorder.archive` — window math + the archive pass that
-  folds rotated-out DB files into compressed per-cluster archives.
+  folds sealed files into compressed per-cluster archives.
 - :mod:`drakkar.recorder.fanout`  — the live ``/ws`` fan-out: subscriber
   set, per-client queues, deferred ``task_started`` events.
 
@@ -24,6 +26,7 @@ import atexit
 import contextlib
 import functools
 import os
+import secrets
 
 # ``socket`` is re-imported here so test patches like
 # ``patch('drakkar.recorder.socket.socket', ...)`` still find the module on
@@ -33,17 +36,19 @@ import os
 # the class globally for both modules.
 import socket  # noqa: F401
 import sqlite3
+import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 import structlog
 
 from drakkar.config import HistoryArchiveConfig, UIConfig
-from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, atomic_symlink, remove_symlink, secure_db_file
+from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
     recorder_buffer_size,
@@ -52,6 +57,8 @@ from drakkar.metrics import (
     recorder_flush_duration,
     recorder_flush_retries,
     recorder_requeue_overflow,
+    recorder_seal_failures,
+    recorder_unsealed_files,
 )
 from drakkar.recorder.archive import run_archive_pass
 from drakkar.recorder.helpers import (
@@ -59,11 +66,11 @@ from drakkar.recorder.helpers import (
     detect_worker_ip,
     encode_json_str,
     format_dt,
-    live_link_path,
     make_db_path,
     open_reader,
     sanitize_env_value,
 )
+from drakkar.recorder.history import history_dir
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -73,6 +80,13 @@ from drakkar.recorder.schema import (
     WEBAPP_REQUIRED_EVENT_COLUMNS,
     EventType,
     RecorderSchemaError,
+)
+from drakkar.recorder.sealing import (
+    LEFTOVER_FLOOR_SECONDS,
+    find_leftovers,
+    publish_in_background,
+    seal_closed_file,
+    seal_connection,
 )
 from drakkar.recorder.writer import EventWriter
 from drakkar.utils import redact_url
@@ -150,11 +164,11 @@ class EventRecorder(EventWriter):
     """Records processing events to timestamped SQLite database files.
 
     Events are buffered in memory and flushed periodically. On each
-    rotation tick, the current DB is finalized and a new timestamped file
-    is created.
-
-    A ``{worker_name}-live.db`` symlink points to the current database
-    while the worker is running and is removed on graceful shutdown.
+    rotation tick a new timestamped file is created and the previous one
+    is sealed: switched to a rollback journal, closed, and moved with its
+    meta file into ``<shared_dir>/history/<cluster>/``, where it never
+    changes again. A clean stop seals the live file the same way. Only
+    this recorder ever opens its live file.
 
     Which tables are created depends on config flags:
     - ``store_events`` -> ``events`` table
@@ -171,19 +185,30 @@ class EventRecorder(EventWriter):
         cluster_name: str = '',
         *,
         storage_dir: str = '',
+        shared_dir: str = '',
+        instance: str = '',
         archive: HistoryArchiveConfig | None = None,
+        merged_retention_days: int = 0,
     ) -> None:
         """Wire a recorder without opening anything.
 
         ``storage_dir`` is the worker's own folder (``storage.dir``); empty
-        runs memory-only. ``archive`` is ``history.archive``; the defaults
-        apply when omitted.
+        runs memory-only. ``shared_dir`` is the folder every worker of the
+        fleet sees (``shared.dir``); sealed files go to its
+        ``history/<cluster>/``, and it falls back to ``storage_dir``.
+        ``instance`` names this process in the meta files (random when
+        empty). ``archive`` is ``history.archive``; the defaults apply when
+        omitted. ``merged_retention_days`` is how long the archive pass keeps
+        UI merge results (0 keeps them).
         """
         super().__init__(config)
         self._worker_name = worker_name
         self._cluster_name = cluster_name
         self._storage_dir = storage_dir
+        self._shared_dir = shared_dir or storage_dir
+        self._instance = instance or secrets.token_hex(8)
         self._archive = archive if archive is not None else HistoryArchiveConfig()
+        self._merged_retention_days = merged_retention_days
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -214,16 +239,31 @@ class EventRecorder(EventWriter):
         self._rotation_task: asyncio.Task | None = None
         self._state_task: asyncio.Task | None = None
         self._host_sample_task: asyncio.Task | None = None
-        # Databases-page stats cache (drakkar.dbstats). Constructed in
-        # start() when storage_dir is set; the warmer loop keeps it filled and
-        # _rotate feeds it the freshly-immutable file. None in memory-only
-        # mode — there is no directory to describe.
-        self._dbstats: Any = None
-        self._dbstats_warm_task: asyncio.Task | None = None
-        # Fire-and-forget rotation scans; tracked so they are not GC'd
-        # mid-flight and can be awaited nowhere (their failure only costs
-        # a later warmer scan).
-        self._dbstats_rotate_tasks: set[asyncio.Task] = set()
+        # Own files closed but not yet in the history folder. ``_backlog``
+        # holds files whose seal or move failed (sealed again before the
+        # next move); ``_sealed`` holds files sealed at rotation, with their
+        # meta, whose move is still to come. Both in memory only: a process
+        # that dies with either leaves the files as leftovers, and the next
+        # start with the same worker name seals them.
+        self._backlog: list[str] = []
+        self._sealed: dict[str, dict[str, Any]] = {}
+        # Paths a seal or a move works on right now. The rotation, the
+        # background sealing job and the leftover task each take a path
+        # here first, so no file is ever sealed or moved twice at once.
+        self._in_hand: set[str] = set()
+        # Moves into the history folder and the archive pass touch the
+        # shared mount, which can hang, so they run as background jobs that
+        # never hold up the next rotation. One of each runs at a time.
+        self._sealing_task: asyncio.Task | None = None
+        self._archive_task: asyncio.Task | None = None
+        self._leftover_task: asyncio.Task | None = None
+        # Set by stop(). Cancelling the archive job only stops the await;
+        # the pass itself runs on in its thread, so it checks this between
+        # windows and ends early instead of holding the process exit.
+        self._archive_stop = threading.Event()
+        # How long a leftover must be untouched before it is sealed; an
+        # attribute so tests can shorten it.
+        self._leftover_floor_seconds = LEFTOVER_FLOOR_SECONDS
         # Host resource sampling (RSS/CPU/fds/pressure/NFS) with the
         # previous-tick state its rate fields need.
         self._host_sampler = HostSampler()
@@ -270,6 +310,20 @@ class EventRecorder(EventWriter):
     def storage_dir(self) -> str:
         """The worker's own folder (``storage.dir``); ``''`` in memory-only mode."""
         return self._storage_dir
+
+    @property
+    def worker_name(self) -> str:
+        return self._worker_name
+
+    @property
+    def shared_dir(self) -> str:
+        """The folder every worker of the fleet sees; ``''`` in memory-only mode."""
+        return self._shared_dir if self._storage_dir else ''
+
+    @property
+    def history_dir(self) -> str:
+        """Where this recorder's sealed files go; ``''`` in memory-only mode."""
+        return history_dir(self._shared_dir, self._cluster_name) if self._storage_dir else ''
 
     @property
     def config(self) -> UIConfig:
@@ -374,7 +428,9 @@ class EventRecorder(EventWriter):
         if self._storage_dir:
             await self._warn_if_storage_dir_world_writable()
             await self._warn_if_storage_dir_network_fs()
-            self._db_path = make_db_path(self._storage_dir, self._worker_name)
+            # Normalized so it compares equal to the leftover scan's paths
+            # however storage.dir is spelled ('./data' or 'data/').
+            self._db_path = os.path.normpath(make_db_path(self._storage_dir, self._worker_name))
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
             # whichever connections already opened — otherwise the caller
@@ -434,15 +490,6 @@ class EventRecorder(EventWriter):
                     self._db = None
                 self._running = False
                 raise
-            self._update_live_link()
-            # Databases-page stats cache + its warmer. Lazy import keeps
-            # drakkar.merge (sync sqlite3 scanning) out of the recorder's
-            # import chain until a DB-backed recorder actually starts.
-            from drakkar.dbstats import DbStatsCache
-
-            self._dbstats = DbStatsCache(self._storage_dir)
-            self._dbstats_warm_task = asyncio.create_task(self._dbstats_warm_loop())
-            self._watch_background_task(self._dbstats_warm_task, 'dbstats_warm')
             if self._store.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
                 self._watch_background_task(self._flush_task, 'flush')
@@ -457,8 +504,8 @@ class EventRecorder(EventWriter):
                 await logger.ainfo(
                     'recorder_archiving_disabled',
                     category='recorder',
-                    storage_dir=self._storage_dir,
-                    hint='raw recorder database files are never deleted automatically; '
+                    folder=self.history_dir,
+                    hint='sealed recorder database files are never deleted automatically; '
                     'prune the folder yourself or set history.archive.enabled: true',
                 )
         # Outside the storage_dir branch on purpose: resource samples still feed
@@ -587,21 +634,6 @@ class EventRecorder(EventWriter):
         if not skip_ws:
             self._fanout.broadcast(event)
 
-    def _update_live_link(self) -> None:
-        """Create or update the {worker}-live.db symlink to the current DB."""
-        if not self._storage_dir or not self._db_path:
-            return
-        atomic_symlink(
-            live_link_path(self._storage_dir, self._worker_name),
-            os.path.basename(self._db_path),
-        )
-
-    def _remove_live_link(self) -> None:
-        """Remove the live symlink on graceful shutdown."""
-        if not self._storage_dir:
-            return
-        remove_symlink(live_link_path(self._storage_dir, self._worker_name))
-
     # --- Worker config (autodiscovery) ---
 
     async def write_config(self, drakkar_config: DrakkarConfig) -> None:
@@ -683,59 +715,6 @@ class EventRecorder(EventWriter):
                     exc_info=exc,
                 )
 
-    async def _dbstats_warm_loop(self) -> None:
-        """Keep the databases-page stats cache warm and purged.
-
-        Each sweep (thread-offloaded — it is sync sqlite3 work) computes
-        stats for files the cache does not know yet and drops rows for
-        files an operator deleted from ``storage_dir``. When everything is
-        cached the sweep costs one directory listing and one SELECT, so
-        a short interval is fine. The first sweep runs immediately, so a
-        worker booting over a pre-existing directory starts warming
-        before anyone opens the page.
-
-        The sweep re-reads only THIS worker's live database. Live files
-        change constantly, so a sweep that refreshed every live file made
-        each worker read every co-located worker's growing DB once a
-        minute — N-squared reads across the fleet, over a directory that
-        is typically network-mounted, for a page nobody may have open.
-        Those rows carry stdout/stderr, so each scan touches many pages.
-        The stats cache is shared, so every worker warming its own file is
-        enough to keep the whole page warm; a page request still refreshes
-        every row on demand.
-        """
-        from drakkar.dbstats import DBSTATS_WARM_INTERVAL_SECONDS, warm_directory
-
-        while self._running:
-            try:
-                _scanned, purged = await asyncio.to_thread(
-                    functools.partial(
-                        warm_directory,
-                        self._storage_dir,
-                        self._dbstats,
-                        own_live_db=self._db_path,
-                    )
-                )
-                if purged:
-                    await logger.ainfo(
-                        'recorder_dbstats_purged',
-                        category='recorder',
-                        purged=purged,
-                        detail='dropped cached stats for database files removed from the storage folder',
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # Same per-iteration guard as the other loops: one bad sweep
-                # must not end warming for the rest of the run.
-                await logger.awarning(
-                    'recorder_dbstats_warm_failed',
-                    category='recorder',
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-            await asyncio.sleep(DBSTATS_WARM_INTERVAL_SECONDS)
-
     async def _host_sample_loop(self) -> None:
         """Per-tick host sampling: one ``resource_sample`` event per
         state-sync interval.
@@ -813,45 +792,41 @@ class EventRecorder(EventWriter):
         )
         await self._db.commit()
 
-    async def stop(self) -> None:
+    async def stop(self, timeout: float | None = None) -> None:
+        """Flush, then seal the live file and move it into the history folder.
+
+        ``timeout`` is the shutdown time left (``None``: no limit). The seal
+        itself (journal mode, meta, close) is fast and always runs; the move
+        into the history folder runs only while time remains, so a slow
+        network mount cannot hold the stop past the deadline. A file that
+        is not moved stays in ``storage.dir`` and the next start with the
+        same worker name seals it.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
         self._running = False
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-        if self._rotation_task:
-            self._rotation_task.cancel()
-            try:
-                await self._rotation_task
-            except asyncio.CancelledError:
-                pass
-        if self._state_task:
-            self._state_task.cancel()
-            try:
-                await self._state_task
-            except asyncio.CancelledError:
-                pass
-        if self._host_sample_task:
-            self._host_sample_task.cancel()
-            try:
-                await self._host_sample_task
-            except asyncio.CancelledError:
-                pass
-        if self._dbstats_warm_task:
-            self._dbstats_warm_task.cancel()
-            try:
-                await self._dbstats_warm_task
-            except asyncio.CancelledError:
-                pass
+        self._archive_stop.set()
+        for task in (
+            self._flush_task,
+            self._rotation_task,
+            self._state_task,
+            self._host_sample_task,
+            self._leftover_task,
+            self._sealing_task,
+            self._archive_task,
+        ):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         # Drop any pending deferred start events and disarm the shared sweep.
         self._fanout.close()
 
         # Final flush + state sync are best-effort: a failure in either must
-        # not skip the DB closes, live-link removal, and _LIVE_RECORDERS
-        # discard below, or shutdown would leak connections and interpreter
-        # exit would try to flush into a recorder that never tore down.
+        # not skip the seal and the _LIVE_RECORDERS discard below, or
+        # shutdown would leak connections and interpreter exit would try to
+        # flush into a recorder that never tore down.
         try:
             await self._flush()
         except Exception as exc:
@@ -868,9 +843,9 @@ class EventRecorder(EventWriter):
                 category='recorder',
                 error=str(exc),
             )
-        # Close the reader first. A close failure here should not block
-        # the writer close below — the writer close is what actually
-        # finalizes pending commits and tears down the WAL.
+        # Close the reader first: the seal needs the writer to be the last
+        # open connection. A close failure here only makes the seal fail,
+        # which leaves the file for the next start.
         if self._reader_db:
             try:
                 await self._reader_db.close()
@@ -882,25 +857,24 @@ class EventRecorder(EventWriter):
                 )
             self._reader_db = None
         if self._db:
-            # Match the ``_rotate`` pattern: a close failure on the writer
-            # must not leak an exception out of shutdown. Log + continue so
-            # the live-link cleanup and the final ``recorder_stopped`` log
-            # still happen.
-            try:
-                await self._db.close()
-            except Exception as exc:
-                await logger.awarning(
-                    'recorder_writer_close_failed',
-                    category='recorder',
-                    error=str(exc),
-                )
+            writer, path = self._db, self._db_path
             self._db = None
-        self._remove_live_link()
+            meta = await self._seal(path, seal_connection(writer, db_path=path, **self._seal_identity()))
+            if meta is not None:
+                await self._publish_until(path, meta, deadline)
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.
         _LIVE_RECORDERS.discard(self)
         await logger.ainfo('recorder_stopped', category='recorder')
+
+    async def _publish_until(self, path: str, meta: dict[str, Any], deadline: float | None) -> None:
+        """Publish a sealed file at stop, waiting no later than ``deadline``."""
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            await self._seal_failed(path, TimeoutError('no shutdown time left to move the file'), 'publish')
+            return
+        await self._publish(path, meta, timeout=remaining)
 
     def _last_breath_flush(self) -> None:
         """Synchronous, best-effort buffer flush at interpreter exit.
@@ -1296,12 +1270,9 @@ class EventRecorder(EventWriter):
         while self._running:
             await asyncio.sleep(self._store.rotation_interval_hours * 3600)
             # Same guard as ``_flush_loop``: one failed rotation must cost a
-            # single interval, not every rotation from here on. The archive
-            # pass shares the guard — it runs on the freshly rotated-out
-            # files, so a failure there is equally per-tick recoverable.
+            # single interval, not every rotation from here on.
             try:
                 await self._rotate()
-                await self._archive_pass()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1312,26 +1283,32 @@ class EventRecorder(EventWriter):
                     error_type=type(exc).__name__,
                     exc_info=exc,
                 )
+            # Whatever the rotation did, files sealed earlier still wait for
+            # their move, and due windows still wait for the archive pass.
+            self._start_sealing()
+            self._start_archive_pass()
 
     async def _archive_pass(self) -> None:
-        """Fold due windows of rotated-out DB files into compressed archives.
+        """Archive due windows of this cluster's history folder, in a thread.
 
-        The whole pass — directory scan, per-file SQLite reads, merge and
-        gzip — is blocking work measured in seconds, so it goes to a
-        thread. The event loop only ever sees this await.
+        The whole pass — listing, SQLite merges, gzip — is blocking work
+        measured in seconds, so it goes to a thread; the event loop only
+        sees this await, and the rotation loop starts it as a background
+        job so it never waits for it either.
         """
         if not self._archive.enabled or not self._storage_dir:
             return
         await asyncio.to_thread(
-            run_archive_pass,
-            db_dir=self._storage_dir,
-            worker_name=self._worker_name,
-            cluster=self._cluster_name,
-            archive=self._archive,
-            rotation_interval_hours=self._store.rotation_interval_hours,
-            # The live DB is the file we are writing right now; the pass
-            # must never merge it away underneath us.
-            exclude_path=self._db_path,
+            functools.partial(
+                run_archive_pass,
+                self._shared_dir,
+                cluster=self._cluster_name,
+                worker=self._worker_name,
+                instance=self._instance,
+                archive=self._archive,
+                merged_retention_days=self._merged_retention_days,
+                stop=self._archive_stop,
+            )
         )
 
     async def _rotate(self) -> None:
@@ -1356,7 +1333,7 @@ class EventRecorder(EventWriter):
         # open new DB and initialize schema BEFORE swapping. If schema
         # creation fails, close the orphaned connection and leave
         # self._db untouched so the caller can retry on the next tick.
-        new_path = make_db_path(self._storage_dir, self._worker_name)
+        new_path = os.path.normpath(make_db_path(self._storage_dir, self._worker_name))
         # Same ordering contract as ``start``: owner-only before the driver
         # opens the file, so the rotated DB's sidecars are created
         # owner-only too. Skipping this step here would leave every
@@ -1389,58 +1366,233 @@ class EventRecorder(EventWriter):
                 await new_db.close()
             raise
 
-        # Atomic swap: once these lines execute, any concurrent flush or
-        # UI read sees the new, schema-ready connections. We swap writer
-        # first so a concurrent SELECT using the stale reader still runs
-        # against a (briefly) valid handle; the stale reader is closed
-        # below and its next use would correctly raise/fail through the
-        # None check in the debug_server helpers.
-        old_db = self._db
-        old_reader = self._reader_db
-        old_path = self._db_path
-        self._db = new_db
-        self._reader_db = new_reader
-        self._db_path = new_path
-        if self._drakkar_config:
-            await self.write_config(self._drakkar_config)
-        self._update_live_link()
+        # Atomic swap: once these lines execute, any concurrent flush or UI
+        # read sees the new, schema-ready connections. The flush lock makes
+        # a flush that already took the old writer finish before the swap,
+        # so nothing writes the old file after it is sealed.
+        async with self._flush_lock:
+            old_db = self._db
+            old_reader = self._reader_db
+            old_path = self._db_path
+            self._db = new_db
+            self._reader_db = new_reader
+            self._db_path = new_path
+            # Taken in the same step as the swap: the leftover scan must
+            # never pick the old file up while it is sealed here.
+            self._in_hand.add(old_path)
+        try:
+            if self._drakkar_config:
+                await self.write_config(self._drakkar_config)
 
-        if old_reader:
-            # Close the old reader before the old writer so any pending
-            # SELECT returns/errors promptly rather than blocking the
-            # writer close. Failures here are non-fatal — the new reader
-            # is already live.
-            try:
-                await old_reader.close()
-            except Exception as exc:
-                await logger.awarning(
-                    'recorder_old_reader_close_failed',
-                    category='recorder',
-                    error=str(exc),
-                )
+            if old_reader:
+                # Close the old reader before sealing: the seal needs the old
+                # writer to be the last open connection. Failures here are
+                # non-fatal — the new reader is already live, and a seal that
+                # fails leaves the file in the backlog.
+                try:
+                    await old_reader.close()
+                except Exception as exc:
+                    await logger.awarning(
+                        'recorder_old_reader_close_failed',
+                        category='recorder',
+                        error=str(exc),
+                    )
 
-        if old_db:
-            # Don't let a close failure on the outgoing connection
-            # propagate — the new writer is already live and functional.
-            try:
-                await old_db.close()
-            except Exception as exc:
-                await logger.awarning(
-                    'recorder_old_db_close_failed',
-                    category='recorder',
-                    error=str(exc),
-                )
-
-        # The just-closed file is immutable from here on — precompute its
-        # databases-page stats now (thread, fire-and-forget) so the page
-        # never pays a full scan for it. Failures only cost a later
-        # warmer-sweep retry, hence no await and no error handling beyond
-        # the task set keeping the reference alive.
-        if self._dbstats is not None and old_path:
-            from drakkar.dbstats import scan_and_store
-
-            task = asyncio.create_task(asyncio.to_thread(scan_and_store, old_path, self._dbstats))
-            self._dbstats_rotate_tasks.add(task)
-            task.add_done_callback(self._dbstats_rotate_tasks.discard)
+            if old_db:
+                # A seal failure never propagates: the new writer is already
+                # live, and the old file waits in the backlog. The move into
+                # the history folder is the background sealing job's work.
+                meta = await self._seal(old_path, seal_connection(old_db, db_path=old_path, **self._seal_identity()))
+                if meta is not None:
+                    self._sealed[old_path] = meta
+                    self._update_unsealed_gauge()
+        finally:
+            self._in_hand.discard(old_path)
 
         await logger.ainfo('recorder_rotated', category='recorder', new_db=self._db_path)
+
+    # --- Sealing ---
+
+    def _seal_identity(self) -> dict[str, Any]:
+        """Who seals the file and when: the meta file's identity fields."""
+        return {
+            'worker': self._worker_name,
+            'instance': self._instance,
+            'cluster': self._cluster_name,
+            'sealed_at': datetime.now(UTC),
+        }
+
+    async def _seal(self, path: str, sealing: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, Any] | None:
+        """Await one seal; on failure the file joins the backlog and ``None`` is returned."""
+        try:
+            return await sealing
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._seal_failed(path, exc, 'seal')
+            return None
+
+    async def _publish(
+        self,
+        path: str,
+        meta: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        event: str = 'recorder_sealed',
+    ) -> bool:
+        """Move a sealed file and its meta into the history folder; ``event`` names the success log."""
+        try:
+            destination, crossed = await asyncio.wait_for(
+                publish_in_background(path, meta, self.history_dir), timeout=timeout
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._seal_failed(path, exc, 'publish')
+            return False
+        self._forget(path)
+        await logger.ainfo(
+            event,
+            category='recorder',
+            db_path=path,
+            destination=destination,
+            crossed_filesystems=crossed,
+            size_bytes=meta['size_bytes'],
+            events=meta['tables'].get('events', 0),
+        )
+        return True
+
+    async def _seal_failed(self, path: str, exc: BaseException, stage: str) -> None:
+        """Count the failure and keep the file in the backlog for the next job."""
+        recorder_seal_failures.inc()
+        self._sealed.pop(path, None)
+        if path not in self._backlog:
+            self._backlog.append(path)
+        self._update_unsealed_gauge()
+        await logger.awarning(
+            'recorder_seal_failed',
+            category='recorder',
+            db_path=path,
+            stage=stage,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            backlog=len(self._backlog),
+        )
+
+    def _forget(self, path: str) -> None:
+        """The file reached the history folder (or vanished): drop it from the waiting lists."""
+        self._sealed.pop(path, None)
+        if path in self._backlog:
+            self._backlog.remove(path)
+        self._update_unsealed_gauge()
+
+    def _update_unsealed_gauge(self) -> None:
+        recorder_unsealed_files.set(len(self._backlog) + len(self._sealed))
+
+    def _take(self, path: str) -> bool:
+        """Claim ``path`` for one seal or move; False when something else works on it."""
+        if path in self._in_hand:
+            return False
+        self._in_hand.add(path)
+        return True
+
+    async def _seal_pending(self) -> None:
+        """Move sealed files into the history folder, retry the backlog, seal leftovers.
+
+        One file at a time. A backlog file that disappeared (an operator
+        deleted it) is dropped. A leftover is a file of this worker name,
+        other than the live one, that nothing touched for the leftover
+        floor: a crashed earlier process, or a stop without time left to
+        move the file.
+        """
+        if not self._storage_dir:
+            return
+        # Snapshots taken first: a file that fails in this job waits for
+        # the next one instead of being retried right away.
+        sealed = list(self._sealed.items())
+        backlog = list(self._backlog)
+        for path, meta in sealed:
+            if not self._take(path):
+                continue
+            try:
+                await self._publish(path, meta)
+            finally:
+                self._in_hand.discard(path)
+        for path in backlog:
+            if not self._take(path):
+                continue
+            try:
+                await self._seal_again(path)
+            finally:
+                self._in_hand.discard(path)
+        leftovers = await asyncio.to_thread(
+            find_leftovers,
+            self._storage_dir,
+            self._worker_name,
+            exclude=self._db_path,
+            now=time.time(),
+            floor_seconds=self._leftover_floor_seconds,
+        )
+        for path in leftovers:
+            if path in self._backlog or path in self._sealed or not self._take(path):
+                continue
+            try:
+                meta = await self._seal(path, seal_closed_file(path, **self._seal_identity()))
+                if meta is not None:
+                    await self._publish(path, meta, event='recorder_leftover_sealed')
+            finally:
+                self._in_hand.discard(path)
+
+    async def _seal_again(self, path: str) -> None:
+        """Seal and move one backlog file; drop it when it is gone."""
+        if not await asyncio.to_thread(os.path.exists, path):
+            self._forget(path)
+            return
+        meta = await self._seal(path, seal_closed_file(path, **self._seal_identity()))
+        if meta is not None:
+            await self._publish(path, meta)
+
+    def _start_sealing(self) -> None:
+        """Start the background sealing job unless one still runs (it takes new files next time)."""
+        if not self._storage_dir or (self._sealing_task is not None and not self._sealing_task.done()):
+            return
+        self._sealing_task = asyncio.create_task(self._run_job('sealing', self._seal_pending()))
+
+    def _start_archive_pass(self) -> None:
+        """Start the background archive pass unless one still runs."""
+        if not self._storage_dir or (self._archive_task is not None and not self._archive_task.done()):
+            return
+        self._archive_task = asyncio.create_task(self._run_job('archive', self._archive_pass()))
+
+    async def _run_job(self, job: str, work: Coroutine[Any, Any, None]) -> None:
+        """Run one background job; a failure is logged and the next tick runs the job again."""
+        try:
+            await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await logger.aerror(
+                'recorder_background_job_failed',
+                category='recorder',
+                job=job,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=exc,
+            )
+
+    def start_leftover_sealing(self) -> None:
+        """Seal files an earlier process left behind, in the background.
+
+        Called once the worker runs, so startup never waits on it. It looks
+        twice: right away, and again once the leftover floor has passed, so
+        a file from a quick restart is sealed within minutes rather than
+        at the next rotation.
+        """
+        if not self._storage_dir or self._leftover_task is not None:
+            return
+        self._leftover_task = asyncio.create_task(self._run_job('leftover_sealing', self._leftover_sealing()))
+
+    async def _leftover_sealing(self) -> None:
+        await self._seal_pending()
+        await asyncio.sleep(self._leftover_floor_seconds)
+        await self._seal_pending()

@@ -1,11 +1,12 @@
 # Local Databases & Worker Autodiscovery
 
 This page is the **specification** of every SQLite file a Drakkar worker
-creates, how it is written, and how workers find each other through a
-shared directory. It is written as a specification, byte-for-byte where it
-matters, because these files outlive the process that wrote them: several
-workers share one `storage.dir` and read each other's files, and an archive is
-opened months later by tooling that was not running when it was created.
+creates, how it is written, how it moves into the shared history, and how
+workers find each other. It is written as a specification, byte-for-byte
+where it matters, because these files outlive the process that wrote them:
+the workers of a fleet read each other's sealed files in one shared folder,
+and an archive is opened months later by tooling that was not running when
+it was created.
 
 Any change to schemas, encodings, pragmas, naming, or discovery rules is a
 breaking change to that spec, not a refactor: existing files on a shared
@@ -14,37 +15,68 @@ code.
 
 ## The files
 
-Every worker owns (writes) at most two databases, both living in its
-`storage.dir`:
+A worker uses two folders:
 
-| File | Purpose | Directory config |
-|---|---|---|
-| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. Rotated. | `storage.dir` |
-| `<worker>-live.db` → *(symlink)* | Stable pointer to the current recorder DB; peers read through it so rotation never breaks them. | same |
-| `<cluster>-<from>__<to>.db.gz` | Archive: gzip-compressed merge of one UTC window's rotated-out recorder files for one cluster. Deleting a raw file's source is the only thing an archive pass does to `storage.dir` besides creating this. | `storage.dir` |
-| `<worker>-cache.db.actual` | LWW key/value cache. Never rotated. | `storage.dir` |
-| `<worker>-cache.db` → `.actual` *(symlink)* | Discovery pointer for the cache, deliberately shaped like the recorder's so one symlink-scan routine serves both. | same |
-| `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). | `storage.dir` |
-| `.dbstats.db` | Shared stats cache behind the Databases page — derived data only, disposable, dot-prefixed so it never lists as a database itself. See [The databases-page stats cache](#the-databases-page-stats-cache). | `storage.dir` |
+- **`storage.dir`** holds the worker's own files. The live recorder file
+  is opened only by its owner.
+- **`shared.dir`** is the folder every worker of a fleet sees. It holds the
+  recorder history of each cluster, the archives, the merge results and the
+  [registry cards](fleet.md). When `shared.dir` is empty, the worker uses
+  `storage.dir` for this too.
 
-See [Archiving](#archiving) below for the full mechanics of the `.db.gz` file.
+### Own files (`storage.dir`)
+
+| File | Purpose |
+|---|---|
+| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. The **live file**: WAL mode, opened only by its owner. Rotated. |
+| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` *(older ones)* | The **backlog**: own files that are closed but not yet moved into the history folder, because a seal or a move failed, or a clean stop had no time left. See [Sealing](#sealing-and-the-history-folder). |
+| `<worker>-cache.db.actual` | LWW key/value cache. Never rotated. |
+| `<worker>-cache.db` → `.actual` *(symlink)* | Discovery pointer for the cache. Peers scan for it; see [Cache peer sync](#cache-peer-sync). |
+| `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). |
+
+### Shared files (`shared.dir`)
+
+| Path | Purpose |
+|---|---|
+| `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | A **sealed** recorder file: rollback journal, no sidecars, never changes again. |
+| `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json` | The [meta file](#the-meta-file) of that sealed file: its statistics, written once by the owner. |
+| `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
+| `history/<cluster>/.archive.lock` | The [archive lock](#the-archive-lock) of the folder. It exists while one worker of the cluster runs an archive pass. |
+| `merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` | The result of a merge started from the UI. Deleted after `history.merged_retention_days`; see [Merge results expire](#merge-results-expire). |
+| `fleet/workers/<worker>.json` | Registry card of the default `filesystem` provider. See [Fleet registry](fleet.md). |
+
+`<cluster>` is the sanitized cluster name: every character outside
+`[a-zA-Z0-9_-]` becomes `_`, and an empty name becomes `default`. A worker
+in cluster `search hot` writes into `history/search_hot/`. The meta file
+keeps the cluster name as configured.
 
 Rules:
 
-- **A worker only ever writes its own files.** Peers open other workers'
-  files strictly read-only (`file:...?mode=ro`).
+- **The live file has one owner.** Only the worker that writes it opens
+  it: one writer connection and one reader connection, both in that
+  worker. Other workers read only sealed files, and they open them with
+  `immutable=1`, which takes no locks.
+- **Of the history folders, a worker writes only into the one of its own
+  cluster.** It publishes its sealed files there. The worker that holds the
+  archive lock also writes the archives there and deletes the sealed files
+  it archived.
 - Timestamp format in recorder filenames is exactly
   `%Y-%m-%d__%H_%M_%S` (UTC).
-- DB files are created with `0600` permissions, and the worker logs a
-  warning when `storage.dir` is world-writable.
-- `storage.dir` is **disposable**: deleting it loses history/cache contents but
-  never breaks a worker — fresh files are created on next start. This is
-  also the documented upgrade path for schema changes (below).
+- DB files and meta files are created with `0600` permissions. The worker
+  creates `storage.dir` with mode `0700` when it is missing, and logs a
+  warning when `storage.dir` is world-writable. A cluster history folder
+  and `merged/` are created with mode `0700`.
+- `storage.dir` is **disposable**: deleting it loses own history/cache
+  contents but never breaks a worker — fresh files are created on next
+  start. This is also the documented upgrade path for schema changes
+  (below).
 - The merge tool output (`drakkar-merge` / the merge library) is a derived
   offline artifact with its own tables (`workers`, `events`,
-  `worker_states`) and is not part of this runtime spec. It still lands in
-  `storage.dir` and still carries fleet-wide event data, so it is created `0600`
-  like every other database here.
+  `worker_states`) and is not part of this runtime spec. A merge started
+  from the UI lands in `<shared.dir>/merged/` and still carries fleet-wide
+  event data, so it is created `0600` like every other database here.
+  Merge results and archives are left with a rollback journal, so a merged
+  file opens read-only without any `-shm` sidecar.
 
 ## Modes: which files exist when
 
@@ -54,9 +86,9 @@ persistence flag needs a directory to write into:
 | Config | Effect |
 |---|---|
 | `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and `storage.dir` is set. |
-| `storage.dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, the Databases tab, downloads. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
+| `storage.dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, nothing sealed, no history, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, the Databases tab, downloads. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
 | `ui.recorder.store_events: false` | The `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
-| `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
+| `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster inside the database. The meta file of each sealed file still names both. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
 | `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |
 | `cache.enabled: true` with `storage.dir: ''` | Startup warning + effective disable — the cache never runs memory-only. |
@@ -154,11 +186,10 @@ IS NOT NULL`, `idx_events_origin(origin)`, partial
 
 This 20-column list is the **pinned event-row shape** — the same list the
 `/api/v1` contract exposes through `/ws`, `/events`, `/trace`, and
-`/trace-by-label` (`SELECT *` pass-through). It is pinned in code on both
-backends (`EVENT_COLUMNS` / `EventColumns`) with tests asserting the live
-table matches, and normatively in
-`drakkar-ui/docs/api-contract-v1.md`. Column *presence* is contractual;
-values stay event-type-dependent.
+`/trace-by-label` (`SELECT *` pass-through). It is pinned in code
+(`EVENT_COLUMNS`) with tests asserting the live table matches, and
+normatively in `drakkar-ui/docs/api-contract-v1.md`. Column *presence* is
+contractual; values stay event-type-dependent.
 
 ### `worker_config` (recorder, single row)
 
@@ -248,17 +279,23 @@ CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
 
 The connection discipline is:
 
-- **One writer connection per DB** (SQLite allows a single writer anyway).
-- **A dedicated read-only reader connection** per DB for UI queries and
-  cache `get()` fallback, so reads never queue behind flush commits.
-- **`journal_mode=WAL`**, set on the writer at open (persisted in the DB
-  header; readers inherit it). WAL is what lets peers read consistent
-  snapshots while the owner commits, across processes.
+- **One writer connection per live DB** (SQLite allows a single writer
+  anyway).
+- **A dedicated read-only reader connection** per live DB for UI queries
+  and cache `get()` fallback, so reads never queue behind flush commits.
+- **`journal_mode=WAL` on the live file**, set on the writer at open
+  (persisted in the DB header; readers inherit it). WAL lets the reader
+  connection read consistent snapshots while the writer commits.
+- **A rollback journal on every file that leaves `storage.dir`.** Sealing
+  switches a recorder file to `journal_mode=DELETE` before it moves into the
+  history folder (see [Sealing](#sealing-and-the-history-folder)). Archives
+  and merge results are left the same way. A sealed file never changes, so
+  readers open it with `immutable=1`: no locks and no sidecar files.
 - **Explicit `busy_timeout` on every connection**:
 
 | Connection | busy_timeout |
 |---|---|
-| Recorder writer, own reader, peer reads | 5000 ms |
+| Recorder writer, own reader | 5000 ms |
 | Cache writer, own reader | 10000 ms |
 | Cache peer/cluster ephemeral reads | 5000 ms |
 
@@ -266,13 +303,12 @@ The connection discipline is:
   local flush; **peer** reads time out fast so a lock-wedged peer stays
   inside the per-peer failure isolation.
 - **`synchronous=NORMAL` on every WAL writer** — the
-  recorder (including the connection rotation opens), the handler cache and
-  the `.dbstats` cache.
+  recorder (including the connection rotation opens) and the handler cache.
 
   SQLite's default is `FULL`, which fsyncs the WAL on **every commit**.
   These stores commit often — the recorder on its flush interval, on each
   state sync and on any UI poll that forces a flush; the cache on its own
-  flush interval — and a `storage.dir` is routinely a network mount, where one
+  flush interval — and a `storage.dir` can be a network mount, where one
   fsync costs tens of milliseconds and reads on the same connection queue
   behind it. `NORMAL` is the level SQLite's own documentation recommends
   under WAL: the WAL is synced at checkpoints instead.
@@ -281,15 +317,14 @@ The connection discipline is:
   crash** — the process being killed, an OOM, a failed deploy — because the
   WAL is still written and replayed on the next open. It can lose the most
   recently committed transactions only when the **host** dies mid-write: a
-  power cut or a kernel panic. For a flight recorder, a derived stats cache
-  and a last-writer-wins cache, none of which is a system of record, that is
-  the correct trade. If your deployment needs stricter durability from these
-  files, they are the wrong place to keep that data.
+  power cut or a kernel panic. For a flight recorder and a last-writer-wins
+  cache, neither of which is a system of record, that is the correct trade.
+  If your deployment needs stricter durability from these files, they are
+  the wrong place to keep that data.
 
   Note that `synchronous` is per-**connection** and, unlike `journal_mode`,
-  is not stored in the database header. Python sets it on each writer
-  connection; Go sets it as a DSN pragma, because `database/sql` may reopen
-  a pooled connection and it would otherwise revert to the default.
+  is not stored in the database header. The worker sets it on every writer
+  connection it opens.
 - No explicit WAL checkpoints, no `VACUUM`, driver-default `foreign_keys`.
 
 ## Encodings
@@ -337,26 +372,168 @@ covers *detecting* those, and the last periodic flush is what remains.
 
 **Rotation** (every `ui.recorder.rotation_interval_hours`): flush →
 create + initialize the new timestamped DB (WAL, busy_timeout, schema,
-reader) → atomic swap → rewrite `worker_config` → repoint the live
-symlink → close the old DB. Rotation itself deletes nothing — the
-[archive pass](#archiving) is the only thing that ever removes a raw
-recorder file.
+reader) → atomic swap → rewrite `worker_config` → close the old reader →
+[seal](#sealing-and-the-history-folder) the old file. Rotation only seals:
+moving the sealed file into the history folder is a background job.
+Rotation itself deletes nothing — the [archive pass](#archiving) is the only
+thing that ever removes a sealed recorder file.
 
 **Cache**: dirty entries flush every `cache.flush_interval_seconds`
 (atomic dirty-map swap, single transaction, restore-on-failure); expired
 rows are deleted every `cache.cleanup_interval_seconds`. The cache file
 never rotates.
 
+## Sealing and the history folder
+
+A live recorder file is opened only by its owner. When the owner is done
+with the file, it **seals** it and moves it into the history folder of its
+cluster, `<shared.dir>/history/<cluster>/`. A sealed file never changes
+again. Any worker can read it without locks, and the archive pass needs no
+check for files still in use.
+
+### When a file is sealed
+
+- **At rotation.** The old file is sealed right after the swap to the new
+  file.
+- **At a clean stop.** The live file is sealed after the final flush. The
+  seal always runs. The move into the history folder runs only while
+  shutdown time remains: the rest of `executor.drain_timeout_seconds` after
+  draining. When no time remains, the sealed file stays in `storage.dir`,
+  and the next start with the same worker name moves it as a
+  [leftover](#leftovers).
+- **Leftovers** of an earlier process, after the worker starts. See
+  [Leftovers](#leftovers).
+
+Memory-only mode (`storage.dir: ""`) creates no files and seals nothing.
+
+### How a file is sealed
+
+1. On the last open connection to the file, the recorder switches the file
+   to a rollback journal (`PRAGMA journal_mode=DELETE`). The switch fails
+   when another connection still holds the file. Then the file stays in the
+   backlog.
+2. On the same connection, it computes the content of the
+   [meta file](#the-meta-file), then closes the connection. The result is a
+   file with no `-wal` or `-shm` sidecar, which never changes again.
+3. It **publishes** the file: it writes `<name>.db.meta.json` into
+   `<shared.dir>/history/<cluster>/`, then renames the database next to it.
+   The meta file is written first. A crash between the two leaves a meta
+   file without its database; readers ignore it, and the database stays in
+   `storage.dir` to be sealed again.
+
+When `storage.dir` and `shared.dir` are on different filesystems, the
+rename fails with `EXDEV`. This is the usual fleet layout: a local disk per
+pod plus a network mount. The worker then:
+
+1. copies the file to a dot-prefixed `.<name>.<16 hex>.incoming` file in the
+   history folder;
+2. fsyncs the copy;
+3. renames the copy to its final name;
+4. fsyncs the folder;
+5. deletes the source in `storage.dir`.
+
+Dot-prefixed files never appear in listings and are never archived. The
+archive pass removes an `.incoming` file that a stopped copy left behind
+(see [the sweep](#the-sweep)).
+
+### Background moves and the backlog
+
+Rotation only seals. Moving the sealed file into the history folder runs in
+a background job, one at a time, so a slow or hung shared mount never holds
+up rotation or the pipeline. A file whose seal or move fails stays in
+`storage.dir`, closed, in an in-memory **backlog**. The background job
+retries it on every rotation tick. A backlog file that is gone (deleted by
+hand) leaves the backlog.
+
+| Metric | Meaning |
+|---|---|
+| `drakkar_recorder_unsealed_files` | Own recorder files closed but not yet sealed into the history folder. |
+| `drakkar_recorder_seal_failures_total` | Recorder files whose sealing failed; they stay in the backlog and are retried. |
+
+Suggested alert: `drakkar_recorder_unsealed_files > 0` for two rotation
+intervals.
+
+### Leftovers
+
+A **leftover** is a recorder file of this worker name that an earlier
+process left in `storage.dir`: after a crash, or after a clean stop with no
+time left to move it. A file is a leftover when all of these hold:
+
+- its name is exactly `<worker>-YYYY-MM-DD__HH_MM_SS.db` for this worker
+  name, so worker `a` never touches the files of worker `a-b`;
+- it is not the live file;
+- nothing touched the file or its `-wal` for 300 seconds. A second process
+  with the same worker name may still write a fresh file, and network
+  mounts round modification times.
+
+The worker looks for leftovers in the background after it starts: once at
+start, once more after 300 seconds, and then on every rotation tick. It
+opens a leftover normally, so SQLite replays the WAL of a crashed process.
+Then it seals and moves the file like any other.
+
+### Log events
+
+| Event | When |
+|---|---|
+| `recorder_sealed` | A sealed file reached the history folder. Fields: `db_path`, `destination`, `crossed_filesystems`, `size_bytes`, `events`. |
+| `recorder_leftover_sealed` | The same, for a leftover. |
+| `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. |
+| `recorder_background_job_failed` | A background job (sealing, leftover sealing, archive pass) failed with an unexpected error. Field `job` names it. The next rotation tick runs it again. |
+
+## The meta file
+
+Every sealed file has a meta file next to it: `<name>.db.meta.json`. The
+owner writes it once, at seal time, from the connection that sealed the
+file. Readers — the Databases page and the history listings — never open a
+sealed file to learn its statistics. They read the meta file.
+
+Schema 1:
+
+| Key | Type | Value |
+|---|---|---|
+| `schema` | int | `1`. |
+| `worker` | string | Name of the worker that wrote the file. |
+| `instance` | string | 16 hex characters, new for every process. It tells two runs of one worker name apart. |
+| `cluster` | string | Cluster name as configured (not sanitized). |
+| `first_event_ts` | string or `null` | Time of the earliest event (`MIN(ts)` of `events`). `null` when the file has no events. |
+| `last_event_ts` | string or `null` | Time of the latest event (`MAX(ts)` of `events`). `null` when the file has no events. |
+| `sealed_at` | string | When the file was sealed. |
+| `size_bytes` | int | Size of the file after the seal. |
+| `tables` | object | Row count per table. SQLite's internal tables (`sqlite_*`) are left out. |
+| `event_types` | object | Event count per event type. |
+
+Encoding: sorted keys, compact separators, raw UTF-8, no trailing newline,
+file mode `0600`. Times use the canonical datetime format from
+[Encodings](#encodings). The bytes are pinned by
+`tests/fixtures/history_meta.json`, so one meta object always serializes to
+the same bytes, for any implementation. An example:
+
+```json
+{"cluster":"search","event_types":{"task_completed":120211,"task_started":120400},"first_event_ts":"2026-10-13T08:00:00.000000Z","instance":"9c41e0b27fd34a1e","last_event_ts":"2026-10-13T08:59:59.871000Z","schema":1,"sealed_at":"2026-10-13T09:00:02.410000Z","size_bytes":48211968,"tables":{"events":412093,"worker_config":1,"worker_state":360},"worker":"search-worker-3"}
+```
+
 ## Archiving
 
 Age-based and count-based retention (the old `retention_hours` /
 `retention_max_events` keys) are gone. In their place, a periodic
-**archive pass** folds each finished UTC time window's rotated-out raw
-files into one compressed, merged database per cluster, and deletes only
-the raw files it successfully merged. The window math, file names and lock
-protocol (`drakkar/recorder/archive.py`) are part of the on-disk spec, so a
-fleet sharing one `storage.dir` archives correctly no matter which
-backend does the work for a given cluster.
+**archive pass** folds each finished UTC time window's sealed files into
+one compressed, merged database per cluster, and deletes only the sealed
+files it successfully merged. A worker's pass works only inside the history
+folder of its own cluster, `<shared.dir>/history/<cluster>/`. The window
+math, file names and lock protocol (`drakkar/recorder/archive.py`,
+`drakkar/recorder/archive_lock.py`) are part of the on-disk spec, so a
+fleet sharing one `shared.dir` archives correctly no matter which worker
+does the work for a given cluster.
+
+### When the pass runs
+
+Every worker runs the pass after each rotation tick, as a background job
+(one at a time), when `history.archive.enabled` is true. A worker that
+stops ends its pass after the window in progress and skips expiry and
+pruning; the windows left stay due for the next pass of any worker. The
+[archive lock](#the-archive-lock) lets one worker of the cluster work at a
+time. The others skip the tick and lose nothing: any window still due is
+picked up on a later tick.
 
 ### Defaults walkthrough
 
@@ -364,107 +541,157 @@ With `ui.recorder.rotation_interval_hours: 1` and `history.archive`
 `enabled: true`, `window_hours: 24`, `due_after_hours: 48` and
 `retention_days: 30` (all defaults):
 
-- Every hour, rotation opens a new raw `<worker>-<timestamp>.db` file.
-- Windows are UTC calendar days, `[00:00, 24:00)`. A window is **due**
-  only once (a) the due delay (`due_after_hours`, 48h) has passed since it
-  ended, and (b) every file assigned to it has gone untouched for at least
-  one rotation interval — belt-and-braces against a writer that is still
-  holding an old file open. With the defaults this means a window
-  becomes due exactly 48h after it closes and is archived on the next
-  rotation tick after that (up to 1h later, at the default hourly
-  cadence) — that delay is the safety margin, not a bug.
-- Because of that delay, a single raw file's lifespan on disk — counted
-  from when it was *created*, not from when its window closed — can
+- Every hour, rotation opens a new `<worker>-<timestamp>.db` file and seals
+  the previous one into the history folder.
+- Windows are UTC calendar days, `[00:00, 24:00)`. A window is **due** once
+  the due delay (`due_after_hours`, 48h) has passed since it ended. Every
+  file in the history folder is sealed, so there is no check for files
+  still in use. With the defaults a window becomes due exactly 48h after it
+  closes and is archived on the next rotation tick after that (up to 1h
+  later, at the default hourly cadence) — that delay is the safety margin,
+  not a bug. It also gives a late file of the window, such as a backlog file
+  or a leftover, time to reach the history folder.
+- Because of that delay, a single recorder file's lifespan on disk —
+  counted from when it was *created*, not from when its window closed — can
   reach up to ~72h: up to 24h as part of the window it belongs to (a
   file created at the window's own start closes the window out 24h
   later), plus the ~48h due delay after the window closes before
   archiving actually runs.
-- Once due, whichever worker wins that tick's lock election merges the
-  window's raw files into one `<cluster>-<from>__<to>.db.gz` and deletes
-  the raw files it merged.
+- Once due, the worker that holds the archive lock merges the window's
+  sealed files into one `<cluster>-<from>__<to>.db.gz` in the same folder,
+  then deletes the sealed files and the meta files it merged.
 - `retention_days: 30` deletes a `.db.gz` file once its window
   ended more than 30 days ago, so the archive footprint settles at about
   a month of history. `0` disables expiry entirely — nothing then deletes
   a `.db.gz` file, and the worker logs a `recorder_archives_unbounded`
   warning at startup saying so.
 
-Steady state: up to three windows' worth of raw `.db` files per worker
-at any time — the window currently being written plus the two most
-recently closed ones, until the oldest of those finishes archiving — and one
-`<cluster>-<from>__<to>.db.gz` per cluster per window reaching back as
-far as retention allows — forever, by default.
+Steady state: up to three windows' worth of sealed `.db` files per worker in
+the history folder at any time — the window currently being written plus
+the two most recently closed ones, until the oldest of those finishes
+archiving — and one `<cluster>-<from>__<to>.db.gz` per cluster per window
+reaching back as far as retention allows.
 
 ### Windows are keyed by file start time, not event time
 
 A window is `[k·W, (k+1)·W)` in UTC epoch seconds, width
-`history.archive.window_hours`. A raw file belongs to the window holding its own
-**start** timestamp (parsed from the filename) and is never split across
-two windows. Because a file keeps recording events until it rotates, an
-archive can therefore carry a handful of events timestamped slightly past
-its own window end — archives partition by when a file was *opened*, not
-by when each event inside it happened.
+`history.archive.window_hours`. A sealed file belongs to the window holding
+its own **start** timestamp (parsed from the filename) and is never split
+across two windows. Because a file keeps recording events until it rotates,
+an archive can therefore carry a handful of events timestamped slightly
+past its own window end — archives partition by when a file was *opened*,
+not by when each event inside it happened.
 
-### Live and merged databases are never archive candidates
+### Only sealed files are archive candidates
 
-Each running worker keeps a `<worker>-live.db` symlink pointing at the file
-it is writing right now. An archive pass excludes every one of those
-targets — its own and every peer's — so a worker can never merge away a
-database another worker still holds open. This matters when workers in one
-`storage.dir` do not share a rotation setting: without the rule, a worker on
-`rotation_interval_hours: 1` would judge a worker on `24` by its own
-schedule and delete a file still in use.
+Every `*.db` file in a cluster history folder is sealed: the live file never
+leaves `storage.dir`, and a file reaches the history folder only after its
+seal. So the pass needs no in-use check, no "settled" modification-time
+check, and no opening of files to learn their cluster — the folder is the
+cluster. It reads its sources with `immutable=1`, which takes no locks.
 
-Merged files are not archive candidates either. A UI merge can copy a file
-that a worker is still writing, and the merged file records the names of
-its source files. Archived, those names would mark the source file as
-already archived, and a later pass would delete it with the events written
-after the merge. A `merged-<ts>-<token>.db` stays in `storage.dir` until you
-remove it.
+Merge results from the UI live in `<shared.dir>/merged/`, outside every
+history folder, so they are never archive candidates. Dot-prefixed work
+files are never candidates either.
 
-Settledness is judged from both the database file and its `-wal` sidecar.
-Under WAL the main file's modification time only moves on checkpoint, so a
-continuously written database can look untouched for hours; the sidecar
-moves on every write.
+### The archive lock
 
-### Lock election in a shared folder
+Every worker of the cluster tries to create
+`history/<cluster>/.archive.lock` with an exclusive create, mode `0600`.
+One worker wins and runs the pass; the others skip the tick. The lock body
+is compact JSON with sorted keys, pinned by
+`tests/fixtures/history_meta.json`:
 
-Workers sharing one `storage.dir` each attempt the archive pass on every
-rotation tick, but only one worker per **cluster** actually runs it: a
-`flock`-based lock file (`.archive-<cluster>.lock`) elects the winner.
-Losers skip the tick and lose nothing — any window still due is picked up
-on the next tick. Ownership is decided by holding the OS lock, not by the
-lock file's existence, so a crashed worker never leaves a stale election
-behind; the kernel drops the lock the moment the holder's process dies.
-Election relies on `flock` semantics being honored by the filesystem — on
-a network filesystem (NFS/EFS) shared across hosts, verify the mount
-supports `flock` before pointing multiple hosts' workers at one folder.
+```json
+{"acquired_at":"2026-10-14T02:00:00.125000Z","instance":"9c41e0b27fd34a1e","token":"5f0c1d2e3a4b6978","worker":"search-worker-3"}
+```
+
+- **Refresh.** The holder refreshes the lock's modification time every 60
+  seconds while its pass runs. At the end of the pass it deletes the lock,
+  but only while the lock still holds its own token.
+- **Takeover.** A lock older than `history.archive.lock_stale_seconds`
+  (default 7200) belongs to a dead archiver. The next worker renames it
+  aside to `.archive.lock.stale.<token>` (one rename wins), deletes it, and
+  creates its own lock. Log: `recorder_archive_lock_taken_over`. When two
+  workers take over at once, the slower one can move aside the fresh lock
+  the faster one just created. It then sees that the lock is not stale,
+  puts it back with a hard link (which never overwrites a newer lock) and
+  stands down. If a third worker created a lock in that moment, the
+  put-back fails (log: `recorder_archive_lock_put_back_failed`) and the
+  holder of the moved lock is fenced at its next check.
+- **The file server's clock.** Ages are measured on the file server's
+  clock: the worker touches a marker file `.clock.<instance>` in the same
+  folder and uses its modification time as "now". No host's wall clock is
+  compared with another host's.
+- **Fencing.** Right before it publishes an archive, and before it deletes
+  any source, the holder reads the lock again. When the token is no longer
+  its own — another worker took the lock over — the pass publishes nothing
+  and deletes nothing. Log: `recorder_archive_fenced`.
+
+The lock uses only an exclusive create, renames and modification times. It
+does not use `flock`.
+
+### The sweep
+
+With the lock held, the pass first deletes work files older than
+`lock_stale_seconds`, together with their `-wal`, `-shm` and `-journal`
+sidecars:
+
+| Pattern | What it is |
+|---|---|
+| `.*.merge.db`, `.*.tmp`, `.*.previous.db` | Work files of an archive pass that stopped. |
+| `.*.incoming` | A cross-filesystem copy that stopped. |
+| `.clock.*` | Age markers of the file server's clock. |
+| `.archive.lock.stale.*` | Locks set aside by a takeover. |
+| `<name>.db.meta.json` with no `<name>.db` | A meta file whose database is gone. A fresh one is kept: it is a move in progress, because the meta file is written before the database is renamed in. |
+
+Each deletion logs `recorder_archive_temp_swept`.
 
 ### Merge, compress, publish, then delete
 
 Each due window is merged with the same engine `POST /api/v1/debug/merge`
 uses, gzip-compressed, and published under its final name with an atomic
-rename. Only after the archive is durably on disk (its directory entry
-fsynced) are the raw files it covers deleted — any failure before the
-rename leaves every raw source untouched for the next tick to retry.
+rename. All of this happens on dot-prefixed work files named with the lock
+token. Only after the archive is durably on disk (its directory entry
+fsynced) are the sealed files it covers deleted, together with their meta
+files — any failure before the rename leaves every source untouched for the
+next tick to retry.
 
-- A raw file the merge cannot read (corrupt, still mid-write, whatever)
-  is never deleted: it is renamed to `<name>.unreadable` (its `-wal` /
-  `-shm` sidecars move with it) so it stops blocking its window forever,
-  while staying on disk for an operator to inspect.
+- A sealed file the merge cannot read is never deleted: it is renamed to
+  `<name>.unreadable` so it stops blocking its window forever, while
+  staying on disk for an operator to inspect. Its meta file stays, and the
+  sweep removes it later as a meta file whose database is gone.
 - An archive already present at the final name — left by an earlier pass
   that died between publishing and finishing its cleanup — is folded into
   the new one rather than overwritten: sources it already covers are
   recognized and simply deleted, never re-merged (which would duplicate
   their events).
 
+A pass that took the lock and did not finish cleanly — a window failed, the
+pass was fenced, or an unexpected error — counts in
+`drakkar_recorder_archive_failures_total`. At the start of every pass,
+before it tries the lock, each worker refreshes
+`drakkar_recorder_archive_bytes` and `drakkar_recorder_archive_files` from
+the archives in its cluster's history folder.
+
+### Merge results expire
+
+The pass also deletes UI merge results in `<shared.dir>/merged/*.db` that
+are older than `history.merged_retention_days` (default 32; `0` keeps
+them). Ages are measured on the file server's clock. Each deletion logs
+`recorder_merged_pruned`. This runs only inside the archive pass, so with
+`history.archive.enabled: false` nothing deletes merge results
+automatically.
+
 ### Opting out
 
-`history.archive.enabled: false` turns the pass off entirely. With it
-off, **nothing removes raw recorder files automatically** — not the old
-age/count retention (removed), not archiving. A startup log line
-(`recorder_archiving_disabled`) says so explicitly; bounding `storage.dir`
-becomes the operator's job (delete old files by hand, or run an external
-job against them).
+`history.archive.enabled: false` turns the pass off entirely. Sealing still
+runs. With the pass off, **nothing removes sealed recorder files or merge
+results automatically** — not the old age/count retention (removed), not
+archiving. A startup log line (`recorder_archiving_disabled`, with the
+history folder in its `folder` field) says so explicitly; bounding the
+history folder becomes the operator's job (delete old files by hand, or run
+an external job against them).
 
 ### Renamed and removed keys
 
@@ -484,33 +711,36 @@ see the [upgrade guide](upgrading.md).
 
 ```yaml
 storage:
-  dir: /var/lib/drakkar              # this worker's own files
+  dir: /var/lib/drakkar              # this worker's own files (local disk)
+shared:
+  dir: /mnt/fleet                    # history, archives and merge results; '' = storage.dir
 ui:
   recorder:
     rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
 history:
   archive:
-    enabled: true                    # merge recorder files into windowed .db.gz archives
+    enabled: true                    # merge sealed files into windowed .db.gz archives
     window_hours: 24                 # one archive per cluster per UTC day; must be >= rotation_interval_hours
     due_after_hours: 48              # archive a window this long after it ends; must be >= rotation_interval_hours
     retention_days: 30               # delete archives older than this; 0 = keep forever; must cover due_after_hours + window_hours
+    lock_stale_seconds: 7200         # an archive lock or work file older than this belongs to a dead archiver
+  merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
 ```
 
 ### Downloading archives
 
-Archives are listed and downloaded from the same place as raw databases:
-**Debug → Databases tab → Archives**, backed by
-`GET /api/v1/debug/archives` (name, cluster, window bounds, size — all
-parsed from the file name, no file is opened) and
-`GET /api/v1/debug/archives/{name}` (download,
-`Content-Type: application/gzip`). Archives are **read-only** in the UI:
-they never appear as merge candidates, and there is no delete button.
-`POST /api/v1/debug/merge` does not specifically reject an archive name
-passed to it by hand — filename hardening only rejects path traversal and
-unsafe characters — but the merge engine cannot open gzip bytes as
-SQLite, so it silently drops that source from the result, the same
-"a source that cannot be opened or read is skipped, not fatal" behavior
-it already has for any bad input.
+Archives are listed and downloaded from the same place as the other
+history files: **Debug → Databases tab**.
+`GET /api/v1/debug/archives` lists the archives of every cluster history
+folder: name, cluster, window bounds and size, all parsed from the file
+name and one `stat` (no file is opened), plus `folder` and `path`.
+`GET /api/v1/debug/download/{path}` downloads one
+(`Content-Type: application/gzip`); `path` is relative to `shared.dir`, for
+example `history/search/search-2026-10-12_00-00__2026-10-13_00-00.db.gz`.
+Archives are **read-only** in the UI: they never appear as merge
+candidates, and there is no delete button. `POST /api/v1/debug/merge`
+accepts only `.db` paths, so an archive path passed to it by hand answers
+`400`.
 
 A downloaded archive is a plain gzip file: `gunzip` it and the result is
 an ordinary merged recorder SQLite database, readable with the `sqlite3`
@@ -518,61 +748,61 @@ CLI or any tool that already reads a merged `.db`.
 
 ### Gotchas
 
-- **Retention only runs when a new window becomes due.** An idle or
-  retired cluster that stops producing raw files never triggers another
-  archive pass, so its existing archives are never re-evaluated against
-  `history.archive.retention_days` — they are kept forever, regardless of the
-  setting, until some other window in that cluster becomes due again.
+- **A cluster with no running worker is never archived or expired.** Each
+  worker works only on the history folder of its own cluster. When you
+  retire a cluster, its sealed files and archives stay until you delete
+  them.
 - **A corrupt file sitting at an archive's own final name stalls that
   window.** If `<cluster>-<from>__<to>.db.gz` itself is unreadable (junk
-  written by something outside the recorder, or a previous pass that died
-  mid-write), every pass that considers that window tries to decompress
-  it, fails, logs `recorder_archive_failed`, and retries on the next
-  tick — indefinitely, without touching the raw sources, which stay safe
+  written by something outside the recorder), every pass that considers
+  that window tries to decompress it, fails, logs
+  `recorder_archive_failed`, counts in
+  `drakkar_recorder_archive_failures_total`, and retries on the next
+  tick — indefinitely, without touching the sealed sources, which stay safe
   and undeleted on disk. Recovery is manual: remove or rename the bad
   file so the next pass can publish a clean one.
 
-## The databases-page stats cache
+## The Databases page
 
-`GET /api/v1/debug/databases` used to open every `.db` file and aggregate its
-whole events table per page load. It is now backed by
-`<storage.dir>/.dbstats.db` (table `db_stats_v1` — identical schema on both
-backends; a mixed fleet shares the file):
+`GET /api/v1/debug/databases` answers in two parts:
 
-- **The directory stays the source of truth.** The file *list* is a live
-  scan on every request — a file you delete from `storage.dir` by hand
-  disappears from the page immediately, and the cache only supplies
-  derived statistics, keyed by `(path, mtime_ns, size_bytes)`. Rotated
-  files are immutable, so their key never changes and they are scanned
-  exactly once, ever.
-- **Three feeders**: rotation precomputes the just-closed file's stats;
-  a warmer loop (every 60 seconds) sweeps for anything missing and purges
-  rows whose files are gone; a page request itself scans at most 4 cold
-  files inline —
-  the rest render as `stats_pending` rows and fill in as the warmer
-  catches up (the UI re-polls automatically).
-- **Live DBs are delta-scanned**: the events table is append-only with a
-  monotonic `id`, so refreshing the file a worker is writing costs only
-  its new rows, not a full `GROUP BY`.
-- **Each worker warms only its own live DB.** A live file changes
-  constantly, so a sweep that refreshed every live file made each worker
-  re-read every co-located worker's growing database once a minute —
-  N&nbsp;&times;&nbsp;N reads across the fleet, over a directory that is
-  usually network-mounted, for a page nobody may have open. Because the
-  cache is shared, every worker refreshing its own file keeps the whole
-  page warm. A peer's row can therefore lag by up to that peer's warm
-  interval in the background; **opening the page still refreshes every
-  row on demand**, so what you look at is current.
-- **Disposable and self-healing**: delete `.dbstats.db` and everything
-  rescans; a corrupt file is discarded and rebuilt automatically. Writes
-  are idempotent, so concurrent workers share it with WAL + busy-timeout
-  and no coordination.
+```json
+{"own": [...], "history": {"folders": [...]}}
+```
 
-The page also marks **in-use files** (`live_for` — resolved from the
-`*-live.db` / `*-cache.db` symlinks; note a stale symlink after a
-SIGKILL marks its file in-use until the worker restarts) and now lists
-**cache databases** as typed rows (`kind: cache`, entry count, shown
-under the stable symlink name).
+- **`own`** lists this worker's own files in `storage.dir`: the live file
+  (`kind: "live"`) and the backlog files (`kind: "backlog"`). They have no
+  meta file, so their statistics are measured on request. The worker keeps
+  the statistics in memory and refreshes them incrementally: the `events`
+  table is append-only with a monotonic `id`, so a refresh of the live file
+  reads only its new rows.
+- **`history.folders`** has one entry per `history/<cluster>` folder,
+  sorted by name, and then one for `merged`. Each file has `path` (relative
+  to `shared.dir`), `name`, `kind` (`sealed`, `archive` or `merged`),
+  `size_bytes`, `modified_at`, and `meta`: the meta object of a sealed
+  file, `null` for the other kinds. No sealed file is opened to build this
+  list.
+
+Memory-only mode answers `{"own": [], "history": {"folders": []}}`. The
+normative shape is in `drakkar-ui/docs/api-contract-v1.md`.
+
+**Download.** `GET /api/v1/debug/download/{path}` takes a path relative to
+`shared.dir` and serves only these shapes:
+
+- `history/<cluster>/<name>.db` — a sealed file;
+- `history/<cluster>/<archive>.db.gz` — an archive;
+- `merged/<name>.db` — a merge result.
+
+Any other path, an unsafe path segment, a symlink, a path that resolves
+outside `shared.dir`, or a missing file answers `404`. Own files in
+`storage.dir` are not downloadable: download a file once it is sealed.
+
+**Merge.** `POST /api/v1/debug/merge` takes the same `.db` paths (sealed
+files and merge results) and writes
+`merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` inside `shared.dir`. It
+writes a temporary file and renames it, so the result appears only when it
+is complete. `merged/` is created with mode `0700`. The answer carries an
+extra `path` field with the result's path relative to `shared.dir`.
 
 ## Schema evolution
 
@@ -596,10 +826,15 @@ the file server's clock: a peer is `online` while its card is no older than
 `fleet.registry.offline_after_seconds` (default 30). See
 [Fleet registry](fleet.md) for the card format and the rules.
 
-**Cross-worker tracing** (`trace`, `trace-by-label`) searches: own live
-DB → other workers' live DBs (sorted, first match wins) → rotated files
-newest-first, filtered by matching `cluster_name`, annotating every event
-with `worker_name`.
+**Message trace** (`GET /api/v1/debug/trace`) searches this worker's own
+files by default: the live file and its closed own files in `storage.dir`.
+With `history=1` it searches only the sealed files of the history folder
+of the worker's own cluster, newest first. It stops after
+`ui.trace.history_max_files` files (default 256) or
+`ui.trace.history_max_seconds` (default 10), and it opens sealed files with
+`immutable=1`. **Trace by label** (`GET /api/v1/debug/trace-by-label`)
+searches the live file only. Every returned event carries `worker_name`. No
+worker opens another worker's live file.
 
 ## Cache peer sync
 
@@ -627,23 +862,60 @@ strictly greater wins; on a tie the lexicographically **smaller**
 `origin_worker_id` wins; otherwise the stored row is kept. Two workers
 observing the same conflict converge on the same survivor.
 
-## Sharing one `storage.dir` across workers
+## Sharing folders across workers
 
-Running several workers against one shared `storage.dir` — cross-tracing
-and cache peer sync included — is a **supported deployment
+Running a fleet against one shared folder — history, archives, merge
+results, the registry and the cache exchange — is a **supported deployment
 mode**, and the reason this page is written as a specification rather than
-as a description. What makes it safe:
+as a description. Two layouts are common:
 
-- fixed DDL, filenames, symlink protocols, JSON encodings, and the
-  canonical datetime format (this page);
-- defined busy-timeout behaviour under cross-process WAL contention;
-- per-peer failure isolation, so one lock-wedged worker cannot stall the
-  others.
+- **One host.** The workers of one host share one `storage.dir` and leave
+  `shared.dir` empty. Each file name carries the worker name, and the
+  history folders are created inside `storage.dir`.
+- **A fleet across hosts.** Each worker has its own `storage.dir` on a
+  local disk, and every worker mounts one shared folder as `shared.dir`.
+  The live file stays on the local disk. Only sealed files go to the shared
+  mount, in a background job.
 
-Requirements: mount the shared directory at the **same path** in every
-worker. Keep `ui.recorder.store_config: true` (the default) so every
-recorder file names the worker and cluster that wrote it; discovery and the
-cache exchange's cluster rule come from the [fleet registry](fleet.md).
+The cache exchange finds its peers' cache files in `storage.dir` (see
+[Cache peer sync](#cache-peer-sync)), so it needs workers that share
+`storage.dir`.
+
+What makes sharing safe:
+
+- fixed DDL, filenames, meta file and lock body bytes, JSON encodings, and
+  the canonical datetime format (this page);
+- sealed files never change, so readers take no locks;
+- one archiver per cluster folder, chosen by an exclusive create, with ages
+  measured on the file server's clock and a fence before every publish;
+- per-peer failure isolation in the cache exchange, so one lock-wedged
+  worker cannot stall the others.
+
+Requirements: every worker mounts the same shared folder; the mount path
+may differ, because no file stores an absolute path. The filesystem must support an exclusive create (`O_EXCL`) and a
+rename inside one folder: the archive lock and the move of a sealed file
+into the history folder rely on both. Keep `ui.recorder.store_config: true` (the default) so every
+recorder file names the worker and cluster that wrote it inside the
+database; discovery and the cache exchange's cluster rule come from the
+[fleet registry](fleet.md).
+
+Every worker trusts the shared folder. Anyone who can write it can plant
+files that the workers archive and serve. See
+[Security posture](security.md).
+
+## Removed files
+
+Earlier releases wrote three more files into `storage.dir`. The worker no
+longer writes or reads them:
+
+| File | Replaced by |
+|---|---|
+| `<worker>-live.db` *(symlink)* | Nothing. No worker opens another worker's live file. |
+| `.dbstats.db` | Meta files for sealed files, and in-memory statistics for own files. See [The Databases page](#the-databases-page). |
+| `.archive-<cluster>.lock` (`flock`) | `history/<cluster>/.archive.lock`. See [The archive lock](#the-archive-lock). |
+
+The worker does not delete them. Delete them by hand after the upgrade; see
+the [upgrade guide](upgrading.md#8-old-files).
 
 ## Watchdog file
 

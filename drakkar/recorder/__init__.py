@@ -21,8 +21,6 @@ from drakkar.recorder.helpers import (
     encode_json,  # noqa: F401  (re-exported for tests)
     encode_json_str,  # noqa: F401  (re-exported for tests)
     format_dt,  # noqa: F401  (re-exported for tests)
-    list_db_files,  # noqa: F401  (re-exported for tests)
-    live_link_path,  # noqa: F401  (re-exported for tests)
     make_db_path,  # noqa: F401  (re-exported for tests)
     open_reader,  # noqa: F401  (re-exported for tests)
     sanitize_env_value,  # noqa: F401  (re-exported for tests)

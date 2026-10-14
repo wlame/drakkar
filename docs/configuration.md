@@ -857,7 +857,7 @@ The UI's auth is **opt-in by default**. With `ui.enabled=true` and `ui.auth_toke
 | Endpoint | Effect | Switch |
 |----------|--------|--------|
 | `POST /api/v1/debug/probe` | Runs caller-supplied bytes through the live handler and the real executor subprocess pool, competing with production traffic for executor slots. (It writes no sinks, recorder rows, cache entries, or offsets — see [Message Probe](observability.md#operator-ui).) | `ui.probe_enabled: false` |
-| `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `storage.dir`; nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
+| `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `<shared.dir>/merged/`. The archive pass deletes it after `history.merged_retention_days` (default 32); with archiving off, or with that set to `0`, nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
 
 Both default to `true`, and both return `403` with `{"error": "..."}` naming the config key when switched off. The switches are deliberately independent of `auth_token` in both directions: a deployment that cannot set a token can still close the endpoints, and a deployment that has one can still close them as defence in depth — a valid token is not the same as consent to burn executor slots on demand. The startup warning names whichever of the two is still enabled, so an operator who has already closed them is not warned about exposure they do not have.
 
@@ -882,7 +882,7 @@ Top-level `ui.*` fields configure the UI server itself and the presentation sett
 | `port` | `int` | `8080` | 1--65535 | Port for the web UI (FastAPI server). |
 | `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
 | `probe_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
-| `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `storage.dir` and nothing reclaims it, so repeated calls grow unbounded. `false` serves `403` instead — independently of `auth_token`. |
+| `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `<shared.dir>/merged/`. The archive pass deletes merge results after `history.merged_retention_days`; with archiving off, or with that set to `0`, nothing reclaims them. `false` serves `403` instead — independently of `auth_token`. |
 | `kafka_read_enabled` | `bool` | `true` | | Serve `GET /api/v1/debug/kafka/*` — ad-hoc reads of the configured topics (source, DLQ, and each Kafka sink by instance name; never an arbitrary topic). Reads use `assign()`-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. `false` serves `403` instead — independently of `auth_token`. When the resolved Kafka security of any readable topic is not PLAINTEXT while `auth_token` is empty, startup logs a warning naming the exposed aliases. See [Kafka Read API](kafka-read.md). |
 | `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
 | `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
@@ -971,6 +971,15 @@ anchors that link UI surfaces (a label, a sink, a timeline event type, a declare
 page) into it — covered field-by-field on the dedicated
 [Operator Docs Site](ui-docs.md) page.
 
+### Trace Over History (`ui.trace:`)
+
+Budget of one Message Trace request with `history=1`, which searches the sealed files in the history folder of the worker's own cluster, newest first. See [Cross-Worker Trace](observability.md#cross-worker-trace).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `history_max_files` | `int` | `256` | >= 1 | Most sealed history files one trace request with `history=1` opens, newest first. |
+| `history_max_seconds` | `float` | `10.0` | > 0 | Time limit for one trace request with `history=1`; the search stops and returns what it found. |
+
 ### Flight Recorder (`ui.recorder:`)
 
 Flight-recorder persistence — the UI's data store. The recorder writes into [`storage.dir`](#storage-and-shared); all flags below need it to be non-empty. Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
@@ -981,7 +990,7 @@ Flight-recorder persistence — the UI's data store. The recorder writes into [`
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
 | `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves and, with archiving on, runs the archive pass. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
@@ -1106,12 +1115,12 @@ What happens to recorder history after a worker is done with a file. See
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `archive.enabled` | `bool` | `true` | | Fold recorder files into one compressed archive per cluster and window, then delete the files a pass merged. `false` disables the pass entirely — no recorder file is ever deleted automatically. |
+| `archive.enabled` | `bool` | `true` | | Fold recorder files into one compressed archive per cluster and window, then delete the files a pass merged. `false` disables the pass entirely — no sealed recorder file and no merge result is ever deleted automatically. |
 | `archive.window_hours` | `int` | `24` | >= 1, and >= `ui.recorder.rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned). |
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
 | `archive.lock_stale_seconds` | `int` | `7200` | >= 1 | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. |
-| `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI are deleted after this many days. `0` keeps them forever. |
+| `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
 
 ```yaml
 history:

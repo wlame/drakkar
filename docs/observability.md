@@ -164,8 +164,11 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
 | `drakkar_recorder_requeue_overflow_total` | Counter | -- | Events silently dropped from the recorder buffer tail when an `OperationalError`-triggered requeue exceeded `max_buffer` capacity (concurrent records filled the deque during the flush). Any non-zero value is data loss on the flush-retry path — alert alongside `flush_batches_dropped_total`. |
 | `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
-| `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in `storage.dir`, refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `history.archive.retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
-| `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in `storage.dir`. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
+| `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in its history folder (`<shared.dir>/history/<cluster>/`), refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `history.archive.retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
+| `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in its history folder. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
+| `drakkar_recorder_unsealed_files` | Gauge | -- | Own recorder files closed but not yet sealed into the history folder: files waiting for the background move, plus the backlog of failed seals and moves. Alert when it stays above `0` for two rotation intervals: the history folder is unwritable, or another process holds the file. See [Sealing](local-databases.md#sealing-and-the-history-folder). |
+| `drakkar_recorder_seal_failures_total` | Counter | -- | Recorder files whose sealing failed; they stay in the backlog and are retried. Counts a failed seal and a failed move into the history folder (log `recorder_seal_failed`, field `stage`). |
+| `drakkar_recorder_archive_failures_total` | Counter | -- | Archive passes that failed after taking the archive lock: a window failed, the pass was fenced because another worker took the lock over, or an unexpected error. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
@@ -525,9 +528,9 @@ Multi-purpose debug page with:
 - **Periodic tasks** -- status of all `@periodic` handler methods: last run time, duration, success/error status, total counts, and a sparkline of recent runs.
 - **Cross-worker message trace** -- two search modes:
     - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
-    - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across partitions and workers.
-    Both modes search the current worker first, then other live workers in the cluster, then rotated historical DB files.
-- **Database management** -- list all recorder database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
+    - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across the partitions of this worker.
+    A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. See [Cross-Worker Trace](#cross-worker-trace).
+- **Database management** -- list this worker's own recorder files and the shared history folders (sealed files, archives, merge results) with event counts and sizes, download history files, merge several of them into one, and view per-file breakdown by event type. See [The Databases page](local-databases.md#the-databases-page).
 - **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
@@ -737,62 +740,78 @@ Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-
 
 ### File Layout and Rotation
 
-Database files follow the naming pattern:
+The live database file follows the naming pattern:
 
 ```
 {storage.dir}/{worker_name}-{timestamp}.db
 ```
 
-For example: `/tmp/worker-1-2026-04-06__14_55_00.db`
+For example: `/tmp/drakkar/worker-1-2026-04-06__14_55_00.db`. Only the worker that writes it opens it.
 
-A symlink `{worker_name}-live.db` always points to the currently active database file while the worker is running:
+**Rotation**: every `rotation_interval_hours` (default: 1), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file. The old file is then **sealed**: switched to a rollback journal, given a meta file with its statistics, and closed. A background job moves it into the history folder of the worker's cluster:
 
 ```
-/tmp/worker-1-live.db -> worker-1-2026-04-06__14_55_00.db
+{shared.dir}/history/{cluster}/{worker_name}-{timestamp}.db
+{shared.dir}/history/{cluster}/{worker_name}-{timestamp}.db.meta.json
 ```
 
-The symlink is removed on graceful shutdown.
-
-**Rotation**: every `rotation_interval_hours` (default: 1), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file and the live symlink is updated. Rotation itself deletes nothing — see [Archiving](#archiving), next.
+`shared.dir` empty means `storage.dir`. `{cluster}` is the cluster name with every character outside `[a-zA-Z0-9_-]` replaced by `_` (`default` when it is empty). A clean stop seals the live file too, and moves it while shutdown time remains. A file whose seal or move fails stays in `storage.dir` and is retried on every rotation tick. The full rules — the cross-filesystem copy, the backlog, leftovers of a crashed process, the meta file format — are in [Local Databases → Sealing](local-databases.md#sealing-and-the-history-folder). Rotation itself deletes nothing — see [Archiving](#archiving), next.
 
 ### Archiving
 
 Age- and count-based retention (the old `retention_hours` /
 `retention_max_events` keys) are gone. In their place, a periodic
-**archive pass** folds each finished UTC time window's rotated-out raw
-files into one compressed, merged database per cluster
-(`<cluster>-<from>__<to>.db.gz`), and deletes only the raw files it
-successfully merged — see [Local Databases → Archiving](local-databases.md#archiving)
-for the full byte-level spec. The short
-version:
+**archive pass** folds each finished UTC time window's sealed files into
+one compressed, merged database per cluster
+(`<cluster>-<from>__<to>.db.gz`, in the same cluster history folder), and
+deletes only the sealed files it successfully merged — see
+[Local Databases → Archiving](local-databases.md#archiving) for the full
+byte-level spec. The short version:
 
 - **Defaults** (`ui.recorder.rotation_interval_hours: 1`, and
   `history.archive` `enabled: true`, `window_hours: 24`,
-  `due_after_hours: 48`, `retention_days: 30`): raw files
-  rotate hourly; a UTC day's window becomes due exactly 48h after it
-  closes and is archived on the next hourly tick after that, merging its
-  raw files into one `.db.gz` per cluster and deleting them. That 48h
-  due delay is the safety margin, not a bug — but it means a single raw
-  file's lifespan, counted from when it was *created* rather than from
-  window close, can reach up to ~72h (up to 24h as part of its own
-  window, plus the ~48h due delay after that window closes). Archives
-  themselves are deleted once their window ended more than
-  `retention_days` ago; `0` keeps them forever and warns at
+  `due_after_hours: 48`, `retention_days: 30`): files rotate hourly and
+  are sealed into the history folder; a UTC day's window becomes due
+  exactly 48h after it closes and is archived on the next hourly tick after
+  that, merging its sealed files into one `.db.gz` per cluster and deleting
+  them and their meta files. That 48h due delay is the safety margin, not a
+  bug — but it means a single recorder file's lifespan, counted from when
+  it was *created* rather than from window close, can reach up to ~72h (up
+  to 24h as part of its own window, plus the ~48h due delay after that
+  window closes). Archives themselves are deleted once their window ended
+  more than `retention_days` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
-- **Windows key on file start time, not event time.** A raw file belongs
-  to the window holding its own start timestamp; an archive can carry a
-  handful of events timestamped slightly past its own window end.
-- **One archiver per cluster.** Workers sharing a folder elect a single
-  archiver per cluster per tick via a `flock`-based lock file; the losers
-  skip the tick and lose nothing.
-- **Sources die last.** A raw file is deleted only once its archive is
+- **Every worker runs the pass** after each rotation tick, in the
+  background, on the history folder of its own cluster only.
+- **Windows key on file start time, not event time.** A sealed file
+  belongs to the window holding its own start timestamp; an archive can
+  carry a handful of events timestamped slightly past its own window end.
+- **Only sealed files are candidates.** Every `*.db` in a cluster history
+  folder is sealed and never changes, so the pass needs no in-use check and
+  reads its sources with `immutable=1`.
+- **One archiver per cluster.** Every worker of the cluster tries to
+  create `history/<cluster>/.archive.lock` with an exclusive create; one
+  wins, and the others skip the tick and lose nothing. A lock older than
+  `history.archive.lock_stale_seconds` (default 7200) belongs to a dead
+  archiver and is taken over (`recorder_archive_lock_taken_over`); a fresh
+  lock that two racing takers moved aside is put back, and
+  `recorder_archive_lock_put_back_failed` reports when a third worker's
+  lock came first. Ages are measured on the file server's clock. Right before it publishes, the
+  holder checks that the lock still holds its token; if another worker took
+  it over, the pass publishes and deletes nothing (`recorder_archive_fenced`).
+- **Sources die last.** A sealed file is deleted only once its archive is
   durably on disk. A file the merge cannot read is renamed to
   `<name>.unreadable` instead of being deleted, and a pre-existing
   archive at the final name is folded into the new one rather than
-  overwritten.
-- **Opting out** (`history.archive.enabled: false`) disables the pass entirely —
-  nothing then deletes raw recorder files automatically, and a startup
-  log line (`recorder_archiving_disabled`) says so.
+  overwritten. A pass that took the lock and failed counts in
+  `drakkar_recorder_archive_failures_total`.
+- **Merge results expire.** The pass also deletes UI merge results in
+  `<shared.dir>/merged/` older than `history.merged_retention_days`
+  (default 32; `0` keeps them), logging `recorder_merged_pruned`.
+- **Opting out** (`history.archive.enabled: false`) disables the pass
+  entirely — nothing then deletes sealed recorder files or merge results
+  automatically, and a startup log line (`recorder_archiving_disabled`,
+  field `folder`) says so.
 - **Renamed key:** `rotation_interval_minutes` is now
   `rotation_interval_hours`, with a unit change (`1` = 1 hour, not 1
   minute). `rotation_interval_minutes`, `retention_hours` and
@@ -803,21 +822,27 @@ version:
 ```yaml
 storage:
   dir: /var/lib/drakkar
+shared:
+  dir: /mnt/fleet                    # history folders live here; '' = storage.dir
 ui:
   recorder:
     rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
 history:
   archive:
-    enabled: true                    # merge recorder files into windowed .db.gz archives
+    enabled: true                    # merge sealed files into windowed .db.gz archives
     window_hours: 24                 # one archive per cluster per UTC day; must be >= rotation_interval_hours
     due_after_hours: 48              # archive a window this long after it ends
     retention_days: 30               # delete archives older than this; 0 = keep forever
+  merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
 ```
 
-Archives are downloaded from the same place as raw databases — **Debug →
-Databases tab → Archives** section, backed by
-`GET /api/v1/debug/archives` and `GET /api/v1/debug/archives/{name}` —
-see [Merging Databases](#merging-databases) below for why archives never
+Archives are downloaded from the same place as the other history files —
+**Debug → Databases tab** — backed by `GET /api/v1/debug/archives` (the
+archives of every cluster folder, each with `folder` and `path`) and
+`GET /api/v1/debug/download/{path}`, where `path` is relative to
+`shared.dir` (for example
+`history/search/search-2026-10-12_00-00__2026-10-13_00-00.db.gz`). See
+[Merging Databases](#merging-databases) below for why archives never
 appear as merge candidates. A downloaded archive is a plain gzip file:
 `gunzip` it and the result is an ordinary merged recorder SQLite
 database, readable with the `sqlite3` CLI or any tool that already reads
@@ -825,16 +850,14 @@ a merged `.db`.
 
 Two operational gotchas worth knowing:
 
-- **Retention only runs when a new window becomes due.** An idle or
-  retired cluster that stops producing raw files never triggers another
-  archive pass, so its existing archives are kept forever regardless of
-  `history.archive.retention_days`, until some other window in that cluster
-  becomes due again.
+- **A cluster with no running worker is never archived or expired.** Each
+  worker works only on its own cluster's history folder, so a retired
+  cluster's sealed files and archives stay until you delete them.
 - **A corrupt file at an archive's own final name stalls that window.**
   Every pass that considers the window fails to decompress it, logs
   `recorder_archive_failed`, and retries next tick — indefinitely,
-  without touching the (safe, undeleted) raw sources. Recovery is manual:
-  remove or rename the bad file.
+  without touching the (safe, undeleted) sealed sources. Recovery is
+  manual: remove or rename the bad file.
 
 ### Buffer Mechanics
 
@@ -905,7 +928,8 @@ database.
 ### Merging Databases
 
 The UI's database section (`/debug`) allows selecting multiple
-database files and merging them into a single file. This is useful for:
+history files — sealed files and earlier merge results — and merging them
+into a single file. This is useful for:
 
 - **Post-mortem analysis** -- combine files from multiple workers and
   time periods into one queryable database
@@ -915,22 +939,27 @@ database files and merging them into a single file. This is useful for:
 - **Archival** -- download a merged file for offline analysis with
   any SQLite tool
 
-The merge process copies all events from the selected files into a new
-file named `merged-<timestamp>-<token>.db`. It does not remove duplicates.
-The `workers` table lists every source worker; a selected merged file
-keeps its own workers, events and states. The file is written under a
-hidden temporary name and appears in the database list only when it is
-complete. It can be downloaded.
+`POST /api/v1/debug/merge` takes paths relative to `shared.dir`
+(`history/<cluster>/<name>.db` or `merged/<name>.db`). The merge process
+copies all events from the selected files into a new file
+`<shared.dir>/merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db`; the
+answer carries its `path`. It does not remove duplicates. The `workers`
+table lists every source worker; a selected merged file keeps its own
+workers, events and states. The file is written under a hidden temporary
+name and appears in the database list only when it is complete. It can be
+downloaded. `merged/` is created with mode `0700`, and the archive pass
+deletes merge results older than `history.merged_retention_days`
+(default 32 days; `0` keeps them).
 
-**Archives are never merge candidates.** The Databases tab's Archives
-section (see [Archiving](#archiving) above) is read-only — no selection
+A worker's own files in `storage.dir` — the live file and the backlog —
+are not merge sources and are not downloadable: use a file once it is
+sealed into the history folder.
+
+**Archives are never merge candidates.** The Databases tab's archives
+(see [Archiving](#archiving) above) are read-only — no selection
 checkboxes, no path into `/api/v1/debug/merge`. `POST /api/v1/debug/merge`
-itself does not specifically reject an archive filename passed to it by
-hand (filename hardening only checks for path traversal and unsafe
-characters), but the merge engine cannot open gzip bytes as SQLite, so it
-silently drops that source from the result rather than failing the whole
-request — the same "an unreadable source is skipped, not fatal" behavior
-it already has for any bad input.
+accepts only `.db` paths, so an archive path passed to it by hand answers
+`400`.
 
 ---
 
@@ -973,7 +1002,7 @@ Reduces storage for fast tasks where the output is uninteresting.
 
 ## Worker Autodiscovery
 
-A shared `storage.dir` between workers is **not required** for Drakkar to
+A shared folder between workers is **not required** for Drakkar to
 function. Each worker operates independently -- its own Kafka consumer,
 executor pool, sinks, and flight recorder work fine with a local
 directory.
@@ -988,22 +1017,22 @@ discovery needs a card folder for the [fleet registry](fleet.md): with
 the workers list. The live pipeline view (`/live`) and dashboard counters
 continue working since they read from in-memory state.
 
-When workers share the same `storage.dir` (e.g., a shared NFS mount,
-Kubernetes PVC, or Docker volume), several additional UI features
-become available:
+When workers share one `shared.dir` (e.g., a shared NFS mount,
+Kubernetes PVC, or Docker volume; with `shared.dir` empty, one shared
+`storage.dir`), several additional UI features become available:
 
 - **Worker switcher** -- jump between worker UIs from a dropdown in the
   nav bar, without remembering ports or IP addresses (the switcher comes
   from the [fleet registry](fleet.md), whose default card folder is in
   the shared folder)
-- **Cross-worker message trace** -- trace a message across all workers
-  in the cluster by partition:offset or by label value
-- **Database merge** -- combine flight recorder files from multiple
+- **Cross-worker message trace** -- trace a message by partition:offset
+  through the sealed history of every worker in the cluster
+- **Database merge** -- combine sealed recorder files from multiple
   workers into a single SQLite file for post-mortem analysis
-- **Cluster-wide database browser** -- see all workers' DB files in
-  one view, sorted and filtered
+- **Cluster-wide database browser** -- see every cluster's history
+  folder (sealed files, archives, merge results) in one view
 
-Without a shared `storage.dir`, each worker's UI only sees its own
+Without a shared folder, each worker's UI only sees its own
 data. All other functionality (processing, sinks, metrics, logging)
 works identically.
 
@@ -1078,7 +1107,7 @@ volumes:
     persistentVolumeClaim:
       claimName: drakkar-recorder
 
-# mount on all worker pods at the same path
+# mount on all worker pods (the mount path may differ per pod)
 volumeMounts:
   - name: recorder-shared
     mountPath: /shared
@@ -1102,7 +1131,8 @@ services:
 ### Cross-Worker Trace
 
 The trace feature on the `/debug` page searches for a message's lifecycle
-across all workers in the cluster. Two search modes are available:
+in the current worker's files and, on request, in the sealed history of
+every worker in the cluster. Two search modes are available:
 
 **By partition:offset** -- given a partition and offset, finds the
 consumed event and all related events (task_started, task_completed,
@@ -1115,11 +1145,21 @@ identifier but not which partition or offset it landed on. Label search
 inputs appear automatically on the `/debug` page for each label key
 found in the database.
 
-Both modes search in the same order:
+What each mode searches:
 
-1. The current worker's live database.
-2. Other workers' live databases (same cluster).
-3. Rotated (historical) database files in `storage.dir`, newest first.
+- **By partition:offset**, by default: the current worker's own files --
+  its live database and its closed files in `storage.dir` that are not yet
+  sealed into the history folder.
+- **By partition:offset with `history=1`**: only the sealed files in the
+  history folder of the worker's own cluster
+  (`<shared.dir>/history/<cluster>/`), newest first. The search stops after
+  `ui.trace.history_max_files` files (default 256) or
+  `ui.trace.history_max_seconds` (default 10). Sealed files never change,
+  so the search opens them with `immutable=1` and takes no locks.
+- **By label**: the current worker's live database only.
+
+No worker opens another worker's live database. Events of other workers
+come only from their sealed files.
 
 Each returned event carries a `worker_name` field identifying which
 worker processed it. Labels are stored as JSON in the `labels` column

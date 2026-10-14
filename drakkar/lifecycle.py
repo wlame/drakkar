@@ -70,6 +70,7 @@ from drakkar.metrics import (
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
+from drakkar.recorder.history import history_dir
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -215,6 +216,10 @@ class AppLifecycle:
             await self._run_on_ready_and_periodics()
             await self._start_sources()
             self._set_lifecycle_state('running')
+            # Files an earlier process with this worker name left behind
+            # are sealed in the background; startup never waits on them.
+            if app._recorder is not None:
+                app._recorder.start_leftover_sealing()
 
             # Claim the watchdog slot for this run NOW — only once we're
             # committed to running. See ``_claim_watchdog_slot`` for the
@@ -455,14 +460,20 @@ class AppLifecycle:
             # Archives are the one recorder artifact nothing else reclaims,
             # so "keep forever" is stated at startup rather than discovered
             # when a volume fills.
-            warn_if_archives_unbounded(app._config.history.archive, app._config.storage.dir)
+            warn_if_archives_unbounded(
+                app._config.history.archive,
+                history_dir(app._config.resolved_shared_dir, app._cluster_name),
+            )
 
             app._recorder = EventRecorder(
                 app._config.ui,
                 worker_name=app._worker_id,
                 cluster_name=app._cluster_name,
                 storage_dir=app._config.storage.dir,
+                shared_dir=app._config.resolved_shared_dir,
+                instance=app._instance,
                 archive=app._config.history.archive,
+                merged_retention_days=app._config.history.merged_retention_days,
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()
@@ -1089,7 +1100,9 @@ class AppLifecycle:
 
             if app._recorder:
                 try:
-                    await app._recorder.stop()
+                    # The seal always runs; moving the file into the history
+                    # folder gets only the shutdown time that is left.
+                    await app._recorder.stop(timeout=max(deadline - time.monotonic(), 0.0))
                 except Exception as exc:
                     await log.awarning(
                         'recorder_stop_failed',

@@ -485,15 +485,18 @@ paths:
     get:
       tags: [debug-tools]
       operationId: getDatabases
-      summary: Recorder database files
+      summary: Own recorder files and the shared history folders
+      description: >-
+        v1.23: an object. own lists the serving worker's live file and its
+        files closed but not sealed yet (statistics measured on request);
+        history lists one folder per history/<cluster> plus merged, read
+        from shared.dir. Pre-v1.23 backends answer an array.
       responses:
         '200':
-          description: One row per SQLite file in db_dir.
+          description: Own files and history folders.
           content:
             application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/DatabaseRow'}
+              schema: {$ref: '#/components/schemas/DatabasesResponse'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /api/v1/debug/merge:
@@ -502,11 +505,13 @@ paths:
       operationId: postMerge
       summary: Merge recorder databases
       description: >-
-        Merges ≥2 recorder DB files into one downloadable file. Filename
-        hardening rejects path separators, leading dots, quotes, semicolons,
-        and control characters. Errors use the legacy {"error": ...}
-        envelope (400 malformed body, 404 missing files, 500 merge failed —
-        v1.23).
+        Merges ≥2 sealed recorder files or merge results into one file
+        under merged/ (v1.23). filenames are paths relative to shared.dir
+        (history/<cluster>/<name>.db or merged/<name>.db); every segment is
+        hardened against separators, leading dots, quotes, semicolons and
+        control characters. Errors use the legacy {"error": ...} envelope
+        (400 malformed body or rejected path, 404 missing files, 500 merge
+        failed).
       requestBody:
         required: true
         content:
@@ -544,26 +549,30 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
-  /api/v1/debug/download/{filename}:
+  /api/v1/debug/download/{path}:
     get:
       tags: [debug-tools]
       operationId: getDownload
-      summary: Download a recorder database
+      summary: Download a sealed file, an archive or a merge result
       description: >-
-        SQLite file attachment (Content-Type application/x-sqlite3,
-        Cache-Control no-store). Filename hardening as merge. The bearer
-        token may ride as ?token= because plain <a> downloads cannot set
-        headers.
+        path is relative to shared.dir and keeps its / separators:
+        history/<cluster>/<name>.db, history/<cluster>/<archive>.db.gz or
+        merged/<name>.db (v1.23). Every segment is hardened as in merge and
+        the resolved file must stay inside shared.dir. Attachment with
+        Cache-Control no-store. The bearer token may ride as ?token=
+        because plain <a> downloads cannot set headers.
       parameters:
-        - name: filename
+        - name: path
           in: path
           required: true
           schema: {type: string}
       responses:
         '200':
-          description: The database file.
+          description: The file.
           content:
             application/x-sqlite3:
+              schema: {type: string, format: binary}
+            application/gzip:
               schema: {type: string, format: binary}
         '400':
           description: Rejected filename.
@@ -583,9 +592,10 @@ paths:
       operationId: getArchives
       summary: Compressed recorder archives
       description: >-
-        One row per archive file in db_dir (name
-        `<cluster>-<from>__<to>.db.gz`), all fields parsed from the file
-        name — no file is opened. Sorted newest-first by to_ts.
+        One row per archive file in every history/<cluster> folder of
+        shared.dir (name `<cluster>-<from>__<to>.db.gz`), all fields parsed
+        from the file name — no file is opened. Sorted newest-first by
+        to_ts. Download through /debug/download/{path} (v1.23).
       responses:
         '200':
           description: Archive list.
@@ -594,40 +604,16 @@ paths:
               schema: {$ref: '#/components/schemas/ArchiveList'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
-  /api/v1/debug/archives/{name}:
-    get:
-      tags: [debug-tools]
-      operationId: getArchiveDownload
-      summary: Download a compressed recorder archive
-      description: >-
-        Gzip file attachment (Content-Type application/gzip, Cache-Control
-        no-store). name must match the archive naming pattern and resolve
-        inside db_dir; a rejected name, a path escaping db_dir, or a
-        missing file all answer 404. The bearer token may ride as ?token=
-        because plain <a> downloads cannot set headers.
-      parameters:
-        - name: name
-          in: path
-          required: true
-          schema: {type: string}
-      responses:
-        '200':
-          description: The archive file.
-          content:
-            application/gzip:
-              schema: {type: string, format: binary}
-        '404':
-          description: Rejected, escaping, or missing archive name.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-
   /api/v1/debug/trace:
     get:
       tags: [debug-tools]
       operationId: getTrace
       summary: Trace one message by partition/offset
+      description: >-
+        Without history, searches the serving worker's own live file and
+        own unsealed files. With history=1, searches only the sealed files of
+        history/<own cluster>, newest first, within the backend's trace
+        budget (v1.23).
       parameters:
         - name: partition
           in: query
@@ -637,6 +623,10 @@ paths:
           in: query
           required: true
           schema: {type: integer}
+        - name: history
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
       responses:
         '200':
           description: Event rows for that message.
@@ -1801,44 +1791,100 @@ components:
         output_message_count: {type: integer}
       required: [ts, partition, window_id, task_count]
 
-    DatabaseRow:
+    DatabasesResponse:
       type: object
       properties:
+        own:
+          type: array
+          items: {$ref: '#/components/schemas/OwnDatabase'}
+        history:
+          type: object
+          properties:
+            folders:
+              type: array
+              items: {$ref: '#/components/schemas/HistoryFolder'}
+          required: [folders]
+      required: [own, history]
+
+    OwnDatabase:
+      type: object
+      description: >-
+        One of the serving worker's own files in storage.dir: the live file
+        or a file closed but not sealed yet.
+      properties:
         filename: {type: string}
-        path: {type: string}
-        worker_name: {type: [string, 'null']}
+        worker_name: {type: string}
         cluster_name: {type: [string, 'null']}
+        kind: {type: string, enum: [live, backlog]}
         event_count: {type: integer}
         event_counts:
           type: object
           additionalProperties: {type: integer}
         first_event_ts: {type: [number, 'null']}
         last_event_ts: {type: [number, 'null']}
-        has_events: {type: boolean}
-        has_config: {type: boolean}
-        has_state: {type: boolean}
         size_bytes: {type: integer}
-        # v1.12 additions — optional so older backends stay conformant.
-        # kind: what the file IS (recorder event log / drakkar-merge
-        # output / handler cache / foreign schema).
-        kind: {type: string, enum: [recorder, merged, cache, unknown]}
-        # live_for: worker currently writing this file (resolved from the
-        # *-live.db / *-cache.db symlinks); '' when not in use.
-        live_for: {type: string}
-        # stats_pending: the file exists but its statistics are not
-        # computed yet (cold stats cache, inline scan budget exhausted) —
-        # only filename/path/size_bytes/kind are meaningful; the row
-        # fills in on a later poll.
-        stats_pending: {type: boolean}
-        # cache_entry_count: rows in cache_entries, kind='cache' only.
-        cache_entry_count: {type: [integer, 'null']}
-      required: [filename, path, event_count, size_bytes]
+      required: [filename, worker_name, kind, event_count, event_counts, size_bytes]
+
+    HistoryFolder:
+      type: object
+      properties:
+        folder:
+          type: string
+          description: history/<cluster> or merged, relative to shared.dir.
+        kind: {type: string, enum: [history, merged]}
+        cluster: {type: [string, 'null']}
+        files:
+          type: array
+          items: {$ref: '#/components/schemas/HistoryFile'}
+      required: [folder, kind, cluster, files]
+
+    HistoryFile:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Relative to shared.dir; the /debug/download/{path} argument.
+        name: {type: string}
+        kind: {type: string, enum: [sealed, archive, merged]}
+        size_bytes: {type: integer}
+        modified_at: {type: string, format: date-time}
+        meta:
+          description: >-
+            The sealed file's meta file object (schema 1), or null for an
+            archive, a merge result, or a missing or unreadable meta file.
+          oneOf:
+            - {$ref: '#/components/schemas/HistoryMeta'}
+            - {type: 'null'}
+      required: [path, name, kind, size_bytes, modified_at, meta]
+
+    HistoryMeta:
+      type: object
+      properties:
+        schema: {type: integer, const: 1}
+        worker: {type: string}
+        instance: {type: string}
+        cluster: {type: string}
+        first_event_ts: {type: [string, 'null'], format: date-time}
+        last_event_ts: {type: [string, 'null'], format: date-time}
+        sealed_at: {type: string, format: date-time}
+        size_bytes: {type: integer}
+        tables:
+          type: object
+          additionalProperties: {type: integer}
+        event_types:
+          type: object
+          additionalProperties: {type: integer}
+      required: [schema, worker, cluster, sealed_at, size_bytes, tables, event_types]
 
     ArchiveEntry:
       type: object
       properties:
         name: {type: string}
         cluster: {type: string}
+        # v1.23: the history/<cluster> folder and the path for
+        # /debug/download/{path}.
+        folder: {type: string}
+        path: {type: string}
         from_ts: {type: number}
         to_ts: {type: number}
         size_bytes: {type: integer}
@@ -1856,6 +1902,8 @@ components:
       type: object
       properties:
         filename: {type: string}
+        # v1.23: the output's path relative to shared.dir (merged/...).
+        path: {type: string}
         worker_count: {type: integer}
         event_count: {type: integer}
         state_count: {type: integer}

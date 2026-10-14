@@ -4,14 +4,13 @@ These back the drakkar-ui Debug page; the page itself is served by
 ``routes_spa`` from the bundle, not rendered here.
 
 Routes:
-  * ``/api/v1/debug/databases``         — list of debug DB files.
-  * ``/api/v1/debug/merge``             — merge multiple DB files.
-  * ``/api/v1/debug/download/{filename}`` — download a single DB file.
-  * ``/api/v1/debug/archives``          — list of compressed archive files.
-  * ``/api/v1/debug/archives/{name}``   — download a single archive file.
-  * ``/api/v1/debug/trace``             — cross-worker trace for one (partition, offset).
+  * ``/api/v1/debug/databases``         — own files, then the shared history folders.
+  * ``/api/v1/debug/merge``             — merge history files into ``merged/``.
+  * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
+  * ``/api/v1/debug/archives``          — compressed archives of every cluster folder.
+  * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or sealed history.
   * ``/api/v1/debug/label-keys``        — distinct label keys across events.
-  * ``/api/v1/debug/trace-by-label``    — cross-worker trace by (key, value).
+  * ``/api/v1/debug/trace-by-label``    — trace by (key, value) in the live file.
   * ``/api/v1/debug/metrics``           — Prometheus metric snapshot as JSON.
   * ``/api/v1/debug/periodic``          — periodic-task run history.
   * ``/api/v1/debug/probe``             — single-message probe through the live handler.
@@ -25,12 +24,15 @@ as 422 errors at runtime.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import os
 import re
 import secrets
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -38,10 +40,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
+from drakkar.dbstats import OwnFileStats
+from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
+from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
+from drakkar.recorder.history import HISTORY_FOLDER, MERGED_FOLDER, meta_path, read_meta
+from drakkar.recorder.queries import trace_history
 from drakkar.recorder.schema import EventType
+from drakkar.recorder.sealing import own_db_files
+from drakkar.timefmt import format_epoch_ns
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
+    from drakkar.recorder import EventRecorder
     from drakkar.uiserver.server import UIDeps
 
 logger = structlog.get_logger()
@@ -71,24 +81,29 @@ def _has_unsafe_filename_char(filename: str) -> bool:
     return any(c in '";' or ord(c) < 0x20 or ord(c) == 0x7F for c in filename)
 
 
-# Names the database download and merge endpoints will act on.
+# Names of database files the download and merge endpoints act on: the
+# sealed recorder files (``<worker>-<time>.db``) and the merge results
+# (``merged-*.db``). ``shared.dir`` is shared with other workers and the
+# debug UI is unauthenticated by design, so the endpoints serve only names
+# the framework writes, never any readable file a path happens to reach.
 #
-# They exist to hand over recorder artifacts: the timestamped DBs
-# ``make_db_path`` writes, the ``-live.db`` / ``-cache.db`` symlinks and the
-# ``merged-*.db`` output. ``storage.dir`` may sit under ``/tmp`` — shared
-# with every other program on the host — and the debug UI is unauthenticated by
-# design, so checking only for separators and header-injection characters
-# let any readable file there be fetched by exact name.
-#
-# Archives are NOT matched here: they are ``.db.gz`` and have their own
-# route guarded by ``ARCHIVE_NAME_RE``.
-#
-# Note the character class: a worker whose name contains something outside
-# ``[\w.-]`` (a space, say) would not be able to serve its own database
-# through this endpoint. Worker names are not validated anywhere, so that is
-# possible — but such a name already makes for awkward filenames, and
-# widening this pattern to accommodate it would defeat its purpose.
+# A worker whose name contains something outside ``[\w.-]`` (a space, say)
+# cannot have its files served; widening the pattern for that would defeat
+# its purpose.
 DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
+
+# A sanitized cluster folder name (``drakkar.recorder.history.sanitize_cluster``).
+_CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
+
+# The paths, relative to ``shared.dir``, that the download and merge
+# endpoints act on. The first segment picks the folder; the folder fixes
+# how many segments the path has and which names its last segment may
+# carry: ``history/<cluster>/<sealed>.db`` or ``history/<cluster>/<archive>``,
+# and ``merged/<result>.db``.
+_SHARED_PATH_SHAPES: dict[str, tuple[int, tuple[re.Pattern[str], ...]]] = {
+    HISTORY_FOLDER: (3, (DB_DOWNLOAD_NAME_RE, ARCHIVE_NAME_RE)),
+    MERGED_FOLDER: (2, (DB_DOWNLOAD_NAME_RE,)),
+}
 
 
 def _probe_busy_response(exc: ProbeBusyError) -> JSONResponse:
@@ -118,40 +133,221 @@ def _db_root(db_dir: str) -> Path | None:
 
     There is no directory to serve from in that mode, so callers answer 404
     rather than trying to contain a path that has no root.
+
+    Blocking: ``resolve`` is ``realpath`` (an lstat per path component), and
+    ``shared.dir`` is a network mount by design, so callers run it in a
+    thread, never on the loop that answers /healthz and /readyz.
     """
     if not db_dir:
         return None
     return Path(db_dir).resolve()
 
 
-def _contained_path(root: Path, filename: str) -> Path | None:
-    """``filename`` resolved inside ``root``, or None when it is not contained.
+def _is_safe_segment(segment: str) -> bool:
+    """One path segment: not empty, no leading dot, no separator, no header-breaking character."""
+    return (
+        bool(segment) and not segment.startswith('.') and '\\' not in segment and not _has_unsafe_filename_char(segment)
+    )
 
-    Rejects path separators, dot-prefixed names and the characters that
-    would break out of the ``Content-Disposition`` header, then resolves
-    and checks containment against the real root — so a symlink inside
-    the folder pointing outside it is refused too.
 
-    Containment only. Callers decide WHICH names they are willing to act
-    on: ``_contained_db_path`` for database files, ``ARCHIVE_NAME_RE`` for
-    the ``.db.gz`` archives.
+def _shared_file_path(root: Path, relative: str) -> Path | None:
+    """``relative`` (a path inside ``shared.dir``) as a file path, or None when it is not one these endpoints serve.
+
+    The path must have one of the :data:`_SHARED_PATH_SHAPES` and every
+    segment must be safe. The file itself must not be a symlink, and the
+    resolved path must stay inside ``root`` — so a symlinked folder that
+    leads elsewhere is refused too. Blocking (stat calls).
     """
-    if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
+    segments = relative.split('/')
+    shape = _SHARED_PATH_SHAPES.get(segments[0])
+    if shape is None:
         return None
-    candidate = (root / filename).resolve()
-    if candidate == root or not candidate.is_relative_to(root):
+    segment_count, name_patterns = shape
+    if len(segments) != segment_count or not all(_is_safe_segment(segment) for segment in segments):
         return None
-    return candidate
+    if segment_count == 3 and not _CLUSTER_FOLDER_RE.fullmatch(segments[1]):
+        return None
+    if not any(pattern.fullmatch(segments[-1]) for pattern in name_patterns):
+        return None
+    candidate = root.joinpath(*segments)
+    if candidate.is_symlink():
+        return None
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root):
+        return None
+    return resolved
 
 
-def _contained_db_path(root: Path, filename: str) -> Path | None:
-    """A contained path that is also a recorder DATABASE name.
+def _existing_shared_file(shared_dir: str, relative: str) -> Path | None:
+    """:func:`_shared_file_path` for a file that exists; None in memory-only mode. Blocking."""
+    root = _db_root(shared_dir)
+    if root is None:
+        return None
+    path = _shared_file_path(root, relative)
+    return path if path is not None and path.is_file() else None
 
-    See ``DB_DOWNLOAD_NAME_RE`` for why the name policy exists at all.
+
+def _own_db_row(stats: DbStats, kind: str) -> dict[str, Any]:
+    return {
+        'filename': stats.filename,
+        'worker_name': stats.worker_name,
+        'cluster_name': stats.cluster_name or None,
+        'kind': kind,
+        'event_count': stats.event_count,
+        'event_counts': stats.event_counts,
+        'first_event_ts': stats.first_event_ts,
+        'last_event_ts': stats.last_event_ts,
+        'size_bytes': stats.size_bytes,
+    }
+
+
+def _file_entry(folder: str, name: str, info: os.stat_result, kind: str, meta: dict | None) -> dict[str, Any]:
+    return {
+        'path': f'{folder}/{name}',
+        'name': name,
+        'kind': kind,
+        'size_bytes': info.st_size,
+        'modified_at': format_epoch_ns(info.st_mtime_ns),
+        'meta': meta,
+    }
+
+
+def _regular_entries(folder: Path) -> list[tuple[str, os.stat_result]]:
+    """(name, lstat) of the plain files in ``folder``, sorted by name; no dot names, no links."""
+    try:
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return []
+    entries = []
+    for name in sorted(names):
+        if name.startswith('.'):
+            continue
+        try:
+            info = os.lstat(folder / name)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            entries.append((name, info))
+    return entries
+
+
+def _history_files(shared: Path, cluster: str) -> list[dict[str, Any]]:
+    """The sealed files and archives of one cluster folder; a sealed file's stats come from its meta file."""
+    folder = shared / HISTORY_FOLDER / cluster
+    relative = f'{HISTORY_FOLDER}/{cluster}'
+    files = []
+    for name, info in _regular_entries(folder):
+        if ARCHIVE_NAME_RE.fullmatch(name):
+            files.append(_file_entry(relative, name, info, 'archive', None))
+        elif name.endswith('.db'):
+            files.append(_file_entry(relative, name, info, 'sealed', read_meta(meta_path(str(folder / name)))))
+    return files
+
+
+def _cluster_folders(shared: Path) -> list[str]:
+    """Names of the cluster folders under ``history/``, sorted; no dot names, no links."""
+    history = shared / HISTORY_FOLDER
+    try:
+        names = os.listdir(history)
+    except FileNotFoundError:
+        return []
+    folders = []
+    for name in sorted(names):
+        if name.startswith('.'):
+            continue
+        try:
+            if stat.S_ISDIR(os.lstat(history / name).st_mode):
+                folders.append(name)
+        except FileNotFoundError:
+            continue
+    return folders
+
+
+def _history_answer(shared: Path) -> list[dict[str, Any]]:
+    folders: list[dict[str, Any]] = [
+        {
+            'folder': f'{HISTORY_FOLDER}/{cluster}',
+            'kind': 'history',
+            'cluster': cluster,
+            'files': _history_files(shared, cluster),
+        }
+        for cluster in _cluster_folders(shared)
+    ]
+    merged = shared / MERGED_FOLDER
+    if merged.is_dir() and not merged.is_symlink():
+        files = [
+            _file_entry(MERGED_FOLDER, name, info, 'merged', None)
+            for name, info in _regular_entries(merged)
+            if name.endswith('.db')
+        ]
+        folders.append({'folder': MERGED_FOLDER, 'kind': 'merged', 'cluster': None, 'files': files})
+    return folders
+
+
+def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats) -> dict[str, Any]:
+    """The ``/debug/databases`` answer: own files measured now, then the shared history. Blocking."""
+    if not recorder.storage_dir:
+        return {'own': [], 'history': {'folders': []}}
+    live = os.path.normpath(recorder.db_path) if recorder.db_path else ''
+    own = [
+        _own_db_row(stats, 'live' if stats.path == live else 'backlog')
+        for stats in own_stats.measure(own_db_files(recorder.storage_dir, recorder.worker_name))
+    ]
+    return {'own': own, 'history': {'folders': _history_answer(Path(recorder.shared_dir))}}
+
+
+def _all_archives(shared_dir: str) -> list[dict[str, Any]]:
+    """Archives of every cluster folder, newest window end first; none in memory-only mode. Blocking."""
+    shared = _db_root(shared_dir)
+    if shared is None:
+        return []
+    entries = []
+    for cluster in _cluster_folders(shared):
+        folder = f'{HISTORY_FOLDER}/{cluster}'
+        for archive in list_archives(str(shared / HISTORY_FOLDER / cluster)):
+            entries.append(
+                {
+                    'name': archive.name,
+                    'cluster': archive.cluster,
+                    'from_ts': archive.from_ts,
+                    'to_ts': archive.to_ts,
+                    'size_bytes': archive.size_bytes,
+                    'folder': folder,
+                    'path': f'{folder}/{archive.name}',
+                }
+            )
+    entries.sort(key=lambda entry: entry['to_ts'], reverse=True)
+    return entries
+
+
+def _merge_sources(root: Path, paths: list[str]) -> tuple[list[str], JSONResponse | None]:
+    """Check merge source paths; an error answer instead when one is not a database file we serve. Blocking."""
+    sources = []
+    for relative in paths:
+        full = _shared_file_path(root, relative)
+        if full is None or not relative.endswith('.db'):
+            return [], JSONResponse({'error': f'Invalid filename: {relative}'}, status_code=400)
+        if not full.is_file():
+            return [], JSONResponse({'error': f'File not found: {relative}'}, status_code=404)
+        sources.append(str(full))
+    return sources, None
+
+
+def _merge_into_shared(shared_dir: str, paths: list[str], output_name: str) -> MergeResult | JSONResponse:
+    """Check the sources, then merge them into ``<shared>/merged/<output_name>``. Blocking.
+
+    Answers with the error response when a source is refused. The output
+    folder is created owner-only when missing; a merge failure raises.
     """
-    if not DB_DOWNLOAD_NAME_RE.fullmatch(filename):
-        return None
-    return _contained_path(root, filename)
+    root = _db_root(shared_dir)
+    if root is None:
+        return JSONResponse({'error': 'No database directory configured'}, status_code=404)
+    sources, error = _merge_sources(root, paths)
+    if error is not None:
+        return error
+    folder = root / MERGED_FOLDER
+    folder.mkdir(mode=0o700, exist_ok=True)
+    return merge_databases_atomic(sources, str(folder / output_name))
 
 
 # ``/api/v1/debug/probe`` request body — module-scope per the FastAPI
@@ -199,66 +395,28 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     # --- Debug databases ---
 
+    # Statistics of this worker's own files, refreshed incrementally per
+    # request (sealed files carry theirs in meta files).
+    own_stats = OwnFileStats()
+
     @router.get('/api/v1/debug/databases', dependencies=[Depends(deps.require_auth)])
     async def api_debug_databases():
-        """List all debug database files in storage.dir with stats.
+        """This worker's own files with measured stats, then every shared history folder.
 
-        Backed by the ``.dbstats.db`` cache (see :mod:`drakkar.dbstats`):
-        the file LIST always comes from a live directory scan — externally
-        deleted files disappear on the next request — while statistics for
-        immutable rotated files come from the cache. At most
-        ``DBSTATS_INLINE_SCAN_LIMIT`` cold files are scanned
-        inline; the rest return ``stats_pending`` and fill in as the
-        recorder's warmer loop catches up. Contract v1.12 adds ``kind``,
-        ``live_for`` (the worker currently writing the file — the in-use
-        highlight), ``stats_pending``, and ``cache_entry_count``.
+        Offloaded: it lists folders on a possibly network-mounted
+        ``shared.dir`` and reads the own files with sqlite3 — /healthz and
+        /readyz live on this same loop.
         """
-        from drakkar.dbstats import DBSTATS_INLINE_SCAN_LIMIT, DbStatsCache, collect
-
-        # Offloaded: sync sqlite3 work. Even with the cache, a cold file
-        # or a live-DB delta scan does real reads — /healthz and /readyz
-        # live on this same loop.
-        cache = DbStatsCache(recorder.storage_dir)
-        rows = await asyncio.to_thread(
-            collect,
-            recorder.storage_dir,
-            cache,
-            inline_scan_limit=DBSTATS_INLINE_SCAN_LIMIT,
-        )
-        return JSONResponse(
-            [
-                {
-                    'filename': row.stats.filename,
-                    'path': row.stats.path,
-                    'worker_name': row.stats.worker_name,
-                    'cluster_name': row.stats.cluster_name,
-                    'event_count': row.stats.event_count,
-                    'event_counts': row.stats.event_counts,
-                    'first_event_ts': row.stats.first_event_ts,
-                    'last_event_ts': row.stats.last_event_ts,
-                    'has_events': row.stats.has_events,
-                    'has_config': row.stats.has_config,
-                    'has_state': row.stats.has_state,
-                    'size_bytes': row.stats.size_bytes,
-                    'kind': row.stats.kind,
-                    'live_for': row.live_for,
-                    'stats_pending': row.stats_pending,
-                    'cache_entry_count': row.stats.cache_entry_count,
-                }
-                for row in rows
-            ]
-        )
+        return JSONResponse(await asyncio.to_thread(_databases_answer, recorder, own_stats))
 
     @router.post('/api/v1/debug/merge', dependencies=[Depends(deps.require_auth)])
     async def api_debug_merge(request: Request):
         """Merge selected database files into one."""
 
-        from drakkar.merge import merge_databases_atomic
-
         # Policy gate, checked before the body is even read: merge is the
-        # one UI endpoint that writes to disk, and nothing reclaims what it
-        # writes. Independent of auth_token by design — see
-        # ``UIConfig.merge_enabled``.
+        # one UI endpoint that writes to disk (the archive pass deletes its
+        # results after ``history.merged_retention_days``). Independent of
+        # auth_token by design — see ``UIConfig.merge_enabled``.
         if not config.merge_enabled:
             return _disabled_response('merge', 'ui.merge_enabled')
 
@@ -274,29 +432,16 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if len(filenames) < 2:
             return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
 
-        # Memory-only recorder: no directory to read sources from, and —
-        # the part that mattered — none to write the output into either.
-        root = _db_root(recorder.storage_dir)
-        if root is None:
-            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
-
-        # resolve to full paths, validate they exist in storage.dir
-        db_paths = []
-        for fn in filenames:
-            full = _contained_db_path(root, fn)
-            if full is None:
-                return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
-            if not full.is_file():
-                return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
-            db_paths.append(str(full))
-
         ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
         # The random suffix keeps two merges in the same second apart.
         output_name = f'merged-{ts}-{secrets.token_hex(8)}.db'
-        output_path = str(root / output_name)
 
+        # Memory-only recorder: no folder to read sources from, and — the
+        # part that mattered — none to write the output into either. The
+        # whole check-and-merge runs in a thread: it resolves paths on the
+        # shared mount.
         try:
-            result = await asyncio.to_thread(merge_databases_atomic, db_paths, output_path)
+            result = await asyncio.to_thread(_merge_into_shared, recorder.shared_dir, filenames, output_name)
         except Exception as exc:
             await logger.awarning(
                 'merge_failed',
@@ -306,9 +451,12 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             )
             return JSONResponse({'error': f'Merge failed: {exc}'}, status_code=500)
 
+        if isinstance(result, JSONResponse):
+            return result
         return JSONResponse(
             {
                 'filename': output_name,
+                'path': f'{MERGED_FOLDER}/{output_name}',
                 'worker_count': result.worker_count,
                 'event_count': result.event_count,
                 'state_count': result.state_count,
@@ -321,8 +469,25 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     async def api_debug_trace(
         partition: int = Query(ge=0, le=_INT32_MAX),
         offset: int = Query(),
+        history: bool = Query(False),
     ):
-        """Trace a message across all workers in the same cluster."""
+        """Trace a message: this worker's own files, or with ``history`` its cluster's sealed files.
+
+        The history search reads only sealed files, so it runs in a thread
+        here and never touches the worker's main loop.
+        """
+        if history:
+            events = await asyncio.to_thread(
+                functools.partial(
+                    trace_history,
+                    recorder.history_dir,
+                    partition,
+                    offset,
+                    max_files=config.trace.history_max_files,
+                    max_seconds=config.trace.history_max_seconds,
+                )
+            )
+            return JSONResponse(events)
         events = await dispatch_to_loop(recorder.cross_trace(partition, offset), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
@@ -357,7 +522,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         key: str = Query(min_length=1),
         value: str = Query(min_length=1),
     ):
-        """Trace tasks by label value across all workers in the cluster."""
+        """Trace tasks by label value through this worker's live file."""
         events = await dispatch_to_loop(recorder.cross_trace_by_label(key, value), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
@@ -443,21 +608,21 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
         return JSONResponse(sorted(tasks.values(), key=lambda t: t['name']))
 
-    @router.get('/api/v1/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
-    async def debug_download(filename: str):
-        """Download a database file from storage.dir."""
-        root = _db_root(recorder.storage_dir)
-        if root is None:
-            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
-        full = _contained_db_path(root, filename)
+    @router.get('/api/v1/debug/download/{path:path}', dependencies=[Depends(deps.require_auth)])
+    async def debug_download(path: str):
+        """Download one sealed file, archive or merge result; ``path`` is relative to ``shared.dir``.
+
+        Every refusal — a path of another shape, an unsafe segment, a link
+        leading out of the folder, a missing file — answers 404.
+        """
+        full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
         if full is None:
-            return JSONResponse({'error': 'Invalid filename'}, status_code=400)
-        if not full.is_file():
             return JSONResponse({'error': 'File not found'}, status_code=404)
+        name = path.rsplit('/', 1)[-1]
         return FileResponse(
             path=str(full),
-            filename=filename,
-            media_type='application/x-sqlite3',
+            filename=name,
+            media_type='application/gzip' if ARCHIVE_NAME_RE.fullmatch(name) else 'application/x-sqlite3',
             # The download URL may carry ?token= (browsers can't set headers
             # on <a> navigations); no-store keeps token-bearing responses
             # out of shared proxy/CDN caches.
@@ -466,53 +631,12 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():
-        """List compressed archive files in storage.dir."""
-        from drakkar.recorder.archive import list_archives
+        """Compressed archives of every cluster history folder, newest first.
 
-        # Offloaded for the same reason as api_debug_databases above: this
-        # is one listdir + one stat per archive, cheap today, but the folder
-        # can be shared and unbounded, so it must never run inline on the loop
-        # that also serves /healthz and /readyz.
-        archives = await asyncio.to_thread(list_archives, recorder.storage_dir)
-        return JSONResponse(
-            {
-                'archives': [
-                    {
-                        'name': archive.name,
-                        'cluster': archive.cluster,
-                        'from_ts': archive.from_ts,
-                        'to_ts': archive.to_ts,
-                        'size_bytes': archive.size_bytes,
-                    }
-                    for archive in archives
-                ]
-            }
-        )
-
-    @router.get('/api/v1/debug/archives/{name}', dependencies=[Depends(deps.require_auth)])
-    async def debug_download_archive(name: str):
-        """Download one compressed archive file from storage.dir."""
-        from drakkar.recorder.archive import ARCHIVE_NAME_RE
-
-        # The naming pattern alone already rules out path separators and a
-        # leading dot, but the realpath check stays as defense-in-depth —
-        # same belt-and-braces shape as debug_download above.
-        if not ARCHIVE_NAME_RE.fullmatch(name):
-            return JSONResponse({'error': 'Invalid archive name'}, status_code=404)
-        root = _db_root(recorder.storage_dir)
-        if root is None:
-            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
-        # ARCHIVE_NAME_RE above is this route's name policy (archives are
-        # ``.db.gz``, not ``.db``), so only containment is left to check.
-        full = _contained_path(root, name)
-        if full is None or not full.is_file():
-            return JSONResponse({'error': 'File not found'}, status_code=404)
-        return FileResponse(
-            path=str(full),
-            filename=name,
-            media_type='application/gzip',
-            headers={'Cache-Control': 'no-store, private'},
-        )
+        Offloaded: one listdir per folder and one stat per archive, on a
+        shared folder that may be network-mounted and unbounded.
+        """
+        return JSONResponse({'archives': await asyncio.to_thread(_all_archives, recorder.shared_dir)})
 
     # Shared DebugRunner instance. The runner holds an ``asyncio.Lock``
     # that serializes overlapping probes; keeping a single instance per
