@@ -27,17 +27,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
-from drakkar.uiserver.server_helpers import backend_version, origin_allowed
+from drakkar.timefmt import format_rfc3339_micro
+from drakkar.uiserver.server_helpers import BACKEND_NAME, backend_version, origin_allowed
 
 if TYPE_CHECKING:
     from drakkar.config import UIDocsConfig, UITimelineConfig
+    from drakkar.fleet.service import PeerView
     from drakkar.uiserver.server import UIDeps
 
 # Idle backoff bounds for the WebSocket drain loop. The loop polls a
@@ -133,6 +135,33 @@ def _docs_wire(cfg: UIDocsConfig) -> dict[str, object] | None:
             entry['title'] = anchor.title
         anchors.append(entry)
     return {'title': cfg.title, 'anchors': anchors}
+
+
+# Card fields a peer row copies when the card has them; a card without one
+# (a static peer, an older release) leaves the key out of the row.
+_OPTIONAL_PEER_FIELDS = ('backend', 'version', 'state', 'started_at', 'instance')
+
+
+def peer_worker_row(view: PeerView) -> dict[str, Any]:
+    """One ``/api/v1/workers`` row for a registry peer."""
+    card = view.card
+    row: dict[str, Any] = {
+        'worker_name': card['worker'],
+        'cluster_name': card['cluster'] or None,
+        'cluster': card['cluster'],
+        # A card carries a URL, not an address: the browser needs nothing else.
+        'ip_address': None,
+        'debug_port': None,
+        'debug_url': card['url'],
+        'url': card['url'],
+        'is_current': False,
+        'last_seen_ts': view.last_seen_ts,
+        'online': view.online,
+    }
+    for key in _OPTIONAL_PEER_FIELDS:
+        if key in card:
+            row[key] = card[key]
+    return row
 
 
 def _link_bases_wire(cfg: UIDocsConfig, link_bases: dict[str, str]) -> dict[str, str]:
@@ -394,7 +423,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'worker_id': drakkar_app._worker_id,
             'cluster': drakkar_app._cluster_name or None,
             'config_summary': drakkar_app.config_summary,
-            'backend': 'python',
+            'backend': BACKEND_NAME,
             'backend_version': backend_version(),
             'ui_version': deps.ui_version,
             'ui_source': deps.ui_source,
@@ -503,57 +532,43 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             }
         )
 
-    # --- Workers autodiscovery API ---
+    # --- Workers list API (registry snapshot) ---
 
-    @router.get('/api/v1/workers')
-    async def api_workers():
-        """Discover live workers sharing the same storage.dir, including self.
-
-        Each worker gets a ``url`` field (debug_url if set, else http://ip:port),
-        a ``cluster`` field from the stored cluster_name (falls back to
-        auto-derived group from worker name), and ``is_current`` for self.
-        Discovered peers carry ``last_seen_ts``/``online`` liveness fields
-        from the recorder; the current worker is always online (it is
-        answering this request) with ``last_seen_ts`` = now.
-
-        Workers are sorted: clustered first (by cluster then name),
-        unclustered at the end (sorted by name).
-        """
-        # ``discover_workers`` only opens transient aiosqlite connections
-        # against peer live-DB symlinks — it never touches ``recorder._db``
-        # or any primitive bound to the main loop. No dispatch needed;
-        # the connections created inside the coroutine are bound to
-        # whichever loop invokes it, which is fine for a one-shot read.
-        workers = await recorder.discover_workers(drakkar_app.config.fleet.registry.offline_after_seconds)
-
-        # add the current worker to the list
-        current_entry = {
-            'worker_name': drakkar_app._worker_id,
-            'cluster_name': drakkar_app._cluster_name or None,
+    def _current_worker_row() -> dict[str, Any]:
+        identity = drakkar_app.worker_identity
+        return {
+            'worker_name': identity.worker,
+            'cluster_name': identity.cluster or None,
+            'cluster': identity.cluster,
             'ip_address': None,
             'debug_port': config.port,
             'debug_url': config.public_url or None,
-            # The current worker is serving this very response, so it is
-            # online by definition — no heartbeat lookup needed.
+            'url': identity.url,
+            'is_current': True,
+            # Serving this very response, so online by definition.
             'last_seen_ts': time.time(),
             'online': True,
+            'backend': identity.backend,
+            'version': identity.version,
+            'state': drakkar_app.lifecycle_state,
+            'started_at': format_rfc3339_micro(identity.started_at),
+            'instance': identity.instance,
         }
-        workers.append(current_entry)
 
-        for w in workers:
-            w['url'] = w.get('debug_url') or f'http://{w.get("ip_address", "127.0.0.1")}:{w.get("debug_port", 8080)}/'
-            w['cluster'] = w.get('cluster_name') or ''
-            w['is_current'] = w.get('worker_name') == drakkar_app._worker_id
+    @router.get('/api/v1/workers')
+    async def api_workers():
+        """This worker plus the peers of the last registry snapshot.
 
-        # sort: clustered workers first (by cluster name, then worker name),
-        # unclustered at the end sorted by worker name
-        workers.sort(
-            key=lambda w: (
-                0 if w['cluster'] else 1,
-                w['cluster'],
-                w.get('worker_name', ''),
-            )
-        )
+        Answered from memory: the registry service refreshes the snapshot in
+        the background, so this route does no storage I/O. Without a
+        registry (UI off, provider ``none``, no card folder) only this
+        worker is listed. Sorted clustered first (by cluster, then name),
+        unclustered last (by name).
+        """
+        fleet = drakkar_app.fleet
+        workers = [peer_worker_row(view) for view in fleet.peer_views()] if fleet is not None else []
+        workers.append(_current_worker_row())
+        workers.sort(key=lambda w: (0 if w['cluster'] else 1, w['cluster'], w['worker_name']))
         return JSONResponse(workers)
 
     # --- WebSocket endpoint for live event streaming ---

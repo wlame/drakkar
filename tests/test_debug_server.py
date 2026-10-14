@@ -17,6 +17,8 @@ from starlette.testclient import TestClient
 
 from drakkar.annotations import Annotator
 from drakkar.config import DrakkarConfig, TimelineEventType, UITimelineConfig
+from drakkar.fleet.card import WorkerIdentity
+from drakkar.fleet.service import PeerView
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import archive_file_name
@@ -29,6 +31,35 @@ from drakkar.uiserver.server import (
     worker_group,
 )
 from tests.conftest import make_ui_config
+
+TEST_IDENTITY = WorkerIdentity(
+    worker='test-worker',
+    instance='abcdef0123456789',
+    cluster='',
+    url='http://10.0.0.1:8080/',
+    backend='python',
+    version='9.9.9',
+    started_at=datetime(2026, 10, 14, 9, 0, tzinfo=UTC),
+)
+
+
+class StubFleet:
+    """The one registry call the workers route makes."""
+
+    def __init__(self, *views: PeerView) -> None:
+        self._views = list(views)
+
+    def peer_views(self) -> list[PeerView]:
+        return list(self._views)
+
+
+def peer_view(worker: str, *, cluster: str = '', age: float | None = 5.0, **card_fields) -> PeerView:
+    """A peer as the registry reports it; ``age=None`` is a peer of unknown liveness."""
+    card = {'schema': 1, 'worker': worker, 'cluster': cluster, 'url': f'http://{worker}.fleet:8080/', **card_fields}
+    if age is None:
+        return PeerView(card=card, age_seconds=None, online=None, last_seen_ts=None)
+    return PeerView(card=card, age_seconds=age, online=age <= 30, last_seen_ts=1_760_000_000.0 - age)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -122,6 +153,9 @@ def mock_app():
     app = MagicMock()
     app._worker_id = 'test-worker'
     app._cluster_name = ''
+    app.fleet = None
+    app.lifecycle_state = 'running'
+    app.worker_identity = TEST_IDENTITY
     app._start_time = time.monotonic() - 120
     app.processors = {}
     app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
@@ -555,8 +589,7 @@ class TestApiDebugProcessors:
 
 
 class TestApiWorkers:
-    async def test_returns_200_with_current_worker(self, client, mock_recorder):
-        mock_recorder.discover_workers.return_value = []
+    async def test_returns_200_with_current_worker(self, client):
         resp = await client.get('/api/v1/workers')
         assert resp.status_code == 200
         data = resp.json()
@@ -565,16 +598,11 @@ class TestApiWorkers:
         assert data[0]['worker_name'] == 'test-worker'
         assert data[0]['is_current'] is True
 
-    async def test_includes_discovered_workers(self, client, mock_recorder):
-        mock_recorder.discover_workers.return_value = [
-            {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
-        ]
+    async def test_includes_registry_peers(self, client, mock_app):
+        mock_app.fleet = StubFleet(peer_view('worker-2'))
         resp = await client.get('/api/v1/workers')
-        data = resp.json()
-        assert len(data) == 2
-        names = [w['worker_name'] for w in data]
-        assert 'test-worker' in names
-        assert 'worker-2' in names
+        names = [w['worker_name'] for w in resp.json()]
+        assert sorted(names) == ['test-worker', 'worker-2']
 
 
 # ---------------------------------------------------------------------------
@@ -1635,122 +1663,126 @@ def test_hook_flags_detects_overrides():
 # --- Sinks page and API ---
 
 
-# --- Workers autodiscovery API ---
+# --- Workers list API (registry snapshot) ---
 
 
-async def test_api_workers_includes_current(client, mock_recorder):
-    """Current worker is always included in the list with is_current=True."""
-    mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
-    ]
-    resp = await client.get('/api/v1/workers')
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 2
-    current = [w for w in data if w['is_current']]
-    assert len(current) == 1
-    assert current[0]['worker_name'] == 'test-worker'
-
-
-async def test_api_workers_only_self_when_no_others(client, mock_recorder):
-    """Even with no discovered workers, current worker appears."""
-    mock_recorder.discover_workers.return_value = []
-    resp = await client.get('/api/v1/workers')
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 1
-    assert data[0]['worker_name'] == 'test-worker'
-    assert data[0]['is_current'] is True
-
-
-async def test_api_workers_uses_debug_url(client, mock_recorder):
-    """When debug_url is set, it is returned as the url field."""
-    mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'w-1', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'debug_url': 'http://localhost:8081/'},
-    ]
-    resp = await client.get('/api/v1/workers')
-    data = resp.json()
-    w1 = next(w for w in data if w['worker_name'] == 'w-1')
-    assert w1['url'] == 'http://localhost:8081/'
-
-
-async def test_api_workers_falls_back_to_ip_port(client, mock_recorder):
-    """When debug_url is not set, url falls back to http://ip:port/."""
-    mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'w-1', 'ip_address': '10.0.0.5', 'debug_port': 9090, 'debug_url': None},
-    ]
-    resp = await client.get('/api/v1/workers')
-    data = resp.json()
-    w1 = next(w for w in data if w['worker_name'] == 'w-1')
-    assert w1['url'] == 'http://10.0.0.5:9090/'
-
-
-async def test_api_workers_grouped_by_cluster(client, mock_recorder, mock_app):
-    """Workers are grouped by cluster_name, with clustered first."""
-    mock_app._cluster_name = 'alpha'
-    mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'w-3', 'ip_address': '10.0.0.3', 'debug_port': 8080, 'cluster_name': 'beta'},
-        {'worker_name': 'w-1', 'ip_address': '10.0.0.1', 'debug_port': 8080, 'cluster_name': 'alpha'},
-        {'worker_name': 'w-lone', 'ip_address': '10.0.0.9', 'debug_port': 8080, 'cluster_name': None},
-        {'worker_name': 'w-2', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'alpha'},
-    ]
-    resp = await client.get('/api/v1/workers')
-    data = resp.json()
-    names = [w['worker_name'] for w in data]
-    clusters = [w['cluster'] for w in data]
-    assert names == ['test-worker', 'w-1', 'w-2', 'w-3', 'w-lone']
-    assert clusters == ['alpha', 'alpha', 'alpha', 'beta', '']
-
-
-async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
-    """Workers without cluster_name appear at the end, sorted by name."""
-    mock_app._cluster_name = ''
-    mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'z-worker', 'ip_address': '10.0.0.1', 'debug_port': 8080, 'cluster_name': None},
-        {'worker_name': 'a-worker', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'prod'},
-    ]
-    resp = await client.get('/api/v1/workers')
-    data = resp.json()
-    names = [w['worker_name'] for w in data]
-    assert names == ['a-worker', 'test-worker', 'z-worker']
-
-
-async def test_api_workers_current_worker_always_online(client, mock_recorder):
-    """The current worker reports online=True with last_seen_ts = now."""
-    mock_recorder.discover_workers.return_value = []
+async def test_api_workers_current_worker_row_has_every_contract_field(client):
     before = time.time()
     resp = await client.get('/api/v1/workers')
     after = time.time()
-    me = resp.json()[0]
-    assert me['is_current'] is True
-    assert me['online'] is True
-    assert before <= me['last_seen_ts'] <= after
+
+    (me,) = resp.json()
+    assert before <= me.pop('last_seen_ts') <= after
+    assert me == {
+        'worker_name': 'test-worker',
+        'cluster_name': None,
+        'cluster': '',
+        'ip_address': None,
+        'debug_port': 8080,
+        'debug_url': None,
+        'url': 'http://10.0.0.1:8080/',
+        'is_current': True,
+        'online': True,
+        'backend': 'python',
+        'version': '9.9.9',
+        'state': 'running',
+        'started_at': '2026-10-14T09:00:00.000000Z',
+        'instance': 'abcdef0123456789',
+    }
 
 
-async def test_api_workers_passes_through_peer_liveness_fields(client, mock_recorder):
-    """Peer last_seen_ts/online from discover_workers reach the response unchanged."""
-    mock_recorder.discover_workers.return_value = [
-        {
-            'worker_name': 'w-crashed',
-            'ip_address': '10.0.0.2',
-            'debug_port': 8080,
-            'last_seen_ts': None,
-            'online': False,
-        },
-        {
-            'worker_name': 'w-alive',
-            'ip_address': '10.0.0.3',
-            'debug_port': 8080,
-            'last_seen_ts': 1234.5,
-            'online': True,
-        },
-    ]
+async def test_api_workers_current_worker_debug_url_is_the_public_url(debug_config, mock_recorder, mock_app):
+    debug_config.public_url = 'https://worker-1.example.internal/'
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+    async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
+        (me,) = (await c.get('/api/v1/workers')).json()
+
+    assert me['debug_url'] == 'https://worker-1.example.internal/'
+
+
+async def test_api_workers_peer_row_comes_from_the_card(client, mock_app):
+    mock_app.fleet = StubFleet(
+        peer_view(
+            'w-2',
+            cluster='search',
+            age=4.0,
+            backend='python',
+            version='2.4.0',
+            state='draining',
+            started_at='2026-10-13T09:12:01.123456Z',
+            instance='9c41e0b27fd34a1e',
+            heartbeat_at='2026-10-13T09:40:11.000210Z',
+            features={'cache': {}},
+        )
+    )
+
     resp = await client.get('/api/v1/workers')
-    data = {w['worker_name']: w for w in resp.json()}
-    assert data['w-crashed']['online'] is False
-    assert data['w-crashed']['last_seen_ts'] is None
-    assert data['w-alive']['online'] is True
-    assert data['w-alive']['last_seen_ts'] == 1234.5
+
+    peer = next(w for w in resp.json() if w['worker_name'] == 'w-2')
+    assert peer == {
+        'worker_name': 'w-2',
+        'cluster_name': 'search',
+        'cluster': 'search',
+        'ip_address': None,
+        'debug_port': None,
+        'debug_url': 'http://w-2.fleet:8080/',
+        'url': 'http://w-2.fleet:8080/',
+        'is_current': False,
+        'last_seen_ts': 1_760_000_000.0 - 4.0,
+        'online': True,
+        'backend': 'python',
+        'version': '2.4.0',
+        'state': 'draining',
+        'started_at': '2026-10-13T09:12:01.123456Z',
+        'instance': '9c41e0b27fd34a1e',
+    }
+
+
+async def test_api_workers_peer_without_optional_fields_omits_them(client, mock_app):
+    """A static peer card holds only the required fields; its liveness is unknown, not offline."""
+    mock_app.fleet = StubFleet(peer_view('w-static', age=None))
+
+    resp = await client.get('/api/v1/workers')
+
+    peer = next(w for w in resp.json() if w['worker_name'] == 'w-static')
+    assert peer['online'] is None
+    assert peer['last_seen_ts'] is None
+    assert peer['cluster_name'] is None
+    for absent in ('backend', 'version', 'state', 'started_at', 'instance'):
+        assert absent not in peer
+
+
+async def test_api_workers_offline_peer(client, mock_app):
+    mock_app.fleet = StubFleet(peer_view('w-gone', age=95.0))
+
+    resp = await client.get('/api/v1/workers')
+
+    peer = next(w for w in resp.json() if w['worker_name'] == 'w-gone')
+    assert peer['online'] is False
+    assert peer['last_seen_ts'] == 1_760_000_000.0 - 95.0
+
+
+async def test_api_workers_grouped_by_cluster(client, mock_app):
+    """Workers are grouped by cluster, clustered first."""
+    mock_app._cluster_name = 'alpha'
+    mock_app.worker_identity = WorkerIdentity(**{**TEST_IDENTITY.__dict__, 'cluster': 'alpha'})
+    mock_app.fleet = StubFleet(
+        peer_view('w-3', cluster='beta'),
+        peer_view('w-1', cluster='alpha'),
+        peer_view('w-lone'),
+        peer_view('w-2', cluster='alpha'),
+    )
+    resp = await client.get('/api/v1/workers')
+    data = resp.json()
+    assert [w['worker_name'] for w in data] == ['test-worker', 'w-1', 'w-2', 'w-3', 'w-lone']
+    assert [w['cluster'] for w in data] == ['alpha', 'alpha', 'alpha', 'beta', '']
+
+
+async def test_api_workers_unclustered_at_end(client, mock_app):
+    """Workers without a cluster appear at the end, sorted by name."""
+    mock_app.fleet = StubFleet(peer_view('z-worker'), peer_view('a-worker', cluster='prod'))
+    resp = await client.get('/api/v1/workers')
+    assert [w['worker_name'] for w in resp.json()] == ['a-worker', 'test-worker', 'z-worker']
 
 
 # --- Debug databases page and API ---

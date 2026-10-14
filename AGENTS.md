@@ -36,6 +36,9 @@ breaking change, never a refactor:
   order they were given
 - the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads
   recorder and cache files written by other workers sharing its `storage.dir`
+- the worker registry card (schema 1, `tests/fixtures/fleet_card.json`) and
+  the filesystem provider layout (`<dir>/workers/<sanitized worker>.json`,
+  temp file plus rename) — workers of other releases read these cards
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 
@@ -146,6 +149,7 @@ drakkar/
   sinks/                   sink implementations + DLQ + circuit breaker
   sources/                 input-source protocol, registry, handler validation
   cache/                   LWW SQLite cache + peer sync
+  fleet/                   worker registry: cards, providers, plugin lookup, test kit, service
   recorder/                flight recorder (SQLite event log)
   uiserver/                UI server: routes + message probe runner
   webapp/                  synchronous HTTP ingress pipeline

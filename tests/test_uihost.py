@@ -456,7 +456,6 @@ def mock_recorder():
     rec.get_stats.return_value = {'total_events': 0}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []
-    rec.discover_workers.side_effect = lambda: []
     return rec
 
 

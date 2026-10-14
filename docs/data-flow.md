@@ -40,8 +40,9 @@ After `on_startup`, the framework builds all components in this order:
    - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
    - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `ui.recorder.state_sync_interval_seconds` (default: `10`) seconds.
    - Starts the recorder (creates/opens the SQLite database, starts flush/retention/state-sync background tasks).
-   - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), enabling autodiscovery by other workers in the same cluster.
+   - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
    - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
+   - Starts the [fleet registry](fleet.md) service (when `ui.enabled` and a provider other than `none`): it publishes this worker's card with state `starting` and reads the peer cards in the background. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
 
 5. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry

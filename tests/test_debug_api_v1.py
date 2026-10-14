@@ -47,9 +47,6 @@ def mock_recorder():
     rec.get_stats.return_value = {'total_events': 3, 'consumed': 2, 'completed': 1}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []
-    # fresh list per call: the /api/workers handler appends the current
-    # worker to whatever discover_workers returns
-    rec.discover_workers.side_effect = lambda: []
     rec.cross_trace.return_value = []
     rec.cross_trace_by_label.return_value = []
     return rec

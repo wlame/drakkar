@@ -13,9 +13,11 @@ a back-reference. See :mod:`drakkar.lifecycle` for the rationale.
 
 import asyncio
 import os
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast, get_origin
 
@@ -30,6 +32,8 @@ from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinksConfig, load_
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
+from drakkar.fleet.card import WorkerIdentity
+from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
@@ -38,6 +42,7 @@ from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDel
 from drakkar.partition import PartitionProcessor
 from drakkar.probe import build_layout, referenced_bases
 from drakkar.recorder import EventRecorder
+from drakkar.recorder.helpers import detect_worker_ip
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
@@ -290,6 +295,19 @@ class DrakkarApp:
         if not self._cluster_name:
             self._cluster_name = self._config.cluster_name
         self._start_time = time.monotonic()
+        # Identity of this process in the worker registry: a new random
+        # instance at every start, so two processes that share a worker name
+        # (or a restart) are told apart.
+        self._instance = secrets.token_hex(8)
+        self._started_at = datetime.now(UTC)
+        # starting -> running (sources started) -> draining (shutdown began);
+        # published in the registry card and shown in the workers list.
+        self._lifecycle_state = 'starting'
+        # Registry service, started by the lifecycle after the UI server
+        # listens; None while the registry is off (UI off, provider none, or
+        # no folder for the filesystem provider).
+        self._fleet: FleetRegistry | None = None
+        self._ui_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
         # The manager reads the ``sinks:`` section through a callable rather
@@ -457,6 +475,44 @@ class DrakkarApp:
     @property
     def recorder(self) -> EventRecorder | None:
         return self._recorder
+
+    @property
+    def fleet(self) -> FleetRegistry | None:
+        """The worker registry service, or None while the registry is off."""
+        return self._fleet
+
+    @property
+    def lifecycle_state(self) -> str:
+        """``starting``, ``running`` or ``draining``."""
+        return self._lifecycle_state
+
+    @property
+    def ui_url(self) -> str:
+        """Where peers and browsers reach this worker's UI server.
+
+        ``ui.public_url`` when set, else ``http://<outbound ip>:<ui.port>/``.
+        Detected once and kept: the outbound address does not change while
+        the process runs.
+        """
+        if self._ui_url is None:
+            ui = self._config.ui
+            self._ui_url = ui.public_url or f'http://{detect_worker_ip()}:{ui.port}/'
+        return self._ui_url
+
+    @property
+    def worker_identity(self) -> WorkerIdentity:
+        """The fields of this worker's registry card that do not change while it runs."""
+        from drakkar.uiserver.server_helpers import BACKEND_NAME, backend_version
+
+        return WorkerIdentity(
+            worker=self._worker_id,
+            instance=self._instance,
+            cluster=self._cluster_name,
+            url=self.ui_url,
+            backend=BACKEND_NAME,
+            version=backend_version(),
+            started_at=self._started_at,
+        )
 
     @property
     def sink_manager(self) -> SinkManager:

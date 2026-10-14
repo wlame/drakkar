@@ -8,22 +8,21 @@ The behaviors pinned down here:
 
 1. ``_sync_once`` calls ``discover_peer_dbs(db_dir, '-cache.db', self_id)``
    with the expected arguments — we spy on the helper to verify.
-2. For each peer, the engine resolves the peer's ``cluster_name`` from the
-   peer's ``-live.db`` ``worker_config`` row, cached in-process for 300s.
+2. For each peer, the engine asks the worker registry's lookup for the
+   peer's cluster.
 3. Peer in same cluster as self → query uses ``scope IN ('cluster','global')``.
 4. Peer in different cluster → query uses ``scope = 'global'`` only.
 5. Expired rows are excluded (``expires_at_ms IS NULL OR expires_at_ms > now``).
 6. ``LIMIT batch_size`` caps the pull.
-7. Peer without a ``worker_config`` table → skipped with a warn log, cluster
-   falls back to "unknown" (pull global-only).
+7. A peer the registry does not list, or no registry at all → cluster
+   unknown, pull global-only.
 8. ``fleet.cache_exchange.enabled=false`` at startup → ``_sync_once`` is a no-op (zero
    filesystem accesses, via a spy on ``discover_peer_dbs``).
 
 We use an on-disk ``tmp_path`` directory for peer DBs so we can exercise the
 real symlink discovery and aiosqlite read paths. Peer DBs are minimal: a
-``cache_entries`` table with our own schema and a ``-live.db`` recorder
-stand-in with just the ``worker_config`` row we need. This keeps the tests
-focused on the sync-pull contract without booting a full recorder.
+``cache_entries`` table with our own schema. The peer's cluster comes from
+``set_peer_cluster``, which stands in for the registry lookup.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides
+from tests.conftest import set_peer_cluster, split_cache_overrides
 
 # --- helpers ----------------------------------------------------------------
 
@@ -126,37 +125,6 @@ async def _seed_peer_cache_db(
     return actual
 
 
-async def _seed_peer_live_db(tmp_path: Path, peer_name: str, cluster_name: str | None) -> Path:
-    """Create a peer ``-live.db.actual`` with a single ``worker_config`` row.
-
-    When ``cluster_name`` is ``None``, the DB is created without a
-    ``worker_config`` table at all — used to test the "peer missing
-    worker_config" fallback.
-    """
-    actual = tmp_path / f'{peer_name}-live.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        if cluster_name is not None:
-            await db.execute(
-                """CREATE TABLE worker_config (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    worker_name TEXT NOT NULL,
-                    cluster_name TEXT,
-                    created_at REAL NOT NULL,
-                    created_at_dt TEXT NOT NULL
-                )"""
-            )
-            await db.execute(
-                'INSERT INTO worker_config (id, worker_name, cluster_name, created_at, created_at_dt) '
-                'VALUES (1, ?, ?, 0, "")',
-                (peer_name, cluster_name or None),
-            )
-        await db.commit()
-    # Symlink too, matching the real recorder's rotation convention.
-    link = tmp_path / f'{peer_name}-live.db'
-    link.symlink_to(actual.name)
-    return actual
-
-
 # --- discovery arguments ----------------------------------------------------
 
 
@@ -192,7 +160,7 @@ async def test_sync_same_cluster_pulls_cluster_and_global(tmp_path):
     """
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -217,7 +185,7 @@ async def test_sync_different_cluster_pulls_global_only(tmp_path):
     rows — ``cluster``-scoped rows stay in their home cluster."""
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer2', cluster_name='staging')
+        set_peer_cluster(engine, 'peer2', 'staging')
         await _seed_peer_cache_db(
             tmp_path,
             'peer2',
@@ -246,7 +214,7 @@ async def test_sync_excludes_expired_rows(tmp_path):
     """
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -284,7 +252,7 @@ async def test_sync_respects_batch_size_limit(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Stage 10 global rows — only 3 should come back.
         rows = [
             {
@@ -303,19 +271,15 @@ async def test_sync_respects_batch_size_limit(tmp_path):
         await engine.stop()
 
 
-# --- peer with missing worker_config table ----------------------------------
+# --- peer missing from the registry ---
 
 
-async def test_sync_peer_without_worker_config_is_skipped_with_warn(tmp_path, caplog):
-    """Peer whose ``-live.db`` is missing ``worker_config`` table should
-    be handled gracefully — ``_resolve_peer_cluster`` returns ``None``
-    and the engine pulls ``scope='global'`` only (conservative fallback).
-    A warning is logged.
-    """
+async def test_sync_peer_the_registry_does_not_list_pulls_global_only(tmp_path):
+    """A peer missing from the registry snapshot has an unknown cluster, so
+    the engine pulls only its ``global`` rows (conservative fallback)."""
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        # Peer has a -live.db but no worker_config table inside.
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name=None)
+        set_peer_cluster(engine, 'peer1', None)
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -327,8 +291,26 @@ async def test_sync_peer_without_worker_config_is_skipped_with_warn(tmp_path, ca
 
         pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        # Conservative fallback — only global-scoped rows pulled when
-        # cluster membership is unknown.
+        assert {row[0] for row in pulled['peer1']} == {'k_global'}
+    finally:
+        await engine.stop()
+
+
+async def test_sync_without_a_registry_pulls_global_only(tmp_path):
+    """No registry (UI off, provider none): every peer's cluster is unknown."""
+    engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
+    try:
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [
+                {'key': 'k_cluster', 'scope': CacheScope.CLUSTER.value},
+                {'key': 'k_global', 'scope': CacheScope.GLOBAL.value},
+            ],
+        )
+
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
         assert {row[0] for row in pulled['peer1']} == {'k_global'}
     finally:
         await engine.stop()
@@ -365,29 +347,7 @@ async def test_sync_disabled_is_no_op(tmp_path, monkeypatch):
         await engine.stop()
 
 
-# --- cluster cache behavior -------------------------------------------------
-
-
-async def test_peer_cluster_lookup_is_cached(tmp_path):
-    """The in-process cluster-name cache should serve repeat calls without
-    re-opening the peer's ``-live.db``.
-    """
-    engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
-    try:
-        live_db = await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
-
-        # First call populates the cache.
-        cluster1 = await engine._resolve_peer_cluster('peer1', str(tmp_path))  # type: ignore[reportPrivateUsage]
-        assert cluster1 == 'prod'
-
-        # Remove the peer's live DB — cached value should still serve.
-        live_db.unlink()
-        (tmp_path / 'peer1-live.db').unlink()
-
-        cluster2 = await engine._resolve_peer_cluster('peer1', str(tmp_path))  # type: ignore[reportPrivateUsage]
-        assert cluster2 == 'prod'
-    finally:
-        await engine.stop()
+# --- cluster lookup ---
 
 
 async def test_peer_cluster_empty_string_means_no_cluster(tmp_path):
@@ -398,7 +358,7 @@ async def test_peer_cluster_empty_string_means_no_cluster(tmp_path):
     """
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='')
+        set_peer_cluster(engine, 'peer1', '')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',

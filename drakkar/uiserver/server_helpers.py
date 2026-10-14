@@ -245,6 +245,11 @@ def worker_group(name: str) -> str:
     return re.sub(r'[-_]?\d+$', '', name) or name
 
 
+# The implementation that runs this worker, as /api/v1/identity and the
+# registry card report it.
+BACKEND_NAME = 'python'
+
+
 def backend_version() -> str:
     """The running backend's version string for the identity endpoint.
 

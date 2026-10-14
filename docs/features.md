@@ -24,7 +24,8 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Recorder archiving | `history.archive.enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
-| Cross-worker fleet view | shared `storage.dir` | — | Worker autodiscovery, workers list, cross-tracing |
+| Worker registry | `fleet.registry.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, peer clusters for the cache exchange; needs `ui.enabled` |
+| Cross-worker fleet view | shared `storage.dir` | — | Cross-tracing, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
@@ -73,24 +74,26 @@ the failure mode so you can decide what your deployment needs.
    bundle. For an air-gapped deployment, stage one with
    `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
    internal mirror.
-5. **Fleet features need a SHARED `storage.dir` + `store_config`.** Worker
-   autodiscovery, the workers list, cross-worker links, and cross-worker
-   tracing all work by scanning one shared directory for other workers'
-   DB files (see [Local Databases](local-databases.md)). Every worker
-   must mount it at the **same path**, and `ui.recorder.store_config`
-   must stay `true` (default) — a worker without its `worker_config`
-   row is invisible to peers. Unshared directories are silent: each
-   worker simply sees only itself. Set `ui.public_url` per worker so
-   cross-links use a reachable address instead of the bind IP.
+5. **The workers list needs the registry; cross-tracing needs a SHARED
+   `storage.dir`.** Workers find each other through the
+   [fleet registry](fleet.md), which needs `ui.enabled` and, for the
+   default `filesystem` provider, a card folder all workers see
+   (`shared.dir`, else `storage.dir`). Cross-worker tracing still scans
+   one shared directory for other workers' DB files (see
+   [Local Databases](local-databases.md)); every worker must mount it at
+   the **same path**. Unshared folders are silent: each worker simply sees
+   only itself. Set `ui.public_url` per worker so the card and
+   cross-links carry a reachable address instead of the bind IP.
 6. **The cache engine needs `storage.dir` too.** The cache file lives
    there; with `storage.dir` empty the cache runs memory-only (WARN
    `cache_engine_disabled_no_storage_dir`) and the cache exchange turns
    itself off.
-7. **Cache exchange needs peers' `store_config`.** A worker resolves
-   each peer's cluster from that peer's `worker_config` row; a peer with
-   `ui.recorder.store_config: false` counts as an unknown cluster, so only
-   its `global` rows are pulled. Real cross-worker exchange additionally
-   needs the shared directory from rule 5.
+7. **Cache exchange takes clusters from the registry.** A worker learns
+   each peer's cluster from the [fleet registry](fleet.md); a peer the
+   registry does not list (or every peer, with the registry off) counts as
+   an unknown cluster, so only its `global` rows are pulled. Real
+   cross-worker exchange additionally needs the shared directory from
+   rule 5.
 8. **The webapp needs handler support — checked at construction.** A
    worker with `sources.http.enabled` and a handler that lacks the HTTP
    hooks (`arrange_http_request` + `on_http_request_complete` plus the
@@ -223,9 +226,9 @@ config and the worker serves HTTP only.
   port.
 - More than one worker? → shared `storage.dir`, same mount path everywhere
   (rule 5), `ui.public_url` set per worker.
-- Cache not syncing? → check the peers' `store_config` (rule 7), the shared
-  directory (rule 6), and that both workers are in the same cluster for
-  `cluster`-scoped keys.
+- Cache not syncing? → check that the peers appear in the workers list
+  (rule 7), the shared directory (rule 6), and that both workers are in
+  the same cluster for `cluster`-scoped keys.
 - Webapp 500s at the first request? → it can't: the worker rejects a
   hook-less handler at startup (rule 8).
 - Worker will not start with `no input source enabled`? → turn on

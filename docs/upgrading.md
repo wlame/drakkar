@@ -98,7 +98,8 @@ These keys are new. Their defaults work for most deployments.
 | `ui.trace.history_max_files` | `256` | Most history files one trace request reads. |
 | `ui.trace.history_max_seconds` | `10` | Time limit for one trace request over history. |
 
-See [Configuration](configuration.md) for every field.
+See [Configuration](configuration.md) for every field, and
+[Fleet registry](fleet.md) for how workers find each other.
 
 ## 6. Kubernetes example
 

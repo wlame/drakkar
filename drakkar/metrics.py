@@ -620,6 +620,39 @@ cache_bytes_in_db = Gauge(
 )
 
 
+# --- Fleet registry ---
+# One provider call is one publish, list or withdraw. Every call runs under
+# fleet.registry.timeout_seconds; a timeout counts as an error. The snapshot
+# age grows while refreshes fail, so an alert can tell a stale workers list
+# from an empty one.
+FLEET_REGISTRY_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+
+fleet_peers = Gauge(
+    'drakkar_fleet_peers',
+    'Peers in the last registry snapshot by liveness state (this worker not counted).',
+    ['state'],
+)
+fleet_registry_errors = Counter(
+    'drakkar_fleet_registry_errors_total',
+    'Registry provider calls that failed or timed out.',
+    ['op'],
+)
+fleet_registry_duration = Histogram(
+    'drakkar_fleet_registry_duration_seconds',
+    'Duration of registry provider calls in seconds.',
+    ['op'],
+    buckets=FLEET_REGISTRY_DURATION_BUCKETS,
+)
+fleet_registry_snapshot_age = Gauge(
+    'drakkar_fleet_registry_snapshot_age_seconds',
+    'Seconds since the last successful registry refresh; 0 right after one.',
+)
+fleet_duplicate_worker_name = Counter(
+    'drakkar_fleet_duplicate_worker_name_total',
+    "Other live instances seen publishing this worker's name.",
+)
+
+
 def cache_gauge_snapshot() -> dict[str, int]:
     """Return the current integer values of all four cache gauges.
 

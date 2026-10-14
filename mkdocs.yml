@@ -83,6 +83,7 @@ nav:
   - Offload (CPU-bound hook work off the loop): offload.md
   - Threads & Pools (which mechanism for which work): threads.md
   - Local Databases: local-databases.md
+  - Fleet Registry (how workers find each other): fleet.md
   - Performance: performance.md
   - Deployment: deployment.md
   - Config Calculator: calculator.md

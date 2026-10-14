@@ -6,8 +6,7 @@ The implementation has been split across four sibling modules:
   ``Op``, ``DirtyOp``, ``_now_ms``.
 - :mod:`drakkar.cache.memory`  — ``Cache`` and ``NoOpCache`` (handler-facing
   in-memory layer + DB fallback for ``get``).
-- :mod:`drakkar.cache.sql`     — ``SCHEMA_CACHE_ENTRIES``, ``LWW_UPSERT_SQL``,
-  ``PEER_CLUSTER_CACHE_TTL_SECONDS``.
+- :mod:`drakkar.cache.sql`     — ``SCHEMA_CACHE_ENTRIES``, ``LWW_UPSERT_SQL``.
 - :mod:`drakkar.cache.engine`  — ``CacheEngine`` (SQLite write-behind, cleanup
   loop, peer-sync).
 
@@ -42,7 +41,6 @@ from drakkar.cache.models import (
 from drakkar.cache.protocol import CacheLike
 from drakkar.cache.sql import (
     LWW_UPSERT_SQL,
-    PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
 )
 
@@ -56,7 +54,6 @@ logger = structlog.get_logger()
 
 __all__ = [
     'LWW_UPSERT_SQL',
-    'PEER_CLUSTER_CACHE_TTL_SECONDS',
     'SCHEMA_CACHE_ENTRIES',
     'Cache',
     'CacheEngine',

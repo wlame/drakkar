@@ -12,12 +12,10 @@ without breaking lookups. We resolve through `os.path.realpath` once per
 call so we open the actual file (aiosqlite URI connections with relative
 paths or symlinks that later break are painful to debug).
 
-Callers:
-
-- `EventRecorder.discover_workers()` uses suffix `'-live.db'` and then
-  reads the `worker_config` table from each resolved target.
-- `CacheEngine._sync_once()` uses suffix `'-cache.db'` and pulls rows
-  from each peer's `cache_entries` table with a scope-aware filter.
+Caller: `CacheEngine._sync_once()` uses suffix `'-cache.db'` and pulls
+rows from each peer's `cache_entries` table with a scope-aware filter. The
+workers list comes from the worker registry (`drakkar.fleet`), not from
+these links.
 """
 
 from __future__ import annotations

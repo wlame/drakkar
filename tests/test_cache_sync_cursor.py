@@ -37,8 +37,8 @@ remaining concerns that make peer sync a durable, steady-state system:
 
 All tests use the same ``tmp_path`` + ``aiosqlite`` on-disk pattern as
 the other sync test files for filesystem/DB realism, plus the
-``_seed_peer_cache_db`` / ``_seed_peer_live_db`` helpers from those files
-(duplicated here to keep each file self-contained).
+``_seed_peer_cache_db`` helper from those files (duplicated here to keep
+each file self-contained); ``set_peer_cluster`` stands in for the registry.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides
+from tests.conftest import set_peer_cluster, split_cache_overrides
 
 # --- helpers ---------------------------------------------------------------
 #
@@ -133,30 +133,6 @@ async def _seed_peer_cache_db(
     return actual
 
 
-async def _seed_peer_live_db(tmp_path: Path, peer_name: str, cluster_name: str) -> Path:
-    """Create a peer -live.db stand-in with a single worker_config row."""
-    actual = tmp_path / f'{peer_name}-live.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        await db.execute(
-            """CREATE TABLE worker_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                worker_name TEXT NOT NULL,
-                cluster_name TEXT,
-                created_at REAL NOT NULL,
-                created_at_dt TEXT NOT NULL
-            )"""
-        )
-        await db.execute(
-            'INSERT INTO worker_config (id, worker_name, cluster_name, created_at, created_at_dt) '
-            'VALUES (1, ?, ?, 0, "")',
-            (peer_name, cluster_name),
-        )
-        await db.commit()
-    link = tmp_path / f'{peer_name}-live.db'
-    link.symlink_to(actual.name)
-    return actual
-
-
 def _counter_value(counter, **labels) -> float:
     """Read a Prometheus Counter's value for a label set (0 if never incremented).
 
@@ -185,7 +161,7 @@ async def test_peer_cursor_starts_at_zero(tmp_path):
         # After a sync cycle against a peer, that peer's cursor has an
         # entry; we don't assert the exact value here (the dedicated
         # advancement tests cover that).
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -214,7 +190,7 @@ async def test_peer_cursor_advances_to_last_row_when_batch_full(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # 5 rows, batch_size=3 — first cycle pulls keys with the three
         # smallest ``updated_at_ms`` values (our pull is ORDER BY
         # updated_at_ms ASC LIMIT 3).
@@ -245,7 +221,7 @@ async def test_peer_cursor_picks_up_remaining_tail_on_next_cycle(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -301,7 +277,7 @@ async def test_full_batch_all_same_updated_at_ms_drains_remainder_same_cycle(tmp
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # 4 rows, batch_size=3, all at the SAME updated_at_ms. This is
         # the burst scenario: imagine four cache.set(...) calls that all
         # complete in the same millisecond on the peer.
@@ -355,7 +331,7 @@ async def test_full_batch_all_same_ms_with_large_tail_drains_multiple_pages(tmp_
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         same_ts = 5000
         # 10 rows, all at the same ms. Keys k00..k09 sort deterministically
         # for the drain's ``ORDER BY key ASC`` walk.
@@ -406,7 +382,7 @@ async def test_full_batch_same_ms_drain_handles_non_lex_insertion_order(tmp_path
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         same_ts = 1000
         # Insertion order deliberately scrambled relative to lex order.
         # This is the exact scenario the bug report described: 10 same-ms
@@ -457,7 +433,7 @@ async def test_full_batch_mixed_updated_at_ms_drain_no_tail_is_noop(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Full batch (3 rows) with all-distinct timestamps. The trailing
         # ms (1002) has exactly one row on the peer, so the drain's
         # ``updated_at_ms = 1002 AND key > 'k2'`` returns empty.
@@ -507,7 +483,7 @@ async def test_mixed_ms_full_batch_with_same_ms_tail_drains_remainder(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Deliberately seed k3..k7 all at ts=1002 to create the mixed-ms
         # batch with spillover at the trailing ms. k1@1000, k2@1001 are
         # the earlier-ms prefix of the main pull.
@@ -572,7 +548,7 @@ async def test_peer_cursor_advances_to_last_row_ts_when_partial_batch(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Only 2 rows, way below the batch_size=100 cap.
         await _seed_peer_cache_db(
             tmp_path,
@@ -607,7 +583,7 @@ async def test_peer_cursor_never_regresses_on_partial_batch(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Full batch: 3 rows with timestamps [1000, 1001, 1002].
         await _seed_peer_cache_db(
             tmp_path,
@@ -665,7 +641,7 @@ async def test_peer_cursor_tracks_future_skewed_peer_timestamps(tmp_path):
         # Peer timestamp: ~50 years in the future (well past any local now_ms).
         future_ts_base = 4_000_000_000_000  # ≈ year 2096
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -732,7 +708,7 @@ async def test_peer_cursor_unchanged_when_zero_rows_returned(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Seed exactly batch_size rows so the cursor sets to the last
         # row's timestamp (deterministic).
         await _seed_peer_cache_db(
@@ -769,7 +745,7 @@ async def test_peer_error_does_not_affect_other_peers(tmp_path):
     )
     try:
         # Good peer
-        await _seed_peer_live_db(tmp_path, 'good_peer', cluster_name='prod')
+        set_peer_cluster(engine, 'good_peer', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'good_peer',
@@ -782,7 +758,7 @@ async def test_peer_error_does_not_affect_other_peers(tmp_path):
         bad_actual.write_text('not a valid sqlite database', encoding='utf-8')
         bad_link = tmp_path / 'bad_peer-cache.db'
         bad_link.symlink_to(bad_actual.name)
-        await _seed_peer_live_db(tmp_path, 'bad_peer', cluster_name='prod')
+        set_peer_cluster(engine, 'bad_peer', 'prod')
 
         pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
@@ -812,7 +788,7 @@ async def test_peer_error_increments_sync_errors_counter(tmp_path):
         bad_actual.write_text('not a sqlite file', encoding='utf-8')
         bad_link = tmp_path / 'bad_peer-cache.db'
         bad_link.symlink_to(bad_actual.name)
-        await _seed_peer_live_db(tmp_path, 'bad_peer', cluster_name='prod')
+        set_peer_cluster(engine, 'bad_peer', 'prod')
 
         before = _counter_value(metrics.cache_sync_errors, peer='bad_peer')
 
@@ -831,7 +807,7 @@ async def test_peer_error_cursor_not_advanced(tmp_path):
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
         # First cycle: a healthy peer with rows advances the cursor.
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -842,7 +818,7 @@ async def test_peer_error_cursor_not_advanced(tmp_path):
         assert cursor_after_good > 0
 
         # Now corrupt the peer's cache DB file to force a pull failure
-        # on the next cycle. The peer's symlink / live.db are fine;
+        # on the next cycle. The peer's symlink is fine;
         # only the actual DB data becomes unreadable.
         peer_actual = tmp_path / 'peer1-cache.db.actual'
         peer_actual.write_text('garbage', encoding='utf-8')
@@ -893,7 +869,7 @@ async def test_delete_is_local_only_peer_copy_survives_and_is_repulled(tmp_path)
             await cur.close()
 
         # Step 2: peer has the same key with a much newer timestamp.
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -1050,7 +1026,7 @@ async def test_cursor_filters_already_seen_rows(tmp_path):
         cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -1099,7 +1075,7 @@ async def test_peer_error_variants_isolate_and_continue(tmp_path, err_kind):
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
         # Healthy peer
-        await _seed_peer_live_db(tmp_path, 'healthy', cluster_name='prod')
+        set_peer_cluster(engine, 'healthy', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'healthy',
@@ -1125,7 +1101,7 @@ async def test_peer_error_variants_isolate_and_continue(tmp_path, err_kind):
             # then make it unreadable by replacing with garbage content.
             bad_actual.write_text('garbage', encoding='utf-8')
 
-        await _seed_peer_live_db(tmp_path, 'bad', cluster_name='prod')
+        set_peer_cluster(engine, 'bad', 'prod')
 
         pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 

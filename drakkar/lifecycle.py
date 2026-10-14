@@ -36,7 +36,7 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -52,6 +52,9 @@ from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
+from drakkar.fleet.plugins import resolve_provider_factory
+from drakkar.fleet.providers import FleetRegistryFolderError, prepare_registry_folder
+from drakkar.fleet.service import FleetRegistry
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
 from drakkar.logging import close_logging
@@ -74,8 +77,28 @@ from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig
 
 logger = structlog.get_logger()
+
+
+def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
+    """The options mapping the configured registry provider's factory receives.
+
+    The built-ins take their settings from their own config sections; any
+    other name is a plugin and gets ``fleet.registry.plugin_options``.
+    """
+    registry = config.fleet.registry
+    builders = {
+        'filesystem': lambda: {
+            'dir': config.resolved_registry_dir,
+            'prune_after_seconds': registry.prune_after_seconds,
+        },
+        'static': lambda: {'peers': [peer.model_dump() for peer in registry.static.peers]},
+        'none': dict,
+    }
+    build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
+    return build()
 
 
 class AppLifecycle:
@@ -179,6 +202,7 @@ class AppLifecycle:
             await self._build_executor_pool()
             await self._start_observability()
             await self._start_ui_and_recorder()
+            await self._start_fleet()
             self._start_runtime_health()
             self._start_throughput()
             self._wire_annotator()
@@ -190,6 +214,7 @@ class AppLifecycle:
             self._bind_sources()
             await self._run_on_ready_and_periodics()
             await self._start_sources()
+            self._set_lifecycle_state('running')
 
             # Claim the watchdog slot for this run NOW — only once we're
             # committed to running. See ``_claim_watchdog_slot`` for the
@@ -462,6 +487,65 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
+    async def _start_fleet(self) -> None:
+        """Start the worker registry, or say once why it stays off.
+
+        Runs right after the UI server listens: peers reach this worker
+        through the URL its card publishes. The service starts its loops in
+        the background and returns at once; nothing later in startup, and
+        nothing in the pipeline, waits on a registry call.
+        """
+        app = self._app
+        config = app._config
+        registry = config.fleet.registry
+        log = logger.bind(worker_id=app._worker_id)
+        if registry.provider == 'none':
+            return
+        if not config.ui.enabled:
+            await log.awarning(
+                'fleet_registry_disabled_no_ui',
+                category='fleet',
+                provider=registry.provider,
+                hint='the registry needs ui.enabled: peers reach a worker through its UI server',
+            )
+            return
+        if registry.provider == 'filesystem' and not config.resolved_registry_dir:
+            await log.awarning(
+                'fleet_registry_disabled_no_dir',
+                category='fleet',
+                hint='set storage.dir, shared.dir or fleet.registry.filesystem.dir for the card folder',
+            )
+            return
+        if registry.provider == 'filesystem' and registry.filesystem.dir:
+            await self._prepare_explicit_registry_folder(registry.filesystem.dir, registry.timeout_seconds)
+        options = registry_provider_options(config)
+        provider = resolve_provider_factory(registry.provider)(options)
+        app._fleet = FleetRegistry(
+            provider,
+            provider_name=registry.provider,
+            config=registry,
+            identity=app.worker_identity,
+            provider_options=options,
+        )
+        await app._fleet.start()
+
+    async def _prepare_explicit_registry_folder(self, folder: str, timeout_seconds: float) -> None:
+        """Fail startup when a card folder the operator named cannot be created or written."""
+        try:
+            await asyncio.wait_for(asyncio.to_thread(prepare_registry_folder, folder), timeout=timeout_seconds)
+        except (OSError, TimeoutError) as exc:
+            reason = str(exc) or 'timed out'
+            raise FleetRegistryFolderError(
+                f"fleet.registry.filesystem.dir '{folder}' cannot be used: {reason}"
+            ) from exc
+
+    def _set_lifecycle_state(self, state: str) -> None:
+        """Record the worker's state and publish it in the registry card at once."""
+        app = self._app
+        app._lifecycle_state = state
+        if app._fleet is not None:
+            app._fleet.set_state(state)
+
     def _start_runtime_health(self) -> None:
         """Start the event-loop health monitor when enabled.
 
@@ -605,6 +689,7 @@ class AppLifecycle:
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
                 recorder=app._recorder,
+                peer_cluster=app._fleet.peer_cluster if app._fleet is not None else None,
             )
             # The handler-facing Cache: origin_worker_id is this worker's
             # id so LWW tiebreaks during peer-sync can identify our writes.
@@ -855,6 +940,7 @@ class AppLifecycle:
         # actually exits. ``DrakkarApp.is_ready`` reads this flag, and so
         # does the webapp's per-request gate.
         app._stopping = True
+        self._set_lifecycle_state('draining')
 
         # Then tell every source to stop accepting input. Idempotent: the
         # signal handler already did this when a signal started the
@@ -1008,6 +1094,20 @@ class AppLifecycle:
                     await log.awarning(
                         'recorder_stop_failed',
                         category='lifecycle',
+                        error=str(exc),
+                        exc_info=True,
+                    )
+
+            # Withdraw the registry card after the recorder's last write and
+            # before the UI server goes: until the card is gone, peers may
+            # still reach this worker through it.
+            if app._fleet is not None:
+                try:
+                    await app._fleet.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'fleet_registry_stop_failed',
+                        category='fleet',
                         error=str(exc),
                         exc_info=True,
                     )

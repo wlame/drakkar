@@ -424,10 +424,10 @@ next sync tick.
 
 ### Cross-cluster visibility
 
-Peer sync uses the same worker-autodiscovery mechanism as the flight
-recorder (see [Worker Autodiscovery](observability.md#worker-autodiscovery)).
+Peer sync takes each peer's cluster from the [fleet registry](fleet.md).
 Workers are grouped by `cluster_name` (from `DrakkarConfig.cluster_name`
-or `cluster_name_env`).
+or `cluster_name_env`). A peer the registry does not list, or every peer
+when the registry is off, counts as an unknown cluster.
 
 A peer's scope filter depends on cluster membership:
 
@@ -597,7 +597,7 @@ handler asked of the cache without disturbing its state.
 - [Observability](observability.md) — Prometheus metrics, operator UI details
 - [Performance](performance.md) — when caching helps, the `PrecomputedResult`
   fast path
-- [Worker Autodiscovery](observability.md#worker-autodiscovery) — the
-  shared-storage-folder convention that peer sync reuses
+- [Fleet registry](fleet.md) — where peer sync learns each peer's
+  cluster
 - [Integration Tests](integration.md) — the docker-compose demo exercises
   cache fast-path, peer sync, and disk persistence

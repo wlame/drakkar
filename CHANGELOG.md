@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.trace`.** The summary line shows `storage=`, `shared=` (when it
   differs) and `fleet=`. The worker creates `storage.dir` with mode 0700
   when it is missing.
+- **Worker registry.** Each worker publishes a small card (name, cluster,
+  UI URL, state, release) and reads the cards of its peers. Providers:
+  `filesystem` (default, cards in `<shared.dir>/fleet/workers/`), `static`
+  (a fixed peer list), `none`, and plugins through the
+  `drakkar.registry_providers` entry point group. `drakkar.fleet.testkit`
+  holds the checks a provider should pass. Liveness uses the file
+  server's clock. New metrics `drakkar_fleet_peers`,
+  `drakkar_fleet_registry_errors_total`,
+  `drakkar_fleet_registry_duration_seconds`,
+  `drakkar_fleet_registry_snapshot_age_seconds` and
+  `drakkar_fleet_duplicate_worker_name_total`. See `docs/fleet.md`.
+- **`GET /api/v1/workers` rows carry `backend`, `version`, `state`,
+  `started_at` and `instance`** (UI contract v1.23).
 
 ### Changed
 
@@ -35,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (default 7200) instead of a fixed value.
 - **The cache exchange no longer depends on the worker's own
   `ui.recorder.store_config`.**
+- **The workers list comes from the registry**, not from the peers'
+  recorder files. A peer's `online` is `null` when its liveness is unknown
+  (a `static` peer). Peers have `ip_address` and `debug_port` `null`; use
+  `url`. The current worker's `url` no longer reads `http://None:<port>/`.
+  With the registry off (UI off, provider `none`, no card folder) the list
+  shows only the current worker.
+- **The cache exchange takes each peer's cluster from the registry.** A
+  peer the registry does not list counts as an unknown cluster: only its
+  `global` rows are pulled. The log events `cache_peer_missing_worker_config`,
+  `cache_peer_cluster_resolve_failed` and `recorder_peer_scan_failed` are
+  gone.
 - **Log events that named the old folder key are renamed:**
   `recorder_storage_dir_world_writable`, `recorder_storage_dir_network_fs`,
   `watchdog_disabled_no_storage_dir`, `cache_engine_disabled_no_storage_dir`.

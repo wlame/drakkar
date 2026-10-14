@@ -427,10 +427,12 @@ Browse topics in the [Kafka UI](http://localhost:8088).
 
 ## Worker Autodiscovery
 
-All workers write to `/shared` (mounted as a volume). The [operator UI](observability.md#operator-ui)
-scans this directory for `*-live.db` symlinks and discovers peer
-workers via [worker autodiscovery](observability.md#worker-autodiscovery). Use the worker dropdown in the top-right nav to switch between
-workers without remembering ports.
+All workers write to `/shared` (mounted as a volume). Each worker
+publishes its card to the [fleet registry](fleet.md) folder in that
+volume and reads the cards of the others, so the
+[operator UI](observability.md#operator-ui) lists every worker. Use the
+worker dropdown in the top-right nav to switch between workers without
+remembering ports.
 
 ---
 

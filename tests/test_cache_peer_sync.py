@@ -39,7 +39,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides, wait_for
+from tests.conftest import set_peer_cluster, split_cache_overrides, wait_for
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
 
@@ -112,31 +112,6 @@ async def _seed_peer_cache_db(
     return actual
 
 
-async def _seed_peer_live_db(tmp_path: Path, peer_name: str, cluster_name: str | None) -> Path:
-    """Create a peer ``-live.db.actual`` with a single ``worker_config`` row."""
-    actual = tmp_path / f'{peer_name}-live.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        if cluster_name is not None:
-            await db.execute(
-                """CREATE TABLE worker_config (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    worker_name TEXT NOT NULL,
-                    cluster_name TEXT,
-                    created_at REAL NOT NULL,
-                    created_at_dt TEXT NOT NULL
-                )"""
-            )
-            await db.execute(
-                'INSERT INTO worker_config (id, worker_name, cluster_name, created_at, created_at_dt) '
-                'VALUES (1, ?, ?, 0, "")',
-                (peer_name, cluster_name or None),
-            )
-        await db.commit()
-    link = tmp_path / f'{peer_name}-live.db'
-    link.symlink_to(actual.name)
-    return actual
-
-
 # --- deadline-firing behavior -----------------------------------------------
 
 
@@ -166,13 +141,13 @@ async def test_peer_sync_cycle_deadline_fires_and_counter_increments(tmp_path):
         },
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
             [{'key': 'k1', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000}],
         )
-        await _seed_peer_live_db(tmp_path, 'peer2', cluster_name='prod')
+        set_peer_cluster(engine, 'peer2', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer2',
@@ -235,7 +210,7 @@ async def test_peer_sync_cycle_normal_does_not_increment_counter(tmp_path):
         },
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -290,7 +265,7 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
         },
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -360,7 +335,7 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
         },
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -451,7 +426,7 @@ async def test_concurrent_sync_once_smoke(tmp_path):
         # Seed 2 peer DBs — matches the plan's "2 peer DBs" scenario.
         # Different rows per peer so we can assert both peers' rows
         # end up in the local DB.
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -460,7 +435,7 @@ async def test_concurrent_sync_once_smoke(tmp_path):
                 {'key': 'p1_k2', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1001},
             ],
         )
-        await _seed_peer_live_db(tmp_path, 'peer2', cluster_name='prod')
+        set_peer_cluster(engine, 'peer2', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer2',
@@ -542,7 +517,7 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         },
     )
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # 4 rows with strictly increasing timestamps — cursor advances
         # deterministically cycle by cycle.
         await _seed_peer_cache_db(

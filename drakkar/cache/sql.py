@@ -94,18 +94,6 @@ WHERE
 
 # ---- runtime tunables (non-SQL) --------------------------------------------
 
-# Hardcoded TTL (seconds) for the in-process peer-cluster_name lookup cache.
-# When peer-sync encounters a new peer, it reads the peer's ``-live.db``
-# ``worker_config`` row to learn the peer's ``cluster_name``. That read is
-# cached for this long, after which the next sync cycle re-reads. Operators
-# rarely change cluster_name at runtime — exposing the TTL as a config knob
-# would add surface without real benefit. YAGNI; bump if someone actually
-# needs it.
-#
-# Kept separate from the SQL constants above so "which of these knobs are
-# runtime tunables vs DDL/DML?" is obvious at a glance.
-PEER_CLUSTER_CACHE_TTL_SECONDS = 300.0
-
 # Explicit per-connection busy timeouts, in milliseconds, so lock
 # contention on a shared cache DB behaves the same no matter which worker
 # opened it (see docs/local-databases.md). The

@@ -1,9 +1,8 @@
 """Tests for the shared peer discovery helper.
 
-The helper powers both the recorder's own `discover_workers()` and the
-upcoming cache peer-sync loop. Both scan a shared `db_dir` for live
-symlinks following the `<worker>{suffix}` convention (e.g. `-live.db`,
-`-cache.db`) and return resolved target paths.
+The helper powers the cache peer-sync loop. It scans a shared `db_dir`
+for live symlinks following the `<worker>{suffix}` convention (e.g.
+`-cache.db`) and returns resolved target paths.
 """
 
 import os

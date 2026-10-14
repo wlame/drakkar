@@ -1016,10 +1016,6 @@ class EventRecorder(EventWriter):
         stats['total_events'] = sum(self._counters.values())
         return stats
 
-    async def discover_workers(self, offline_after_seconds: int) -> list[dict]:
-        """List the other workers of this cluster, with their liveness."""
-        return await self._queries.discover_workers(offline_after_seconds)
-
     # --- Internal flush/retention ---
 
     async def _wait_until_flush_due(self) -> None:

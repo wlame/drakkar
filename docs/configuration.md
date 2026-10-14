@@ -1133,6 +1133,9 @@ executor, sinks, offset commits) does not depend on it.
 
 ### Registry (`fleet.registry:`) {#fleet-registry}
 
+How the registry works, the card format, liveness and how to write a
+provider plugin are on [Fleet registry](fleet.md).
+
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), or the name of a provider plugin. Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |

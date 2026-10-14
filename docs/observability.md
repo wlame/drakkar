@@ -686,7 +686,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
     surface a confusing `OperationalError: no such column` mid-request
     on the first HTTP event the recorder tried to write.
 
-#### `worker_config` -- Autodiscovery
+#### `worker_config` -- Worker identity {#worker_config-autodiscovery}
 
 Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
 
@@ -982,16 +982,20 @@ You can also disable the flight recorder database entirely by setting
 `storage.dir: ""` (empty string). The web UI and WebSocket live
 streaming still work (events are held in memory only), but these
 features are disabled: event history (`/history`), message trace,
-label search, database download/merge, periodic task history, and
-worker autodiscovery. The live pipeline view (`/live`) and dashboard
-counters continue working since they read from in-memory state.
+label search, database download/merge and periodic task history. Worker
+discovery needs a card folder for the [fleet registry](fleet.md): with
+`storage.dir: ""` set `shared.dir` (or another registry provider) to keep
+the workers list. The live pipeline view (`/live`) and dashboard counters
+continue working since they read from in-memory state.
 
 When workers share the same `storage.dir` (e.g., a shared NFS mount,
 Kubernetes PVC, or Docker volume), several additional UI features
 become available:
 
 - **Worker switcher** -- jump between worker UIs from a dropdown in the
-  nav bar, without remembering ports or IP addresses
+  nav bar, without remembering ports or IP addresses (the switcher comes
+  from the [fleet registry](fleet.md), whose default card folder is in
+  the shared folder)
 - **Cross-worker message trace** -- trace a message across all workers
   in the cluster by partition:offset or by label value
 - **Database merge** -- combine flight recorder files from multiple
@@ -1005,65 +1009,66 @@ works identically.
 
 ### How It Works
 
-1. Each worker creates a timestamped SQLite file in `storage.dir`
-   (e.g., `worker-1-2026-04-08__14_30_00.db`) and maintains a
-   `{worker_name}-live.db` symlink pointing to the current file.
-2. Workers with `store_config: true` (default) write their
-   configuration -- worker name, IP address, UI port, cluster
-   name, Kafka settings -- to the `worker_config` table at startup
-   and after each DB rotation.
-3. The UI server scans `storage.dir` for `*-live.db` symlinks belonging
-   to other workers.
-4. For each live symlink, the UI reads `worker_config` to get the
-   worker's name, address, and cluster membership.
-5. Workers are grouped by `cluster_name` -- only workers in the same
-   cluster appear together. Unclustered workers show in a separate
-   group.
-6. On graceful shutdown, the `*-live.db` symlink is removed so
-   stopped workers don't appear in the dropdown.
+Workers find each other through the [fleet registry](fleet.md):
+
+1. Each worker publishes a small card -- worker name, cluster, the URL of
+   its UI server, state (`starting`, `running`, `draining`), release --
+   right after its UI server starts, at every state change, and every
+   `fleet.registry.heartbeat_seconds` (default 10).
+2. With the default `filesystem` provider the card is a file in
+   `<shared.dir>/fleet/workers/` (`<storage.dir>/fleet/workers/` when
+   `shared.dir` is empty), so workers that mount the same folder see each
+   other.
+3. Every `fleet.registry.refresh_seconds` (default 15) a worker reads the
+   other cards into memory. `GET /api/v1/workers` answers from that
+   snapshot; it never opens a peer's database.
+4. Workers are grouped by cluster name -- only workers in the same cluster
+   appear together. Unclustered workers show in a separate group.
+5. At a clean stop a worker deletes its card.
 
 ### Liveness
 
-A crashed or OOM-killed worker never removes its symlink, so it would
-stay listed forever. To tell such workers apart from healthy ones, each
-discovered worker carries two liveness fields in `/api/v1/workers`:
+A crashed or OOM-killed worker never deletes its card, so it stays listed
+until the card is pruned (`fleet.registry.prune_after_seconds`, default one
+day). To tell such workers apart from healthy ones, every row of
+`/api/v1/workers` carries two liveness fields:
 
-- `last_seen_ts` -- the newest heartbeat, read from the peer's
-  `worker_state.updated_at` (written every
-  `ui.recorder.state_sync_interval_seconds`, default 10s). Workers with
-  `store_state: false` fall back to their newest event timestamp;
-  `null` when neither source exists.
-- `online` -- `true` when the heartbeat is no older than
-  `fleet.registry.offline_after_seconds` (default 30). The worker serving
-  the request always reports itself online.
+- `online` -- `true` when the peer's card is no older than
+  `fleet.registry.offline_after_seconds` (default 30), `false` when it is
+  older, and `null` when the provider cannot tell (a `static` peer list,
+  or a worker whose own first card write has not succeeded yet). The worker
+  serving the request always reports itself online.
+- `last_seen_ts` -- the serving worker's current time minus the card's
+  age, in epoch seconds; `null` when the age is unknown.
 
-Set `fleet.registry.offline_after_seconds` to at least 2--3x the largest
-`state_sync_interval_seconds` in the fleet so a healthy worker never
-flaps offline between heartbeats. An offline worker stays listed --
-its recorded history is still reachable -- it is just marked as gone.
+The age is measured on the file server's clock, so clock skew between
+worker hosts does not matter (see [Liveness](fleet.md#liveness)). An
+offline worker stays listed -- its recorded history is still reachable --
+it is just marked as gone.
 
 ### Worker Switcher
 
 The UI navigation bar includes a worker dropdown that lists all
-discovered workers, grouped by cluster. Clicking a worker navigates
-to its UI (using `ui.public_url` if configured, otherwise
-`http://{ip_address}:{debug_port}/`). The dropdown refreshes every
-10 seconds.
+discovered workers, grouped by cluster. Clicking a worker navigates to the
+URL on its card: `ui.public_url` if configured, otherwise
+`http://<outbound ip>:<ui.port>/`. A worker that is not `running` shows its
+state, and every worker shows its release when the card carries it. The
+dropdown refreshes every 10 seconds.
 
 ### Setup
 
-The minimal config for autodiscovery:
+The minimal config for worker discovery:
 
 ```yaml
-# all workers must share the same storage folder path
-storage:
-  dir: "/shared"           # mount the same volume on all workers
-ui:
-  recorder:
-    store_config: true     # default, writes worker_config table
+# every worker mounts the same folder; the registry keeps its cards there
+shared:
+  dir: "/shared"
 # optional: set cluster_name to group workers
 cluster_name: "my-cluster"
 ```
+
+Without `shared.dir`, workers that share one `storage.dir` see each other
+too (the cards then live in `<storage.dir>/fleet/workers/`).
 
 In Kubernetes, use a shared PVC:
 

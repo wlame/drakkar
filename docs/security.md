@@ -70,7 +70,14 @@ Stated plainly, so nobody plans around a control that is not there:
 - **No sandbox around your handler binary.** It runs with the worker's
   privileges and receives message bytes on stdin unvalidated.
 - **No authentication between peer workers.** Anything that can write to a
-  shared `storage.dir` is trusted as a peer.
+  shared `storage.dir` is trusted as a peer. The same holds for the
+  [fleet registry](fleet.md): anyone who can write the card folder can
+  publish a card, and the workers list will show it and link to its URL.
+  The UI links only `http` and `https` card URLs, but the Live page opens
+  a connection to every listed worker and sends `ui.auth_token` with it, so
+  a planted card can collect the token. Protect the card folder like the
+  token itself. Cards hold no secrets — a name, a cluster, a URL, a state
+  and a release — so reading the folder reveals only where workers answer.
 
 The last two are architectural trust boundaries with their own reasoning —
 see [the FAQ's trust model](faq.md#security-and-trust-model) and

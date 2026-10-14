@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -217,3 +218,22 @@ def minimal_config_yaml_file(minimal_config_dict: dict, tmp_path: Path) -> Path:
     with open(config_path, 'w') as f:
         yaml.dump(minimal_config_dict, f)
     return config_path
+
+
+class PeerClusters(dict):
+    """Stands in for the worker registry's ``peer_cluster`` lookup in cache tests."""
+
+    def __call__(self, worker: str) -> str | None:
+        return self.get(worker)
+
+
+def set_peer_cluster(engine: Any, peer: str, cluster: str | None) -> None:
+    """Make ``engine`` see ``peer`` in ``cluster``, as the registry would report it.
+
+    ``None`` leaves the peer unlisted, so its cluster is unknown and only its
+    ``global`` rows are pulled.
+    """
+    lookup = engine._peer_cluster if isinstance(engine._peer_cluster, PeerClusters) else PeerClusters()
+    if cluster is not None:
+        lookup[peer] = cluster
+    engine._peer_cluster = lookup

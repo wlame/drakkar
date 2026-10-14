@@ -355,30 +355,6 @@ class TestRecorderStoreFlags:
 
         await rec.stop()
 
-    async def test_recorder_discover_workers_requires_config_and_db(self, tmp_path):
-        """discover_workers returns empty when store_config=False or storage.dir is empty."""
-        cfg_no_config = make_ui_config(
-            enabled=True,
-            store_config=False,
-            flush_interval_seconds=60,
-        )
-        rec = EventRecorder(cfg_no_config, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
-        await rec.start()
-        workers = await rec.discover_workers(30)
-        assert workers == []
-        await rec.stop()
-
-        cfg_no_db = make_ui_config(
-            enabled=True,
-            store_config=True,
-            flush_interval_seconds=60,
-        )
-        rec2 = EventRecorder(cfg_no_db, worker_name='test', cluster_name='', storage_dir='')
-        await rec2.start()
-        workers = await rec2.discover_workers(30)
-        assert workers == []
-        await rec2.stop()
-
     @pytest.mark.parametrize('store_state', [True, False])
     async def test_recorder_state_sync_respects_flag(self, tmp_path, store_state):
         """State sync only writes when store_state=True and db exists."""

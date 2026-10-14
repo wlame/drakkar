@@ -273,61 +273,6 @@ class TestCrossWorkerSweep:
         assert await queries.cross_trace(partition=99, msg_offset=99) == []
 
 
-class TestDiscoverWorkers:
-    async def test_lists_peers_with_liveness(self, tmp_path, ui_config, monkeypatch):
-        import time
-
-        now = time.time()
-        fresh = await make_db(
-            tmp_path / 'fresh-20260101-000000.db',
-            worker_name='fresh',
-            state_updated_at=now,
-        )
-        stale = await make_db(
-            tmp_path / 'stale-20260101-000000.db',
-            worker_name='stale',
-            state_updated_at=now - 3600,
-        )
-        (tmp_path / 'fresh-live.db').symlink_to(fresh)
-        (tmp_path / 'stale-live.db').symlink_to(stale)
-        own = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
-
-        async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
-            workers = {w['worker_name']: w for w in await queries.discover_workers(30)}
-
-        assert workers['fresh']['online'] is True
-        assert workers['stale']['online'] is False, 'a crashed worker leaves its symlink behind'
-        assert WORKER not in workers, 'a worker must not discover itself'
-
-    async def test_falls_back_to_the_newest_event_when_state_is_off(self, tmp_path, ui_config):
-        import time
-
-        peer = await make_db(
-            tmp_path / 'eventsonly-20260101-000000.db',
-            worker_name='eventsonly',
-            events=[{'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': 1}],
-        )
-        (tmp_path / 'eventsonly-live.db').symlink_to(peer)
-        own = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
-
-        async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
-            (worker,) = await queries.discover_workers(30)
-
-        assert worker['worker_name'] == 'eventsonly'
-        assert worker['online'] is True
-
-    async def test_returns_nothing_when_config_is_not_stored(self, tmp_path, ui_config):
-        own = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
-        ui_config.recorder.store_config = False
-
-        async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
-
-            assert await queries.discover_workers(30) == []
-
-
 class TestScanBudget:
     """The bound on a cross-worker sweep (file count + wall clock)."""
 

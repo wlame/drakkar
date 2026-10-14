@@ -54,7 +54,7 @@ from drakkar.cache import (
     Op,
 )
 from drakkar.config import CacheConfig
-from tests.conftest import split_cache_overrides
+from tests.conftest import set_peer_cluster, split_cache_overrides
 
 # --- helpers ---------------------------------------------------------------
 #
@@ -129,30 +129,6 @@ async def _seed_peer_cache_db(
     return actual
 
 
-async def _seed_peer_live_db(tmp_path: Path, peer_name: str, cluster_name: str) -> Path:
-    """Create a peer ``-live.db`` stand-in with a single ``worker_config`` row."""
-    actual = tmp_path / f'{peer_name}-live.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        await db.execute(
-            """CREATE TABLE worker_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                worker_name TEXT NOT NULL,
-                cluster_name TEXT,
-                created_at REAL NOT NULL,
-                created_at_dt TEXT NOT NULL
-            )"""
-        )
-        await db.execute(
-            'INSERT INTO worker_config (id, worker_name, cluster_name, created_at, created_at_dt) '
-            'VALUES (1, ?, ?, 0, "")',
-            (peer_name, cluster_name),
-        )
-        await db.commit()
-    link = tmp_path / f'{peer_name}-live.db'
-    link.symlink_to(actual.name)
-    return actual
-
-
 async def _fetch_local_row(tmp_path: Path, worker_id: str, key: str) -> tuple | None:
     """Fetch a row from our own ``<worker>-cache.db.actual``."""
     db_path = tmp_path / f'{worker_id}-cache.db.actual'
@@ -183,7 +159,7 @@ async def test_sync_apply_uses_shared_lww_upsert_sql(tmp_path, monkeypatch):
     """
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -239,7 +215,7 @@ async def test_sync_apply_rejects_older_peer_row(tmp_path):
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
         # Peer row (older)
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -285,7 +261,7 @@ async def test_sync_apply_accepts_newer_peer_row(tmp_path):
         cache._dirty['shared'] = DirtyOp(op=Op.SET, entry=local_entry)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -334,7 +310,7 @@ async def test_sync_apply_lww_tiebreak_by_smaller_origin(tmp_path):
         cache._dirty['shared'] = DirtyOp(op=Op.SET, entry=local_entry)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -376,7 +352,7 @@ async def test_sync_apply_invalidates_memory_for_upserted_keys(tmp_path):
         cache.set('stale_in_mem', 'local_mem_value', scope=CacheScope.GLOBAL)
         assert 'stale_in_mem' in cache._memory  # type: ignore[reportPrivateUsage]
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -426,7 +402,7 @@ async def test_sync_apply_invalidates_memory_even_when_lww_rejects(tmp_path):
         cache.set('k', 'in_memory_recent', scope=CacheScope.GLOBAL)
         assert 'k' in cache._memory  # type: ignore[reportPrivateUsage]
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -463,7 +439,7 @@ async def test_sync_apply_noop_when_peer_pull_empty(tmp_path):
     """
     engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
     try:
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         # Peer exists but has zero rows.
         await _seed_peer_cache_db(tmp_path, 'peer1', [])
 
@@ -514,7 +490,7 @@ async def test_sync_apply_counter_fetched_and_upserted(tmp_path):
         fetched_before = _counter_value(metrics.cache_sync_entries_fetched, peer='peer1')
         upserted_before = _counter_value(metrics.cache_sync_entries_upserted, peer='peer1')
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -561,7 +537,7 @@ async def test_sync_apply_upserted_leq_fetched_when_lww_rejects(tmp_path):
         fetched_before = _counter_value(metrics.cache_sync_entries_fetched, peer='peer1')
         upserted_before = _counter_value(metrics.cache_sync_entries_upserted, peer='peer1')
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -613,7 +589,7 @@ async def test_sync_apply_preserves_size_bytes_from_peer(tmp_path):
         peer_value = '"abcdef"'  # 8 bytes including quotes
         peer_size = len(peer_value.encode('utf-8'))
 
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',
@@ -668,7 +644,7 @@ async def test_apply_peer_rows_subtracts_popped_entry_bytes_from_running_sum(tmp
 
         # A peer has a newer version of 'invalidated' — sync will UPSERT
         # and invalidate the memory entry.
-        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        set_peer_cluster(engine, 'peer1', 'prod')
         await _seed_peer_cache_db(
             tmp_path,
             'peer1',

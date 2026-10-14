@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.2"
+  version: "1.23"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -505,7 +505,8 @@ paths:
         Merges ≥2 recorder DB files into one downloadable file. Filename
         hardening rejects path separators, leading dots, quotes, semicolons,
         and control characters. Errors use the legacy {"error": ...}
-        envelope (400 malformed body, 404 missing files).
+        envelope (400 malformed body, 404 missing files, 500 merge failed —
+        v1.23).
       requestBody:
         required: true
         content:
@@ -531,6 +532,13 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '404':
           description: A named file does not exist.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '500':
+          description: >-
+            The merge failed ("Merge failed: <reason>"); no output file is
+            left behind (v1.23).
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -1549,17 +1557,26 @@ components:
         worker_name: {type: string}
         cluster_name: {type: [string, 'null']}
         ip_address: {type: [string, 'null']}
-        debug_port: {type: integer}
+        # v1.23: null for registry peers (a card carries a URL only).
+        debug_port: {type: [integer, 'null']}
         debug_url: {type: [string, 'null']}
         url: {type: string}
         cluster: {type: string}
         is_current: {type: boolean}
-        # v1.18, optional: liveness from recorder heartbeats. Absent on older
-        # backends — clients must then treat every worker as online. The
-        # is_current worker is always online; online=false means the heartbeat
-        # is older than ui.workers_offline_after_seconds (default 30).
+        # v1.18, optional: liveness. Absent on older backends — clients must
+        # then treat every worker as online. The is_current worker is always
+        # online. Since v1.23 the age comes from the worker registry's own
+        # clock (fleet.registry.offline_after_seconds, default 30) and online
+        # is null when the registry knows no age (a fixed peer list): unknown,
+        # not offline.
         last_seen_ts: {type: [number, 'null']}
-        online: {type: boolean}
+        online: {type: [boolean, 'null']}
+        # v1.23, optional: from the worker's registry card.
+        backend: {type: string, enum: [python, go]}
+        version: {type: string}
+        state: {type: string, enum: [starting, running, draining]}
+        started_at: {type: string}
+        instance: {type: string}
       required: [worker_name, url, is_current]
 
     ProcessorsReport:

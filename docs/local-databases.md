@@ -54,16 +54,16 @@ persistence flag needs a directory to write into:
 | Config | Effect |
 |---|---|
 | `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and `storage.dir` is set. |
-| `storage.dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, peer autodiscovery, the Databases tab, downloads. |
+| `storage.dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, the Databases tab, downloads. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
 | `ui.recorder.store_events: false` | The `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
-| `ui.recorder.store_config: false` | No `worker_config` row — this worker becomes invisible to peer autodiscovery and to cluster-scoped cache sync. |
+| `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
 | `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |
 | `cache.enabled: true` with `storage.dir: ''` | Startup warning + effective disable — the cache never runs memory-only. |
 
 Any combination is valid: for example `store_config: true` with
-`store_events: false` keeps a worker discoverable while writing no event
-history.
+`store_events: false` keeps each recorder file named after its worker and
+cluster while writing no event history.
 
 ## What the events table stores — and the knobs that trim it
 
@@ -586,34 +586,15 @@ additive-only by contract.
 
 ## Worker autodiscovery
 
-A worker **advertises** itself by writing its single `worker_config` row
-(requires `ui.recorder.store_config: true`, the default) and maintaining
-the `<worker>-live.db` symlink. There is no separate registry.
-
-The UI's workers list **discovers** siblings with this exact algorithm:
-
-1. Scan `storage.dir/*-live.db`, **sorted** by path.
-2. Keep only true symlinks (plain files are ignored).
-3. Skip our own entry (basename minus suffix == own worker name).
-4. Resolve the symlink; skip broken links silently.
-5. Open the target read-only, confirm `worker_config` exists, read the
-   `id = 1` row **mapped by column name** (column order never matters).
-
-**Liveness semantics**: a peer is listed iff its symlink exists and
-resolves. The symlink is removed on graceful shutdown; after a crash or
-an OOM kill the worker stays visible until archiving removes the file it
-points at (or, with `history.archive.enabled: false`, indefinitely — see
-[Archiving](#archiving)). Listed is not the same as alive: each entry
-carries `last_seen_ts` (the newest `worker_state.updated_at` heartbeat,
-written every `ui.recorder.state_sync_interval_seconds`; falls back to
-`MAX(events.ts)` when the peer runs `store_state: false`; `null` when
-neither exists) and `online` — `true` iff that heartbeat is no older
-than `fleet.registry.offline_after_seconds` (default 30). A crashed worker
-therefore stays listed — its history remains reachable — but flips to
-offline once its heartbeat goes stale. The worker answering the request
-always reports itself online. Size the threshold to at least 2–3x the
-largest `state_sync_interval_seconds` in the fleet so healthy workers
-never flap offline between heartbeats.
+Workers find each other through the [fleet registry](fleet.md), not
+through these database files. With the default `filesystem` provider each
+worker writes a small JSON card to `<shared.dir>/fleet/workers/<worker>.json`
+(`<storage.dir>/fleet/...` when `shared.dir` is empty) and reads the cards
+of its peers every `fleet.registry.refresh_seconds`. The workers list
+answers from that in-memory snapshot. Liveness comes from the card's age on
+the file server's clock: a peer is `online` while its card is no older than
+`fleet.registry.offline_after_seconds` (default 30). See
+[Fleet registry](fleet.md) for the card format and the rules.
 
 **Cross-worker tracing** (`trace`, `trace-by-label`) searches: own live
 DB → other workers' live DBs (sorted, first match wins) → rotated files
@@ -622,14 +603,13 @@ with `worker_name`.
 
 ## Cache peer sync
 
-Peers are discovered by scanning `storage.dir/*-cache.db` symlinks (same
-routine as recorder discovery — that is why the `.actual` indirection
-exists). For each peer, every `fleet.cache_exchange.interval_seconds`:
+Peers are discovered by scanning `storage.dir/*-cache.db` symlinks (that
+is why the `.actual` indirection exists). For each peer, every `fleet.cache_exchange.interval_seconds`:
 
-1. **Cluster resolution**: read `cluster_name` from the peer's
-   `<peer>-live.db` `worker_config` row; cache the answer in-process for
-   300 s. Same cluster (including both-empty) → pull scopes
-   `('cluster','global')`; different or unresolvable → `('global')` only.
+1. **Cluster resolution**: take the peer's cluster from the
+   [fleet registry](fleet.md) snapshot. Same cluster (including
+   both-empty) → pull scopes `('cluster','global')`; different, or a peer
+   the registry does not list (or no registry at all) → `('global')` only.
    `local` never leaves its worker.
 2. **Cursor pull**: `WHERE <scope> AND (expires_at_ms IS NULL OR
    expires_at_ms > now) AND updated_at_ms > cursor ORDER BY
@@ -649,8 +629,8 @@ observing the same conflict converge on the same survivor.
 
 ## Sharing one `storage.dir` across workers
 
-Running several workers against one shared `storage.dir` — recorder discovery,
-cross-tracing, and cache peer sync included — is a **supported deployment
+Running several workers against one shared `storage.dir` — cross-tracing
+and cache peer sync included — is a **supported deployment
 mode**, and the reason this page is written as a specification rather than
 as a description. What makes it safe:
 
@@ -661,8 +641,9 @@ as a description. What makes it safe:
   others.
 
 Requirements: mount the shared directory at the **same path** in every
-worker, and keep `ui.recorder.store_config: true` (discovery and
-cluster-scoped cache sync depend on the `worker_config` row).
+worker. Keep `ui.recorder.store_config: true` (the default) so every
+recorder file names the worker and cluster that wrote it; discovery and the
+cache exchange's cluster rule come from the [fleet registry](fleet.md).
 
 ## Watchdog file
 
