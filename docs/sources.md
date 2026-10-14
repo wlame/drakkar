@@ -164,7 +164,7 @@ counter if your HTTP-only workers must not lose failed payloads — set
 The config-summary line names the enabled sources:
 
 ```
-[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s ui=on:8081 cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 ```
 
 The `sources=[...]` token lists the enabled sources in a fixed order, Kafka

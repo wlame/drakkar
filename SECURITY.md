@@ -43,7 +43,7 @@ closed with a pointer here:
 - **The handler binary is fully trusted.** `executor.binary_path` is
   operator-configured and message bytes reach its stdin without
   sanitisation.
-- **Peer workers sharing a `db_dir` are fully trusted.** Cache and
+- **Peer workers sharing a `storage.dir` are fully trusted.** Cache and
   recorder peer sync have no cryptographic authentication of peer
   writes.
 - **Kafka transport security is configured, not assumed.** `kafka.security`
@@ -60,7 +60,7 @@ closed with a pointer here:
   **Message Probe** (`ui.probe_enabled`) executes the live handler
   against pasted input and competes with production traffic for
   executor slots, and **Merge** (`ui.merge_enabled`) writes a
-  `merged-<ts>-<token>.db` into `db_dir` that nothing reclaims. It is intended
+  `merged-<ts>-<token>.db` into `storage.dir` that nothing reclaims. It is intended
   for private-network deployment.
 
 Findings that break *out* of these boundaries — for example remote code

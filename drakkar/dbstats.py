@@ -30,7 +30,7 @@ idempotent ``store``):
    (files present before the cache started tracking, files rotated by
    co-located workers) and purges cache rows whose files are gone.
 3. **The endpoint itself** — a page request scans at most
-   ``ui.recorder.dbstats_inline_scan_limit`` cold files inline; the rest
+   ``DBSTATS_INLINE_SCAN_LIMIT`` cold files inline; the rest
    render immediately as ``stats_pending`` rows and fill in as the warmer
    catches up.
 
@@ -63,6 +63,12 @@ from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.merge import DbStats, _dict_factory, _table_exists, scan_db
 
 logger = structlog.get_logger()
+
+# Sweep cadence of the warmer loop and the per-request inline scan budget.
+# Fixed values: the shared statistics cache is a stopgap that goes away once
+# recorder files are sealed and carry their own statistics.
+DBSTATS_WARM_INTERVAL_SECONDS = 60
+DBSTATS_INLINE_SCAN_LIMIT = 4
 
 DBSTATS_FILENAME = '.dbstats.db'
 

@@ -16,10 +16,8 @@ The behaviors pinned down here:
 6. ``LIMIT batch_size`` caps the pull.
 7. Peer without a ``worker_config`` table → skipped with a warn log, cluster
    falls back to "unknown" (pull global-only).
-8. ``peer_sync.enabled=false`` at startup → ``_sync_once`` is a no-op (zero
+8. ``fleet.cache_exchange.enabled=false`` at startup → ``_sync_once`` is a no-op (zero
    filesystem accesses, via a spy on ``discover_peer_dbs``).
-9. ``debug.store_config=false`` at startup → peer sync is silently disabled
-   (effective-disable logged once at startup).
 
 We use an on-disk ``tmp_path`` directory for peer DBs so we can exercise the
 real symlink discovery and aiosqlite read paths. Peer DBs are minimal: a
@@ -43,34 +41,16 @@ from drakkar.cache import (
     CacheEngine,
     CacheScope,
 )
-from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
-from tests.conftest import make_ui_config
+from drakkar.config import CacheConfig, CacheExchangeConfig
+from tests.conftest import split_cache_overrides
 
 # --- helpers ----------------------------------------------------------------
-
-
-def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
-    """UIConfig with ``db_dir`` pointed at the temp path and events off.
-
-    Defaults match the cleanup-loop tests' helper so it's easy to read
-    across files. Callers can override any field — in particular
-    ``store_config`` for the gating-rule tests.
-    """
-    defaults: dict[str, Any] = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': True,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
     """CacheConfig enabled by default, with peer_sync overrides honoured.
 
-    ``peer_sync`` override can be a ``CachePeerSyncConfig`` instance or a
+    ``peer_sync`` override can be a ``CacheExchangeConfig`` instance or a
     dict — pydantic handles either one.
     """
     defaults: dict[str, Any] = {'enabled': True}
@@ -84,7 +64,6 @@ async def _make_engine(
     worker_id: str = 'w1',
     cluster_name: str = '',
     cache_overrides: dict[str, Any] | None = None,
-    debug_overrides: dict[str, Any] | None = None,
 ) -> CacheEngine:
     """Spin up a started CacheEngine for sync-pull testing.
 
@@ -93,9 +72,11 @@ async def _make_engine(
     share the discovery directory.
     """
     cache = Cache(origin_worker_id=worker_id)
+    cache_fields, exchange = split_cache_overrides(cache_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**(cache_overrides or {})),
-        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,
@@ -295,12 +276,12 @@ async def test_sync_excludes_expired_rows(tmp_path):
 
 
 async def test_sync_respects_batch_size_limit(tmp_path):
-    """The pull query must cap rows at ``peer_sync.batch_size``."""
+    """The pull query must cap rows at ``fleet.cache_exchange.page_size``."""
     engine = await _make_engine(
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -357,13 +338,13 @@ async def test_sync_peer_without_worker_config_is_skipped_with_warn(tmp_path, ca
 
 
 async def test_sync_disabled_is_no_op(tmp_path, monkeypatch):
-    """When ``peer_sync.enabled=false`` at startup, ``_sync_once`` must
+    """When ``fleet.cache_exchange.enabled=false`` at startup, ``_sync_once`` must
     not touch the filesystem at all — not even to list peers.
     """
     engine = await _make_engine(
         tmp_path,
         worker_id='me',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(enabled=False)},
+        cache_overrides={'exchange': CacheExchangeConfig(enabled=False)},
     )
     try:
         call_count = 0
@@ -380,38 +361,6 @@ async def test_sync_disabled_is_no_op(tmp_path, monkeypatch):
 
         assert call_count == 0
         assert pulled == {}
-    finally:
-        await engine.stop()
-
-
-async def test_sync_disabled_when_store_config_off(tmp_path, monkeypatch):
-    """``debug.store_config=false`` silently disables peer sync at startup
-    regardless of ``peer_sync.enabled=true`` — the pull needs
-    ``worker_config`` rows from peer recorders to determine cluster
-    membership. ``_sync_once`` short-circuits.
-    """
-    engine = await _make_engine(
-        tmp_path,
-        worker_id='me',
-        debug_overrides={'store_config': False},
-    )
-    try:
-        # Gating runs in start() — the effective flag should be False.
-        assert engine._peer_sync_enabled is False  # type: ignore[reportPrivateUsage]
-
-        call_count = 0
-
-        async def fake_discover(db_dir, suffix, self_name):
-            nonlocal call_count
-            call_count += 1
-            return
-            yield  # type: ignore[unreachable]
-
-        monkeypatch.setattr(cache_engine_module, 'discover_peer_dbs', fake_discover)
-
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
-
-        assert call_count == 0
     finally:
         await engine.stop()
 
@@ -488,7 +437,8 @@ def test_peer_scope_filter_matrix(tmp_path, self_cluster, peer_cluster, expected
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
         config=make_cache_config(),
-        ui_config=make_debug_config(tmp_path),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(tmp_path),
         worker_id='me',
         cluster_name=self_cluster,
         recorder=None,

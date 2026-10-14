@@ -335,7 +335,6 @@ def test_ui_config_defaults():
     assert cfg.max_rows == 5000
     assert cfg.recorder.flush_interval_seconds == 5
     assert cfg.recorder.rotation_interval_hours == 1
-    assert cfg.recorder.archive_window_hours == 24
 
 
 def test_link_bases_strips_trailing_slash_and_validates_scheme():

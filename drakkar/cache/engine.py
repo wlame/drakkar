@@ -6,8 +6,8 @@ connection, so SQLite operations run off the event loop; WAL mode allows the
 reader to see consistent snapshots while the writer commits.
 
 The engine is constructed by the app during startup; ``start()`` opens the
-DB and prepares the periodic loops (flush, cleanup, peer-sync). If neither
-``cache.db_dir`` nor ``debug.db_dir`` is set, ``start()`` logs a warning and
+DB and prepares the periodic loops (flush, cleanup, peer-sync). With an empty
+``storage.dir`` (memory-only mode), ``start()`` logs a warning and
 puts the engine into an *effectively disabled* state — no connection is
 opened, no file is created, and subsequent flush/sync/cleanup calls become
 no-ops. The handler still sees a ``Cache`` instance; it just never persists.
@@ -49,7 +49,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 from drakkar.periodic import run_periodic_task
 
 if TYPE_CHECKING:
-    from drakkar.config import CacheConfig, UIConfig
+    from drakkar.config import CacheConfig, CacheExchangeConfig
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
@@ -86,8 +86,8 @@ class CacheEngine:
     commits.
 
     The engine is constructed by the app during startup; ``start()`` opens
-    the DB and prepares the periodic loops. If neither ``cache.db_dir`` nor
-    ``debug.db_dir`` is set, ``start()`` logs a warning and puts the engine
+    the DB and prepares the periodic loops. With an empty ``storage.dir``
+    (memory-only mode), ``start()`` logs a warning and puts the engine
     into an *effectively disabled* state — no connection is opened, no file
     is created, and subsequent flush/sync/cleanup calls become no-ops. The
     handler still sees a ``Cache`` instance; it just never persists.
@@ -96,7 +96,8 @@ class CacheEngine:
     def __init__(
         self,
         config: CacheConfig,
-        ui_config: UIConfig,
+        exchange: CacheExchangeConfig,
+        storage_dir: str,
         worker_id: str,
         cluster_name: str,
         recorder: EventRecorder | None = None,
@@ -105,10 +106,12 @@ class CacheEngine:
 
         Args:
             config: cache-specific settings (enabled flag, intervals,
-                peer-sync, memory cap, optional dedicated db_dir).
-            ui_config: referenced only for its ``recorder.db_dir`` fallback when
-                ``config.db_dir`` is empty. The engine does NOT otherwise
-                reach into debug settings.
+                memory cap).
+            exchange: ``fleet.cache_exchange`` — whether and how often
+                ``cluster``/``global`` rows are pulled from peers.
+            storage_dir: the worker's own folder (``storage.dir``); the
+                cache file lives here. Empty means memory-only: the engine
+                warns at start and stays disabled.
             worker_id: stable identifier for this worker — used for the
                 DB filename, the symlink name, peer-discovery self-filter,
                 and the ``origin_worker_id`` column on every write.
@@ -122,13 +125,14 @@ class CacheEngine:
                 can avoid requiring the recorder's presence.
         """
         self._config = config
-        self._ui_config = ui_config
+        self._exchange = exchange
+        self._storage_dir = storage_dir
         self._worker_id = worker_id
         self._cluster_name = cluster_name
         self._recorder = recorder
         # Writer connection. Opened in ``start()``, closed in ``stop()``.
-        # Nil when the engine is disabled (config.enabled=False or no
-        # db_dir resolution) or has not been started yet.
+        # Nil when the engine is disabled (config.enabled=False or an
+        # empty storage_dir) or has not been started yet.
         self._writer_db: aiosqlite.Connection | None = None
         # Reader connection. Second aiosqlite connection to the same DB
         # file, opened in read-only mode. Used exclusively by ``Cache.get``
@@ -172,16 +176,13 @@ class CacheEngine:
         self._cleanup_task: asyncio.Task | None = None
         # Task reference for the periodic peer-sync loop. Same lifecycle
         # as flush/cleanup; only scheduled when peer sync is effectively
-        # enabled (both config flag on AND debug.store_config=True). None
-        # when disabled so there's no wakeup cost.
+        # enabled (``fleet.cache_exchange.enabled`` and a writable local
+        # DB). None when disabled so there's no wakeup cost.
         self._sync_task: asyncio.Task | None = None
-        # Whether peer-sync is *effectively* enabled — i.e. both the config
-        # flag is on and the startup gating rules passed. Set during
-        # ``start()``: peer-sync needs ``debug.store_config`` (to read peer
-        # cluster_names from their ``worker_config`` tables) and a writable
-        # local DB, so startup may silently downgrade to disabled even if
-        # ``config.peer_sync.enabled=True``. ``_sync_once`` short-circuits
-        # on this flag to keep the idle-engine cost at O(1).
+        # Whether peer-sync is *effectively* enabled — the config flag is
+        # on and ``start()`` opened a writable local DB to apply pulled rows
+        # into. ``_sync_once`` short-circuits on this flag to keep the
+        # idle-engine cost at O(1).
         self._peer_sync_enabled: bool = False
         # In-process cache of peer ``cluster_name`` values keyed by peer
         # worker_name. Populated lazily from each peer's ``-live.db``
@@ -288,16 +289,8 @@ class CacheEngine:
             cache.attach_reader_db(self._reader_db)
 
     def _resolve_db_dir(self) -> str:
-        """Return the directory the cache DB should live in, or ''.
-
-        Precedence:
-        1. ``cache.db_dir`` if set (operator explicitly isolated the
-           cache DB from the event recorder DB).
-        2. ``debug.db_dir`` otherwise (default operational setup — cache
-           piggybacks on the debug directory).
-        3. Empty string → engine runs in disabled mode.
-        """
-        return self._config.db_dir or self._ui_config.recorder.db_dir
+        """Return the folder the cache DB lives in (``storage.dir``), or ``''`` for memory-only."""
+        return self._storage_dir
 
     def _update_live_link(self) -> None:
         """Create/refresh the ``<worker>-cache.db`` symlink pointing at the DB file.
@@ -356,7 +349,7 @@ class CacheEngine:
         Idempotent: calling ``start()`` on an already-started engine is
         a no-op (the second call would otherwise re-run schema DDL, which
         is safe but wasteful). Returns without opening resources when the
-        cache is disabled or no db_dir can be resolved — the engine stays
+        cache is disabled or ``storage.dir`` is empty — the engine stays
         in effectively-disabled mode with ``_writer_db = None``.
         """
         # already started — keep the existing connection
@@ -369,16 +362,16 @@ class CacheEngine:
         db_dir = self._resolve_db_dir()
         if not db_dir:
             # Warn-and-continue (not fail-at-startup): the cache is an
-            # optional accelerator, so a missing db_dir degrades to
+            # optional accelerator, so memory-only mode degrades to
             # no-persistence rather than blocking the worker. The handler
             # still gets a Cache instance; it just won't persist.
             # Peer-sync is automatically disabled because it needs the
             # writer connection to apply UPSERTs.
             await logger.awarning(
-                'cache_engine_disabled_no_db_dir',
+                'cache_engine_disabled_no_storage_dir',
                 category='cache',
                 worker_id=self._worker_id,
-                reason='cache.db_dir empty and debug.db_dir empty',
+                reason='storage.dir is empty (memory-only mode), so there is no cache file',
             )
             return
 
@@ -416,37 +409,17 @@ class CacheEngine:
 
         self._update_live_link()
 
-        # Gate peer-sync on both config flags. ``peer_sync.enabled=False``
-        # (the explicit off-switch) always wins. Otherwise peer-sync also
-        # needs ``debug.store_config=True`` — we pull each peer's
-        # ``cluster_name`` from their ``worker_config`` table, which only
-        # exists when the peer's recorder has ``store_config=True``.
-        # Logging once at startup keeps operators aware of the effective
-        # state without spamming the sync loop.
-        #
-        # We use two log levels intentionally so operators can tell the
-        # cases apart at a glance:
-        #   - explicit off-switch (config says disabled) → INFO ("I turned
-        #     it off"), no action needed
-        #   - silent downgrade (peer_sync asked for, but store_config off)
-        #     → WARNING ("you wanted this but it got disabled"), operator
-        #     should decide whether to flip store_config or accept the
-        #     degraded mode
-        if not self._config.peer_sync.enabled:
+        # Peer-sync runs whenever ``fleet.cache_exchange.enabled`` is on: the
+        # writer connection it applies pulled rows into is open by now.
+        # Logged once at startup so the effective state is visible without
+        # spamming the sync loop.
+        if not self._exchange.enabled:
             self._peer_sync_enabled = False
             await logger.ainfo(
                 'cache_peer_sync_disabled_by_config',
                 category='cache',
                 worker_id=self._worker_id,
-                reason='peer_sync.enabled=False in config',
-            )
-        elif not self._ui_config.recorder.store_config:
-            self._peer_sync_enabled = False
-            await logger.awarning(
-                'cache_peer_sync_disabled_no_store_config',
-                category='cache',
-                worker_id=self._worker_id,
-                reason='peer_sync needs debug.store_config=True to read peer cluster_names',
+                reason='fleet.cache_exchange.enabled=false in config',
             )
         else:
             self._peer_sync_enabled = True
@@ -488,14 +461,13 @@ class CacheEngine:
         # Schedule the periodic peer-sync loop — but only when peer sync
         # is effectively enabled. When disabled we skip registration
         # entirely so there's zero wakeup cost on workers that don't
-        # participate in cross-worker cache sharing (including workers
-        # where ``debug.store_config=False`` silently downgraded sync).
+        # participate in cross-worker cache sharing.
         if self._peer_sync_enabled:
             self._sync_task = asyncio.create_task(
                 run_periodic_task(
                     name='cache.sync',
                     coro_fn=self._sync_once,
-                    seconds=self._config.peer_sync.interval_seconds,
+                    seconds=self._exchange.interval_seconds,
                     on_error='continue',
                     recorder=self._recorder,
                     system=True,
@@ -569,7 +541,7 @@ class CacheEngine:
         # A peer-commit task orphaned by a cancelled sync cycle may still
         # be running — await it (bounded) before the final drain and the
         # writer close, so we never close ``_writer_db`` mid-executemany.
-        await self._await_pending_peer_commit(timeout=self._config.peer_sync.timeout_seconds)
+        await self._await_pending_peer_commit(timeout=self._exchange.timeout_seconds)
 
         # Step 3: final drain — catches any dirty ops that accumulated
         # after the last scheduled flush fired, so shutdown isn't a
@@ -942,7 +914,7 @@ class CacheEngine:
         # Each peer DB query is wrapped in ``asyncio.wait_for`` with the
         # configured timeout so a stuck peer cannot block the sync cycle.
         # ``asyncio.TimeoutError`` propagates into the outer ``except`` below.
-        timeout = self._config.peer_sync.timeout_seconds
+        timeout = self._exchange.timeout_seconds
         try:
             async with _peer_reader(live_link) as db:
                 async with db.execute(
@@ -1060,7 +1032,7 @@ class CacheEngine:
         # timeout so a slow or wedged peer cannot stall the whole sync
         # cycle. Timeout raises ``asyncio.TimeoutError`` which the caller's
         # per-peer try/except catches and isolates.
-        timeout = self._config.peer_sync.timeout_seconds
+        timeout = self._exchange.timeout_seconds
         async with _peer_reader(peer_db_path) as db, db.execute(query, params) as cur:
             # aiosqlite's ``fetchall`` returns ``Iterable[Row]``; we
             # materialize to a concrete tuple-list so callers can index by
@@ -1116,7 +1088,7 @@ class CacheEngine:
         # connection keeps the drain on a single worker thread end-to-end;
         # the ``key > ?`` cursor still guarantees forward progress and
         # distinct pages per iteration.
-        timeout = self._config.peer_sync.timeout_seconds
+        timeout = self._exchange.timeout_seconds
         async with _peer_reader(peer_db_path) as db:
             while True:
                 params = (*scope_params, now_ms, ms, cursor_key, batch_size)
@@ -1231,7 +1203,7 @@ class CacheEngine:
         cycle and starve the periodic task.
 
         Deadline resolution:
-        - ``config.peer_sync.cycle_deadline_seconds`` when set explicitly.
+        - ``fleet.cache_exchange.cycle_deadline_seconds`` when set explicitly.
         - Otherwise ``interval_seconds * 0.9`` — strictly less than the
           gap between invocations so the periodic loop always has slack
           to schedule the next cycle even if this one hit the cap.
@@ -1243,9 +1215,9 @@ class CacheEngine:
         # A commit orphaned by the PREVIOUS cycle's deadline must finish
         # before this cycle touches the writer — otherwise the two could
         # interleave transactions on the shared connection.
-        await self._await_pending_peer_commit(timeout=self._config.peer_sync.timeout_seconds)
+        await self._await_pending_peer_commit(timeout=self._exchange.timeout_seconds)
 
-        cycle_deadline = self._config.peer_sync.cycle_deadline_seconds
+        cycle_deadline = self._exchange.cycle_deadline_seconds
         # ``None`` is the default: derive from the interval so operators
         # who never tune the deadline still get a reasonable bound. The
         # 0.9 factor gives the periodic loop headroom to schedule the
@@ -1253,10 +1225,7 @@ class CacheEngine:
         # — ``interval_seconds`` is only constrained by ``gt=0``, so a tiny
         # value (e.g. a pathological test config with interval_seconds=0.05)
         # could otherwise yield a deadline too small to be usable.
-        if cycle_deadline is not None:
-            deadline = cycle_deadline
-        else:
-            deadline = max(0.1, self._config.peer_sync.interval_seconds * 0.9)
+        deadline = cycle_deadline if cycle_deadline is not None else max(0.1, self._exchange.interval_seconds * 0.9)
         try:
             return await asyncio.wait_for(self._sync_inner(), timeout=deadline)
         except TimeoutError:
@@ -1291,7 +1260,7 @@ class CacheEngine:
         if not db_dir:
             return pulled
 
-        batch_size = self._config.peer_sync.batch_size
+        batch_size = self._exchange.page_size
         # Iterate peers. One bad peer must not break the whole sync cycle —
         # isolation is part of the peer-sync contract. Any exception inside
         # the per-peer block: log, tick the error counter, leave the

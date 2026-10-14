@@ -13,13 +13,12 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from drakkar.config import UIRecorderConfig
+from drakkar.config import HistoryArchiveConfig
 from drakkar.merge import merge_databases
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, EventRecorder, format_dt
 from drakkar.recorder import archive as archive_mod
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.archive import (
-    LOCK_STALE_SECONDS,
     _is_settled,
     archive_file_name,
     assign_windows,
@@ -101,10 +100,10 @@ def _lock_path(db_dir: Path, cluster: str = CLUSTER) -> Path:
     return db_dir / f'.archive-{sanitize_cluster(cluster)}.lock'
 
 
-def _make_config(**overrides) -> UIRecorderConfig:
-    values = {'archive_enabled': True, 'archive_window_hours': 24, 'rotation_interval_hours': 1}
+def _make_config(**overrides) -> HistoryArchiveConfig:
+    values = {'enabled': True, 'window_hours': 24}
     values.update(overrides)
-    return UIRecorderConfig(**values)
+    return HistoryArchiveConfig(**values)
 
 
 # --- filename helpers ---------------------------------------------------
@@ -249,7 +248,7 @@ def test_assign_windows_assigns_a_late_evening_file_to_its_own_day(tmp_path):
     path = _make_db(tmp_path, 'worker-1', start)
     now = start + 3 * DAY
 
-    windows = assign_windows([path], DAY, now, HOUR)
+    windows = assign_windows([path], DAY, DAY, now, HOUR)
 
     assert len(windows) == 1
     assert windows[0].start == datetime(2026, 8, 8, 0, 0, 0, tzinfo=UTC).timestamp()
@@ -263,7 +262,7 @@ def test_assign_windows_returns_the_window_exactly_at_end_plus_one_window(tmp_pa
     path = _make_db(tmp_path, 'worker-1', start)
     end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
 
-    assert assign_windows([path], DAY, end + DAY, HOUR) != []
+    assert assign_windows([path], DAY, DAY, end + DAY, HOUR) != []
 
 
 def test_assign_windows_skips_the_window_one_second_before_it_is_due(tmp_path):
@@ -271,7 +270,18 @@ def test_assign_windows_skips_the_window_one_second_before_it_is_due(tmp_path):
     path = _make_db(tmp_path, 'worker-1', start)
     end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
 
-    assert assign_windows([path], DAY, end + DAY - 1, HOUR) == []
+    assert assign_windows([path], DAY, DAY, end + DAY - 1, HOUR) == []
+
+
+def test_assign_windows_waits_for_the_due_delay_not_one_window(tmp_path):
+    start = datetime(2026, 8, 8, 10, 0, 0, tzinfo=UTC).timestamp()
+    path = _make_db(tmp_path, 'worker-1', start)
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    due_after = 2 * DAY
+
+    assert assign_windows([path], DAY, due_after, end + DAY, HOUR) == []
+    assert assign_windows([path], DAY, due_after, end + due_after - 1, HOUR) == []
+    assert assign_windows([path], DAY, due_after, end + due_after, HOUR) != []
 
 
 def test_assign_windows_vetoes_a_window_whose_file_was_written_recently(tmp_path):
@@ -281,9 +291,9 @@ def test_assign_windows_vetoes_a_window_whose_file_was_written_recently(tmp_path
     # Second file of the same window, still being written a minute ago.
     fresh = _make_db(tmp_path, 'worker-2', start + HOUR, mtime=now - 60)
 
-    assert assign_windows([old, fresh], DAY, now, HOUR) == []
+    assert assign_windows([old, fresh], DAY, DAY, now, HOUR) == []
     # Without the still-warm file the same window is due.
-    assert len(assign_windows([old], DAY, now, HOUR)) == 1
+    assert len(assign_windows([old], DAY, DAY, now, HOUR)) == 1
 
 
 def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
@@ -293,7 +303,7 @@ def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
     second = _make_db(tmp_path, 'worker-1', day_two)
     now = day_two + 5 * DAY
 
-    windows = assign_windows([second, first], DAY, now, HOUR)
+    windows = assign_windows([second, first], DAY, DAY, now, HOUR)
 
     assert [w.start for w in windows] == [
         datetime(2026, 8, 8, tzinfo=UTC).timestamp(),
@@ -315,7 +325,8 @@ def _run(tmp_path, cfg=None, cluster=CLUSTER, exclude_path=''):
         db_dir=str(tmp_path),
         worker_name='worker-1',
         cluster=cluster,
-        cfg=cfg or _make_config(),
+        archive=cfg or _make_config(),
+        rotation_interval_hours=1,
         exclude_path=exclude_path,
     )
 
@@ -754,7 +765,7 @@ def test_run_archive_pass_takes_over_a_lock_file_left_by_a_dead_worker(tmp_path)
     lock = _lock_path(tmp_path)
     # No process holds the flock — a dead worker's file, whatever its age.
     lock.write_text(json.dumps({'pid': 999, 'worker': 'worker-2', 'ts': 0}))
-    stale = now - LOCK_STALE_SECONDS - 1
+    stale = now - HistoryArchiveConfig().lock_stale_seconds - 1
     os.utime(lock, (stale, stale))
 
     _run(tmp_path)
@@ -808,7 +819,7 @@ def test_run_archive_pass_sweeps_temporaries_left_by_a_dead_pass(tmp_path):
     orphan.write_bytes(b'leftover')
     fresh = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4243.merge.db'
     fresh.write_bytes(b'still warm')
-    stale = now - LOCK_STALE_SECONDS - 1
+    stale = now - HistoryArchiveConfig().lock_stale_seconds - 1
     os.utime(orphan, (stale, stale))
 
     with capture_logs() as cap:
@@ -818,6 +829,22 @@ def test_run_archive_pass_sweeps_temporaries_left_by_a_dead_pass(tmp_path):
     assert fresh.exists()
     swept = [e for e in cap if e['event'] == 'recorder_archive_temp_swept']
     assert [e['name'] for e in swept] == [orphan.name]
+
+
+def test_run_archive_pass_sweeps_temporaries_older_than_lock_stale_seconds(tmp_path):
+    now = time.time()
+    _make_db(tmp_path, 'worker-1', _due_start(now))
+    old = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4242.tmp'
+    old.write_bytes(b'leftover')
+    young = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4243.tmp'
+    young.write_bytes(b'still warm')
+    os.utime(old, (now - 101, now - 101))
+    os.utime(young, (now - 50, now - 50))
+
+    _run(tmp_path, cfg=_make_config(lock_stale_seconds=100))
+
+    assert not old.exists()
+    assert young.exists()
 
 
 def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path):
@@ -918,7 +945,7 @@ def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
     old_theirs = _make_archive(tmp_path, OTHER_CLUSTER, now - 10 * DAY)
 
     with capture_logs() as cap:
-        _run(tmp_path, cfg=_make_config(archive_retention_days=3))
+        _run(tmp_path, cfg=_make_config(retention_days=3))
 
     assert not old_mine.exists()
     assert recent_mine.exists()
@@ -934,7 +961,7 @@ def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_path):
     _make_db(tmp_path, 'worker-1', _due_start(now))
     old_mine = _make_archive(tmp_path, CLUSTER, now - 100 * DAY)
 
-    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+    _run(tmp_path, cfg=_make_config(retention_days=0))
 
     assert old_mine.exists()
 
@@ -954,7 +981,7 @@ def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     theirs = _make_archive(tmp_path, OTHER_CLUSTER, now - 3 * DAY)
     theirs.write_bytes(b'x' * 4096)
 
-    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+    _run(tmp_path, cfg=_make_config(retention_days=0))
 
     expected = mine_a.stat().st_size + mine_b.stat().st_size
     assert archive_mod.recorder_archive_files._value.get() == 2
@@ -972,7 +999,7 @@ def test_archive_footprint_skips_a_cluster_whose_name_extends_this_one(tmp_path)
     extended = _make_archive(tmp_path, f'{CLUSTER}-hot', now - 2 * DAY)
     extended.write_bytes(b'x' * 4096)
 
-    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+    _run(tmp_path, cfg=_make_config(retention_days=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 1
     assert archive_mod.recorder_archive_bytes._value.get() == mine.stat().st_size
@@ -990,7 +1017,7 @@ def test_archive_pass_reports_the_footprint_when_no_window_is_due(tmp_path):
     archive_mod.recorder_archive_bytes.set(0)
     archive_mod.recorder_archive_files.set(0)
 
-    _run(tmp_path, cfg=_make_config(archive_retention_days=0))  # no raw db: nothing is due
+    _run(tmp_path, cfg=_make_config(retention_days=0))  # no raw db: nothing is due
 
     assert _archives(tmp_path) == [existing.name]
     assert archive_mod.recorder_archive_files._value.get() == 1
@@ -1001,7 +1028,7 @@ def test_archive_pass_reports_a_zero_footprint_for_an_empty_dir(tmp_path):
     archive_mod.recorder_archive_bytes.set(999)
     archive_mod.recorder_archive_files.set(9)
 
-    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+    _run(tmp_path, cfg=_make_config(retention_days=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 0
     assert archive_mod.recorder_archive_bytes._value.get() == 0
@@ -1012,21 +1039,21 @@ def test_archive_pass_reports_a_zero_footprint_for_an_empty_dir(tmp_path):
 
 def test_warn_if_archives_unbounded_warns_when_retention_is_zero():
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(archive_retention_days=0, db_dir='/var/lib/drakkar'))
+        warn_if_archives_unbounded(_make_config(retention_days=0), '/var/lib/drakkar')
 
     warnings = [e for e in cap if e['event'] == 'recorder_archives_unbounded']
     assert len(warnings) == 1
     assert warnings[0]['log_level'] == 'warning'
-    assert warnings[0]['db_dir'] == '/var/lib/drakkar'
+    assert warnings[0]['storage_dir'] == '/var/lib/drakkar'
     # The message has to name the knob and the metric, or it tells an
     # operator there is a problem without telling them what to do.
-    assert 'ui.recorder.archive_retention_days' in warnings[0]['message']
+    assert 'history.archive.retention_days' in warnings[0]['message']
     assert 'drakkar_recorder_archive_bytes' in warnings[0]['message']
 
 
 def test_warn_if_archives_unbounded_is_silent_when_retention_is_set():
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(archive_retention_days=30))
+        warn_if_archives_unbounded(_make_config(retention_days=30), '/var/lib/drakkar')
 
     assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
@@ -1034,7 +1061,7 @@ def test_warn_if_archives_unbounded_is_silent_when_retention_is_set():
 def test_warn_if_archives_unbounded_is_silent_when_archiving_is_disabled():
     """Nothing accumulates when no archive is ever written."""
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(archive_enabled=False, archive_retention_days=0))
+        warn_if_archives_unbounded(_make_config(enabled=False, retention_days=0), '/var/lib/drakkar')
 
     assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
@@ -1042,7 +1069,7 @@ def test_warn_if_archives_unbounded_is_silent_when_archiving_is_disabled():
 def test_warn_if_archives_unbounded_is_silent_on_the_shipped_defaults():
     """The default config must not warn — a warning nobody can act on is noise."""
     with capture_logs() as cap:
-        warn_if_archives_unbounded(UIRecorderConfig())
+        warn_if_archives_unbounded(HistoryArchiveConfig(), '/tmp/drakkar')
 
     assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
@@ -1050,9 +1077,11 @@ def test_warn_if_archives_unbounded_is_silent_on_the_shipped_defaults():
 # --- recorder wiring ----------------------------------------------------
 
 
-def _make_recorder(tmp_path, **recorder_overrides) -> EventRecorder:
-    config = make_ui_config(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60, **recorder_overrides)
-    return EventRecorder(config, worker_name='worker-1', cluster_name=CLUSTER)
+def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> EventRecorder:
+    config = make_ui_config(enabled=True, flush_interval_seconds=60)
+    return EventRecorder(
+        config, worker_name='worker-1', cluster_name=CLUSTER, storage_dir=str(tmp_path), archive=archive
+    )
 
 
 async def test_archive_pass_runs_off_the_event_loop_with_the_live_db_excluded(tmp_path, monkeypatch):
@@ -1072,12 +1101,13 @@ async def test_archive_pass_runs_off_the_event_loop_with_the_live_db_excluded(tm
     assert seen['worker_name'] == 'worker-1'
     assert seen['cluster'] == CLUSTER
     assert seen['exclude_path'] == rec._db_path
-    assert seen['cfg'] is rec._store
+    assert seen['archive'] is rec._archive
+    assert seen['rotation_interval_hours'] == 1
     assert seen['thread'] != threading.current_thread().ident
 
 
 async def test_archive_pass_does_nothing_when_archiving_is_disabled(tmp_path, monkeypatch):
-    rec = _make_recorder(tmp_path, archive_enabled=False)
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=False))
     calls = 0
 
     def spy(**kwargs) -> None:
@@ -1091,9 +1121,9 @@ async def test_archive_pass_does_nothing_when_archiving_is_disabled(tmp_path, mo
     assert calls == 0
 
 
-async def test_archive_pass_does_nothing_without_a_db_dir(tmp_path, monkeypatch):
+async def test_archive_pass_does_nothing_without_a_storage_dir(tmp_path, monkeypatch):
     rec = _make_recorder(tmp_path)
-    rec._store = rec._store.model_copy(update={'db_dir': ''})
+    rec._storage_dir = ''
     calls = 0
 
     def spy(**kwargs) -> None:
@@ -1108,7 +1138,7 @@ async def test_archive_pass_does_nothing_without_a_db_dir(tmp_path, monkeypatch)
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):
-    rec = _make_recorder(tmp_path, archive_enabled=False)
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=False))
 
     with capture_logs() as cap:
         await rec.start()

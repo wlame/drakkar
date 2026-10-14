@@ -50,6 +50,7 @@ from drakkar.app import (
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
+from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
@@ -157,6 +158,7 @@ class AppLifecycle:
         # same ``_shutdown`` the run phase uses, then re-raises so the worker
         # exits non-zero. ``_shutdown`` is written to tolerate partial state.
         try:
+            await self._prepare_storage()
             await self._setup_watchdog()
 
             await self._run_on_startup()
@@ -267,6 +269,24 @@ class AppLifecycle:
                     message=message,
                 )
 
+    async def _prepare_storage(self) -> None:
+        """Create ``storage.dir`` before anything writes into it.
+
+        The folder holds this worker's own files (recorder, cache, crash
+        marker), so a folder created here is owner-only (0700). An existing
+        folder — typically a mounted volume — keeps the mode the operator
+        gave it: ``os.makedirs`` applies the mode only to the folder it
+        creates. Memory-only mode (``storage.dir: ""``) creates nothing.
+
+        A folder that cannot be created fails startup: every own file lives
+        there, so the worker could not record or cache anything.
+        """
+        storage_dir = self._app._config.storage.dir
+        if not storage_dir:
+            return
+        # File I/O on a possibly network-mounted path — keep it off the loop.
+        await asyncio.to_thread(os.makedirs, storage_dir, mode=DB_DIR_MODE, exist_ok=True)
+
     async def _setup_watchdog(self) -> None:
         """Construct the watchdog file and check the previous run.
 
@@ -277,10 +297,9 @@ class AppLifecycle:
         """
         app = self._app
         log = logger.bind(worker_id=app._worker_id)
-        # Watchdog file for OOM / SIGKILL detection. Resolves the durable
-        # directory from ``config.ui.recorder.db_dir`` (the canonical location
-        # for per-worker durable files in this codebase — already used by
-        # the recorder and the cache engine). When ``db_dir`` is empty —
+        # Watchdog file for OOM / SIGKILL detection. Lives in
+        # ``storage.dir``, the folder for this worker's own files (the
+        # recorder and the cache engine write there too). When it is empty —
         # fully disk-less deployment where the operator deliberately
         # disabled every on-disk file — we skip the watchdog entirely
         # rather than fall back to the worker's CWD: the CWD is often a
@@ -297,15 +316,15 @@ class AppLifecycle:
         # committed to running. Otherwise an exception during sink
         # connect / consumer.subscribe / on_startup would leave the empty
         # body and falsely flag the next startup as OOM-killed.
-        if app._config.ui.recorder.db_dir:
-            watchdog_dir = Path(app._config.ui.recorder.db_dir)
+        if app._config.storage.dir:
+            watchdog_dir = Path(app._config.storage.dir)
             self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
             # Detect a possible SIGKILL from the prior run BEFORE we
             # claim the slot for this run. ``check_previous`` returns
             # True when no suspect-OOM signature was found; logging that
             # at info level lets operators confirm the watchdog ran
             # without grepping the warn-only suspect path.
-            # File I/O on db_dir (often NFS) — keep it off the event loop.
+            # File I/O on storage.dir (possibly network-mounted) — keep it off the event loop.
             previous_run_clean = await asyncio.to_thread(self._watchdog.check_previous)
             if previous_run_clean:
                 await log.ainfo(
@@ -316,9 +335,9 @@ class AppLifecycle:
         else:
             self._watchdog = None
             await log.ainfo(
-                'watchdog_disabled_no_db_dir',
+                'watchdog_disabled_no_storage_dir',
                 category='watchdog',
-                reason='ui.recorder.db_dir is empty — OOM/SIGKILL detection disabled for this run',
+                reason='storage.dir is empty — OOM/SIGKILL detection disabled for this run',
             )
 
     async def _build_executor_pool(self) -> None:
@@ -411,12 +430,14 @@ class AppLifecycle:
             # Archives are the one recorder artifact nothing else reclaims,
             # so "keep forever" is stated at startup rather than discovered
             # when a volume fills.
-            warn_if_archives_unbounded(app._config.ui.recorder)
+            warn_if_archives_unbounded(app._config.history.archive, app._config.storage.dir)
 
             app._recorder = EventRecorder(
                 app._config.ui,
                 worker_name=app._worker_id,
                 cluster_name=app._cluster_name,
+                storage_dir=app._config.storage.dir,
+                archive=app._config.history.archive,
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()
@@ -579,7 +600,8 @@ class AppLifecycle:
         if app._config.cache.enabled:
             app._cache_engine = CacheEngine(
                 config=app._config.cache,
-                ui_config=app._config.ui,
+                exchange=app._config.fleet.cache_exchange,
+                storage_dir=app._config.storage.dir,
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
                 recorder=app._recorder,
@@ -792,7 +814,7 @@ class AppLifecycle:
         if self._watchdog is None:
             return
         try:
-            # File I/O on db_dir (often NFS) — keep it off the event loop.
+            # File I/O on storage.dir (possibly network-mounted) — keep it off the event loop.
             await asyncio.to_thread(self._watchdog.write)
         except OSError as exc:
             await logger.awarning(
@@ -899,7 +921,7 @@ class AppLifecycle:
             # availability would be the wrong tradeoff at this layer.
             if self._watchdog is not None:
                 try:
-                    # File I/O on db_dir (often NFS) — keep it off the loop.
+                    # File I/O on storage.dir (possibly network-mounted) — keep it off the loop.
                     await asyncio.to_thread(self._watchdog.mark_clean)
                 except OSError as exc:
                     await log.awarning(

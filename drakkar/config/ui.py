@@ -9,79 +9,20 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Archives are the only recorder artifact nothing else reclaims, so the
-# default has to be a horizon rather than "forever": a worker left alone
-# on its defaults must not be able to fill the disk it runs on. 30 days
-# keeps a month of history queryable while covering every archive window
-# up to 360 hours — wider windows have to name their own retention.
-DEFAULT_ARCHIVE_RETENTION_DAYS = 30
-
 
 class UIRecorderConfig(BaseModel):
     """Flight-recorder persistence settings — the UI's data store.
 
-    Set ``db_dir: ""`` to run without any SQLite files on disk.
+    The recorder writes into ``storage.dir``; with ``storage.dir: ""`` it
+    runs memory-only and writes no file.
 
-    Granular persistence flags (all require ``db_dir`` to be set):
+    Granular persistence flags (all need a ``storage.dir``):
     - ``store_events``: write processing events to the ``events`` table.
-    - ``store_config``: write worker config to ``worker_config`` (enables autodiscovery).
+    - ``store_config``: write worker config to ``worker_config`` (names the
+      worker and cluster inside each file, for history and merges).
     - ``store_state``: periodically dump counters to ``worker_state``.
-
-    Any combination is valid — e.g. ``store_config=true`` with everything
-    else ``false`` gives autodiscovery without event or state logging.
     """
 
-    @model_validator(mode='after')
-    def _validate_archive_window_vs_rotation(self) -> 'UIRecorderConfig':
-        """The archive pass must see every rotated file before it ages out.
-
-        If ``archive_window_hours`` were shorter than ``rotation_interval_hours``,
-        a file could rotate out and be gone before the next archive pass ever
-        looked at it.
-        """
-        if self.archive_window_hours < self.rotation_interval_hours:
-            raise ValueError(
-                f'ui.recorder.archive_window_hours ({self.archive_window_hours}) must be >= '
-                f'ui.recorder.rotation_interval_hours ({self.rotation_interval_hours})'
-            )
-        return self
-
-    @model_validator(mode='after')
-    def _validate_archive_retention_vs_window(self) -> 'UIRecorderConfig':
-        """Retention must outlive the window an archive is born into.
-
-        A window is archived only once it ended a full window ago, so an
-        archive of a just-due window already describes data one window old.
-        Retention shorter than two windows would delete such an archive in
-        the very pass that created it.
-
-        This does not (and cannot) stop a backlog window from being
-        archived and expired in one pass: a window whose data predates the
-        retention horizon is past due for both. That is retention working
-        as asked.
-        """
-        if self.archive_retention_days and self.archive_retention_days * 24 < 2 * self.archive_window_hours:
-            default_note = (
-                f' The value is the {DEFAULT_ARCHIVE_RETENTION_DAYS}-day default, so raise it (or set 0 to keep '
-                f'archives forever) to go with a window this wide.'
-                if self.archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
-                else ''
-            )
-            raise ValueError(
-                f'ui.recorder.archive_retention_days ({self.archive_retention_days}) must cover at least two '
-                f'archive windows, or be 0 to keep archives forever: archive_retention_days * 24 must be >= '
-                f'2 * ui.recorder.archive_window_hours ({self.archive_window_hours}).{default_note}'
-            )
-        return self
-
-    db_dir: str = Field(
-        default='/tmp',
-        description=(
-            'Directory for the recorder SQLite files. Empty runs memory-only: no files, no '
-            'history — the live WebSocket view keeps working. Use a shared filesystem for '
-            'cross-worker autodiscovery and merge.'
-        ),
-    )
     store_events: bool = Field(
         default=True,
         description=(
@@ -92,8 +33,8 @@ class UIRecorderConfig(BaseModel):
     store_config: bool = Field(
         default=True,
         description=(
-            'Write the worker config snapshot to the worker_config table — what makes the '
-            'worker discoverable by peers sharing the same db_dir.'
+            'Write the worker config snapshot to the worker_config table, so every recorder '
+            'file names the worker and cluster that wrote it (history, merges, archives).'
         ),
     )
     store_state: bool = Field(
@@ -111,47 +52,6 @@ class UIRecorderConfig(BaseModel):
         ),
     )
     rotation_interval_hours: int = Field(default=1, ge=1, description='How often to roll over to a new SQLite file.')
-    archive_enabled: bool = Field(
-        default=True,
-        description='Archive rotated-out DB files instead of deleting them outright.',
-    )
-    archive_window_hours: int = Field(
-        default=24,
-        ge=1,
-        description='How much recent history the archive pass keeps queryable; must be >= rotation_interval_hours.',
-    )
-    archive_retention_days: int = Field(
-        default=DEFAULT_ARCHIVE_RETENTION_DAYS,
-        ge=0,
-        description=(
-            f'How long archived files are kept before deletion. Defaults to '
-            f'{DEFAULT_ARCHIVE_RETENTION_DAYS} days so a worker cannot fill its disk unattended. '
-            f'0 = keep archives forever (a startup warning names the choice); any other value must '
-            f'cover at least two archive windows (archive_retention_days * 24 >= 2 * archive_window_hours).'
-        ),
-    )
-    dbstats_warm_interval_seconds: int = Field(
-        default=60,
-        ge=5,
-        description=(
-            'How often the background warmer sweeps db_dir, computing '
-            'statistics for database files the .dbstats cache does not '
-            'know yet and purging entries for deleted files. Cheap when '
-            'everything is already cached — one directory listing plus '
-            'one small SELECT.'
-        ),
-    )
-    dbstats_inline_scan_limit: int = Field(
-        default=4,
-        ge=0,
-        description=(
-            'How many cold (uncached) database files one /api/v1/debug/databases '
-            'request may fully scan inline. Files beyond the cap return '
-            'immediately with stats_pending=true and fill in as the warmer '
-            'catches up. 0 = requests never scan; matters only on a cold '
-            'cache (first boot over a pre-existing directory).'
-        ),
-    )
     store_output: bool = Field(
         default=True,
         description='Store subprocess stdout/stderr content in task events. Off drops output content from all of them.',
@@ -733,6 +633,21 @@ class UIDocsConfig(BaseModel):
         return value
 
 
+class UITraceConfig(BaseModel):
+    """Budget of one trace search over sealed history files."""
+
+    history_max_files: int = Field(
+        default=256,
+        ge=1,
+        description='Most sealed history files one trace request with history=1 opens, newest first.',
+    )
+    history_max_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description='Time limit for one trace request with history=1; the search stops and returns what it found.',
+    )
+
+
 class UIConfig(BaseModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -748,6 +663,8 @@ class UIConfig(BaseModel):
       user-defined details (:class:`UIProbeDetailsConfig`);
     - ``ui.timeline.*`` — timeline history depth, bar color rules, and
       label roles (:class:`UITimelineConfig`);
+    - ``ui.trace.*`` — the budget of a trace search over sealed history
+      (:class:`UITraceConfig`);
     - ``ui.docs.*`` — the operator docs site and its contextual anchors
       (:class:`UIDocsConfig`).
 
@@ -829,10 +746,11 @@ class UIConfig(BaseModel):
         default=True,
         description=(
             'Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that '
-            'writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in '
-            '``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls '
-            'grow unbounded. Set to false to serve 403 instead — independently '
-            'of ``auth_token``, per the reasoning on ``probe_enabled``.'
+            'writes to disk: each call creates a new ``merged-<ts>-<token>.db`` '
+            'in the ``merged`` folder of ``shared.dir``, kept for '
+            '``history.merged_retention_days``. Set to false to serve 403 '
+            'instead — independently of ``auth_token``, per the reasoning on '
+            '``probe_enabled``.'
         ),
     )
     kafka_read_enabled: bool = Field(
@@ -873,17 +791,6 @@ class UIConfig(BaseModel):
             "Externally reachable URL of this worker's UI, used for "
             'cross-worker links in the workers list. Empty derives '
             'http://<ip>:<port> from the bind address.'
-        ),
-    )
-    workers_offline_after_seconds: int = Field(
-        default=30,
-        ge=1,
-        description=(
-            'A discovered worker whose newest heartbeat is older than this '
-            'many seconds is reported offline in the workers list. Size it '
-            'to at least 2-3x the largest '
-            '``ui.recorder.state_sync_interval_seconds`` in the fleet so a '
-            'healthy worker never flaps offline between heartbeats.'
         ),
     )
     expose_env_vars: list[str] = Field(
@@ -972,6 +879,7 @@ class UIConfig(BaseModel):
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
     timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
+    trace: UITraceConfig = Field(default_factory=UITraceConfig)
     docs: UIDocsConfig = Field(default_factory=UIDocsConfig)
 
     @field_validator('link_bases')

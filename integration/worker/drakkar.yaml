@@ -276,7 +276,6 @@ ui:
   # Path matches the Dockerfile's COPY target under WORKDIR /app.
   custom_renderers_path: "/app/custom-renderers.js"
   recorder:
-    db_dir: "/shared"
     store_events: true
     store_config: true
     store_state: true
@@ -387,10 +386,9 @@ cache:
   # stub (peek/get return None, set/delete silently discard) — handler
   # code runs unchanged.
   enabled: true
-  # Empty db_dir falls back to ui.recorder.db_dir above. Keeping them on the
-  # same shared volume lets the peer-sync loop discover other workers'
-  # cache DBs alongside their -live.db recorder files.
-  db_dir: ""
+  # The cache file lives in storage.dir (below). Keeping every worker's
+  # storage.dir on the one shared volume lets the peer-sync loop discover
+  # other workers' cache DBs alongside their -live.db recorder files.
   # Memory → SQLite flush cadence. Shorter = less data lost on a crash;
   # longer = fewer SQLite transactions per worker. 3s matches the
   # recorder's own flush interval for operational consistency.
@@ -404,13 +402,19 @@ cache:
   # on an evicted key falls through to the DB. Leave unset for
   # unbounded growth (fine for small workers; set a cap in production).
   max_memory_entries: 10000
-  # Peer-sync loop: pulls recent rows from other workers' `-cache.db`
-  # files via read-only SQLite connections, LWW-merges into our local
-  # DB, and invalidates overlapping memory entries so the next read
-  # sees the newer value. Requires ui.recorder.store_config=true above so
-  # peers can discover our cluster_name.
-  peer_sync:
+
+# This worker's own files (recorder, cache, crash marker). The harness
+# mounts one host folder at /shared in every container, so it doubles as
+# the fleet's shared folder (shared.dir empty = storage.dir).
+storage:
+  dir: "/shared"
+
+fleet:
+  # Cache exchange: pulls recent cluster/global rows from other workers,
+  # LWW-merges them into our local DB, and invalidates overlapping memory
+  # entries so the next read sees the newer value.
+  cache_exchange:
     enabled: true
     interval_seconds: 30.0
-    batch_size: 500
+    page_size: 500
     timeout_seconds: 5.0

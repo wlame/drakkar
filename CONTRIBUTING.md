@@ -63,7 +63,7 @@ outside this repository already depends on their exact bytes:
 - **metric names and help text**
 - the config-summary one-liner
 - `/api/v1` request and response shapes
-- the recorder and cache SQLite schemas, which workers sharing a `db_dir`
+- the recorder and cache SQLite schemas, which workers sharing a folder
   read from each other
 
 Changing any of them is a breaking change, not a refactor. Metric names and

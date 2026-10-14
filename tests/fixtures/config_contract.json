@@ -1,0 +1,619 @@
+{
+  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages. Each case deep-merges its yaml over base and loads it through the public loader.",
+  "base": {
+    "sources": {
+      "kafka": {
+        "enabled": true
+      }
+    },
+    "ui": {
+      "release": {
+        "enabled": false
+      }
+    }
+  },
+  "moved_keys": [
+    {
+      "name": "single_yaml_key",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "db_dir": "/data"
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir"
+    },
+    {
+      "name": "yaml_and_env_keys_in_table_order",
+      "yaml": {
+        "cache": {
+          "db_dir": "/cache"
+        },
+        "ui": {
+          "recorder": {
+            "db_dir": "/data"
+          }
+        }
+      },
+      "env": {
+        "DK_CACHE__PEER_SYNC__INTERVAL_SECONDS": "10"
+      },
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir"
+    },
+    {
+      "name": "null_value_still_reported",
+      "yaml": {
+        "ui": {
+          "workers_offline_after_seconds": null
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds"
+    },
+    {
+      "name": "empty_string_still_reported",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "db_dir": ""
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir"
+    },
+    {
+      "name": "every_key",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "db_dir": "/data",
+            "archive_enabled": true,
+            "archive_window_hours": 24,
+            "archive_retention_days": 30,
+            "dbstats_warm_interval_seconds": 60,
+            "dbstats_inline_scan_limit": 4
+          },
+          "workers_offline_after_seconds": 30
+        },
+        "cache": {
+          "peer_sync": {
+            "enabled": true,
+            "interval_seconds": 30,
+            "batch_size": 500,
+            "timeout_seconds": 5,
+            "cycle_deadline_seconds": null
+          },
+          "db_dir": "/cache"
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file"
+    },
+    {
+      "name": "env_only_old_key",
+      "env_only": true,
+      "yaml": {},
+      "env": {
+        "DK_UI__RECORDER__ARCHIVE_ENABLED": "false",
+        "DK_CACHE__DB_DIR": "/cache"
+      },
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.archive_enabled -> history.archive.enabled\n  cache.db_dir: removed, the cache file lives in storage.dir"
+    }
+  ],
+  "summary": [
+    {
+      "name": "defaults",
+      "yaml": {},
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "memory_only_no_shared",
+      "yaml": {
+        "storage": {
+          "dir": ""
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "shared_differs",
+      "yaml": {
+        "storage": {
+          "dir": "/var/lib/drakkar"
+        },
+        "shared": {
+          "dir": "/mnt/fleet"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "shared_equal_to_storage",
+      "yaml": {
+        "storage": {
+          "dir": "/var/lib/drakkar"
+        },
+        "shared": {
+          "dir": "/var/lib/drakkar"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "shared_set_with_memory_only_storage",
+      "yaml": {
+        "storage": {
+          "dir": ""
+        },
+        "shared": {
+          "dir": "/mnt/fleet"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "ui_off",
+      "yaml": {
+        "ui": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "static_provider",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "static"
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=static cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "none_provider",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "none"
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=none cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "memory_only_with_explicit_registry_dir",
+      "yaml": {
+        "storage": {
+          "dir": ""
+        },
+        "fleet": {
+          "registry": {
+            "filesystem": {
+              "dir": "/mnt/reg"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "cache_exchange_off",
+      "yaml": {
+        "cache": {
+          "enabled": true
+        },
+        "fleet": {
+          "cache_exchange": {
+            "enabled": false
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "cache_exchange_fractional_interval",
+      "yaml": {
+        "cache": {
+          "enabled": true
+        },
+        "fleet": {
+          "cache_exchange": {
+            "interval_seconds": 12.5
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "no_cluster",
+      "yaml": {},
+      "worker": "w-1",
+      "cluster": "",
+      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    }
+  ],
+  "validation": [
+    {
+      "name": "window_shorter_than_rotation",
+      "yaml": {
+        "history": {
+          "archive": {
+            "window_hours": 1
+          }
+        },
+        "ui": {
+          "recorder": {
+            "rotation_interval_hours": 2
+          }
+        }
+      },
+      "message": "history.archive.window_hours (1) must be >= ui.recorder.rotation_interval_hours (2)"
+    },
+    {
+      "name": "due_shorter_than_rotation",
+      "yaml": {
+        "history": {
+          "archive": {
+            "due_after_hours": 1
+          }
+        },
+        "ui": {
+          "recorder": {
+            "rotation_interval_hours": 2
+          }
+        }
+      },
+      "message": "history.archive.due_after_hours (1) must be >= ui.recorder.rotation_interval_hours (2)"
+    },
+    {
+      "name": "retention_too_short",
+      "yaml": {
+        "history": {
+          "archive": {
+            "retention_days": 2
+          }
+        }
+      },
+      "message": "history.archive.retention_days (2) must be 0 (keep archives forever) or cover the due delay plus one window: retention_days * 24 must be >= history.archive.due_after_hours (48) + history.archive.window_hours (24)."
+    },
+    {
+      "name": "retention_default_note",
+      "yaml": {
+        "history": {
+          "archive": {
+            "window_hours": 720
+          }
+        }
+      },
+      "message": "history.archive.retention_days (30) must be 0 (keep archives forever) or cover the due delay plus one window: retention_days * 24 must be >= history.archive.due_after_hours (48) + history.archive.window_hours (720). The value is the 30-day default, so raise it (or set 0 to keep archives forever) to go with a window this wide."
+    },
+    {
+      "name": "offline_below_two_heartbeats",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "heartbeat_seconds": 20
+          }
+        }
+      },
+      "message": "fleet.registry.offline_after_seconds (30) must be >= 2 * fleet.registry.heartbeat_seconds (20)"
+    },
+    {
+      "name": "prune_below_offline",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "prune_after_seconds": 10
+          }
+        }
+      },
+      "message": "fleet.registry.prune_after_seconds (10) must be >= fleet.registry.offline_after_seconds (30)"
+    },
+    {
+      "name": "deadline_not_below_interval",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "interval_seconds": 10,
+            "cycle_deadline_seconds": 10
+          }
+        }
+      },
+      "message": "fleet.cache_exchange.cycle_deadline_seconds (10) must be strictly less than fleet.cache_exchange.interval_seconds (10) — otherwise the deadline can never fire before the next cycle schedules."
+    },
+    {
+      "name": "deadline_fractional_values",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "interval_seconds": 2.5,
+            "cycle_deadline_seconds": 3.5
+          }
+        }
+      },
+      "message": "fleet.cache_exchange.cycle_deadline_seconds (3.5) must be strictly less than fleet.cache_exchange.interval_seconds (2.5) — otherwise the deadline can never fire before the next cycle schedules."
+    },
+    {
+      "name": "page_size_over_limit",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "page_size": 1001
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.page_size"
+    },
+    {
+      "name": "page_size_zero",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "page_size": 0
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.page_size"
+    },
+    {
+      "name": "exchange_interval_zero",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "interval_seconds": 0
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.interval_seconds"
+    },
+    {
+      "name": "exchange_timeout_zero",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "timeout_seconds": 0
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.timeout_seconds"
+    },
+    {
+      "name": "deadline_below_floor",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "cycle_deadline_seconds": 0.05
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.cycle_deadline_seconds"
+    },
+    {
+      "name": "max_concurrent_peers_zero",
+      "yaml": {
+        "fleet": {
+          "cache_exchange": {
+            "max_concurrent_peers": 0
+          }
+        }
+      },
+      "path": "fleet.cache_exchange.max_concurrent_peers"
+    },
+    {
+      "name": "history_max_files_zero",
+      "yaml": {
+        "ui": {
+          "trace": {
+            "history_max_files": 0
+          }
+        }
+      },
+      "path": "ui.trace.history_max_files"
+    },
+    {
+      "name": "history_max_seconds_zero",
+      "yaml": {
+        "ui": {
+          "trace": {
+            "history_max_seconds": 0
+          }
+        }
+      },
+      "path": "ui.trace.history_max_seconds"
+    },
+    {
+      "name": "merged_retention_negative",
+      "yaml": {
+        "history": {
+          "merged_retention_days": -1
+        }
+      },
+      "path": "history.merged_retention_days"
+    },
+    {
+      "name": "window_zero",
+      "yaml": {
+        "history": {
+          "archive": {
+            "window_hours": 0
+          }
+        }
+      },
+      "path": "history.archive.window_hours"
+    },
+    {
+      "name": "due_after_zero",
+      "yaml": {
+        "history": {
+          "archive": {
+            "due_after_hours": 0
+          }
+        }
+      },
+      "path": "history.archive.due_after_hours"
+    },
+    {
+      "name": "retention_negative",
+      "yaml": {
+        "history": {
+          "archive": {
+            "retention_days": -1
+          }
+        }
+      },
+      "path": "history.archive.retention_days"
+    },
+    {
+      "name": "lock_stale_zero",
+      "yaml": {
+        "history": {
+          "archive": {
+            "lock_stale_seconds": 0
+          }
+        }
+      },
+      "path": "history.archive.lock_stale_seconds"
+    },
+    {
+      "name": "heartbeat_zero",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "heartbeat_seconds": 0
+          }
+        }
+      },
+      "path": "fleet.registry.heartbeat_seconds"
+    },
+    {
+      "name": "refresh_zero",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "refresh_seconds": 0
+          }
+        }
+      },
+      "path": "fleet.registry.refresh_seconds"
+    },
+    {
+      "name": "registry_timeout_zero",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "timeout_seconds": 0
+          }
+        }
+      },
+      "path": "fleet.registry.timeout_seconds"
+    },
+    {
+      "name": "empty_provider",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": ""
+          }
+        }
+      },
+      "path": "fleet.registry.provider"
+    },
+    {
+      "name": "static_peer_without_url",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "static": {
+              "peers": [
+                {
+                  "name": "peer-a"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "path": "fleet.registry.static.peers"
+    },
+    {
+      "name": "static_peer_empty_name",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "static": {
+              "peers": [
+                {
+                  "name": "",
+                  "url": "http://10.0.0.5:8080/"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "path": "fleet.registry.static.peers"
+    },
+    {
+      "name": "static_peer_empty_url",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "static": {
+              "peers": [
+                {
+                  "name": "peer-a",
+                  "url": ""
+                }
+              ]
+            }
+          }
+        }
+      },
+      "path": "fleet.registry.static.peers"
+    },
+    {
+      "name": "static_peer_without_name",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "static": {
+              "peers": [
+                {
+                  "url": "http://10.0.0.5:8080/"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "path": "fleet.registry.static.peers"
+    }
+  ]
+}

@@ -412,9 +412,10 @@ async def test_archives_payload_matches_schema(tmp_path):
     with gzip.open(tmp_path / name, 'wb') as f:
         f.write(b'archived-bytes')
 
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
+    recorder.storage_dir = str(tmp_path)
     app = MagicMock()
     app._worker_id = 'schema-worker'
     app._cluster_name = ''

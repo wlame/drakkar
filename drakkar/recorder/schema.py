@@ -20,7 +20,7 @@ without a separate code path. These columns are added directly to the
 migration framework. Rationale:
 
 * recorder DBs are observability-only, already rotated and disposable;
-* ``debug.db_dir`` is documented as operator-disposable;
+* ``storage.dir`` is documented as operator-disposable;
 * a forward-only migration runner just to add three optional columns
   would be over-engineering for a feature that affects only debug data.
 

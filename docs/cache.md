@@ -114,7 +114,7 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 | Loop | Default interval | What it does |
 |------|------------------|--------------|
 | `cache.flush` | `flush_interval_seconds` (3s) | Drains the pending `_dirty` map to SQLite via `UPSERT` / `DELETE` in one transaction |
-| `cache.sync` | `peer_sync.interval_seconds` (30s) | Pulls recent rows from peer workers' `-cache.db` files, LWW-merges into local DB |
+| `cache.sync` | `fleet.cache_exchange.interval_seconds` (30s) | Pulls recent rows from peer workers' `-cache.db` files, LWW-merges into local DB |
 | `cache.cleanup` | `cleanup_interval_seconds` (60s) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
 
 A reader aiosqlite connection is opened alongside the writer so `get()`
@@ -183,15 +183,15 @@ And the matching config:
 
 ```yaml
 cache:
-  enabled: true
-  # db_dir: ""           # empty → falls back to ui.recorder.db_dir
+  enabled: true                 # the cache file lives in storage.dir
   flush_interval_seconds: 3.0
   cleanup_interval_seconds: 60.0
   max_memory_entries: 10000     # LRU cap; omit for unbounded
-  peer_sync:
+fleet:
+  cache_exchange:
     enabled: true
     interval_seconds: 30.0
-    batch_size: 500
+    page_size: 500
     timeout_seconds: 5.0
     # Upper bound on a single sync cycle. When None (default), derived as
     # interval_seconds * 0.9 so the next scheduled tick never overlaps the
@@ -512,7 +512,7 @@ See [`delete()` above](#deletekey) for the full story.
   (default: 3s + 30s = 33s).
 - **Worst-case staleness**, concretely: local durability is bounded by
   `flush_interval_seconds` (default 3s); cross-worker freshness is
-  bounded by `flush_interval_seconds + peer_sync.interval_seconds`
+  bounded by `flush_interval_seconds + fleet.cache_exchange.interval_seconds`
   (default 3s + 30s = 33s). Size intervals based on your tolerance —
   halving both to 1.5s/15s trades more SQLite + peer-disk traffic for
   tighter staleness. The cache never promises stricter consistency than
@@ -598,6 +598,6 @@ handler asked of the cache without disturbing its state.
 - [Performance](performance.md) — when caching helps, the `PrecomputedResult`
   fast path
 - [Worker Autodiscovery](observability.md#worker-autodiscovery) — the
-  shared-db_dir convention that peer sync reuses
+  shared-storage-folder convention that peer sync reuses
 - [Integration Tests](integration.md) — the docker-compose demo exercises
   cache fast-path, peer sync, and disk persistence

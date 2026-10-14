@@ -1,8 +1,8 @@
 """Permissions of the SQLite files the recorder and the cache engine write.
 
 The stores persist message-derived data (task args, subprocess output,
-handler results) into a ``db_dir`` that defaults to the world-readable,
-world-writable ``/tmp``. These tests pin the invariant that the DB file
+handler results) into ``storage.dir``, which may sit under the
+world-readable, world-writable ``/tmp``. These tests pin the invariant that the DB file
 **and both WAL sidecars** end up owner-only, in every path that creates
 one: recorder start, recorder rotation, and cache-engine start.
 
@@ -13,8 +13,8 @@ opens it. Chmod-ing afterwards — which is what the code used to do —
 leaves both sidecars at 0644 while the main file reads 0600, so an
 assertion on the main file alone would pass against the bug.
 
-Every worker sharing a db_dir depends on it, so they share a
-``db_dir``, so the two must agree.
+Every worker sharing a folder depends on it, so the recorder and the cache
+must agree.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from drakkar.cache import CacheEngine
-from drakkar.config import CacheConfig, UIConfig
+from drakkar.config import CacheConfig, CacheExchangeConfig, UIConfig
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE, secure_db_file
 from drakkar.recorder import EventRecorder
 from tests.conftest import make_ui_config
@@ -61,7 +61,6 @@ def assert_db_files_owner_only(db_path: str) -> None:
 def make_recorder_config(tmp_path: Path, **overrides) -> UIConfig:
     defaults: dict = {
         'enabled': True,
-        'db_dir': str(tmp_path),
         'store_events': True,
         'store_config': False,
         'store_state': False,
@@ -97,7 +96,7 @@ def test_secure_db_file_tightens_existing_file_and_sidecars(tmp_path):
 
 
 def test_secure_db_file_does_not_follow_a_planted_symlink(tmp_path):
-    """A predictable filename in a world-writable db_dir invites a symlink swap.
+    """A predictable filename in a world-writable folder invites a symlink swap.
 
     ``O_EXCL`` refuses to create through the link, so the victim keeps its
     own mode and never becomes the worker's database.
@@ -129,7 +128,7 @@ def test_secure_db_file_survives_unwritable_directory(tmp_path):
 
 async def test_recorder_db_and_wal_sidecars_are_owner_only(tmp_path):
     """Start + a real write, so the -wal/-shm sidecars actually exist."""
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         rec.record_committed(partition=0, offset=1)
@@ -157,7 +156,7 @@ async def test_recorder_rotation_keeps_the_new_db_owner_only(tmp_path, monkeypat
         lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
     )
 
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         original_path = rec.db_path
@@ -178,8 +177,9 @@ async def test_recorder_rotation_keeps_the_new_db_owner_only(tmp_path, monkeypat
 async def test_cache_db_and_wal_sidecars_are_owner_only(tmp_path):
     db_dir = tmp_path / 'cachedir'
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=str(db_dir)),
-        ui_config=make_recorder_config(tmp_path),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -191,12 +191,13 @@ async def test_cache_db_and_wal_sidecars_are_owner_only(tmp_path):
         await engine.stop()
 
 
-async def test_cache_creates_its_db_dir_owner_only(tmp_path):
-    """A db_dir Drakkar creates itself must not be group/world traversable."""
+async def test_cache_creates_its_storage_dir_owner_only(tmp_path):
+    """A storage folder Drakkar creates itself must not be group/world traversable."""
     db_dir = tmp_path / 'created-by-drakkar'
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=str(db_dir)),
-        ui_config=make_recorder_config(tmp_path),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -209,10 +210,10 @@ async def test_cache_creates_its_db_dir_owner_only(tmp_path):
 
 
 @pytest.mark.parametrize('pre_existing_mode', [0o755, 0o777])
-async def test_cache_leaves_an_operator_owned_db_dir_alone(tmp_path, pre_existing_mode):
+async def test_cache_leaves_an_operator_owned_storage_dir_alone(tmp_path, pre_existing_mode):
     """``makedirs`` mode applies only to directories we create.
 
-    An operator who points db_dir at an existing shared directory keeps
+    An operator who points storage.dir at an existing directory keeps
     whatever mode they chose — we tighten the files inside, not somebody
     else's directory. The world-writable warning covers that case instead.
     """
@@ -220,8 +221,9 @@ async def test_cache_leaves_an_operator_owned_db_dir_alone(tmp_path, pre_existin
     db_dir.mkdir(mode=pre_existing_mode)
     os.chmod(db_dir, pre_existing_mode)
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=str(db_dir)),
-        ui_config=make_recorder_config(tmp_path),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -253,7 +255,7 @@ async def test_recorder_writer_uses_normal_synchronous(tmp_path):
     most recent transactions on a host power loss — acceptable for a flight
     recorder. See docs/local-databases.md.
     """
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         async with rec._db.execute('PRAGMA synchronous') as cur:
@@ -265,7 +267,7 @@ async def test_recorder_writer_uses_normal_synchronous(tmp_path):
 async def test_rotated_recorder_writer_uses_normal_synchronous(tmp_path):
     """``synchronous`` is per-connection and not stored in the DB header, so
     rotation has to set it again on the new writer."""
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         await rec._rotate()
@@ -280,8 +282,9 @@ async def test_cache_writer_uses_normal_synchronous(tmp_path):
     db_dir = tmp_path / 'cache'
     db_dir.mkdir()
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=str(db_dir)),
-        ui_config=make_recorder_config(tmp_path),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
         recorder=None,

@@ -8,7 +8,6 @@ import pytest
 from pydantic import ValidationError
 
 from drakkar.config import (
-    DEFAULT_ARCHIVE_RETENTION_DAYS,
     DrakkarConfig,
     UIConfig,
     UIRecorderConfig,
@@ -33,15 +32,11 @@ def test_ui_defaults_match_old_debug_defaults():
 
 def test_recorder_defaults_match_old_debug_defaults():
     rec = UIRecorderConfig()
-    assert rec.db_dir == '/tmp'
     assert rec.store_events is True
     assert rec.store_config is True
     assert rec.store_state is True
     assert rec.state_sync_interval_seconds == 10
     assert rec.rotation_interval_hours == 1
-    assert rec.archive_enabled is True
-    assert rec.archive_window_hours == 24
-    assert rec.archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
     assert rec.store_output is True
     assert rec.flush_interval_seconds == 5
     assert rec.max_buffer == 50_000
@@ -55,74 +50,18 @@ def test_recorder_rotation_interval_hours_rejects_below_one():
         UIRecorderConfig(rotation_interval_hours=0)
 
 
-def test_recorder_archive_window_hours_rejects_below_one():
-    with pytest.raises(ValidationError):
-        UIRecorderConfig(archive_window_hours=0)
-
-
-def test_recorder_archive_retention_days_accepts_zero():
-    assert UIRecorderConfig(archive_retention_days=0).archive_retention_days == 0
-
-
-def test_recorder_archive_retention_default_bounds_disk_growth():
-    """The default must expire archives, because nothing else reclaims them.
-
-    Rotation, the flush buffer and the live database are all bounded on
-    their own. Archives are not: with retention at 0 a worker left on its
-    defaults grows until the volume fills. The default is therefore a
-    horizon, and 0 is an explicit opt-out.
-    """
-    assert DEFAULT_ARCHIVE_RETENTION_DAYS > 0
-    assert UIRecorderConfig().archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
-
-
-def test_recorder_archive_retention_default_covers_the_default_window():
-    """The shipped defaults must validate against each other.
-
-    Retention has to cover two archive windows, so a default retention
-    that did not clear 2 x the default window would make an untouched
-    config fail to load at all.
-    """
-    assert 2 * UIRecorderConfig().archive_window_hours <= DEFAULT_ARCHIVE_RETENTION_DAYS * 24
-
-
-def test_recorder_default_retention_against_a_wide_window_names_the_default():
-    """A window too wide for the default must say so, not just fail.
-
-    Whoever hits this never chose 30 days — they widened the window and
-    inherited the default. The message has to name that, or the number in
-    the error looks like it came from their own config.
-    """
-    too_wide = DEFAULT_ARCHIVE_RETENTION_DAYS * 24  # 2 x this exceeds the default's coverage
-    with pytest.raises(ValidationError) as excinfo:
-        UIRecorderConfig(archive_window_hours=too_wide)
-    message = str(excinfo.value)
-    assert f'{DEFAULT_ARCHIVE_RETENTION_DAYS}-day default' in message
-    assert 'set 0 to keep' in message
-
-
-def test_recorder_archive_retention_days_rejects_negative():
-    with pytest.raises(ValidationError):
-        UIRecorderConfig(archive_retention_days=-1)
-
-
-def test_recorder_archive_retention_shorter_than_two_windows_is_fatal():
-    with pytest.raises(ValidationError, match=r'archive_retention_days \(1\).*archive_window_hours \(24\)'):
-        UIRecorderConfig(archive_retention_days=1, archive_window_hours=24)
-
-
-def test_recorder_archive_retention_of_two_windows_is_accepted():
-    rec = UIRecorderConfig(archive_retention_days=2, archive_window_hours=24)
-    assert rec.archive_retention_days == 2
-
-
-def test_recorder_archive_retention_zero_is_accepted_for_any_window():
-    assert UIRecorderConfig(archive_retention_days=0, archive_window_hours=168).archive_retention_days == 0
-
-
-def test_recorder_archive_window_shorter_than_rotation_is_fatal():
-    with pytest.raises(ValidationError, match=r'archive_window_hours \(1\).*rotation_interval_hours \(2\)'):
-        UIRecorderConfig(archive_window_hours=1, rotation_interval_hours=2)
+def test_recorder_has_no_folder_archive_or_stats_fields():
+    """The folder moved to storage.dir, archiving to history.archive, and the stats cache keys are gone."""
+    fields = set(UIRecorderConfig.model_fields)
+    assert not fields & {
+        'db_dir',
+        'archive_enabled',
+        'archive_window_hours',
+        'archive_retention_days',
+        'dbstats_warm_interval_seconds',
+        'dbstats_inline_scan_limit',
+    }
+    assert 'workers_offline_after_seconds' not in UIConfig.model_fields
 
 
 def test_retired_recorder_keys_are_ignored_extras():
@@ -185,12 +124,12 @@ def test_auth_token_stripped_on_load():
 
 
 def test_env_nested_override(monkeypatch):
-    monkeypatch.setenv('DK_UI__RECORDER__DB_DIR', '/data')
+    monkeypatch.setenv('DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS', '7')
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'false')
     monkeypatch.setenv('DK_UI__PORT', '9001')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
-    assert cfg.ui.recorder.db_dir == '/data'
+    assert cfg.ui.recorder.flush_interval_seconds == 7
     assert cfg.ui.release.check_update is False
     assert cfg.ui.port == 9001
 
@@ -219,10 +158,10 @@ def test_config_summary_ui_off():
     assert ' ui=off ' in cfg.config_summary(worker_id='w1')
 
 
-def test_config_summary_cache_token_follows_ui():
+def test_config_summary_storage_and_fleet_tokens_follow_ui():
     cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on:8080 cache=off ' in summary
+    assert ' ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off ' in summary
 
 
 def test_probe_and_merge_default_to_enabled():

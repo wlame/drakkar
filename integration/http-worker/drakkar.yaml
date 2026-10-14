@@ -66,9 +66,6 @@ ui:
   prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
   prometheus_cluster_label: 'cluster="http-cluster"'
   recorder:
-    # Same db_dir as the main/fast clusters' workers, so the Debug UI's
-    # workers page lists this one alongside them on the one shared volume.
-    db_dir: "/shared"
     store_events: true
     store_config: true
     store_state: true
@@ -82,3 +79,11 @@ ui:
 # workers' cache DBs, which needs cache.enabled=true AND a shared
 # cluster_name on both sides — neither holds here. This worker demonstrates
 # the Kafka-source-off / HTTP-only path, not cross-cluster cache sharing.
+
+# This worker's own files (recorder, cache, crash marker). Same folder as
+# the main cluster's workers, so the Debug UI's workers page lists this one
+# alongside them: the harness mounts one host folder at /shared in every
+# container, so it doubles as the fleet's shared folder (shared.dir empty
+# = storage.dir).
+storage:
+  dir: "/shared"

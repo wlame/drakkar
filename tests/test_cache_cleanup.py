@@ -46,22 +46,10 @@ from drakkar.cache import (
     DirtyOp,
     Op,
 )
-from drakkar.config import CacheConfig, UIConfig
-from tests.conftest import make_ui_config
+from drakkar.config import CacheConfig, CacheExchangeConfig
+from tests.conftest import split_cache_overrides
 
 # --- helpers ----------------------------------------------------------------
-
-
-def make_debug_config(tmp_path: Path, **overrides) -> UIConfig:
-    defaults: dict = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': False,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides) -> CacheConfig:
@@ -72,9 +60,11 @@ def make_cache_config(**overrides) -> CacheConfig:
 
 async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides) -> CacheEngine:
     cache = Cache(origin_worker_id=worker_id)
+    cache_fields, exchange = split_cache_overrides(cfg_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**cfg_overrides),
-        ui_config=make_debug_config(tmp_path),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,
@@ -509,7 +499,8 @@ async def test_cleanup_on_disabled_engine_is_noop(tmp_path):
     be a no-op — not raise, not touch anything."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        ui_config=make_debug_config(tmp_path),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',
         recorder=None,

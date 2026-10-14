@@ -153,7 +153,7 @@ def test_broadcast_throughput_frame_shape(tmp_path):
     from drakkar.recorder import EventRecorder
     from tests.test_recorder import WORKER_NAME, make_debug_config
 
-    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     sub = rec.subscribe(event_types=['throughput'])
     windows = {'1': {'throughput': 5.0, 'task_rate': 1.0, 'tasks': 1}}
 

@@ -12,7 +12,7 @@ Two families live here:
   through the recorder's dedicated reader connection.
 - **cross-worker** — ``cross_trace``, ``cross_trace_by_label``,
   ``discover_workers``: bounded sweeps over the peer databases in
-  ``db_dir``, each opened read-only and skipped if it is locked, corrupt,
+  ``storage.dir``, each opened read-only and skipped if it is locked, corrupt,
   or belongs to another cluster.
 """
 
@@ -38,9 +38,9 @@ logger = structlog.get_logger()
 
 # Cross-worker sweep bounds. A cross-trace MISS — the common case when an
 # operator pastes an offset that is not in this cluster — walks every
-# candidate database in db_dir, opening each and running a query. db_dir
-# defaults to /tmp and is shared by co-located workers, so it accumulates live
-# and rotated files from every worker on the host. The sweep is reached from a
+# candidate database in storage.dir, opening each and running a query. Co-located
+# workers may share that folder, so it accumulates live and rotated files from
+# every worker on the host. The sweep is reached from a
 # UI request but executes on the MAIN loop (UI reads of live state hop there),
 # so an unbounded scan stalls Kafka polling — and it is trivially repeatable
 # by refreshing the page.
@@ -79,7 +79,7 @@ class _ScanBudget:
             op=op,
             max_files=CROSS_TRACE_MAX_FILES,
             budget_seconds=CROSS_TRACE_BUDGET_SECONDS,
-            hint='result may be incomplete; narrow db_dir or prune rotated databases',
+            hint='result may be incomplete; prune rotated databases in storage.dir',
         )
 
 
@@ -106,6 +106,8 @@ class QueryContext:
     reader: Callable[[], aiosqlite.Connection | None]
     db_path: Callable[[], str]
     flush: Callable[[], Awaitable[None]]
+    # The worker's own folder (``storage.dir``); ``''`` in memory-only mode.
+    storage_dir: str = ''
 
     @property
     def store(self) -> UIRecorderConfig:
@@ -204,7 +206,7 @@ class EventQueries:
         # the blocking directory walk runs in a thread (inline it would stall
         # the main loop for the whole sweep), and the sweep is bounded so a
         # directory full of peers cannot pin the caller.
-        if not self._ctx.store.db_dir:
+        if not self._ctx.storage_dir:
             return []
 
         json_path = f'$.{label_key}'
@@ -287,7 +289,7 @@ class EventQueries:
         Search order:
         1. Current worker's live DB
         2. Other workers' live DBs (same cluster)
-        3. Rotated (historical) DB files in db_dir, newest first
+        3. Rotated (historical) DB files in storage.dir, newest first
 
         Every returned event carries a ``worker_name`` field.
         """
@@ -298,7 +300,7 @@ class EventQueries:
         if local_events:
             return local_events
 
-        if not self._ctx.store.db_dir:
+        if not self._ctx.storage_dir:
             return []
 
         searched_paths: set[str] = set()
@@ -343,7 +345,7 @@ class EventQueries:
         order, whatever order the filesystem happens to list them in.
         """
         targets: list[str] = []
-        live_pattern = os.path.join(self._ctx.store.db_dir, '*-live.db')
+        live_pattern = os.path.join(self._ctx.storage_dir, '*-live.db')
         for link_path in sorted(glob.glob(live_pattern)):
             if not os.path.islink(link_path):
                 continue
@@ -356,10 +358,10 @@ class EventQueries:
     def _enumerate_rotated_dbs(self, searched_paths: set[str]) -> list[str]:
         """List rotated DB files newest first. Blocking; call in a thread."""
         all_dbs = []
-        for entry in os.listdir(self._ctx.store.db_dir):
+        for entry in os.listdir(self._ctx.storage_dir):
             if not entry.endswith('.db'):
                 continue
-            full = os.path.join(self._ctx.store.db_dir, entry)
+            full = os.path.join(self._ctx.storage_dir, entry)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
             if os.path.realpath(full) in searched_paths:
@@ -430,8 +432,8 @@ class EventQueries:
                 return float(row[0])
         return None
 
-    async def discover_workers(self) -> list[dict]:
-        """Scan db_dir for other workers' -live.db symlinks, read their worker_config.
+    async def discover_workers(self, offline_after_seconds: int) -> list[dict]:
+        """Scan storage.dir for other workers' -live.db symlinks, read their worker_config.
 
         Symlink scanning is delegated to :func:`discover_peer_dbs`
         (shared with the cache peer-sync loop). We keep the recorder-specific
@@ -444,17 +446,17 @@ class EventQueries:
         - ``last_seen_ts`` — newest heartbeat timestamp (see
           :meth:`_peer_last_seen`), or ``None`` when no source is available;
         - ``online`` — True when that heartbeat is no older than
-          ``ui.workers_offline_after_seconds``. A crashed or OOM-killed
+          ``offline_after_seconds`` (``fleet.registry.offline_after_seconds``). A crashed or OOM-killed
           worker leaves its ``-live.db`` symlink behind, so it stays listed
           — this flag is what tells the UI it is gone.
         """
-        if not self._ctx.store.db_dir or not self._ctx.store.store_config:
+        if not self._ctx.storage_dir or not self._ctx.store.store_config:
             return []
-        threshold = self._ctx.config.workers_offline_after_seconds
+        threshold = offline_after_seconds
         now = time.time()
         workers: list[dict] = []
         async for peer_name, target in discover_peer_dbs(
-            self._ctx.store.db_dir,
+            self._ctx.storage_dir,
             '-live.db',
             self._ctx.worker_name,
         ):

@@ -52,7 +52,7 @@ network access.
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
 | **Independent kill switches** | `ui.probe_enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
-| **Path containment** | Database download and merge resolve names inside `ui.recorder.db_dir` and refuse anything that escapes it, is not a recorder database name, or arrives when no directory is configured. |
+| **Path containment** | Database download and merge resolve names inside `storage.dir` and refuse anything that escapes it, is not a recorder database name, or arrives when no directory is configured. |
 | **Secret masking** | The config reference masks secret-flagged fields, `executor.env` and every `*.client_config` by key name; the flight recorder applies the same redaction before storing task env. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
 
@@ -70,7 +70,7 @@ Stated plainly, so nobody plans around a control that is not there:
 - **No sandbox around your handler binary.** It runs with the worker's
   privileges and receives message bytes on stdin unvalidated.
 - **No authentication between peer workers.** Anything that can write to a
-  shared `db_dir` is trusted as a peer.
+  shared `storage.dir` is trusted as a peer.
 
 The last two are architectural trust boundaries with their own reasoning —
 see [the FAQ's trust model](faq.md#security-and-trust-model) and
@@ -123,7 +123,7 @@ in order of how much they buy you:
 4. **Close what you do not need**: `ui.probe_enabled: false`,
    `ui.merge_enabled: false`, and `ui.enabled: false` entirely on workers
    nobody debugs.
-5. **Restrict `ui.recorder.db_dir` permissions** to the worker user, on
+5. **Restrict `storage.dir` permissions** to the worker user, on
    every host that shares it.
 
 ## Reporting something

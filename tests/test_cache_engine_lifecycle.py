@@ -19,23 +19,11 @@ import os
 from pathlib import Path
 
 import aiosqlite
+from structlog.testing import capture_logs
 
 from drakkar.cache import CacheEngine
-from drakkar.config import CacheConfig, UIConfig
-from tests.conftest import make_ui_config
-
-
-def make_debug_config(tmp_path: Path, **overrides) -> UIConfig:
-    """Build a UIConfig rooted at tmp_path — same shape as recorder tests."""
-    defaults: dict = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': False,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
+from drakkar.config import CacheConfig, CacheExchangeConfig
+from tests.conftest import split_cache_overrides
 
 
 def make_cache_config(**overrides) -> CacheConfig:
@@ -51,9 +39,11 @@ async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides
     No recorder wired in — lifecycle tests don't need one. The recorder
     hook path is exercised in later tasks.
     """
+    cache_fields, exchange = split_cache_overrides(cfg_overrides)
     return CacheEngine(
-        config=make_cache_config(**cfg_overrides),
-        ui_config=make_debug_config(tmp_path),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,
@@ -266,77 +256,58 @@ async def test_stop_without_start_is_safe(tmp_path):
     assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
 
 
-# --- disabled / unresolved db_dir --------------------------------------------
+# --- disabled / memory-only storage -------------------------------------------
 
 
-async def test_start_with_empty_db_dir_disables_engine(tmp_path, caplog):
-    """When neither cache.db_dir nor debug.db_dir is set, start() logs a
-    warning and marks the engine as effectively disabled (no file, no
-    connection)."""
-    # cache.db_dir empty, debug.db_dir empty (override) → no resolution possible
+async def test_start_with_empty_storage_dir_disables_engine(tmp_path):
+    """With ``storage.dir: ""`` (memory-only), start() logs a warning and
+    marks the engine as effectively disabled (no file, no connection)."""
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=''),
-        ui_config=make_ui_config(enabled=True, db_dir=''),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir='',
         worker_id='w1',
         cluster_name='',
         recorder=None,
     )
-    await engine.start()
+    with capture_logs() as cap:
+        await engine.start()
     try:
         # no writer connection opened
         assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
         # no file created anywhere under tmp_path
         assert not (tmp_path / 'w1-cache.db').exists()
         assert not (tmp_path / 'w1-cache.db.actual').exists()
+        assert any(e['event'] == 'cache_engine_disabled_no_storage_dir' for e in cap)
     finally:
         await engine.stop()
 
 
-async def test_start_uses_cache_db_dir_when_set(tmp_path):
-    """cache.db_dir takes precedence over debug.db_dir in resolution."""
-    cache_dir = tmp_path / 'cache'
-    debug_dir = tmp_path / 'debug'
-    cache_dir.mkdir()
-    debug_dir.mkdir()
+async def test_start_puts_the_cache_file_in_storage_dir(tmp_path):
+    """The cache file lives in the worker's own folder, storage.dir."""
+    storage = tmp_path / 'own'
+    storage.mkdir()
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=str(cache_dir)),
-        ui_config=make_ui_config(enabled=True, db_dir=str(debug_dir)),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(storage),
         worker_id='w1',
         cluster_name='',
         recorder=None,
     )
     await engine.start()
     try:
-        assert (cache_dir / 'w1-cache.db.actual').exists()
-        assert not (debug_dir / 'w1-cache.db.actual').exists()
-    finally:
-        await engine.stop()
-
-
-async def test_start_falls_back_to_debug_db_dir(tmp_path):
-    """When cache.db_dir is empty but debug.db_dir is set, we use the
-    debug dir — operators should be able to enable the cache with a
-    single `cache: {enabled: true}` on top of an already-configured
-    debug section."""
-    engine = CacheEngine(
-        config=CacheConfig(enabled=True, db_dir=''),
-        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
-        worker_id='w1',
-        cluster_name='',
-        recorder=None,
-    )
-    await engine.start()
-    try:
-        assert (tmp_path / 'w1-cache.db.actual').exists()
+        assert (storage / 'w1-cache.db.actual').exists()
     finally:
         await engine.stop()
 
 
 async def test_start_disabled_cache_does_not_open_connection(tmp_path):
-    """When `cache.enabled=false`, start() is a no-op even if db_dir is set."""
+    """When `cache.enabled=false`, start() is a no-op even with a storage folder."""
     engine = CacheEngine(
-        config=CacheConfig(enabled=False, db_dir=str(tmp_path)),
-        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
+        config=CacheConfig(enabled=False),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',
         recorder=None,

@@ -38,7 +38,7 @@ class CollectingWriter(EventWriter):
 
 @pytest.fixture
 def writer():
-    return CollectingWriter(UIConfig(recorder={'db_dir': '', 'store_events': True}, release={'enabled': False}))
+    return CollectingWriter(UIConfig(recorder={'store_events': True}, release={'enabled': False}))
 
 
 def make_task(task_id='t1', **kwargs) -> ExecutorTask:
@@ -58,7 +58,7 @@ class TestWriterIsIndependentOfStorage:
         assert writer.last['event'] == 'committed'
 
     def test_record_is_abstract_on_the_base_class(self):
-        base = EventWriter(UIConfig(recorder={'db_dir': ''}, release={'enabled': False}))
+        base = EventWriter(UIConfig(release={'enabled': False}))
 
         with pytest.raises(NotImplementedError):
             base._record({'ts': 0.0, 'event': 'x'})

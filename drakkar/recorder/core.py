@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import UIConfig
+from drakkar.config import HistoryArchiveConfig, UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, atomic_symlink, remove_symlink, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -164,10 +164,26 @@ class EventRecorder(EventWriter):
 
     MAX_BUFFER = 50_000  # default, overridden by config.ui.recorder.max_buffer
 
-    def __init__(self, config: UIConfig, worker_name: str = 'worker', cluster_name: str = '') -> None:
+    def __init__(
+        self,
+        config: UIConfig,
+        worker_name: str = 'worker',
+        cluster_name: str = '',
+        *,
+        storage_dir: str = '',
+        archive: HistoryArchiveConfig | None = None,
+    ) -> None:
+        """Wire a recorder without opening anything.
+
+        ``storage_dir`` is the worker's own folder (``storage.dir``); empty
+        runs memory-only. ``archive`` is ``history.archive``; the defaults
+        apply when omitted.
+        """
         super().__init__(config)
         self._worker_name = worker_name
         self._cluster_name = cluster_name
+        self._storage_dir = storage_dir
+        self._archive = archive if archive is not None else HistoryArchiveConfig()
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -176,12 +192,12 @@ class EventRecorder(EventWriter):
         self._buffered_bytes = 0
         # Whether an appended event will ever reach a table. The flush loop
         # is created only when ``store_events`` is on (and only when there
-        # is a ``db_dir`` to open a DB in), and ``_flush`` returns early
+        # is a ``storage_dir`` to open a DB in), and ``_flush`` returns early
         # without one — so in the other configurations an append is a leak:
         # the deque fills to ``max_buffer`` and every further event counts
         # as a drop forever. Both inputs are process-lifetime constants, so
         # this is resolved once here rather than re-read on every event.
-        self._persists_events: bool = bool(self._store.store_events and self._store.db_dir)
+        self._persists_events: bool = bool(self._store.store_events and self._storage_dir)
         self._db: aiosqlite.Connection | None = None
         # Dedicated reader connection used by the debug UI for SELECTs.
         # aiosqlite serializes ops per connection, so without this the UI
@@ -199,7 +215,7 @@ class EventRecorder(EventWriter):
         self._state_task: asyncio.Task | None = None
         self._host_sample_task: asyncio.Task | None = None
         # Databases-page stats cache (drakkar.dbstats). Constructed in
-        # start() when db_dir is set; the warmer loop keeps it filled and
+        # start() when storage_dir is set; the warmer loop keeps it filled and
         # _rotate feeds it the freshly-immutable file. None in memory-only
         # mode — there is no directory to describe.
         self._dbstats: Any = None
@@ -237,6 +253,7 @@ class EventRecorder(EventWriter):
         self._queries = EventQueries(
             QueryContext(
                 config=config,
+                storage_dir=storage_dir,
                 worker_name=worker_name,
                 cluster_name=cluster_name,
                 reader=lambda: self._reader_db or self._db,
@@ -248,6 +265,11 @@ class EventRecorder(EventWriter):
     @property
     def db_path(self) -> str:
         return self._db_path
+
+    @property
+    def storage_dir(self) -> str:
+        """The worker's own folder (``storage.dir``); ``''`` in memory-only mode."""
+        return self._storage_dir
 
     @property
     def config(self) -> UIConfig:
@@ -265,7 +287,7 @@ class EventRecorder(EventWriter):
         separate aiosqlite worker thread from the writer, so UI reads
         don't queue behind buffered-event flushes. Returns ``None`` when
         the recorder has not been started yet or was started without a
-        ``db_dir`` (memory-only mode), matching the semantics of
+        ``storage_dir`` (memory-only mode), matching the semantics of
         ``_db``. Callers should check for ``None`` before executing.
         """
         return self._reader_db
@@ -318,7 +340,7 @@ class EventRecorder(EventWriter):
         * Existing ``events`` table missing one or more required
           columns → pre-webapp-release DB; raise
           :class:`RecorderSchemaError` with operator guidance (delete
-          the file under ``db_dir`` and restart). The exception is
+          the file under ``storage.dir`` and restart). The exception is
           intentionally not caught anywhere in the recorder layer so
           it propagates through ``AppLifecycle._async_run`` and aborts
           worker startup with the message visible in stderr/logs.
@@ -342,17 +364,17 @@ class EventRecorder(EventWriter):
             raise RecorderSchemaError(
                 f'Recorder DB at {db_path} predates the webapp release '
                 f"(missing columns on 'events' table: {', '.join(missing)}); "
-                f'delete it (db_dir is documented as disposable) and '
+                f'delete it (storage.dir is documented as disposable) and '
                 f'restart the worker. New rotation-cycle DBs include the '
                 f'required columns automatically.'
             )
 
     async def start(self) -> None:
         self._running = True
-        if self._store.db_dir:
-            await self._warn_if_db_dir_world_writable()
-            await self._warn_if_db_dir_network_fs()
-            self._db_path = make_db_path(self._store.db_dir, self._worker_name)
+        if self._storage_dir:
+            await self._warn_if_storage_dir_world_writable()
+            await self._warn_if_storage_dir_network_fs()
+            self._db_path = make_db_path(self._storage_dir, self._worker_name)
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
             # whichever connections already opened — otherwise the caller
@@ -376,7 +398,7 @@ class EventRecorder(EventWriter):
                 # One fsync per checkpoint instead of one per commit — see
                 # WAL_SYNCHRONOUS_PRAGMA for the durability trade.
                 await self._db.execute(WAL_SYNCHRONOUS_PRAGMA)
-                # Explicit busy_timeout so shared-db_dir contention behaves
+                # Explicit busy_timeout so lock contention behaves
                 # the same regardless of the driver's own default.
                 await self._db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
                 # Webapp-release schema check. Run BEFORE ``_create_schema``
@@ -418,7 +440,7 @@ class EventRecorder(EventWriter):
             # import chain until a DB-backed recorder actually starts.
             from drakkar.dbstats import DbStatsCache
 
-            self._dbstats = DbStatsCache(self._store.db_dir)
+            self._dbstats = DbStatsCache(self._storage_dir)
             self._dbstats_warm_task = asyncio.create_task(self._dbstats_warm_loop())
             self._watch_background_task(self._dbstats_warm_task, 'dbstats_warm')
             if self._store.store_events:
@@ -429,17 +451,17 @@ class EventRecorder(EventWriter):
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
                 self._watch_background_task(self._state_task, 'state_sync')
-            if not self._store.archive_enabled:
+            if not self._archive.enabled:
                 # Archiving is the only thing that removes rotated files, so
-                # opting out means db_dir grows until the operator prunes it.
+                # opting out means the folder grows until the operator prunes it.
                 await logger.ainfo(
                     'recorder_archiving_disabled',
                     category='recorder',
-                    db_dir=self._store.db_dir,
+                    storage_dir=self._storage_dir,
                     hint='raw recorder database files are never deleted automatically; '
-                    'prune db_dir yourself or set ui.recorder.archive_enabled: true',
+                    'prune the folder yourself or set history.archive.enabled: true',
                 )
-        # Outside the db_dir branch on purpose: resource samples still feed
+        # Outside the storage_dir branch on purpose: resource samples still feed
         # WS subscribers, so the sampler runs in memory-only mode too.
         self._host_sample_task = asyncio.create_task(self._host_sample_loop())
         self._watch_background_task(self._host_sample_task, 'host_sample')
@@ -485,8 +507,8 @@ class EventRecorder(EventWriter):
 
         task.add_done_callback(on_done)
 
-    async def _warn_if_db_dir_world_writable(self) -> None:
-        """Warn when the recorder DB directory is world-writable (e.g. /tmp).
+    async def _warn_if_storage_dir_world_writable(self) -> None:
+        """Warn when the own-files folder is world-writable (e.g. /tmp).
 
         Recorder DBs persist task args and subprocess output. In a
         world-writable directory other local users can pre-create or
@@ -495,21 +517,21 @@ class EventRecorder(EventWriter):
         may not exist yet and ``make_db_path`` / connect handle that.
         """
         try:
-            mode = os.stat(self._store.db_dir).st_mode
+            mode = os.stat(self._storage_dir).st_mode
         except OSError:
             return
         if mode & 0o002:
             await logger.awarning(
-                'recorder_db_dir_world_writable',
+                'recorder_storage_dir_world_writable',
                 category='recorder',
-                db_dir=self._store.db_dir,
+                storage_dir=self._storage_dir,
                 hint='recorder DBs store task args and subprocess output; '
-                'point debug.db_dir at a directory owned by the worker user '
+                'point storage.dir at a folder owned by the worker user '
                 '(e.g. /var/lib/drakkar) on shared hosts',
             )
 
-    async def _warn_if_db_dir_network_fs(self) -> None:
-        """Warn when the recorder DB directory sits on a network filesystem.
+    async def _warn_if_storage_dir_network_fs(self) -> None:
+        """Warn when the own-files folder sits on a network filesystem.
 
         SQLite on NFS/CIFS is a double hazard: file locking is unreliable
         (corruption risk), and every flush shares fate with the network
@@ -518,26 +540,26 @@ class EventRecorder(EventWriter):
         stack degrades exactly when it is needed most. Warning only; the
         operator may accept the trade-off knowingly.
         """
-        hit = detect_network_fs(self._store.db_dir)
+        hit = detect_network_fs(self._storage_dir)
         if hit is None:
             return
         mount, fstype = hit
         await logger.awarning(
-            'recorder_db_dir_network_fs',
+            'recorder_storage_dir_network_fs',
             category='recorder',
-            db_dir=self._store.db_dir,
+            storage_dir=self._storage_dir,
             mount=mount,
             fstype=fstype,
             hint='recorder databases on a network filesystem share fate with '
             'the storage server and risk SQLite lock corruption; point '
-            'ui.recorder.db_dir at a local disk',
+            'storage.dir at a local disk',
         )
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
         """Append event to buffer and broadcast to WS subscribers.
 
         Buffering is skipped entirely when this recorder will never persist
-        events (memory-only ``db_dir: ''``, or ``store_events: false``):
+        events (memory-only ``storage.dir: ''``, or ``store_events: false``):
         nothing would ever drain the deque, so it would pin ``max_buffer``
         events — ``task_completed`` carries the whole subprocess stdout and
         stderr — and report every event after that as a drop. The WS
@@ -567,18 +589,18 @@ class EventRecorder(EventWriter):
 
     def _update_live_link(self) -> None:
         """Create or update the {worker}-live.db symlink to the current DB."""
-        if not self._store.db_dir or not self._db_path:
+        if not self._storage_dir or not self._db_path:
             return
         atomic_symlink(
-            live_link_path(self._store.db_dir, self._worker_name),
+            live_link_path(self._storage_dir, self._worker_name),
             os.path.basename(self._db_path),
         )
 
     def _remove_live_link(self) -> None:
         """Remove the live symlink on graceful shutdown."""
-        if not self._store.db_dir:
+        if not self._storage_dir:
             return
-        remove_symlink(live_link_path(self._store.db_dir, self._worker_name))
+        remove_symlink(live_link_path(self._storage_dir, self._worker_name))
 
     # --- Worker config (autodiscovery) ---
 
@@ -666,7 +688,7 @@ class EventRecorder(EventWriter):
 
         Each sweep (thread-offloaded — it is sync sqlite3 work) computes
         stats for files the cache does not know yet and drops rows for
-        files an operator deleted from ``db_dir``. When everything is
+        files an operator deleted from ``storage_dir``. When everything is
         cached the sweep costs one directory listing and one SELECT, so
         a short interval is fine. The first sweep runs immediately, so a
         worker booting over a pre-existing directory starts warming
@@ -682,14 +704,14 @@ class EventRecorder(EventWriter):
         enough to keep the whole page warm; a page request still refreshes
         every row on demand.
         """
-        from drakkar.dbstats import warm_directory
+        from drakkar.dbstats import DBSTATS_WARM_INTERVAL_SECONDS, warm_directory
 
         while self._running:
             try:
                 _scanned, purged = await asyncio.to_thread(
                     functools.partial(
                         warm_directory,
-                        self._store.db_dir,
+                        self._storage_dir,
                         self._dbstats,
                         own_live_db=self._db_path,
                     )
@@ -699,7 +721,7 @@ class EventRecorder(EventWriter):
                         'recorder_dbstats_purged',
                         category='recorder',
                         purged=purged,
-                        detail='dropped cached stats for database files removed from db_dir',
+                        detail='dropped cached stats for database files removed from the storage folder',
                     )
             except asyncio.CancelledError:
                 raise
@@ -712,7 +734,7 @@ class EventRecorder(EventWriter):
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
-            await asyncio.sleep(self._store.dbstats_warm_interval_seconds)
+            await asyncio.sleep(DBSTATS_WARM_INTERVAL_SECONDS)
 
     async def _host_sample_loop(self) -> None:
         """Per-tick host sampling: one ``resource_sample`` event per
@@ -994,9 +1016,9 @@ class EventRecorder(EventWriter):
         stats['total_events'] = sum(self._counters.values())
         return stats
 
-    async def discover_workers(self) -> list[dict]:
+    async def discover_workers(self, offline_after_seconds: int) -> list[dict]:
         """List the other workers of this cluster, with their liveness."""
-        return await self._queries.discover_workers()
+        return await self._queries.discover_workers(offline_after_seconds)
 
     # --- Internal flush/retention ---
 
@@ -1302,14 +1324,15 @@ class EventRecorder(EventWriter):
         gzip — is blocking work measured in seconds, so it goes to a
         thread. The event loop only ever sees this await.
         """
-        if not self._store.archive_enabled or not self._store.db_dir:
+        if not self._archive.enabled or not self._storage_dir:
             return
         await asyncio.to_thread(
             run_archive_pass,
-            db_dir=self._store.db_dir,
+            db_dir=self._storage_dir,
             worker_name=self._worker_name,
             cluster=self._cluster_name,
-            cfg=self._store,
+            archive=self._archive,
+            rotation_interval_hours=self._store.rotation_interval_hours,
             # The live DB is the file we are writing right now; the pass
             # must never merge it away underneath us.
             exclude_path=self._db_path,
@@ -1325,14 +1348,19 @@ class EventRecorder(EventWriter):
         ``no such table: events``. The fix is to prepare ``new_db``
         completely before the atomic swap, so any concurrent writer only
         ever sees a ready connection.
+
+        Memory-only mode (no ``storage_dir``) has nothing to rotate: without
+        this guard the new file name would resolve into the current folder.
         """
+        if not self._storage_dir:
+            return
         # flush remaining buffer to current DB
         await self._flush()
 
         # open new DB and initialize schema BEFORE swapping. If schema
         # creation fails, close the orphaned connection and leave
         # self._db untouched so the caller can retry on the next tick.
-        new_path = make_db_path(self._store.db_dir, self._worker_name)
+        new_path = make_db_path(self._storage_dir, self._worker_name)
         # Same ordering contract as ``start``: owner-only before the driver
         # opens the file, so the rotated DB's sidecars are created
         # owner-only too. Skipping this step here would leave every

@@ -77,6 +77,21 @@ Env vars are parsed into a nested dict structure and deep-merged on top of the Y
 defaults --> YAML file --> environment variables (deep merge)
 ```
 
+### Moved and removed keys
+
+Some keys moved to the `storage`, `history` and `fleet` sections, and a few
+were removed. An old key in the YAML file or in a `DK_*` variable fails the
+load with one message that lists every old key found, for example:
+
+```
+config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
+  ui.recorder.db_dir -> storage.dir
+  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds
+  cache.db_dir: removed, the cache file lives in storage.dir
+```
+
+The [upgrade guide](upgrading.md) has the full table with YAML and env names.
+
 ---
 
 ## Root Config (`DrakkarConfig`)
@@ -842,7 +857,7 @@ The UI's auth is **opt-in by default**. With `ui.enabled=true` and `ui.auth_toke
 | Endpoint | Effect | Switch |
 |----------|--------|--------|
 | `POST /api/v1/debug/probe` | Runs caller-supplied bytes through the live handler and the real executor subprocess pool, competing with production traffic for executor slots. (It writes no sinks, recorder rows, cache entries, or offsets — see [Message Probe](observability.md#operator-ui).) | `ui.probe_enabled: false` |
-| `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `ui.recorder.db_dir`; nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
+| `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `storage.dir`; nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
 
 Both default to `true`, and both return `403` with `{"error": "..."}` naming the config key when switched off. The switches are deliberately independent of `auth_token` in both directions: a deployment that cannot set a token can still close the endpoints, and a deployment that has one can still close them as defence in depth — a valid token is not the same as consent to burn executor slots on demand. The startup warning names whichever of the two is still enabled, so an operator who has already closed them is not warned about exposure they do not have.
 
@@ -867,11 +882,10 @@ Top-level `ui.*` fields configure the UI server itself and the presentation sett
 | `port` | `int` | `8080` | 1--65535 | Port for the web UI (FastAPI server). |
 | `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
 | `probe_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
-| `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `ui.recorder.db_dir` and nothing reclaims it, so repeated calls grow unbounded. `false` serves `403` instead — independently of `auth_token`. |
+| `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `storage.dir` and nothing reclaims it, so repeated calls grow unbounded. `false` serves `403` instead — independently of `auth_token`. |
 | `kafka_read_enabled` | `bool` | `true` | | Serve `GET /api/v1/debug/kafka/*` — ad-hoc reads of the configured topics (source, DLQ, and each Kafka sink by instance name; never an arbitrary topic). Reads use `assign()`-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. `false` serves `403` instead — independently of `auth_token`. When the resolved Kafka security of any readable topic is not PLAINTEXT while `auth_token` is empty, startup logs a warning naming the exposed aliases. See [Kafka Read API](kafka-read.md). |
 | `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
 | `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
-| `workers_offline_after_seconds` | `int` | `30` | >= 1 | A discovered worker whose newest heartbeat (`worker_state.updated_at`, falling back to the newest event timestamp) is older than this many seconds is reported `online: false` in the workers list. Size it to at least 2--3x the largest `ui.recorder.state_sync_interval_seconds` in the fleet so healthy workers never flap offline between heartbeats. See [Liveness](observability.md#liveness). |
 | `expose_env_vars` | `list[str]` | `[]` | | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
 | `max_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the web UI in list views. |
 
@@ -959,21 +973,15 @@ page) into it — covered field-by-field on the dedicated
 
 ### Flight Recorder (`ui.recorder:`)
 
-Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.
+Flight-recorder persistence — the UI's data store. The recorder writes into [`storage.dir`](#storage-and-shared); all flags below need it to be non-empty. Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `db_dir` | `str` | `'/tmp'` | | Directory for SQLite database files. Set to `''` to run without any disk persistence (in-memory only, WebSocket streaming still works). Use a shared filesystem (e.g., NFS, EFS) for cross-worker autodiscovery and merge. |
 | `store_events` | `bool` | `true` | | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table. Disable to reduce disk I/O on high-throughput workers. |
-| `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table. This enables autodiscovery -- other workers sharing the same `db_dir` can find and link to this worker. |
+| `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
 | `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
 | `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
-| `archive_enabled` | `bool` | `true` | | Fold rotated-out files into compressed per-cluster, per-window archives and delete the raw files a pass successfully merged. `false` disables the pass entirely — no raw file is ever deleted automatically. See [Archiving](local-databases.md#archiving). |
-| `archive_window_hours` | `int` | `24` | >= 1, and >= `rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned); a window is archived once it ended a full window ago and none of its files were written in the last rotation interval. |
-| `archive_retention_days` | `int` | `30` | >= 0, and `>= 2 * archive_window_hours / 24` when non-zero | How long archived `.db.gz` files are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
-| `dbstats_warm_interval_seconds` | `int` | `60` | >= 5 | How often the background warmer sweeps `db_dir`, computing statistics for database files the `.dbstats` cache does not know yet and purging entries for deleted files. Cheap when everything is already cached — one directory listing plus one small SELECT. |
-| `dbstats_inline_scan_limit` | `int` | `4` | >= 0 | How many cold (uncached) database files one `/api/v1/debug/databases` request may fully scan inline. Files beyond the cap return immediately with `stats_pending=true` and fill in as the warmer catches up. `0` = requests never scan; matters only on a cold cache (first boot over a pre-existing directory). |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
@@ -1025,15 +1033,11 @@ ui:
     jenkins: 'https://jenkins.internal.example.com'
   custom_renderers_path: /etc/drakkar/renderers.js
   recorder:
-    db_dir: /shared/drakkar-recorder
     store_events: true
     store_config: true
     store_state: true
     state_sync_interval_seconds: 10
     rotation_interval_hours: 1
-    archive_enabled: true
-    archive_window_hours: 24
-    archive_retention_days: 30
     store_output: true
     flush_interval_seconds: 5
     max_buffer: 50000
@@ -1059,35 +1063,113 @@ See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and t
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. When `true` without a `db_dir` (anywhere), the engine warns and continues without persistence -- in-memory only. |
-| `db_dir` | `str` | `''` | | Directory for the per-worker `<worker_id>-cache.db` SQLite file. Empty falls back to [`ui.recorder.db_dir`](#flight-recorder-uirecorder). Use a **shared** filesystem (NFS, EFS) for peer-sync to discover other workers' cache files. |
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in [`storage.dir`](#storage-and-shared); with `storage.dir: ""` the engine warns and continues without persistence -- in-memory only. |
 | `flush_interval_seconds` | `float` | `3.0` | > 0 | Interval (seconds) for the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
 | `cleanup_interval_seconds` | `float` | `60.0` | > 0 | Interval (seconds) for the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
 | `max_memory_entries` | `int \| null` | `10000` | >= 1 or `null` | Cap for the in-memory LRU. `null` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
 
-### Peer Sync (`cache.peer_sync:`) {#cache-peer-sync}
+```yaml
+cache:
+  enabled: true
+  flush_interval_seconds: 3.0
+  cleanup_interval_seconds: 60.0
+  max_memory_entries: 10000           # null = unbounded (warns)
+```
 
-The peer-sync loop pulls recent entries from sibling workers' `-cache.db` files (LWW merge by `updated_at_ms`). Requires `ui.recorder.store_config: true` for autodiscovery -- if disabled, peer sync silently no-ops.
+Exchange of `cluster` and `global` rows with other workers is configured
+under [`fleet.cache_exchange`](#fleet-cache-exchange).
+
+---
+
+## Own storage and the shared folder (`storage:`, `shared:`) {#storage-and-shared}
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `storage.dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''` runs memory-only: no own files, no history, no cache file. |
+| `shared.dir` | `str` | `''` | The folder every worker of one fleet sees: registry cards, sealed history, daily archives, merge results. `''` means the same folder as `storage.dir`, which is right for workers on one host. |
+
+```yaml
+storage:
+  dir: /var/lib/drakkar        # per-worker volume
+shared:
+  dir: /mnt/fleet              # one volume all workers mount
+```
+
+The [upgrade guide](upgrading.md) explains how to move from the old `ui.recorder.db_dir` key.
+
+---
+
+## History (`history:`) {#history}
+
+What happens to recorder history after a worker is done with a file. See
+[Archiving](local-databases.md#archiving).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `archive.enabled` | `bool` | `true` | | Fold recorder files into one compressed archive per cluster and window, then delete the files a pass merged. `false` disables the pass entirely — no recorder file is ever deleted automatically. |
+| `archive.window_hours` | `int` | `24` | >= 1, and >= `ui.recorder.rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned). |
+| `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
+| `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
+| `archive.lock_stale_seconds` | `int` | `7200` | >= 1 | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. |
+| `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI are deleted after this many days. `0` keeps them forever. |
+
+```yaml
+history:
+  archive:
+    enabled: true
+    window_hours: 24
+    due_after_hours: 48
+    retention_days: 30
+    lock_stale_seconds: 7200
+  merged_retention_days: 32
+```
+
+---
+
+## Fleet (`fleet:`) {#fleet}
+
+How workers find each other and exchange cache rows. The pipeline (sources,
+executor, sinks, offset commits) does not depend on it.
+
+### Registry (`fleet.registry:`) {#fleet-registry}
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), or the name of a provider plugin. Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
+| `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
+| `offline_after_seconds` | `int` | `30` | >= 1, and >= `2 * heartbeat_seconds` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. |
+| `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. |
+| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one registry operation. |
+| `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
+| `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
+| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. |
+
+### Cache exchange (`fleet.cache_exchange:`) {#fleet-cache-exchange}
+
+How this worker pulls `cluster` and `global` cache rows from its peers
+(last-write-wins by `updated_at_ms`). See [Cache](cache.md).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation. Flush and cleanup loops still run. |
-| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between peer-sync cycles. |
-| `batch_size` | `int` | `500` | >= 1 | Maximum rows pulled from each peer per cycle. |
-| `timeout_seconds` | `float` | `5.0` | > 0 | Per-peer read timeout (seconds). One slow peer cannot block the rest. |
-| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single sync cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. |
+| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between exchange cycles. |
+| `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. |
+| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer. One slow peer cannot block the rest. |
+| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. |
+| `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. |
 
 ```yaml
-cache:
-  enabled: true
-  db_dir: /shared/drakkar-cache       # empty falls back to ui.recorder.db_dir
-  flush_interval_seconds: 3.0
-  cleanup_interval_seconds: 60.0
-  max_memory_entries: 10000           # null = unbounded (warns)
-  peer_sync:
+fleet:
+  registry:
+    provider: filesystem
+    heartbeat_seconds: 10
+    refresh_seconds: 15
+    offline_after_seconds: 30
+  cache_exchange:
     enabled: true
     interval_seconds: 30.0
-    batch_size: 500
+    page_size: 500
     timeout_seconds: 5.0
     cycle_deadline_seconds: null      # null = interval_seconds * 0.9
 ```
@@ -1108,6 +1190,10 @@ handler validation and source construction both happen while the app object
 is built, so a hook that flips a source on or off changes nothing. Set them
 in YAML, or through `DK_SOURCES__KAFKA__ENABLED` /
 `DK_SOURCES__HTTP__ENABLED`.
+
+`storage.dir` is on the list too: the worker creates its own-files folder
+before the hook runs, so a hook that moves it changes nothing. Set it in
+YAML or through `DK_STORAGE__DIR`.
 
 The full list and the working alternative are on the
 [Handler](handler.md#on_startup) page.

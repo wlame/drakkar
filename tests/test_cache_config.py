@@ -1,45 +1,44 @@
-"""Tests for CacheConfig and CachePeerSyncConfig in drakkar/config.py.
+"""Tests for CacheConfig and the cache exchange settings (fleet.cache_exchange).
 
 Validates defaults, environment-variable overrides (nested delimiter), field
 constraints, and confirms the v1 scope of the config — no preload fields, no
 exposed peer-resolution cache TTL.
 """
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
 from drakkar.config import (
     CacheConfig,
-    CachePeerSyncConfig,
+    CacheExchangeConfig,
     DrakkarConfig,
     ExecutorConfig,
 )
 
-# --- CachePeerSyncConfig defaults ---
+# --- CacheExchangeConfig bounds ---
 
 
-def test_cache_peer_sync_config_defaults():
-    cfg = CachePeerSyncConfig()
-    assert cfg.enabled is True
-    assert cfg.interval_seconds == 30.0
-    assert cfg.batch_size == 500
-    assert cfg.timeout_seconds == 5.0
-
-
-def test_cache_peer_sync_config_rejects_invalid():
+def test_cache_exchange_config_rejects_invalid():
     # interval_seconds must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CachePeerSyncConfig(interval_seconds=0)
+        CacheExchangeConfig(interval_seconds=0)
     with pytest.raises(ValidationError):
-        CachePeerSyncConfig(interval_seconds=-1.0)
-    # batch_size must be >= 1 (ge=1)
+        CacheExchangeConfig(interval_seconds=-1.0)
+    # page_size must be in 1..1000
     with pytest.raises(ValidationError):
-        CachePeerSyncConfig(batch_size=0)
+        CacheExchangeConfig(page_size=0)
     with pytest.raises(ValidationError):
-        CachePeerSyncConfig(batch_size=-1)
+        CacheExchangeConfig(page_size=1001)
     # timeout_seconds must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CachePeerSyncConfig(timeout_seconds=0)
+        CacheExchangeConfig(timeout_seconds=0)
+
+
+def test_cache_exchange_deadline_below_interval_is_accepted():
+    cfg = CacheExchangeConfig(interval_seconds=10, cycle_deadline_seconds=9.5)
+    assert cfg.cycle_deadline_seconds == 9.5
 
 
 # --- CacheConfig defaults ---
@@ -48,17 +47,15 @@ def test_cache_peer_sync_config_rejects_invalid():
 def test_cache_config_defaults():
     cfg = CacheConfig()
     assert cfg.enabled is False
-    # db_dir empty — resolution happens at engine init, not config load
-    assert cfg.db_dir == ''
     assert cfg.flush_interval_seconds == 3.0
     assert cfg.cleanup_interval_seconds == 60.0
     # Default cap prevents unbounded growth under write-heavy workloads;
     # operators can opt into unbounded behavior by setting None explicitly.
     assert cfg.max_memory_entries == 10_000
-    # peer_sync defaults nested in
-    assert isinstance(cfg.peer_sync, CachePeerSyncConfig)
-    assert cfg.peer_sync.enabled is True
-    assert cfg.peer_sync.interval_seconds == 30.0
+    # The cache file lives in storage.dir and exchange settings in
+    # fleet.cache_exchange; neither is a cache.* field any more.
+    assert 'db_dir' not in CacheConfig.model_fields
+    assert 'peer_sync' not in CacheConfig.model_fields
 
 
 def test_cache_config_rejects_invalid_intervals():
@@ -87,14 +84,6 @@ def test_cache_config_max_memory_entries_none_is_valid():
     assert cfg.max_memory_entries is None
 
 
-def test_cache_config_db_dir_empty_stays_empty():
-    """Config should not resolve db_dir on load — that happens at engine init
-    using debug.db_dir as fallback. Keeps config layer pure and testable.
-    """
-    cfg = CacheConfig(db_dir='')
-    assert cfg.db_dir == ''
-
-
 # --- v1 scope enforcement — cut fields must NOT exist ---
 
 
@@ -108,11 +97,11 @@ def test_cache_config_has_no_preload_fields():
     assert 'preload_limit' not in fields
 
 
-def test_cache_peer_sync_config_has_no_resolution_cache_knob():
+def test_cache_exchange_config_has_no_resolution_cache_knob():
     """peer_resolution_cache_seconds is intentionally hardcoded (300s) in v1.
     YAGNI — expose later only if operators actually need it.
     """
-    fields = set(CachePeerSyncConfig.model_fields.keys())
+    fields = set(CacheExchangeConfig.model_fields.keys())
     assert 'peer_resolution_cache_seconds' not in fields
 
 
@@ -136,23 +125,25 @@ def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
     assert cfg.cache.enabled is True
 
 
-def test_cache_config_env_override_nested_peer_sync(monkeypatch: pytest.MonkeyPatch):
-    """DK_CACHE__PEER_SYNC__INTERVAL_SECONDS=60 should set the nested
-    peer_sync.interval_seconds field. Exercises the two-level nested delimiter.
+def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyPatch):
+    """DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS=60 should set the nested
+    fleet.cache_exchange.interval_seconds field. Exercises the two-level
+    nested delimiter.
     """
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
-    monkeypatch.setenv('DK_CACHE__PEER_SYNC__INTERVAL_SECONDS', '60')
+    monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '60')
     cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
-    assert cfg.cache.peer_sync.interval_seconds == 60.0
+    assert cfg.fleet.cache_exchange.interval_seconds == 60.0
 
 
-def test_cache_config_env_override_db_dir(monkeypatch: pytest.MonkeyPatch):
+def test_cache_config_env_db_dir_fails_the_load(monkeypatch: pytest.MonkeyPatch):
+    """The old cache folder key fails the load: the cache file lives in storage.dir."""
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__DB_DIR', '/srv/cache')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
-    assert cfg.cache.db_dir == '/srv/cache'
+    with pytest.raises(ValidationError, match=re.escape('cache.db_dir: removed, the cache file lives in storage.dir')):
+        DrakkarConfig(sources={'kafka': {'enabled': True}})
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):

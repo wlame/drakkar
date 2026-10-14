@@ -53,26 +53,13 @@ from drakkar.cache import (
     DirtyOp,
     Op,
 )
-from drakkar.config import CacheConfig, UIConfig
-from tests.conftest import make_ui_config
+from drakkar.config import CacheConfig
+from tests.conftest import split_cache_overrides
 
 # --- helpers ---------------------------------------------------------------
 #
 # These mirror the helpers in tests/test_cache_sync_pull.py. Duplication
 # is deliberate: each file stays self-contained so failures localize cleanly.
-
-
-def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
-    """UIConfig with ``db_dir`` pointed at tmp_path; events off, config on."""
-    defaults: dict[str, Any] = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': True,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
@@ -87,13 +74,14 @@ async def _make_engine(
     worker_id: str = 'me',
     cluster_name: str = 'prod',
     cache_overrides: dict[str, Any] | None = None,
-    debug_overrides: dict[str, Any] | None = None,
 ) -> CacheEngine:
     """Spin up a started CacheEngine with ``peer_sync`` on by default."""
     cache = Cache(origin_worker_id=worker_id)
+    cache_fields, exchange = split_cache_overrides(cache_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**(cache_overrides or {})),
-        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,

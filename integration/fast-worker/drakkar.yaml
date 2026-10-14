@@ -95,7 +95,6 @@ ui:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
   recorder:
-    db_dir: "/shared"
     store_events: true
     store_config: true
     store_state: true
@@ -106,3 +105,9 @@ ui:
     max_buffer: 50000
     event_min_duration_ms: 0       # write all task events to DB
     output_min_duration_ms: 100    # only store stdout/stderr/args for tasks above 100ms
+
+# This worker's own files (recorder, cache, crash marker). The harness
+# mounts one host folder at /shared in every container, so it doubles as
+# the fleet's shared folder (shared.dir empty = storage.dir).
+storage:
+  dir: "/shared"

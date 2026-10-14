@@ -38,23 +38,10 @@ from drakkar.cache import (
     CacheEngine,
     CacheScope,
 )
-from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
-from tests.conftest import make_ui_config, wait_for
+from drakkar.config import CacheConfig, CacheExchangeConfig
+from tests.conftest import split_cache_overrides, wait_for
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
-
-
-def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
-    """UIConfig with ``db_dir`` pointed at the temp path and events off."""
-    defaults: dict[str, Any] = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': True,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
@@ -70,13 +57,14 @@ async def _make_engine(
     worker_id: str = 'w1',
     cluster_name: str = '',
     cache_overrides: dict[str, Any] | None = None,
-    debug_overrides: dict[str, Any] | None = None,
 ) -> CacheEngine:
     """Spin up a started CacheEngine for peer-sync deadline testing."""
     cache = Cache(origin_worker_id=worker_id)
+    cache_fields, exchange = split_cache_overrides(cache_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**(cache_overrides or {})),
-        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,
@@ -170,7 +158,7 @@ async def test_peer_sync_cycle_deadline_fires_and_counter_increments(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=30.0,
                 cycle_deadline_seconds=0.5,
@@ -237,7 +225,7 @@ async def test_peer_sync_cycle_normal_does_not_increment_counter(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=30.0,
                 # Generous deadline — a real on-disk sync should finish
@@ -294,7 +282,7 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=30.0,
                 cycle_deadline_seconds=0.5,
@@ -363,7 +351,7 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=0.5,
                 # cycle_deadline_seconds left as None — must fall back to
@@ -450,7 +438,7 @@ async def test_concurrent_sync_once_smoke(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=30.0,
                 # Generous deadline — we don't want the deadline wrapper
@@ -545,9 +533,9 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
-                batch_size=2,
+                page_size=2,
                 interval_seconds=30.0,
                 cycle_deadline_seconds=10.0,
             ),
@@ -678,7 +666,7 @@ async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(
+            'exchange': CacheExchangeConfig(
                 enabled=True,
                 interval_seconds=30.0,
                 # Generous deadline — this test does not go through
@@ -857,7 +845,7 @@ async def test_stop_awaits_orphaned_peer_commit(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(enabled=True, interval_seconds=30.0),
+            'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0),
         },
     )
     _row, original_commit = await _orphan_peer_commit(engine, commit_sleep=0.3)
@@ -887,7 +875,7 @@ async def test_next_sync_cycle_awaits_orphaned_peer_commit(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'peer_sync': CachePeerSyncConfig(enabled=True, interval_seconds=30.0),
+            'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0),
         },
     )
     try:

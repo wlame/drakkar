@@ -132,6 +132,7 @@ point where config can be changed at runtime.
     | `worker_name_env` | the worker's resolved id |
     | `sources.kafka.enabled` | handler validation and source construction |
     | `sources.http.enabled` | handler validation and source construction |
+    | `storage.dir` | the worker creates its own-files folder before `on_startup` runs |
 
     Set those in the config file or through their `DK_` environment
     overrides instead. The worker does not fail on such a change — it logs

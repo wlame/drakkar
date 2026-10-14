@@ -507,7 +507,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
 
     @router.get('/api/v1/workers')
     async def api_workers():
-        """Discover live workers sharing the same db_dir, including self.
+        """Discover live workers sharing the same storage.dir, including self.
 
         Each worker gets a ``url`` field (debug_url if set, else http://ip:port),
         a ``cluster`` field from the stored cluster_name (falls back to
@@ -524,7 +524,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         # or any primitive bound to the main loop. No dispatch needed;
         # the connections created inside the coroutine are bound to
         # whichever loop invokes it, which is fine for a one-shot read.
-        workers = await recorder.discover_workers()
+        workers = await recorder.discover_workers(drakkar_app.config.fleet.registry.offline_after_seconds)
 
         # add the current worker to the list
         current_entry = {

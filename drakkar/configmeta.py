@@ -31,14 +31,18 @@ from drakkar.config import (
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
+    FleetConfig,
+    HistoryConfig,
     IOConfig,
     KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     OffloadConfig,
     RuntimeHealthConfig,
+    SharedConfig,
     SinksConfig,
     SourcesConfig,
+    StorageConfig,
     ThroughputConfig,
     UIConfig,
 )
@@ -141,6 +145,10 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),
     ('ui', 'UI / Flight Recorder (ui:)', 'ui-flight-recorder-ui', UIConfig),
     ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
+    ('storage', 'Own storage (storage:)', 'own-storage-storage', StorageConfig),
+    ('shared', 'Shared folder (shared:)', 'shared-folder-shared', SharedConfig),
+    ('history', 'History and archives (history:)', 'history-and-archives-history', HistoryConfig),
+    ('fleet', 'Fleet registry and cache exchange (fleet:)', 'fleet-registry-and-cache-exchange-fleet', FleetConfig),
 ]
 
 

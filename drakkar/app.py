@@ -128,6 +128,10 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         'sources.http.enabled',
         'handler validation and source construction happen in DrakkarApp.__init__',
     ),
+    ConsumedSetting(
+        'storage.dir',
+        'the worker creates its own-files folder before on_startup runs',
+    ),
 )
 
 

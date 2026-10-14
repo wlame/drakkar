@@ -32,7 +32,7 @@ async def test_flush_cancelled_mid_write_requeues_batch(tmp_path):
     order, so a later flush persists it — not silently drop it.
     """
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -84,7 +84,7 @@ async def test_flush_cancelled_requeue_overflow_ticks_counter(tmp_path):
     from drakkar.metrics import recorder_requeue_overflow
 
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     # Shrink post-construction so overflow is cheap to trigger.
     rec._buffer = deque(maxlen=3)
     await rec.start()
@@ -136,7 +136,7 @@ async def test_flush_non_operational_sqlite_error_requeues_batch(tmp_path, exc_t
     from drakkar.metrics import recorder_flush_retries
 
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         rec.record_consumed(make_msg(partition=0, offset=0))
@@ -175,7 +175,7 @@ async def test_flush_non_operational_sqlite_error_requeues_batch(tmp_path, exc_t
 async def test_stop_completes_teardown_when_final_flush_fails(tmp_path):
     """A failing final flush must not skip the closes and live-set cleanup."""
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     assert rec in _LIVE_RECORDERS
 
@@ -196,7 +196,7 @@ async def test_stop_completes_teardown_when_final_flush_fails(tmp_path):
 async def test_stop_completes_teardown_when_state_sync_fails(tmp_path):
     """A failing final state sync must not skip the closes either."""
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
 
     async def exploding_sync():
@@ -226,7 +226,7 @@ async def test_cross_trace_by_label_respects_scan_budget(tmp_path, monkeypatch):
     os.symlink(peer_db_path.name, live_link_path(str(tmp_path), 'other-worker'))
 
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         monkeypatch.setattr(recorder_queries, 'CROSS_TRACE_MAX_FILES', 0)
@@ -247,7 +247,7 @@ async def test_flush_writes_in_bounded_chunks(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 100)
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         for offset in range(250):
@@ -280,7 +280,7 @@ async def test_flush_ignores_events_appended_while_it_runs(tmp_path, monkeypatch
     """
     monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 2)
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         for offset in range(4):
@@ -313,7 +313,7 @@ async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 10)
     config = make_debug_config(tmp_path, max_flush_retries=2)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         for offset in range(30):
@@ -352,7 +352,7 @@ async def test_flush_wait_returns_early_when_the_buffer_is_half_full(tmp_path):
     early wake-up. That is true today but it is a race, not an invariant.
     """
     config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     # Deliberately not started: the real flush loop calls this same method
     # and would drain the buffer out from under the assertion.
     rec._running = True
@@ -368,7 +368,7 @@ async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_p
     below the mark the interval is still what decides.
     """
     config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     rec._running = True
     for offset in range(100):
         rec.record_committed(partition=0, offset=offset)

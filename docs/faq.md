@@ -140,13 +140,13 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`cache.db_dir`, falling back to `ui.recorder.db_dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
+Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`storage.dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
 
-What happens if the filesystem isn't shared: peer sync finds zero peers and the cache operates single-worker. No error, no warning — it just behaves like a local cache. If you *want* cluster-wide cache, mount a shared volume (NFS, EFS, hostPath in k8s) and point every worker's `db_dir` at it.
+What happens if the filesystem isn't shared: peer sync finds zero peers and the cache operates single-worker. No error, no warning — it just behaves like a local cache. If you *want* cluster-wide cache, mount a shared volume (NFS, EFS, hostPath in k8s) and point every worker's `storage.dir` at it.
 
 Fallbacks when a peer DB is unreachable: the sync loop wraps each peer in `try/except`, logs a warning, increments `drakkar_cache_sync_errors_total{peer=...}`, and continues to the next peer. Broken symlinks (peer's DB file gone) are silently skipped — the peer may come back later with a fresh file. One bad peer cannot break the whole sync cycle. See [Cache — Peer unreachable](cache.md#peer-unreachable).
 
-Trust boundary: the `db_dir` is shared-trust — anyone who can write to it can inject cache entries that peers will read. There is no per-write signature or auth. Restrict directory permissions to the worker user (see [Why are peer workers trusted?](#why-are-peer-workers-trusted)).
+Trust boundary: the shared `storage.dir` is shared-trust — anyone who can write to it can inject cache entries that peers will read. There is no per-write signature or auth. Restrict directory permissions to the worker user (see [Why are peer workers trusted?](#why-are-peer-workers-trusted)).
 
 ### What if two workers write the same cache key?
 
@@ -235,7 +235,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `ui.recorder.db_dir` / `cache.db_dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
@@ -249,7 +249,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
-- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
+- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `storage.dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -298,7 +298,7 @@ Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a
 
 ### What happens to old recorder database files? Where did `retention_hours` go?
 
-They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either is ignoring an unknown key. In their place, a periodic pass merges each finished UTC time window's rotated-out raw files into one compressed `<cluster>-<from>__<to>.db.gz` per cluster and deletes only the raw files it merged; with the defaults, that lands 24-48h after the data was recorded. `ui.recorder.archive_retention_days` (default `30`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab → Archives**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `ui.recorder.archive_enabled: false` if you'd rather prune `db_dir` yourself.
+They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either is ignoring an unknown key. In their place, a periodic pass merges each finished UTC time window's rotated-out raw files into one compressed `<cluster>-<from>__<to>.db.gz` per cluster and deletes only the raw files it merged; with the defaults, that lands 48-72h after the data was recorded. `history.archive.retention_days` (default `30`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab → Archives**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `history.archive.enabled: false` if you'd rather prune `storage.dir` yourself.
 
 ### Can I customize the debug UI?
 
@@ -414,9 +414,9 @@ See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary 
 
 ### Why are peer workers trusted?
 
-The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache_engine.py::CacheEngine._sync_inner` and `drakkar/recorder.py::EventRecorder.cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `db_dir` can inject cache entries or event rows that your workers will read.
+The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache_engine.py::CacheEngine._sync_inner` and `drakkar/recorder.py::EventRecorder.cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `storage.dir` can inject cache entries or event rows that your workers will read.
 
-Treat `db_dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
+Treat a shared `storage.dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
 ### How is the UI protected?
 

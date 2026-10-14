@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Storage, archive, liveness and cache-sync settings moved to new
+  sections.** `ui.recorder.db_dir` is now `storage.dir` (default
+  `/tmp/drakkar`), the archive keys are `history.archive.*`,
+  `ui.workers_offline_after_seconds` is
+  `fleet.registry.offline_after_seconds`, and `cache.peer_sync.*` is
+  `fleet.cache_exchange.*` (`batch_size` is `page_size`). `cache.db_dir`
+  and the two `ui.recorder.dbstats_*` keys are removed. An old key in YAML
+  or in a `DK_*` variable fails the load with one message that lists every
+  old key. See `docs/upgrading.md`.
+
+### Added
+
+- **New config sections `storage`, `shared`, `history`, `fleet` and
+  `ui.trace`.** The summary line shows `storage=`, `shared=` (when it
+  differs) and `fleet=`. The worker creates `storage.dir` with mode 0700
+  when it is missing.
+
+### Changed
+
+- **A window is archived `history.archive.due_after_hours` (default 48)
+  after it ends**, instead of one window later. Retention must now cover
+  that delay plus one window.
+- **The stale archive work-file age is `history.archive.lock_stale_seconds`**
+  (default 7200) instead of a fixed value.
+- **The cache exchange no longer depends on the worker's own
+  `ui.recorder.store_config`.**
+- **Log events that named the old folder key are renamed:**
+  `recorder_storage_dir_world_writable`, `recorder_storage_dir_network_fs`,
+  `watchdog_disabled_no_storage_dir`, `cache_engine_disabled_no_storage_dir`.
+  In `recorder_archives_unbounded` and `recorder_archiving_disabled` the
+  `db_dir` field is now `storage_dir`, and `archive_window_hours` is
+  `window_hours`.
+
 ### Fixed
 
 - **Partition lag no longer shows the whole partition when the broker reports

@@ -56,7 +56,7 @@ def test_artifact_is_valid_json_matching_the_schema():
     raw = json.loads(ARTIFACT_PATH.read_text())
     # Round-trips through the pydantic model without error.
     parsed = ConfigMetadata.model_validate(raw)
-    assert len(parsed.groups) == 14
+    assert len(parsed.groups) == 18
 
 
 # --- 2. Anchor parity: every doc_anchor must exist on the real docs page ---
@@ -250,7 +250,8 @@ def test_env_var_names_for_known_scalar_paths():
     by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
 
     assert by_path['kafka.brokers'].env == 'DK_KAFKA__BROKERS'
-    assert by_path['ui.recorder.db_dir'].env == 'DK_UI__RECORDER__DB_DIR'
+    assert by_path['storage.dir'].env == 'DK_STORAGE__DIR'
+    assert by_path['fleet.cache_exchange.interval_seconds'].env == 'DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS'
     assert by_path['cluster_name'].env == 'DK_CLUSTER_NAME'
 
 

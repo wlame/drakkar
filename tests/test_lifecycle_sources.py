@@ -78,9 +78,10 @@ def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
     """A worker whose disk, sink and executor layers are stubbed out."""
     config_overrides.setdefault('sources', {'kafka': {'enabled': True, 'startup_align_enabled': False}})
     config = DrakkarConfig(
-        # An empty ``db_dir`` keeps the watchdog (and every other on-disk
+        # An empty ``storage.dir`` keeps the watchdog (and every other on-disk
         # artifact) out of the test; ``test_watchdog.py`` covers that path.
-        ui={'enabled': False, 'release': {'enabled': False}, 'recorder': {'db_dir': ''}},
+        storage={'dir': ''},
+        ui={'enabled': False, 'release': {'enabled': False}},
         metrics={'enabled': False},
         runtime_health={'enabled': False},
         executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},

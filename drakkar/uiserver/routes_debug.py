@@ -75,8 +75,8 @@ def _has_unsafe_filename_char(filename: str) -> bool:
 #
 # They exist to hand over recorder artifacts: the timestamped DBs
 # ``make_db_path`` writes, the ``-live.db`` / ``-cache.db`` symlinks and the
-# ``merged-*.db`` output. ``db_dir`` defaults to ``/tmp`` — shared with
-# every other program on the host — and the debug UI is unauthenticated by
+# ``merged-*.db`` output. ``storage.dir`` may sit under ``/tmp`` — shared
+# with every other program on the host — and the debug UI is unauthenticated by
 # design, so checking only for separators and header-injection characters
 # let any readable file there be fetched by exact name.
 #
@@ -108,7 +108,7 @@ def _probe_busy_response(exc: ProbeBusyError) -> JSONResponse:
 def _db_root(db_dir: str) -> Path | None:
     """The recorder directory as an absolute path, or None when there is none.
 
-    ``ui.recorder.db_dir: ""`` is the documented memory-only mode. It used
+    ``storage.dir: ""`` is the documented memory-only mode. It used
     to be an arbitrary-file-read hole in every endpoint that joined a name
     onto it: ``os.path.join('', name)`` is just ``name``, and
     ``os.path.realpath('')`` is the worker's current directory, so a
@@ -130,7 +130,7 @@ def _contained_path(root: Path, filename: str) -> Path | None:
     Rejects path separators, dot-prefixed names and the characters that
     would break out of the ``Content-Disposition`` header, then resolves
     and checks containment against the real root — so a symlink inside
-    ``db_dir`` pointing outside it is refused too.
+    the folder pointing outside it is refused too.
 
     Containment only. Callers decide WHICH names they are willing to act
     on: ``_contained_db_path`` for database files, ``ARCHIVE_NAME_RE`` for
@@ -201,29 +201,29 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/databases', dependencies=[Depends(deps.require_auth)])
     async def api_debug_databases():
-        """List all debug database files in db_dir with stats.
+        """List all debug database files in storage.dir with stats.
 
         Backed by the ``.dbstats.db`` cache (see :mod:`drakkar.dbstats`):
         the file LIST always comes from a live directory scan — externally
         deleted files disappear on the next request — while statistics for
         immutable rotated files come from the cache. At most
-        ``ui.recorder.dbstats_inline_scan_limit`` cold files are scanned
+        ``DBSTATS_INLINE_SCAN_LIMIT`` cold files are scanned
         inline; the rest return ``stats_pending`` and fill in as the
         recorder's warmer loop catches up. Contract v1.12 adds ``kind``,
         ``live_for`` (the worker currently writing the file — the in-use
         highlight), ``stats_pending``, and ``cache_entry_count``.
         """
-        from drakkar.dbstats import DbStatsCache, collect
+        from drakkar.dbstats import DBSTATS_INLINE_SCAN_LIMIT, DbStatsCache, collect
 
         # Offloaded: sync sqlite3 work. Even with the cache, a cold file
         # or a live-DB delta scan does real reads — /healthz and /readyz
         # live on this same loop.
-        cache = DbStatsCache(config.recorder.db_dir)
+        cache = DbStatsCache(recorder.storage_dir)
         rows = await asyncio.to_thread(
             collect,
-            config.recorder.db_dir,
+            recorder.storage_dir,
             cache,
-            inline_scan_limit=config.recorder.dbstats_inline_scan_limit,
+            inline_scan_limit=DBSTATS_INLINE_SCAN_LIMIT,
         )
         return JSONResponse(
             [
@@ -276,11 +276,11 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
         # Memory-only recorder: no directory to read sources from, and —
         # the part that mattered — none to write the output into either.
-        root = _db_root(config.recorder.db_dir)
+        root = _db_root(recorder.storage_dir)
         if root is None:
             return JSONResponse({'error': 'No database directory configured'}, status_code=404)
 
-        # resolve to full paths, validate they exist in db_dir
+        # resolve to full paths, validate they exist in storage.dir
         db_paths = []
         for fn in filenames:
             full = _contained_db_path(root, fn)
@@ -445,8 +445,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
     async def debug_download(filename: str):
-        """Download a database file from db_dir."""
-        root = _db_root(config.recorder.db_dir)
+        """Download a database file from storage.dir."""
+        root = _db_root(recorder.storage_dir)
         if root is None:
             return JSONResponse({'error': 'No database directory configured'}, status_code=404)
         full = _contained_db_path(root, filename)
@@ -466,14 +466,14 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():
-        """List compressed archive files in db_dir."""
+        """List compressed archive files in storage.dir."""
         from drakkar.recorder.archive import list_archives
 
         # Offloaded for the same reason as api_debug_databases above: this
-        # is one listdir + one stat per archive, cheap today, but db_dir is
-        # shared and unbounded, so it must never run inline on the loop
+        # is one listdir + one stat per archive, cheap today, but the folder
+        # can be shared and unbounded, so it must never run inline on the loop
         # that also serves /healthz and /readyz.
-        archives = await asyncio.to_thread(list_archives, config.recorder.db_dir)
+        archives = await asyncio.to_thread(list_archives, recorder.storage_dir)
         return JSONResponse(
             {
                 'archives': [
@@ -491,7 +491,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/archives/{name}', dependencies=[Depends(deps.require_auth)])
     async def debug_download_archive(name: str):
-        """Download one compressed archive file from db_dir."""
+        """Download one compressed archive file from storage.dir."""
         from drakkar.recorder.archive import ARCHIVE_NAME_RE
 
         # The naming pattern alone already rules out path separators and a
@@ -499,7 +499,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # same belt-and-braces shape as debug_download above.
         if not ARCHIVE_NAME_RE.fullmatch(name):
             return JSONResponse({'error': 'Invalid archive name'}, status_code=404)
-        root = _db_root(config.recorder.db_dir)
+        root = _db_root(recorder.storage_dir)
         if root is None:
             return JSONResponse({'error': 'No database directory configured'}, status_code=404)
         # ARCHIVE_NAME_RE above is this route's name policy (archives are

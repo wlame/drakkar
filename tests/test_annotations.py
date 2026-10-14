@@ -380,7 +380,7 @@ async def test_annotations_reach_the_recorder_db_through_the_real_pipeline(tmp_p
     a real DB file, the real partition processor binding the real hook context,
     and the real annotator applying the real budgets.
     """
-    recorder = EventRecorder(make_ui_config(db_dir=str(tmp_path)), worker_name='e2e', cluster_name='main')
+    recorder = EventRecorder(make_ui_config(), worker_name='e2e', cluster_name='main', storage_dir=str(tmp_path))
     await recorder.start()
     try:
         handler = AnnotatingPipelineHandler()

@@ -488,9 +488,6 @@ ui:
   host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_UI__HOST
   port: 8080                       # 1–65535. env: DK_UI__PORT
   public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
-  workers_offline_after_seconds: 30  # peer with no heartbeat newer than this shows offline in the
-                                   # workers list; use >= 2-3x the fleet's largest recorder
-                                   # state_sync_interval_seconds. env: DK_UI__WORKERS_OFFLINE_AFTER_SECONDS
 
   # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
@@ -501,7 +498,7 @@ ui:
   probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
   merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
-                                   # recorder.db_dir, never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
+                                   # storage.dir, never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
   kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 
@@ -545,26 +542,16 @@ ui:
                                    # '' = off. Must exist at boot when set. Referenced from
                                    # probe_field(view='custom', renderer=...) / Column(renderer=...).
 
-  # --- Flight recorder (persistence; all flags require non-empty db_dir) ---
+  # --- Flight recorder (persistence; files go to storage.dir, see Own storage below) ---
   recorder:
-    db_dir: /tmp                     # SQLite directory. Empty = no disk persistence. env: DK_UI__RECORDER__DB_DIR
-                                     # Use shared FS (NFS, EFS) for cross-worker autodiscovery
     store_events: true               # write per-message events. env: DK_UI__RECORDER__STORE_EVENTS
-    store_config: true               # write worker config (enables autodiscovery). env: DK_UI__RECORDER__STORE_CONFIG
+    store_config: true               # write worker config into each file (history attribution). env: DK_UI__RECORDER__STORE_CONFIG
     store_state: true                # periodic worker-state snapshots. env: DK_UI__RECORDER__STORE_STATE
     state_sync_interval_seconds: 10  # snapshot frequency. env: DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS
 
     # --- Database rotation & archiving (see docs/local-databases.md#archiving) ---
     rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour. env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
-    archive_enabled: true            # merge rotated-out files into windowed .db.gz archives instead of leaking them. env: DK_UI__RECORDER__ARCHIVE_ENABLED
-    archive_window_hours: 24         # one archive per cluster per window; must be >= rotation_interval_hours. env: DK_UI__RECORDER__ARCHIVE_WINDOW_HOURS
-    archive_retention_days: 30       # delete archives older than this; 0 = keep forever. Must be >= 2x the window, in days. env: DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS
-
-    # --- Databases-page stats cache (see docs/local-databases.md#the-databases-page-stats-cache) ---
-    dbstats_warm_interval_seconds: 60 # background sweep filling the .dbstats cache + purging deleted files.
-                                      # env: DK_UI__RECORDER__DBSTATS_WARM_INTERVAL_SECONDS
-    dbstats_inline_scan_limit: 4      # max cold files one /api/v1/debug/databases request scans inline;
-                                      # the rest return stats_pending. env: DK_UI__RECORDER__DBSTATS_INLINE_SCAN_LIMIT
+                                     # Archiving settings live in history.archive (see History and archives below).
 
     # --- Output (stdout/stderr) capture ---
     store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT
@@ -619,6 +606,11 @@ ui:
                                      # YAML only.
                                      # e.g. [{name: deploy, kind: marker, color: purple, action: link, link: "{grafana}/d?from={ts_ms}"}]
 
+  # --- Trace search over sealed history (Trace page, history part) ---
+  trace:
+    history_max_files: 256           # most sealed files one trace request with history=1 opens. env: DK_UI__TRACE__HISTORY_MAX_FILES
+    history_max_seconds: 10          # time limit for that request. env: DK_UI__TRACE__HISTORY_MAX_SECONDS
+
   # --- Operator docs site served at /docs/ + contextual anchors (see ui-docs.md) ---
   docs:
     site_dir: ''                     # directory of a PREBUILT static site (mkdocs site/, Sphinx html/, plain
@@ -634,26 +626,95 @@ ui:
 
 ## Cache (`cache:`)
 
-📚 [Deep details](configuration.md#cache-cache) · [Peer Sync](configuration.md#cache-peer-sync) · [Cache page](cache.md)
+📚 [Deep details](configuration.md#cache-cache) · [Cache page](cache.md)
 
 Optional handler-accessible key/value cache. **Disabled by default**.
 
 ```yaml
 cache:
-  enabled: false                   # master switch; false = no-op stub. env: DK_CACHE__ENABLED
-  db_dir: ''                       # SQLite dir; empty = falls back to ui.recorder.db_dir. env: DK_CACHE__DB_DIR
+  enabled: false                   # master switch; false = no-op stub. The cache file lives in storage.dir. env: DK_CACHE__ENABLED
   flush_interval_seconds: 3.0      # write-behind flush cadence. env: DK_CACHE__FLUSH_INTERVAL_SECONDS
   cleanup_interval_seconds: 60.0   # expired-row cleanup cadence. env: DK_CACHE__CLEANUP_INTERVAL_SECONDS
   max_memory_entries: 10000        # in-memory LRU cap; null = unbounded (warns). env: DK_CACHE__MAX_MEMORY_ENTRIES
+                                   # Exchange of cluster/global rows with peers: fleet.cache_exchange below.
+```
 
-  # --- Cross-worker peer sync (LWW merge by updated_at_ms) ---
-  peer_sync:
-    enabled: true                  # env: DK_CACHE__PEER_SYNC__ENABLED
-    interval_seconds: 30.0         # peer-sync cycle cadence. env: DK_CACHE__PEER_SYNC__INTERVAL_SECONDS
-    batch_size: 500                # max rows pulled per peer per cycle. env: DK_CACHE__PEER_SYNC__BATCH_SIZE
-    timeout_seconds: 5.0           # per-peer read timeout. env: DK_CACHE__PEER_SYNC__TIMEOUT_SECONDS
-    cycle_deadline_seconds: null   # hard cap on one cycle; null = interval*0.9. env: DK_CACHE__PEER_SYNC__CYCLE_DEADLINE_SECONDS
-                                   # Must be strictly < interval_seconds (config load fails otherwise)
+---
+
+## Own storage (`storage:`)
+
+📚 [Upgrading](upgrading.md) · [Local databases](local-databases.md)
+
+This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them.
+
+```yaml
+storage:
+  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = memory-only (no own files). env: DK_STORAGE__DIR
+```
+
+---
+
+## Shared folder (`shared:`)
+
+The folder every worker of one fleet sees: registry cards, sealed history, daily archives, merge results.
+
+```yaml
+shared:
+  dir: ''                          # '' = the same folder as storage.dir (one host). env: DK_SHARED__DIR
+```
+
+---
+
+## History and archives (`history:`)
+
+📚 [Archiving](local-databases.md#archiving)
+
+```yaml
+history:
+  archive:
+    enabled: true                  # fold recorder files into one .db.gz per cluster and window. env: DK_HISTORY__ARCHIVE__ENABLED
+    window_hours: 24               # archive window; must be >= ui.recorder.rotation_interval_hours. env: DK_HISTORY__ARCHIVE__WINDOW_HOURS
+    due_after_hours: 48            # a window is archived this long after it ends; must be >= rotation_interval_hours.
+                                   # env: DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS
+    retention_days: 30             # delete archives older than this; 0 = keep forever. Must cover
+                                   # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
+    lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver.
+                                   # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
+  merged_retention_days: 32        # delete UI merge results older than this; 0 = never. env: DK_HISTORY__MERGED_RETENTION_DAYS
+```
+
+---
+
+## Fleet registry and cache exchange (`fleet:`)
+
+📚 [Upgrading](upgrading.md) · [Cache page](cache.md)
+
+How workers find each other and exchange cache rows. The pipeline itself does not depend on it.
+
+```yaml
+fleet:
+  registry:
+    provider: filesystem           # filesystem | static | none | <plugin name>; needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
+    heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
+    refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
+    offline_after_seconds: 30      # card older than this = offline; must be >= 2 x heartbeat_seconds.
+                                   # env: DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS
+    prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds.
+                                   # env: DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS
+    timeout_seconds: 5             # time limit for one registry operation. env: DK_FLEET__REGISTRY__TIMEOUT_SECONDS
+    filesystem:
+      dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
+    static:
+      peers: []                    # [{name, cluster, url}]. YAML only.
+    plugin_options: {}             # passed unchanged to a provider plugin. YAML only.
+  cache_exchange:
+    enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
+    interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
+    page_size: 500                 # 1-1000 rows per page. env: DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE
+    timeout_seconds: 5             # time limit for one request to a peer. env: DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS
+    cycle_deadline_seconds: null   # hard cap on one cycle; null = interval x 0.9; must be < interval_seconds.
+                                   # env: DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS
+    max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS
 ```
 
 ---
@@ -679,7 +740,7 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 | Top-level | `cluster_name` → `DK_CLUSTER_NAME` |
 | One level deep | `kafka.brokers` → `DK_KAFKA__BROKERS` |
 | Section, sub-section, field | `sources.kafka.topic` → `DK_SOURCES__KAFKA__TOPIC` |
-| Two levels deep | `cache.peer_sync.interval_seconds` → `DK_CACHE__PEER_SYNC__INTERVAL_SECONDS` |
+| Two levels deep | `fleet.cache_exchange.interval_seconds` → `DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS` |
 | Map key (sink instance) | `sinks.postgres.main-db.dsn` → `DK_SINKS__POSTGRES__MAIN_DB__DSN` |
 | List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |
 | List value | `ui.expose_env_vars` → `DK_UI__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |

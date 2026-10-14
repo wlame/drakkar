@@ -5,6 +5,7 @@ defaults, the YAML document, then ``DK_*`` environment overrides.
 """
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,9 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.config.cache import CacheConfig
+from drakkar.config.fleet import FleetConfig
 from drakkar.config.kafka import KafkaConfig
+from drakkar.config.moved_keys import find_moved_keys, moved_keys_message
 from drakkar.config.runtime import (
     ExecutorConfig,
     IOConfig,
@@ -25,6 +28,7 @@ from drakkar.config.runtime import (
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
+from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
 from drakkar.config.ui import UIConfig
 from drakkar.config.webapp import WebAppConfig
 
@@ -40,6 +44,23 @@ class DrakkarConfig(BaseSettings):
         env_prefix='DK_',
         env_nested_delimiter='__',
     )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_moved_keys(cls, values: object) -> object:
+        """Refuse config keys that moved or were removed, listing every one found.
+
+        The nested sections ignore unknown keys, so without this check an old
+        key would be dropped silently and its value would stop applying. The
+        raw values here are YAML merged with the ``DK_*`` environment on every
+        construction path; the table and the message live in
+        :mod:`drakkar.config.moved_keys`.
+        """
+        if isinstance(values, Mapping):
+            found = find_moved_keys(values)
+            if found:
+                raise ValueError(moved_keys_message(found))
+        return values
 
     @model_validator(mode='before')
     @classmethod
@@ -99,6 +120,10 @@ class DrakkarConfig(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    shared: SharedConfig = Field(default_factory=SharedConfig)
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
+    fleet: FleetConfig = Field(default_factory=FleetConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     app: dict[str, Any] = Field(
         default_factory=dict,
@@ -120,6 +145,56 @@ class DrakkarConfig(BaseSettings):
         if not self.sources.enabled_names:
             raise ValueError('no input source enabled: set sources.kafka.enabled or sources.http.enabled')
         return self
+
+    @model_validator(mode='after')
+    def _validate_history_vs_rotation(self) -> 'DrakkarConfig':
+        """Archive windows and the due delay must be at least one rotation long.
+
+        A window shorter than the rotation interval would be named for files
+        that rotate out of it later; a due delay shorter than one rotation
+        could archive a window while a file of it is still being written.
+        """
+        rotation_hours = self.ui.recorder.rotation_interval_hours
+        archive = self.history.archive
+        if archive.window_hours < rotation_hours:
+            raise ValueError(
+                f'history.archive.window_hours ({archive.window_hours}) must be >= '
+                f'ui.recorder.rotation_interval_hours ({rotation_hours})'
+            )
+        if archive.due_after_hours < rotation_hours:
+            raise ValueError(
+                f'history.archive.due_after_hours ({archive.due_after_hours}) must be >= '
+                f'ui.recorder.rotation_interval_hours ({rotation_hours})'
+            )
+        return self
+
+    @property
+    def resolved_shared_dir(self) -> str:
+        """The folder every worker of the fleet sees: ``shared.dir``, else ``storage.dir``."""
+        return self.shared.dir or self.storage.dir
+
+    @property
+    def resolved_registry_dir(self) -> str:
+        """Card folder of the filesystem registry; ``''`` when no folder resolves."""
+        if self.fleet.registry.filesystem.dir:
+            return self.fleet.registry.filesystem.dir
+        shared_dir = self.resolved_shared_dir
+        # normpath so the derived folder is the same clean path on every
+        # backend ('./data/' -> 'data/fleet').
+        return os.path.normpath(os.path.join(shared_dir, 'fleet')) if shared_dir else ''
+
+    @property
+    def fleet_summary(self) -> str:
+        """The registry the worker will run: the provider name, or ``off``.
+
+        ``off`` when the registry is forced to ``none``: the registry needs
+        the UI server (peers reach a worker through it), and the filesystem
+        provider needs a folder.
+        """
+        provider = self.fleet.registry.provider
+        if not self.ui.enabled or (provider == 'filesystem' and not self.resolved_registry_dir):
+            return 'off'
+        return provider
 
     @property
     def dlq_enabled(self) -> bool:
@@ -150,12 +225,15 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
         (kafka, then http). The ``ui`` token reports the UI server state;
         the ``ui.release`` bundle-fetch settings are deliberately excluded
-        (they never affect pipeline behavior). The exact bytes are
+        (they never affect pipeline behavior). ``storage`` is the own-files
+        folder (``mem`` for memory-only), ``shared`` appears only when the
+        shared folder differs from it, and ``fleet`` names the registry the
+        worker runs (see :attr:`fleet_summary`). The exact bytes are
         contractual.
         """
         identity = worker_id or '?'
@@ -182,12 +260,16 @@ class DrakkarConfig(BaseSettings):
             cache_part = 'off'
         else:
             flush = f'{self.cache.flush_interval_seconds:g}s'
-            sync = f'{self.cache.peer_sync.interval_seconds:g}s' if self.cache.peer_sync.enabled else 'off'
+            exchange = self.fleet.cache_exchange
+            sync = f'{exchange.interval_seconds:g}s' if exchange.enabled else 'off'
             cleanup = f'{self.cache.cleanup_interval_seconds:g}s'
             cache_tokens = [f'f={flush}', f's={sync}', f'c={cleanup}']
             if self.cache.max_memory_entries is not None:
                 cache_tokens.append(f'max={self.cache.max_memory_entries}')
             cache_part = 'on:' + '/'.join(cache_tokens)
+
+        storage_part = self.storage.dir or 'mem'
+        shared_token = f' shared={self.shared.dir}' if self.shared.dir and self.shared.dir != self.storage.dir else ''
 
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
 
@@ -218,6 +300,9 @@ class DrakkarConfig(BaseSettings):
             f' exec={exec_part}'
             f' retries={retries_part}'
             f' ui={ui_part}'
+            f' storage={storage_part}'
+            f'{shared_token}'
+            f' fleet={self.fleet_summary}'
             f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'

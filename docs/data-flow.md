@@ -889,15 +889,11 @@ Each sink type is a dict mapping instance names to their config:
 | `prometheus_worker_label` | str | `''` | Worker label name in Prometheus |
 | `prometheus_cluster_label` | str | `''` | Cluster label name in Prometheus |
 | `custom_links` | list[dict] | `[]` | Custom links for the UI dashboard |
-| `recorder.db_dir` | str | `'/tmp'` | SQLite database directory; `''` = no disk persistence |
 | `recorder.store_events` | bool | `True` | Write processing events to events table |
-| `recorder.store_config` | bool | `True` | Write worker config (enables autodiscovery) |
+| `recorder.store_config` | bool | `True` | Write worker config into each file |
 | `recorder.store_state` | bool | `True` | Periodic state snapshots |
 | `recorder.state_sync_interval_seconds` | int | `10` | Seconds between state snapshots |
 | `recorder.rotation_interval_hours` | int | `1` | When to roll over DB files (1 = 1 hour) |
-| `recorder.archive_enabled` | bool | `True` | Merge rotated-out files into windowed `.db.gz` archives instead of leaking them |
-| `recorder.archive_window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
-| `recorder.archive_retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |
 | `recorder.store_output` | bool | `True` | Include stdout/stderr in event records |
 | `recorder.flush_interval_seconds` | int | `5` | Buffer flush interval |
 | `recorder.max_buffer` | int | `50000` | In-memory event buffer size |
@@ -908,6 +904,28 @@ Each sink type is a dict mapping instance names to their config:
 | `release.pinned_version` | str | `''` | Known-good UI release tag; `''` = unpinned |
 | `release.cache_dir` | str | `''` | Bundle cache root; `''` = per-user cache dir |
 | `release.check_update` | bool | `True` | Resolve the latest release tag on startup |
+
+### `storage`, `shared`, `history` -- Files and Archives
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `storage.dir` | str | `'/tmp/drakkar'` | This worker's own files; `''` = no disk persistence |
+| `shared.dir` | str | `''` | Folder every worker sees; `''` = `storage.dir` |
+| `history.archive.enabled` | bool | `True` | Merge rotated-out files into windowed `.db.gz` archives instead of leaking them |
+| `history.archive.window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
+| `history.archive.due_after_hours` | int | `48` | A window is archived this long after it ends |
+| `history.archive.retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |
+| `history.archive.lock_stale_seconds` | int | `7200` | Age after which an archive lock or work file belongs to a dead archiver |
+| `history.merged_retention_days` | int | `32` | Delete UI merge results older than this; `0` = never |
+
+### `fleet` -- Registry and Cache Exchange
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `static`, `none`, or a plugin name |
+| `fleet.registry.offline_after_seconds` | int | `30` | A peer card older than this is offline |
+| `fleet.cache_exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
+| `fleet.cache_exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |
 
 ### Root-Level Settings
 

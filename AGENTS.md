@@ -35,7 +35,7 @@ breaking change, never a refactor:
   whose decoded form carries no key order; caller-supplied lists keep the
   order they were given
 - the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads
-  recorder and cache files written by other workers sharing its `db_dir`
+  recorder and cache files written by other workers sharing its `storage.dir`
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 

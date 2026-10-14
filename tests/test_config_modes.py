@@ -106,6 +106,9 @@ def make_config(**overrides) -> DrakkarConfig:
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
         'ui': make_ui_config(enabled=False),
+        # Memory-only: a test that reaches startup must not create the
+        # default own-files folder on the host.
+        'storage': {'dir': ''},
     }
     defaults.update(overrides)
     return DrakkarConfig(**defaults)
@@ -251,8 +254,8 @@ class TestPartitionProcessorRecorderModes:
         async def on_commit(pid, offset):
             committed.append((pid, offset))
 
-        debug_cfg = make_ui_config(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
-        recorder = EventRecorder(debug_cfg, worker_name='test-w', cluster_name='')
+        debug_cfg = make_ui_config(enabled=True, flush_interval_seconds=60)
+        recorder = EventRecorder(debug_cfg, worker_name='test-w', cluster_name='', storage_dir=str(tmp_path))
         await recorder.start()
 
         proc = PartitionProcessor(
@@ -297,13 +300,12 @@ class TestRecorderStoreFlags:
         """Recorder starts and stops cleanly with any combination of store flags."""
         cfg = make_ui_config(
             enabled=True,
-            db_dir=str(tmp_path),
             store_events=store_events,
             store_config=store_config,
             store_state=store_state,
             flush_interval_seconds=60,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='')
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
         await rec.start()
 
         # record some events regardless of flags
@@ -325,17 +327,16 @@ class TestRecorderStoreFlags:
 
         await rec.stop()
 
-    async def test_recorder_db_dir_empty_is_memory_only(self, tmp_path):
-        """With db_dir='', recorder runs in memory-only mode — no crash."""
+    async def test_recorder_empty_storage_dir_is_memory_only(self, tmp_path):
+        """With storage_dir empty, recorder runs in memory-only mode — no crash."""
         cfg = make_ui_config(
             enabled=True,
-            db_dir='',
             store_events=True,
             store_config=True,
             store_state=True,
             flush_interval_seconds=60,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='')
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir='')
         await rec.start()
 
         # should not crash despite requesting all storage features
@@ -355,28 +356,26 @@ class TestRecorderStoreFlags:
         await rec.stop()
 
     async def test_recorder_discover_workers_requires_config_and_db(self, tmp_path):
-        """discover_workers returns empty when store_config=False or db_dir=''."""
+        """discover_workers returns empty when store_config=False or storage.dir is empty."""
         cfg_no_config = make_ui_config(
             enabled=True,
-            db_dir=str(tmp_path),
             store_config=False,
             flush_interval_seconds=60,
         )
-        rec = EventRecorder(cfg_no_config, worker_name='test', cluster_name='')
+        rec = EventRecorder(cfg_no_config, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
         await rec.start()
-        workers = await rec.discover_workers()
+        workers = await rec.discover_workers(30)
         assert workers == []
         await rec.stop()
 
         cfg_no_db = make_ui_config(
             enabled=True,
-            db_dir='',
             store_config=True,
             flush_interval_seconds=60,
         )
-        rec2 = EventRecorder(cfg_no_db, worker_name='test', cluster_name='')
+        rec2 = EventRecorder(cfg_no_db, worker_name='test', cluster_name='', storage_dir='')
         await rec2.start()
-        workers = await rec2.discover_workers()
+        workers = await rec2.discover_workers(30)
         assert workers == []
         await rec2.stop()
 
@@ -385,14 +384,13 @@ class TestRecorderStoreFlags:
         """State sync only writes when store_state=True and db exists."""
         cfg = make_ui_config(
             enabled=True,
-            db_dir=str(tmp_path),
             store_events=False,
             store_config=False,
             store_state=store_state,
             flush_interval_seconds=60,
             state_sync_interval_seconds=1,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='')
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
         rec.set_state_provider(
             lambda: {
                 'uptime_seconds': 1.0,
@@ -997,15 +995,13 @@ class TestConfigSummary:
         summary = cfg.config_summary(worker_id='w')
         assert 'cache=on:f=0.5s/s=30s/c=60s' in summary
 
-    def test_summary_cache_on_with_peer_sync_disabled(self):
-        """peer_sync.enabled=false renders the sync slot as 'off' instead of an interval."""
-        from drakkar.config import CacheConfig, CachePeerSyncConfig
+    def test_summary_cache_on_with_cache_exchange_disabled(self):
+        """fleet.cache_exchange.enabled=false renders the sync slot as 'off' instead of an interval."""
+        from drakkar.config import CacheConfig, CacheExchangeConfig, FleetConfig
 
         cfg = make_config(
-            cache=CacheConfig(
-                enabled=True,
-                peer_sync=CachePeerSyncConfig(enabled=False),
-            )
+            cache=CacheConfig(enabled=True),
+            fleet=FleetConfig(cache_exchange=CacheExchangeConfig(enabled=False)),
         )
         summary = cfg.config_summary(worker_id='w')
         assert 'cache=on:f=3s/s=off/c=60s' in summary

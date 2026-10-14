@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from drakkar.cache import Cache, CacheEngine, NoOpCache
 from drakkar.config import (
     CacheConfig,
+    CacheExchangeConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -157,18 +158,17 @@ def _make_config_with_cache(
         logging=LoggingConfig(level='WARNING', format='console'),
         ui=make_ui_config(
             enabled=debug_enabled,
-            db_dir=str(tmp_path),
             store_events=False,
             store_config=False,
             store_state=False,
         ),
         cache=CacheConfig(
             enabled=cache_enabled,
-            db_dir=str(tmp_path),
             flush_interval_seconds=60.0,  # slow — tests manually flush
             cleanup_interval_seconds=60.0,
-            peer_sync={'enabled': False},
         ),
+        storage={'dir': str(tmp_path)},
+        fleet={'cache_exchange': {'enabled': False}},
     )
 
 
@@ -266,12 +266,9 @@ async def test_pydantic_roundtrip_via_handler_cache(tmp_path) -> None:
     through the handler's ``self.cache`` interface using ``PrecomputedResult``
     (a real framework model, not a test-only toy)."""
     engine = CacheEngine(
-        config=CacheConfig(
-            enabled=True,
-            db_dir=str(tmp_path),
-            peer_sync={'enabled': False},
-        ),
-        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
+        config=CacheConfig(enabled=True),
+        exchange=CacheExchangeConfig(enabled=False),
+        storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',
         recorder=None,

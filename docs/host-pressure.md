@@ -79,13 +79,13 @@ throttle and PSI evidence they saw.
 
 ## Recorder databases on network filesystems
 
-At startup the recorder resolves `ui.recorder.db_dir` against
+At startup the recorder resolves `storage.dir` against
 `/proc/mounts`; when it lands on a network filesystem (`nfs*`, `cifs`,
 `sshfs`, `9p`, `glusterfs`, `ceph`, `lustre`, …) it logs
-`recorder_db_dir_network_fs` and continues. SQLite on such mounts risks
+`recorder_storage_dir_network_fs` and continues. SQLite on such mounts risks
 lock corruption, and — worse for an incident — every recorder flush then
 shares fate with the network path: the observability stack degrades
-exactly when it is needed. Point `db_dir` at a local disk.
+exactly when it is needed. Point `storage.dir` at a local disk.
 
 ## Replay after the fact
 

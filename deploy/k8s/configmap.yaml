@@ -89,9 +89,6 @@ data:
       # acceptable only on a private network.
       auth_token: ""
       recorder:
-        # Matches the emptyDir volumeMount in deployment.yaml. The
-        # recorder and cache SQLite files live here.
-        db_dir: "/var/lib/drakkar"
         store_events: true
         store_config: true
         store_state: true
@@ -99,14 +96,20 @@ data:
 
     cache:
       # Off by default — flip to true if your handler uses
-      # `self.cache`. db_dir empty falls back to ui.recorder.db_dir above.
+      # `self.cache`. The cache file lives in storage.dir below.
       enabled: false
-      db_dir: ""
       flush_interval_seconds: 3.0
       cleanup_interval_seconds: 60.0
       max_memory_entries: 10000
-      peer_sync:
+
+    storage:
+      # This worker's own files (recorder, cache, crash marker). Matches
+      # the emptyDir volumeMount in deployment.yaml.
+      dir: "/var/lib/drakkar"
+
+    fleet:
+      cache_exchange:
         enabled: true
         interval_seconds: 30.0
-        batch_size: 500
+        page_size: 500
         timeout_seconds: 5.0

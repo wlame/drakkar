@@ -56,6 +56,15 @@ class TestTheTableItself:
         assert 'sources.kafka.enabled' in paths
         assert 'sources.http.enabled' in paths
 
+    def test_a_changed_storage_dir_is_reported(self):
+        """The own-files folder is created before the hook runs, so moving it there does nothing."""
+        config = make_config()
+        before = snapshot_consumed_settings(config)
+
+        config.storage.dir = '/var/lib/elsewhere'
+
+        assert changed_consumed_settings(before, config) == ['storage.dir']
+
     def test_every_entry_explains_why_it_is_consumed_early(self):
         for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP:
             assert setting.reason, f'{setting.path} needs a reason an operator can act on'

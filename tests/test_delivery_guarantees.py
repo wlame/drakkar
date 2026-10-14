@@ -511,7 +511,7 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
 
 
 async def test_recorder_db_file_owner_only_permissions(tmp_path):
-    recorder = EventRecorder(make_ui_config(enabled=False, db_dir=str(tmp_path)), worker_name='permtest')
+    recorder = EventRecorder(make_ui_config(enabled=False), worker_name='permtest', storage_dir=str(tmp_path))
     await recorder.start()
     try:
         db_files = [f for f in os.listdir(tmp_path) if f.endswith('.db') and not os.path.islink(tmp_path / f)]

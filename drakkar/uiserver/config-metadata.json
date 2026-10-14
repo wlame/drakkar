@@ -1419,7 +1419,7 @@
           "path": "ui.merge_enabled",
           "env": "DK_UI__MERGE_ENABLED",
           "description": "Serve ``POST /api/v1/debug/merge``.",
-          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in ``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls grow unbounded. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
+          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of ``shared.dir``, kept for ``history.merged_retention_days``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
           "type": "boolean",
           "default": true,
           "secret": false,
@@ -1442,16 +1442,6 @@
           "full_description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list. Empty derives http://<ip>:<port> from the bind address.",
           "type": "string",
           "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.workers_offline_after_seconds",
-          "env": "DK_UI__WORKERS_OFFLINE_AFTER_SECONDS",
-          "description": "A discovered worker whose newest heartbeat is older than this many seconds is reported offline in the workers list.",
-          "full_description": "A discovered worker whose newest heartbeat is older than this many seconds is reported offline in the workers list. Size it to at least 2-3x the largest ``ui.recorder.state_sync_interval_seconds`` in the fleet so a healthy worker never flaps offline between heartbeats.",
-          "type": "integer",
-          "default": 30,
           "secret": false,
           "group": "ui"
         },
@@ -1591,16 +1581,6 @@
           "group": "ui"
         },
         {
-          "path": "ui.recorder.db_dir",
-          "env": "DK_UI__RECORDER__DB_DIR",
-          "description": "Directory for the recorder SQLite files.",
-          "full_description": "Directory for the recorder SQLite files. Empty runs memory-only: no files, no history — the live WebSocket view keeps working. Use a shared filesystem for cross-worker autodiscovery and merge.",
-          "type": "string",
-          "default": "/tmp",
-          "secret": false,
-          "group": "ui"
-        },
-        {
           "path": "ui.recorder.store_events",
           "env": "DK_UI__RECORDER__STORE_EVENTS",
           "description": "Write processing events to the events table.",
@@ -1613,8 +1593,8 @@
         {
           "path": "ui.recorder.store_config",
           "env": "DK_UI__RECORDER__STORE_CONFIG",
-          "description": "Write the worker config snapshot to the worker_config table — what makes the worker discoverable by peers sharing the same db_dir.",
-          "full_description": "Write the worker config snapshot to the worker_config table — what makes the worker discoverable by peers sharing the same db_dir.",
+          "description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
+          "full_description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
           "type": "boolean",
           "default": true,
           "secret": false,
@@ -1647,56 +1627,6 @@
           "full_description": "How often to roll over to a new SQLite file.",
           "type": "integer",
           "default": 1,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.archive_enabled",
-          "env": "DK_UI__RECORDER__ARCHIVE_ENABLED",
-          "description": "Archive rotated-out DB files instead of deleting them outright.",
-          "full_description": "Archive rotated-out DB files instead of deleting them outright.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.archive_window_hours",
-          "env": "DK_UI__RECORDER__ARCHIVE_WINDOW_HOURS",
-          "description": "How much recent history the archive pass keeps queryable; must be >= rotation_interval_hours.",
-          "full_description": "How much recent history the archive pass keeps queryable; must be >= rotation_interval_hours.",
-          "type": "integer",
-          "default": 24,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.archive_retention_days",
-          "env": "DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS",
-          "description": "How long archived files are kept before deletion.",
-          "full_description": "How long archived files are kept before deletion. Defaults to 30 days so a worker cannot fill its disk unattended. 0 = keep archives forever (a startup warning names the choice); any other value must cover at least two archive windows (archive_retention_days * 24 >= 2 * archive_window_hours).",
-          "type": "integer",
-          "default": 30,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.dbstats_warm_interval_seconds",
-          "env": "DK_UI__RECORDER__DBSTATS_WARM_INTERVAL_SECONDS",
-          "description": "How often the background warmer sweeps db_dir, computing statistics for database files the .dbstats cache does not know yet and purging entries for deleted files.",
-          "full_description": "How often the background warmer sweeps db_dir, computing statistics for database files the .dbstats cache does not know yet and purging entries for deleted files. Cheap when everything is already cached — one directory listing plus one small SELECT.",
-          "type": "integer",
-          "default": 60,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.dbstats_inline_scan_limit",
-          "env": "DK_UI__RECORDER__DBSTATS_INLINE_SCAN_LIMIT",
-          "description": "How many cold (uncached) database files one /api/v1/debug/databases request may fully scan inline.",
-          "full_description": "How many cold (uncached) database files one /api/v1/debug/databases request may fully scan inline. Files beyond the cap return immediately with stats_pending=true and fill in as the warmer catches up. 0 = requests never scan; matters only on a cold cache (first boot over a pre-existing directory).",
-          "type": "integer",
-          "default": 4,
           "secret": false,
           "group": "ui"
         },
@@ -1981,6 +1911,26 @@
           "group": "ui"
         },
         {
+          "path": "ui.trace.history_max_files",
+          "env": "DK_UI__TRACE__HISTORY_MAX_FILES",
+          "description": "Most sealed history files one trace request with history=1 opens, newest first.",
+          "full_description": "Most sealed history files one trace request with history=1 opens, newest first.",
+          "type": "integer",
+          "default": 256,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.trace.history_max_seconds",
+          "env": "DK_UI__TRACE__HISTORY_MAX_SECONDS",
+          "description": "Time limit for one trace request with history=1; the search stops and returns what it found.",
+          "full_description": "Time limit for one trace request with history=1; the search stops and returns what it found.",
+          "type": "number",
+          "default": 10.0,
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.docs.site_dir",
           "env": "DK_UI__DOCS__SITE_DIR",
           "description": "Directory of a prebuilt static docs site served at /docs/.",
@@ -2028,16 +1978,6 @@
           "group": "cache"
         },
         {
-          "path": "cache.db_dir",
-          "env": "DK_CACHE__DB_DIR",
-          "description": "Directory for the cache SQLite file.",
-          "full_description": "Directory for the cache SQLite file. Empty falls back to ui.recorder.db_dir; with neither set, the cache warns at startup and disables itself.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "cache"
-        },
-        {
           "path": "cache.flush_interval_seconds",
           "env": "DK_CACHE__FLUSH_INTERVAL_SECONDS",
           "description": "Seconds between write-behind flushes of dirty entries to SQLite.",
@@ -2066,56 +2006,264 @@
           "default": 10000,
           "secret": false,
           "group": "cache"
-        },
+        }
+      ]
+    },
+    {
+      "key": "storage",
+      "title": "Own storage (storage:)",
+      "doc_anchor": "own-storage-storage",
+      "entries": [
         {
-          "path": "cache.peer_sync.enabled",
-          "env": "DK_CACHE__PEER_SYNC__ENABLED",
-          "description": "Pull cache entries from sibling workers' cache DBs on a periodic loop.",
-          "full_description": "Pull cache entries from sibling workers' cache DBs on a periodic loop. Off, flush and cleanup still run but nothing propagates across workers.",
+          "path": "storage.dir",
+          "env": "DK_STORAGE__DIR",
+          "description": "Folder for this worker's own files (live recorder file, cache file, crash marker).",
+          "full_description": "Folder for this worker's own files (live recorder file, cache file, crash marker). Only this worker opens them. The worker creates it with mode 0700. Empty runs memory-only: no own files, no history, no cache file.",
+          "type": "string",
+          "default": "/tmp/drakkar",
+          "secret": false,
+          "group": "storage"
+        }
+      ]
+    },
+    {
+      "key": "shared",
+      "title": "Shared folder (shared:)",
+      "doc_anchor": "shared-folder-shared",
+      "entries": [
+        {
+          "path": "shared.dir",
+          "env": "DK_SHARED__DIR",
+          "description": "Folder that every worker of the fleet sees (for example a ReadWriteMany volume): registry cards, sealed history, daily archives and merge results.",
+          "full_description": "Folder that every worker of the fleet sees (for example a ReadWriteMany volume): registry cards, sealed history, daily archives and merge results. Empty means the same folder as storage.dir, which is right for workers on one host.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "shared"
+        }
+      ]
+    },
+    {
+      "key": "history",
+      "title": "History and archives (history:)",
+      "doc_anchor": "history-and-archives-history",
+      "entries": [
+        {
+          "path": "history.archive.enabled",
+          "env": "DK_HISTORY__ARCHIVE__ENABLED",
+          "description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files.",
+          "full_description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files. Off, nothing removes sealed files.",
           "type": "boolean",
           "default": true,
           "secret": false,
-          "group": "cache"
+          "group": "history"
         },
         {
-          "path": "cache.peer_sync.interval_seconds",
-          "env": "DK_CACHE__PEER_SYNC__INTERVAL_SECONDS",
-          "description": "Seconds between peer-sync cycles.",
-          "full_description": "Seconds between peer-sync cycles.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.peer_sync.batch_size",
-          "env": "DK_CACHE__PEER_SYNC__BATCH_SIZE",
-          "description": "Maximum rows pulled from one peer per sync cycle.",
-          "full_description": "Maximum rows pulled from one peer per sync cycle.",
+          "path": "history.archive.window_hours",
+          "env": "DK_HISTORY__ARCHIVE__WINDOW_HOURS",
+          "description": "Width of one archive window in hours; must be >= ui.recorder.rotation_interval_hours.",
+          "full_description": "Width of one archive window in hours; must be >= ui.recorder.rotation_interval_hours.",
           "type": "integer",
-          "default": 500,
+          "default": 24,
           "secret": false,
-          "group": "cache"
+          "group": "history"
         },
         {
-          "path": "cache.peer_sync.timeout_seconds",
-          "env": "DK_CACHE__PEER_SYNC__TIMEOUT_SECONDS",
-          "description": "Per-peer time budget (seconds) within one sync cycle.",
-          "full_description": "Per-peer time budget (seconds) within one sync cycle.",
+          "path": "history.archive.due_after_hours",
+          "env": "DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS",
+          "description": "A window is archived this many hours after it ends, so late files of that window are still in it; must be >= ui.recorder.rotation_interval_hours.",
+          "full_description": "A window is archived this many hours after it ends, so late files of that window are still in it; must be >= ui.recorder.rotation_interval_hours.",
+          "type": "integer",
+          "default": 48,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.archive.retention_days",
+          "env": "DK_HISTORY__ARCHIVE__RETENTION_DAYS",
+          "description": "How long archives are kept before deletion.",
+          "full_description": "How long archives are kept before deletion. Defaults to 30 days so a worker cannot fill its disk unattended. 0 = keep archives forever (a startup warning names the choice); any other value must cover the due delay plus one window (retention_days * 24 >= due_after_hours + window_hours).",
+          "type": "integer",
+          "default": 30,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.archive.lock_stale_seconds",
+          "env": "DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS",
+          "description": "An archive lock or archive work file older than this many seconds belongs to a dead archiver: the lock is taken over and the work file is removed.",
+          "full_description": "An archive lock or archive work file older than this many seconds belongs to a dead archiver: the lock is taken over and the work file is removed.",
+          "type": "integer",
+          "default": 7200,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.merged_retention_days",
+          "env": "DK_HISTORY__MERGED_RETENTION_DAYS",
+          "description": "Merge results from the UI are deleted after this many days.",
+          "full_description": "Merge results from the UI are deleted after this many days. 0 = never delete.",
+          "type": "integer",
+          "default": 32,
+          "secret": false,
+          "group": "history"
+        }
+      ]
+    },
+    {
+      "key": "fleet",
+      "title": "Fleet registry and cache exchange (fleet:)",
+      "doc_anchor": "fleet-registry-and-cache-exchange-fleet",
+      "entries": [
+        {
+          "path": "fleet.registry.provider",
+          "env": "DK_FLEET__REGISTRY__PROVIDER",
+          "description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), or the name of a provider plugin.",
+          "full_description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), or the name of a provider plugin. Needs ui.enabled.",
+          "type": "string",
+          "default": "filesystem",
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.heartbeat_seconds",
+          "env": "DK_FLEET__REGISTRY__HEARTBEAT_SECONDS",
+          "description": "Seconds between card publishes.",
+          "full_description": "Seconds between card publishes.",
+          "type": "integer",
+          "default": 10,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.refresh_seconds",
+          "env": "DK_FLEET__REGISTRY__REFRESH_SECONDS",
+          "description": "Seconds between reads of the peer cards.",
+          "full_description": "Seconds between reads of the peer cards.",
+          "type": "integer",
+          "default": 15,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.offline_after_seconds",
+          "env": "DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS",
+          "description": "A peer whose card is older than this many seconds (on the provider clock) is offline.",
+          "full_description": "A peer whose card is older than this many seconds (on the provider clock) is offline. Must be >= 2 * heartbeat_seconds.",
+          "type": "integer",
+          "default": 30,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.prune_after_seconds",
+          "env": "DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS",
+          "description": "Cards older than this many seconds are deleted.",
+          "full_description": "Cards older than this many seconds are deleted. Must be >= offline_after_seconds.",
+          "type": "integer",
+          "default": 86400,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.timeout_seconds",
+          "env": "DK_FLEET__REGISTRY__TIMEOUT_SECONDS",
+          "description": "Time limit for one registry operation.",
+          "full_description": "Time limit for one registry operation.",
           "type": "number",
           "default": 5.0,
           "secret": false,
-          "group": "cache"
+          "group": "fleet"
         },
         {
-          "path": "cache.peer_sync.cycle_deadline_seconds",
-          "env": "DK_CACHE__PEER_SYNC__CYCLE_DEADLINE_SECONDS",
-          "description": "Hard wall-clock cap on one peer-sync cycle.",
-          "full_description": "Hard wall-clock cap on one peer-sync cycle. When None, defaults to interval_seconds * 0.9. Prevents a single slow peer from starving the periodic task.",
+          "path": "fleet.registry.filesystem.dir",
+          "env": "DK_FLEET__REGISTRY__FILESYSTEM__DIR",
+          "description": "Folder for the worker cards.",
+          "full_description": "Folder for the worker cards. Empty means <shared.dir>/fleet (or <storage.dir>/fleet when shared.dir is empty). A folder set here that cannot be created or written fails startup.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.static.peers",
+          "env": "DK_FLEET__REGISTRY__STATIC__PEERS",
+          "description": "Fixed list of peers.",
+          "full_description": "Fixed list of peers. Their liveness is unknown, so the workers list shows them as neither online nor offline.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.registry.plugin_options",
+          "env": "DK_FLEET__REGISTRY__PLUGIN_OPTIONS",
+          "description": "Options passed unchanged to a provider plugin, which validates them itself.",
+          "full_description": "Options passed unchanged to a provider plugin, which validates them itself.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.enabled",
+          "env": "DK_FLEET__CACHE_EXCHANGE__ENABLED",
+          "description": "Pull cluster and global cache rows from peers.",
+          "full_description": "Pull cluster and global cache rows from peers. Off, flush and cleanup still run but nothing propagates across workers.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.interval_seconds",
+          "env": "DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS",
+          "description": "Seconds between exchange cycles.",
+          "full_description": "Seconds between exchange cycles.",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.page_size",
+          "env": "DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE",
+          "description": "Maximum rows in one page pulled from a peer.",
+          "full_description": "Maximum rows in one page pulled from a peer.",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.timeout_seconds",
+          "env": "DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS",
+          "description": "Time limit for one request to a peer.",
+          "full_description": "Time limit for one request to a peer.",
+          "type": "number",
+          "default": 5.0,
+          "secret": false,
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.cycle_deadline_seconds",
+          "env": "DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS",
+          "description": "Hard time limit for one exchange cycle.",
+          "full_description": "Hard time limit for one exchange cycle. Empty means 0.9 x interval_seconds.",
           "type": "number",
           "default": null,
           "secret": false,
-          "group": "cache"
+          "group": "fleet"
+        },
+        {
+          "path": "fleet.cache_exchange.max_concurrent_peers",
+          "env": "DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS",
+          "description": "Peers pulled from in parallel.",
+          "full_description": "Peers pulled from in parallel.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "fleet"
         }
       ]
     }

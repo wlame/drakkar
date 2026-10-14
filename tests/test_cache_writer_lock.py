@@ -21,28 +21,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import aiosqlite
 import pytest
 
 from drakkar.cache import Cache, CacheEngine, CacheScope
-from drakkar.config import CacheConfig, UIConfig
-from tests.conftest import make_ui_config
+from drakkar.config import CacheConfig, CacheExchangeConfig
 
 # --- helpers ----------------------------------------------------------------
-
-
-def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
-    defaults: dict[str, Any] = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': False,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 async def _make_started_engine(tmp_path: Path, *, worker_id: str = 'w1') -> CacheEngine:
@@ -50,7 +36,8 @@ async def _make_started_engine(tmp_path: Path, *, worker_id: str = 'w1') -> Cach
     cache = Cache(origin_worker_id=worker_id)
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        ui_config=make_debug_config(tmp_path),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,

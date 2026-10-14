@@ -4,12 +4,21 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 The models are split per domain across this package — ``kafka``, ``sinks``,
-``sources``, ``runtime``, ``ui``, ``cache``, ``webapp`` — and assembled by ``root``.
+``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``fleet``, ``webapp``
+— and assembled by ``root``.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
-from drakkar.config.cache import CacheConfig, CachePeerSyncConfig
+from drakkar.config.cache import CacheConfig
+from drakkar.config.fleet import (
+    CacheExchangeConfig,
+    FilesystemRegistryConfig,
+    FleetConfig,
+    FleetRegistryConfig,
+    StaticPeerConfig,
+    StaticRegistryConfig,
+)
 from drakkar.config.kafka import KafkaConfig
 from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
 from drakkar.config.runtime import (
@@ -34,9 +43,15 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
+from drakkar.config.storage import (
+    DEFAULT_ARCHIVE_RETENTION_DAYS,
+    HistoryArchiveConfig,
+    HistoryConfig,
+    SharedConfig,
+    StorageConfig,
+)
 from drakkar.config.ui import (
     BUILTIN_LINK_BASES,
-    DEFAULT_ARCHIVE_RETENTION_DAYS,
     TIMELINE_COLOR_NAMES,
     TIMELINE_NUMERIC_FIELDS,
     TIMELINE_OPS,
@@ -54,6 +69,7 @@ from drakkar.config.ui import (
     UIRecorderConfig,
     UIReleaseConfig,
     UITimelineConfig,
+    UITraceConfig,
 )
 from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
@@ -65,7 +81,7 @@ __all__ = [
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
     'CacheConfig',
-    'CachePeerSyncConfig',
+    'CacheExchangeConfig',
     'CircuitBreakerConfig',
     'DLQConfig',
     'DocsAnchor',
@@ -73,6 +89,11 @@ __all__ = [
     'DrakkarConfig',
     'ExecutorConfig',
     'FileSinkConfig',
+    'FilesystemRegistryConfig',
+    'FleetConfig',
+    'FleetRegistryConfig',
+    'HistoryArchiveConfig',
+    'HistoryConfig',
     'HttpSinkConfig',
     'IOConfig',
     'KafkaConfig',
@@ -86,8 +107,12 @@ __all__ = [
     'PostgresSinkConfig',
     'RedisSinkConfig',
     'RuntimeHealthConfig',
+    'SharedConfig',
     'SinksConfig',
     'SourcesConfig',
+    'StaticPeerConfig',
+    'StaticRegistryConfig',
+    'StorageConfig',
     'ThroughputConfig',
     'TimelineColorRule',
     'TimelineEventType',
@@ -100,6 +125,7 @@ __all__ = [
     'UIRecorderConfig',
     'UIReleaseConfig',
     'UITimelineConfig',
+    'UITraceConfig',
     'WebAppConfig',
     'WebClientConfig',
     '_deep_merge',

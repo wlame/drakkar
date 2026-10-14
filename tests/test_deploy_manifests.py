@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from drakkar.config import DrakkarConfig, UIRecorderConfig
+from drakkar.config import DrakkarConfig, StorageConfig
 
 DEPLOY_DIR = Path(__file__).parent.parent / 'deploy'
 
@@ -58,29 +58,28 @@ def test_shipped_manifest_loads_through_real_config(path, values):
 
 
 @pytest.mark.parametrize('path,values', _worker_configs(), ids=lambda v: getattr(v, 'name', ''))
-def test_shipped_manifest_recorder_db_dir_matches_a_writable_volume(path, values):
-    """The effective ``ui.recorder.db_dir`` must resolve to a real writable
+def test_shipped_manifest_storage_dir_matches_a_writable_volume(path, values):
+    """The effective ``storage.dir`` must resolve to a real writable
     volumeMount declared by the paired Deployment, not to pydantic's
     built-in default.
 
     ``DrakkarConfig(**values)`` not raising is a much weaker guarantee than
-    it looks: every nested section keeps pydantic's default
-    ``extra='ignore'``, so regressing ``ui.recorder.db_dir`` back to a flat
-    ``ui.db_dir`` -- exactly the shape the ``debug.*`` -> ``ui.*`` move
-    repaired -- is accepted silently, and the recorder falls back to the
-    class default (``/tmp``) with no crash and no CI signal, landing
-    recorder/cache data on the wrong volume.
+    it looks: a misplaced key (``storage.path``, a ``storage:`` block
+    indented under another section) is accepted silently by the nested
+    models, and the worker falls back to the class default
+    (``/tmp/drakkar``) with no crash and no CI signal, landing recorder and
+    cache data on the wrong volume.
     """
     config = DrakkarConfig(**values)
-    db_dir = config.ui.recorder.db_dir
-    default_db_dir = UIRecorderConfig.model_fields['db_dir'].default
+    db_dir = config.storage.dir
+    default_db_dir = StorageConfig.model_fields['dir'].default
     assert db_dir != default_db_dir, (
-        f'{path}: ui.recorder.db_dir resolved to the unset pydantic default '
+        f'{path}: storage.dir resolved to the unset pydantic default '
         f'{default_db_dir!r} -- check for a flattened or misplaced key'
     )
     writable_mount_paths = _sibling_writable_volume_mount_paths(path)
     assert writable_mount_paths, f'{path}: no writable volumeMount found in a paired Deployment manifest'
     assert db_dir in writable_mount_paths, (
-        f'{path}: ui.recorder.db_dir={db_dir!r} is not backed by any writable volumeMount '
+        f'{path}: storage.dir={db_dir!r} is not backed by any writable volumeMount '
         f'declared in a paired Deployment manifest ({sorted(writable_mount_paths)})'
     )

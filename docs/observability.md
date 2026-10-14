@@ -164,8 +164,8 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
 | `drakkar_recorder_requeue_overflow_total` | Counter | -- | Events silently dropped from the recorder buffer tail when an `OperationalError`-triggered requeue exceeded `max_buffer` capacity (concurrent records filled the deque during the flush). Any non-zero value is data loss on the flush-retry path — alert alongside `flush_batches_dropped_total`. |
 | `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
-| `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in `db_dir`, refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `archive_retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
-| `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in `db_dir`. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
+| `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in `storage.dir`, refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `history.archive.retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
+| `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in `storage.dir`. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
@@ -186,7 +186,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer worker's cache DB by the sync loop, per peer. |
 | `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows the sync loop attempted to UPSERT into the local DB. Equals or less than `sync_entries_fetched_total` when LWW rejects some. |
 | `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer failures during the sync cycle (connection refused, corrupt DB, timeout). One increment per failed cycle; sync loop keeps running. |
-| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of peer-sync cycles that exceeded `cache.peer_sync.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline. A sustained non-zero rate signals a slow-peer or peer-count-vs-interval imbalance — either tune the deadline up, stagger peers, or reduce the number of peers pulled per cycle. |
+| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of peer-sync cycles that exceeded `fleet.cache_exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline. A sustained non-zero rate signals a slow-peer or peer-count-vs-interval imbalance — either tune the deadline up, stagger peers, or reduce the number of peers pulled per cycle. |
 | `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
 | `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
 | `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |
@@ -215,11 +215,11 @@ Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client req
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
 | `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout_seconds` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
-| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{ui.recorder.db_dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
+| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{storage.dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
 #### OOM / SIGKILL detection
 
-Drakkar writes a small **watchdog file** at `{ui.recorder.db_dir}/{worker_id}.watchdog`
+Drakkar writes a small **watchdog file** at `{storage.dir}/{worker_id}.watchdog`
 during startup and removes it as the last step of a clean shutdown. The
 file's presence and contents at the next startup let the framework
 distinguish three termination modes:
@@ -242,13 +242,13 @@ so the OOM counter `drakkar_suspected_oom_kills_total` is reserved for
 the genuinely-empty-body signature: process killed before reaching
 `mark_clean`.
 
-The file lives in `ui.recorder.db_dir` (default `/tmp`), the same directory
-used by the recorder and cache engine. If `ui.recorder.db_dir` is empty —
+The file lives in `storage.dir` (default `/tmp/drakkar`), the same folder
+used by the recorder and cache engine. If `storage.dir` is empty —
 fully disk-less deployment — the watchdog is **disabled** for that run
 (no file written, no metric increment), since the alternative of
 falling back to the worker's CWD risks both breaking the "no on-disk
 state" promise and writing into a read-only container volume. The
-disable is logged at startup as `watchdog_disabled_no_db_dir` so
+disable is logged at startup as `watchdog_disabled_no_storage_dir` so
 operators can see the OOM signal is off.
 
 If the watchdog write itself fails (read-only mount, permission denied,
@@ -578,20 +578,18 @@ The flight recorder is a SQLite-based event log that captures the full processin
 ### Configuration
 
 ```yaml
+storage:
+  dir: /tmp/drakkar                   # This worker's own files; '' disables disk persistence
 ui:
   recorder:
-    db_dir: /tmp                      # Directory for SQLite files; '' disables disk persistence
     store_events: true                # Write processing events to the events table
-    store_config: true                # Write worker config (enables autodiscovery)
+    store_config: true                # Write worker config into each file
     store_state: true                 # Periodic state snapshots
     state_sync_interval_seconds: 10   # Snapshot frequency for worker_state
     flush_interval_seconds: 5         # Buffer flush interval
     max_buffer: 50000                 # In-memory event buffer size
     max_flush_retries: 3              # Failed-batch retries before the batch is dropped
     rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
-    archive_enabled: true             # Merge rotated-out files into windowed .db.gz archives (see Archiving below)
-    archive_window_hours: 24          # One archive per cluster per window; must be >= rotation_interval_hours
-    archive_retention_days: 30        # delete archives older than this; 0 = keep forever, must be >= 2x the window
     store_output: true                # Include stdout/stderr in event records
     output_min_duration_ms: 500       # Tasks faster than this store no args/stdout/stderr
     event_min_duration_ms: 0          # Task events faster than this are not persisted at all
@@ -675,7 +673,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
     migration runner that exists only to add three optional columns.
 
     **On upgrade**, operators delete pre-existing per-worker recorder
-    DBs in `ui.recorder.db_dir` before restarting workers. New rotation-cycle
+    DBs in `storage.dir` before restarting workers. New rotation-cycle
     DBs include the new columns automatically.
 
     The framework detects the schema mismatch at startup: the recorder
@@ -683,7 +681,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
     and raises `RecorderSchemaError` when `origin` / `client_name` /
     `request_id` are missing. The exception propagates through
     `AppLifecycle._async_run` and aborts startup with the actionable
-    next step in the message: delete the offending DB(s) under `db_dir`
+    next step in the message: delete the offending DB(s) under `storage.dir`
     and restart. Without this fail-fast check, pre-webapp DBs would
     surface a confusing `OperationalError: no such column` mid-request
     on the first HTTP event the recorder tried to write.
@@ -692,7 +690,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
 
 Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
 
-This table is what enables the worker autodiscovery feature -- other workers scan for it in shared `db_dir`.
+This table names the worker and cluster that wrote each file, for history, merges and archives.
 
 !!! warning "Secrets are redacted before they reach disk"
     The recorder SQLite file is downloadable via the operator UI. To avoid
@@ -742,7 +740,7 @@ Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-
 Database files follow the naming pattern:
 
 ```
-{db_dir}/{worker_name}-{timestamp}.db
+{storage.dir}/{worker_name}-{timestamp}.db
 ```
 
 For example: `/tmp/worker-1-2026-04-06__14_55_00.db`
@@ -768,22 +766,23 @@ successfully merged — see [Local Databases → Archiving](local-databases.md#a
 for the full byte-level spec. The short
 version:
 
-- **Defaults** (`rotation_interval_hours: 1`, `archive_enabled: true`,
-  `archive_window_hours: 24`, `archive_retention_days: 30`): raw files
-  rotate hourly; a UTC day's window becomes due exactly 24h after it
+- **Defaults** (`ui.recorder.rotation_interval_hours: 1`, and
+  `history.archive` `enabled: true`, `window_hours: 24`,
+  `due_after_hours: 48`, `retention_days: 30`): raw files
+  rotate hourly; a UTC day's window becomes due exactly 48h after it
   closes and is archived on the next hourly tick after that, merging its
-  raw files into one `.db.gz` per cluster and deleting them. That 24h
-  due-delay is the safety margin, not a bug — but it means a single raw
+  raw files into one `.db.gz` per cluster and deleting them. That 48h
+  due delay is the safety margin, not a bug — but it means a single raw
   file's lifespan, counted from when it was *created* rather than from
-  window close, can reach up to ~48h (up to 24h as part of its own
-  window, plus the ~24h due-delay after that window closes). Archives
+  window close, can reach up to ~72h (up to 24h as part of its own
+  window, plus the ~48h due delay after that window closes). Archives
   themselves are deleted once their window ended more than
-  `archive_retention_days` ago; `0` keeps them forever and warns at
+  `retention_days` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
 - **Windows key on file start time, not event time.** A raw file belongs
   to the window holding its own start timestamp; an archive can carry a
   handful of events timestamped slightly past its own window end.
-- **One archiver per cluster.** Workers sharing a `db_dir` elect a single
+- **One archiver per cluster.** Workers sharing a folder elect a single
   archiver per cluster per tick via a `flock`-based lock file; the losers
   skip the tick and lose nothing.
 - **Sources die last.** A raw file is deleted only once its archive is
@@ -791,7 +790,7 @@ version:
   `<name>.unreadable` instead of being deleted, and a pre-existing
   archive at the final name is folded into the new one rather than
   overwritten.
-- **Opting out** (`archive_enabled: false`) disables the pass entirely —
+- **Opting out** (`history.archive.enabled: false`) disables the pass entirely —
   nothing then deletes raw recorder files automatically, and a startup
   log line (`recorder_archiving_disabled`) says so.
 - **Renamed key:** `rotation_interval_minutes` is now
@@ -802,13 +801,17 @@ version:
   keys](local-databases.md#renamed-and-removed-keys).
 
 ```yaml
+storage:
+  dir: /var/lib/drakkar
 ui:
   recorder:
-    db_dir: /shared/drakkar-recorder
     rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
-    archive_enabled: true            # merge rotated-out files into windowed .db.gz archives
-    archive_window_hours: 24         # one archive per cluster per UTC day; must be >= rotation_interval_hours
-    archive_retention_days: 30       # delete archives older than this; 0 = keep forever, must be >= 2x the window
+history:
+  archive:
+    enabled: true                    # merge recorder files into windowed .db.gz archives
+    window_hours: 24                 # one archive per cluster per UTC day; must be >= rotation_interval_hours
+    due_after_hours: 48              # archive a window this long after it ends
+    retention_days: 30               # delete archives older than this; 0 = keep forever
 ```
 
 Archives are downloaded from the same place as raw databases — **Debug →
@@ -825,7 +828,7 @@ Two operational gotchas worth knowing:
 - **Retention only runs when a new window becomes due.** An idle or
   retired cluster that stops producing raw files never triggers another
   archive pass, so its existing archives are kept forever regardless of
-  `archive_retention_days`, until some other window in that cluster
+  `history.archive.retention_days`, until some other window in that cluster
   becomes due again.
 - **A corrupt file at an archive's own final name stalls that window.**
   Every pass that considers the window fails to decompress it, logs
@@ -842,7 +845,7 @@ default 50,000). A background task flushes the buffer to disk every
 
 - Avoids per-event disk I/O (thousands of events/sec would bottleneck SQLite)
 - Keeps the main event loop fast (recording an event is a deque append, ~1us)
-- Provides a short window of recent events even when `db_dir` is empty (in-memory only mode)
+- Provides a short window of recent events even when `storage.dir` is empty (in-memory only mode)
 
 If the buffer fills before the next flush (e.g., during a burst),
 oldest events are evicted (ring buffer behavior). Drops are no longer
@@ -891,7 +894,7 @@ twice the default `max_buffer`. Raise it if your workers must survive a
 losing a chunk.
 
 Buffering happens only when the worker will actually write the events. In
-memory-only mode (`db_dir` empty) and with `store_events: false` there is no
+memory-only mode (`storage.dir` empty) and with `store_events: false` there is no
 flush loop, so events are streamed to the live WebSocket view and not
 buffered at all: the buffer gauge stays at 0 and the drop counter never
 moves. A non-zero drop count therefore always means real flush pressure.
@@ -970,20 +973,20 @@ Reduces storage for fast tasks where the output is uninteresting.
 
 ## Worker Autodiscovery
 
-A shared `db_dir` between workers is **not required** for Drakkar to
+A shared `storage.dir` between workers is **not required** for Drakkar to
 function. Each worker operates independently -- its own Kafka consumer,
 executor pool, sinks, and flight recorder work fine with a local
 directory.
 
 You can also disable the flight recorder database entirely by setting
-`db_dir: ""` (empty string). The web UI and WebSocket live
+`storage.dir: ""` (empty string). The web UI and WebSocket live
 streaming still work (events are held in memory only), but these
 features are disabled: event history (`/history`), message trace,
 label search, database download/merge, periodic task history, and
 worker autodiscovery. The live pipeline view (`/live`) and dashboard
 counters continue working since they read from in-memory state.
 
-When workers share the same `db_dir` (e.g., a shared NFS mount,
+When workers share the same `storage.dir` (e.g., a shared NFS mount,
 Kubernetes PVC, or Docker volume), several additional UI features
 become available:
 
@@ -996,20 +999,20 @@ become available:
 - **Cluster-wide database browser** -- see all workers' DB files in
   one view, sorted and filtered
 
-Without a shared `db_dir`, each worker's UI only sees its own
+Without a shared `storage.dir`, each worker's UI only sees its own
 data. All other functionality (processing, sinks, metrics, logging)
 works identically.
 
 ### How It Works
 
-1. Each worker creates a timestamped SQLite file in `db_dir`
+1. Each worker creates a timestamped SQLite file in `storage.dir`
    (e.g., `worker-1-2026-04-08__14_30_00.db`) and maintains a
    `{worker_name}-live.db` symlink pointing to the current file.
 2. Workers with `store_config: true` (default) write their
    configuration -- worker name, IP address, UI port, cluster
    name, Kafka settings -- to the `worker_config` table at startup
    and after each DB rotation.
-3. The UI server scans `db_dir` for `*-live.db` symlinks belonging
+3. The UI server scans `storage.dir` for `*-live.db` symlinks belonging
    to other workers.
 4. For each live symlink, the UI reads `worker_config` to get the
    worker's name, address, and cluster membership.
@@ -1031,10 +1034,10 @@ discovered worker carries two liveness fields in `/api/v1/workers`:
   `store_state: false` fall back to their newest event timestamp;
   `null` when neither source exists.
 - `online` -- `true` when the heartbeat is no older than
-  `ui.workers_offline_after_seconds` (default 30). The worker serving
+  `fleet.registry.offline_after_seconds` (default 30). The worker serving
   the request always reports itself online.
 
-Set `workers_offline_after_seconds` to at least 2--3x the largest
+Set `fleet.registry.offline_after_seconds` to at least 2--3x the largest
 `state_sync_interval_seconds` in the fleet so a healthy worker never
 flaps offline between heartbeats. An offline worker stays listed --
 its recorded history is still reachable -- it is just marked as gone.
@@ -1052,10 +1055,11 @@ to its UI (using `ui.public_url` if configured, otherwise
 The minimal config for autodiscovery:
 
 ```yaml
-# all workers must share the same db_dir path
+# all workers must share the same storage folder path
+storage:
+  dir: "/shared"           # mount the same volume on all workers
 ui:
   recorder:
-    db_dir: "/shared"      # mount the same volume on all workers
     store_config: true     # default, writes worker_config table
 # optional: set cluster_name to group workers
 cluster_name: "my-cluster"
@@ -1110,7 +1114,7 @@ Both modes search in the same order:
 
 1. The current worker's live database.
 2. Other workers' live databases (same cluster).
-3. Rotated (historical) database files in `db_dir`, newest first.
+3. Rotated (historical) database files in `storage.dir`, newest first.
 
 Each returned event carries a `worker_name` field identifying which
 worker processed it. Labels are stored as JSON in the `labels` column

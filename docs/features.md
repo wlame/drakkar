@@ -20,17 +20,17 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes an unreclaimed `merged-<ts>-<token>.db` per call; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
-| Recorder persistence | `ui.recorder.db_dir` | `/tmp` | Where event history and worker metadata live; empty = memory-only |
-| Recorder archiving | `ui.recorder.archive_enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
+| Own storage | `storage.dir` | `/tmp/drakkar` | Where this worker's event history, cache file and crash marker live; empty = memory-only |
+| Recorder archiving | `history.archive.enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
-| Cross-worker fleet view | shared `ui.recorder.db_dir` | — | Worker autodiscovery, workers list, cross-tracing |
+| Cross-worker fleet view | shared `storage.dir` | — | Worker autodiscovery, workers list, cross-tracing |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
 | Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
 | Task cost & throughput | `throughput.cost_label` | **off** (empty) | Naming a numeric task label enables per-task speed and windowed throughput ([Throughput](throughput.md)) |
-| Cache peer sync | `cache.peer_sync.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
+| Cache exchange | `fleet.cache_exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
 | Kafka input source | `sources.kafka.enabled` | **off** | Consumer group, poll loop, `arrange()`, offset commits |
 | HTTP input source | `sources.http.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
 | Aligned startup | `sources.kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
@@ -60,9 +60,10 @@ the failure mode so you can decide what your deployment needs.
 2. **The flight recorder runs only when `ui.enabled`.** UI off = no
    event history, no config snapshot, no state timeline — and none of
    the features below that read them.
-3. **Recorder persistence needs a writable `ui.recorder.db_dir`.**
-   Empty `db_dir` silently switches to a short in-memory window (lost
-   on restart) and disables the OOM watchdog (`{db_dir}/{worker}.watchdog`).
+3. **Recorder persistence needs a writable `storage.dir`.** The worker
+   creates it (mode `0700`) when it is missing. Empty `storage.dir`
+   switches to a short in-memory window (lost on restart) and disables
+   the OOM watchdog (`{storage.dir}/{worker}.watchdog`).
 4. **The SPA bundle needs the UI server.** `ui.release.enabled` fetches
    and serves the drakkar-ui release; a fetch failure is non-fatal, and
    release tags are immutable, so a bundle downloaded once serves from the
@@ -72,7 +73,7 @@ the failure mode so you can decide what your deployment needs.
    bundle. For an air-gapped deployment, stage one with
    `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
    internal mirror.
-5. **Fleet features need a SHARED `db_dir` + `store_config`.** Worker
+5. **Fleet features need a SHARED `storage.dir` + `store_config`.** Worker
    autodiscovery, the workers list, cross-worker links, and cross-worker
    tracing all work by scanning one shared directory for other workers'
    DB files (see [Local Databases](local-databases.md)). Every worker
@@ -81,15 +82,15 @@ the failure mode so you can decide what your deployment needs.
    row is invisible to peers. Unshared directories are silent: each
    worker simply sees only itself. Set `ui.public_url` per worker so
    cross-links use a reachable address instead of the bind IP.
-6. **The cache engine needs a db_dir too.** `cache.db_dir` falls back
-   to `ui.recorder.db_dir`; if both are empty the cache silently runs
-   memory-only (WARN `cache_engine_disabled_no_db_dir`) and peer sync
-   turns itself off.
-7. **Cache peer sync needs `store_config`.** Peers resolve each other's
-   cluster from the recorder's `worker_config` row;
-   `ui.recorder.store_config: false` silently downgrades peer sync
-   (WARN `cache_peer_sync_disabled_no_store_config`). Real cross-worker
-   sync additionally needs the shared directory from rule 5.
+6. **The cache engine needs `storage.dir` too.** The cache file lives
+   there; with `storage.dir` empty the cache runs memory-only (WARN
+   `cache_engine_disabled_no_storage_dir`) and the cache exchange turns
+   itself off.
+7. **Cache exchange needs peers' `store_config`.** A worker resolves
+   each peer's cluster from that peer's `worker_config` row; a peer with
+   `ui.recorder.store_config: false` counts as an unknown cluster, so only
+   its `global` rows are pulled. Real cross-worker exchange additionally
+   needs the shared directory from rule 5.
 8. **The webapp needs handler support — checked at construction.** A
    worker with `sources.http.enabled` and a handler that lacks the HTTP
    hooks (`arrange_http_request` + `on_http_request_complete` plus the
@@ -156,8 +157,8 @@ one-off local runs; **not** for Kubernetes (rule 1).
 ui:
   enabled: true            # default
   auth_token: "${UI_TOKEN}"
-  recorder:
-    db_dir: /var/lib/drakkar
+storage:
+  dir: /var/lib/drakkar
 ```
 
 Adds the operator UI, `/healthz` + `/readyz`, persistent event history,
@@ -180,9 +181,8 @@ deep-links.
 ### Tier 3 — fleet view (multi-worker)
 
 ```yaml
-ui:
-  recorder:
-    db_dir: /shared/drakkar   # same volume, same path, EVERY worker
+storage:
+  dir: /shared/drakkar      # same volume, same path, EVERY worker
 ```
 
 Workers discover each other, the UI's worker switcher fills in, and
@@ -194,7 +194,7 @@ on-disk format can share the directory ([spec](local-databases.md)).
 ```yaml
 cache:
   enabled: true
-  # db_dir inherits ui.recorder.db_dir — already shared from Tier 3
+  # the cache file lives in storage.dir — already shared from Tier 3
 ```
 
 `self.cache` / `h.Cache()` becomes persistent and (thanks to the Tier 3
@@ -221,9 +221,9 @@ config and the worker serves HTTP only.
 
 - Kubernetes? → `ui.enabled: true` (rule 1), probes pointed at the UI
   port.
-- More than one worker? → shared `db_dir`, same mount path everywhere
+- More than one worker? → shared `storage.dir`, same mount path everywhere
   (rule 5), `ui.public_url` set per worker.
-- Cache not syncing? → check `store_config` (rule 7), the shared
+- Cache not syncing? → check the peers' `store_config` (rule 7), the shared
   directory (rule 6), and that both workers are in the same cluster for
   `cluster`-scoped keys.
 - Webapp 500s at the first request? → it can't: the worker rejects a

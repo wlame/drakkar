@@ -38,7 +38,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import Cache, CacheEngine
-from drakkar.config import CacheConfig, DrakkarConfig
+from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
@@ -120,7 +120,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    return make_ui_config(enabled=True, port=8080)
 
 
 # ---------------------------------------------------------------------------
@@ -247,15 +247,13 @@ async def _start_live_engine(tmp_path) -> CacheEngine:
     """
     cache_cfg = CacheConfig(
         enabled=True,
-        db_dir=str(tmp_path),
         flush_interval_seconds=60.0,
         cleanup_interval_seconds=60.0,
-        peer_sync={'enabled': False},
     )
-    debug_cfg = make_ui_config(enabled=True, db_dir=str(tmp_path), store_config=False)
     engine = CacheEngine(
         config=cache_cfg,
-        ui_config=debug_cfg,
+        exchange=CacheExchangeConfig(enabled=False),
+        storage_dir=str(tmp_path),
         worker_id='test-worker',
         cluster_name='',
         recorder=None,

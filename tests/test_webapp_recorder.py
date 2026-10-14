@@ -59,7 +59,6 @@ def _make_debug_config(tmp_path, **overrides) -> UIConfig:
     """Build a minimal ``UIConfig`` with an explicit ``db_dir``."""
     defaults = {
         'enabled': True,
-        'db_dir': str(tmp_path),
         'store_output': False,
         # Tight flush so tests don't have to advance time.
         'flush_interval_seconds': 60,
@@ -130,7 +129,7 @@ async def _read_events_columns(rec: EventRecorder) -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 async def test_fresh_recorder_db_has_required_webapp_columns(tmp_path):
     """Schema CREATE statement adds origin/client_name/request_id."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         assert rec._db is not None
@@ -150,7 +149,7 @@ async def test_fresh_recorder_db_has_required_webapp_columns(tmp_path):
 @pytest.mark.asyncio
 async def test_http_origin_task_rows_carry_client_and_request_id(tmp_path):
     """Tasks stamped origin='http' produce rows with all three columns set."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         task = _make_http_task(task_id='http-task-A', request_id='req_t_42')
@@ -178,7 +177,7 @@ async def test_http_origin_task_rows_carry_client_and_request_id(tmp_path):
 @pytest.mark.asyncio
 async def test_kafka_origin_task_rows_default_to_origin_kafka(tmp_path):
     """Existing Kafka-path code still produces origin='kafka' rows."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         task = _make_kafka_task()
@@ -216,7 +215,7 @@ async def test_kafka_origin_task_rows_default_to_origin_kafka(tmp_path):
 @pytest.mark.asyncio
 async def test_webapp_request_received_row_has_origin_and_request_id(tmp_path):
     """``record_webapp_request_received`` writes one row with all webapp cols."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = _make_request_ctx(client='tenant-A', request_id='req_recv_1')
@@ -238,7 +237,7 @@ async def test_webapp_request_received_row_has_origin_and_request_id(tmp_path):
 
 @pytest.mark.asyncio
 async def test_webapp_request_completed_row_carries_status_and_duration(tmp_path):
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = _make_request_ctx(client='tenant-A', request_id='req_done_1')
@@ -260,7 +259,7 @@ async def test_webapp_request_completed_row_carries_status_and_duration(tmp_path
 
 @pytest.mark.asyncio
 async def test_webapp_request_timeout_row_writes_504_outcome(tmp_path):
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = _make_request_ctx(client='anonymous', request_id='req_to_1')
@@ -279,7 +278,7 @@ async def test_webapp_request_timeout_row_writes_504_outcome(tmp_path):
 
 @pytest.mark.asyncio
 async def test_webapp_request_rate_limited_row_records_client_and_limit(tmp_path):
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         rec.record_webapp_request_rate_limited(client='anonymous', rpm_limit=4, requests_in_window=4)
@@ -299,7 +298,7 @@ async def test_webapp_request_rate_limited_row_records_client_and_limit(tmp_path
 
 @pytest.mark.asyncio
 async def test_webapp_request_auth_failed_row_omits_client_name(tmp_path):
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         rec.record_webapp_request_auth_failed(token_prefix='abcd...')
@@ -318,7 +317,7 @@ async def test_webapp_request_auth_failed_row_omits_client_name(tmp_path):
 
 @pytest.mark.asyncio
 async def test_webapp_request_dropped_after_timeout_row_carries_request_id(tmp_path):
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = _make_request_ctx(client='tenant-A', request_id='req_drop_1')
@@ -349,7 +348,7 @@ def _build_drakkar_app_with_recorder(rec: EventRecorder) -> Any:
 @pytest.mark.asyncio
 async def test_auth_dependency_writes_recorder_row_on_failure(tmp_path):
     """``make_authenticate`` records ``webapp_request_auth_failed`` rows."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         config = WebAppConfig(
@@ -384,7 +383,7 @@ async def test_auth_dependency_writes_recorder_row_on_failure(tmp_path):
 @pytest.mark.asyncio
 async def test_rate_limit_dependency_writes_recorder_row_on_429(tmp_path):
     """``make_rate_limit`` records ``webapp_request_rate_limited`` rows."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         config = WebAppConfig(
@@ -457,7 +456,7 @@ async def test_pre_webapp_release_db_raises_recorder_schema_error(tmp_path):
 
     # Freeze the path the recorder will use so it picks up the legacy DB
     # rather than rolling a fresh timestamp.
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     # Patch ``make_db_path`` so the recorder reuses the legacy file we
     # just wrote. ``start()`` calls ``make_db_path(db_dir, worker_name)``
     # to allocate a path; pointing it at our pre-built file forces the
@@ -504,7 +503,7 @@ async def test_pre_webapp_release_db_propagates_uncaught(tmp_path):
 @pytest.mark.asyncio
 async def test_webapp_request_received_row_with_non_pydantic_body(tmp_path):
     """Non-Pydantic / non-bytes bodies skip body_bytes but still record."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = WebRequestContext(
@@ -528,7 +527,7 @@ async def test_webapp_request_received_row_with_non_pydantic_body(tmp_path):
 @pytest.mark.asyncio
 async def test_webapp_request_received_row_with_bytes_body(tmp_path):
     """Bytes bodies record their byte length verbatim."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         ctx = WebRequestContext(
@@ -555,7 +554,7 @@ async def test_webapp_request_received_row_with_bytes_body(tmp_path):
 @pytest.mark.asyncio
 async def test_fresh_db_carries_origin_and_request_id_indexes(tmp_path):
     """Both new indexes (origin, request_id) are created with the schema."""
-    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    rec = EventRecorder(_make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     try:
         assert rec._db is not None

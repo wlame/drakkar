@@ -17,7 +17,6 @@ WORKER = 'worker-1'
 def _make_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
-        'db_dir': str(tmp_path),
         'rotation_interval_hours': 1,
         'flush_interval_seconds': 60,
     }
@@ -46,7 +45,7 @@ def test_filename_no_drakkar_or_debug_prefix():
     assert 'debug' not in name
 
 
-def test_filename_uses_db_dir():
+def test_filename_uses_storage_dir():
     path = make_db_path('/custom/dir', 'w1')
     assert path.startswith('/custom/dir/')
 
@@ -69,7 +68,7 @@ def test_different_workers_produce_different_filenames():
 
 async def test_start_creates_live_symlink(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     link = Path(live_link_path(str(tmp_path), WORKER))
@@ -81,7 +80,7 @@ async def test_start_creates_live_symlink(tmp_path):
 
 async def test_live_symlink_name_is_worker_dash_live(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name='my-cool-worker')
+    rec = EventRecorder(config, worker_name='my-cool-worker', storage_dir=str(tmp_path))
     await rec.start()
 
     link = tmp_path / 'my-cool-worker-live.db'
@@ -92,7 +91,7 @@ async def test_live_symlink_name_is_worker_dash_live(tmp_path):
 
 async def test_live_symlink_resolves_to_existing_db(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     link = Path(live_link_path(str(tmp_path), WORKER))
@@ -105,7 +104,7 @@ async def test_live_symlink_resolves_to_existing_db(tmp_path):
 
 async def test_stop_removes_live_symlink(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     link = Path(live_link_path(str(tmp_path), WORKER))
@@ -117,7 +116,7 @@ async def test_stop_removes_live_symlink(tmp_path):
 
 async def test_stop_preserves_db_file(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     db_file = rec.db_path
@@ -129,7 +128,7 @@ async def test_stop_preserves_db_file(tmp_path):
 
 async def test_stop_flushes_before_removing_symlink(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     from drakkar.models import SourceMessage
@@ -168,7 +167,7 @@ async def test_rotation_updates_live_symlink(tmp_path, monkeypatch):
     )
 
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
     await rec.start()
 
     link = Path(live_link_path(str(tmp_path), WORKER))
@@ -209,9 +208,9 @@ def test_list_db_files_excludes_other_workers(tmp_path):
 # --- Memory-only mode ---
 
 
-async def test_no_symlink_when_db_dir_empty():
-    config = make_ui_config(enabled=True, db_dir='')
-    rec = EventRecorder(config, worker_name=WORKER)
+async def test_no_symlink_when_storage_dir_empty():
+    config = make_ui_config(enabled=True)
+    rec = EventRecorder(config, worker_name=WORKER, storage_dir='')
     await rec.start()
     assert rec.db_path == ''
     await rec.stop()

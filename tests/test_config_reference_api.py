@@ -108,6 +108,10 @@ class TestShape:
             'logging',
             'ui',
             'cache',
+            'storage',
+            'shared',
+            'history',
+            'fleet',
         ]
 
     async def test_group_has_title_and_doc_anchor(self):

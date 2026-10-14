@@ -49,18 +49,13 @@ from drakkar.merge import merge_databases
 from drakkar.metrics import recorder_archive_bytes, recorder_archive_files
 
 if TYPE_CHECKING:
-    from drakkar.config import UIRecorderConfig
+    from drakkar.config import HistoryArchiveConfig
 
 logger = structlog.get_logger()
 
 # Cluster used for files whose cluster name is empty, missing or
 # unreadable. Also the archive-name prefix those files end up under.
 DEFAULT_CLUSTER = 'default'
-
-# Age past which a leftover file from a dead pass — an orphaned lock file,
-# an abandoned temporary — is treated as garbage and removed. Two hours is
-# far longer than any archive run and far shorter than a shift.
-LOCK_STALE_SECONDS = 7200
 
 ARCHIVE_SUFFIX = '.db.gz'
 
@@ -232,6 +227,7 @@ def list_archives(db_dir: str) -> list[ArchiveInfo]:
 def assign_windows(
     paths: list[str],
     window_seconds: float,
+    due_after_seconds: float,
     now: float,
     rotation_seconds: float,
 ) -> list[ArchiveWindow]:
@@ -239,8 +235,9 @@ def assign_windows(
 
     A window ``[start, end)`` is DUE when both hold:
 
-    * ``now >= end + window_seconds`` — a full extra window has passed, so
-      no worker can still be opening files that belong to it.
+    * ``now >= end + due_after_seconds`` — the due delay
+      (``history.archive.due_after_hours``) has passed, so no worker can
+      still be opening files that belong to it.
     * every assigned file was last written before ``now - rotation_seconds``
       — belt-and-braces against a stalled writer that still holds an old
       file open. A file we cannot stat vetoes its window for this tick.
@@ -260,7 +257,7 @@ def assign_windows(
     mtime_cutoff = now - rotation_seconds
     for window_start, candidates in sorted(grouped.items()):
         window_end = window_start + window_seconds
-        if now < window_end + window_seconds:
+        if now < window_end + due_after_seconds:
             continue
         if not all(_is_settled(candidate.path, mtime_cutoff) for candidate in candidates):
             continue
@@ -299,7 +296,8 @@ def run_archive_pass(
     db_dir: str,
     worker_name: str,
     cluster: str,
-    cfg: UIRecorderConfig,
+    archive: HistoryArchiveConfig,
+    rotation_interval_hours: int,
     exclude_path: str = '',
 ) -> None:
     """Archive every due window of this worker's cluster, then expire.
@@ -315,8 +313,9 @@ def run_archive_pass(
     no lock is taken, and expiry does not run.
     """
     own_cluster = sanitize_cluster(cluster)
-    window_seconds = cfg.archive_window_hours * 3600
-    rotation_seconds = cfg.rotation_interval_hours * 3600
+    window_seconds = archive.window_hours * 3600
+    due_after_seconds = archive.due_after_hours * 3600
+    rotation_seconds = rotation_interval_hours * 3600
     now = time.time()
 
     # Before the due-window check below can return early: the footprint is
@@ -324,7 +323,7 @@ def run_archive_pass(
     _observe_archive_footprint(db_dir, own_cluster)
 
     candidates = [path for path in _list_raw_dbs(db_dir, exclude_path) if _read_cluster(path) == own_cluster]
-    windows = assign_windows(candidates, window_seconds, now, rotation_seconds)
+    windows = assign_windows(candidates, window_seconds, due_after_seconds, now, rotation_seconds)
     if not windows:
         return
 
@@ -335,11 +334,11 @@ def run_archive_pass(
     try:
         # Elected: no other pass of this cluster is running, so any
         # leftover temporary here belongs to a dead one.
-        _sweep_stale_temps(db_dir, own_cluster, now)
+        _sweep_stale_temps(db_dir, own_cluster, now, archive.lock_stale_seconds)
         for window in windows:
             _archive_window(db_dir, own_cluster, window)
-        if cfg.archive_retention_days > 0:
-            _expire_archives(db_dir, own_cluster, now, cfg.archive_retention_days)
+        if archive.retention_days > 0:
+            _expire_archives(db_dir, own_cluster, now, archive.retention_days)
     finally:
         # Released on both paths: a failed window logged itself and the
         # next tick retries, and holding the lock after a crash-free
@@ -405,14 +404,15 @@ def _list_raw_dbs(db_dir: str, exclude_path: str) -> list[str]:
     return paths
 
 
-def _sweep_stale_temps(db_dir: str, cluster: str, now: float) -> None:
+def _sweep_stale_temps(db_dir: str, cluster: str, now: float, stale_seconds: int) -> None:
     """Delete this cluster's abandoned merge/compress temporaries.
 
     Only reachable while holding the lock, so nothing being written right
-    now can be swept — and the age floor keeps a long merge started by a
-    worker that is somehow still alive out of reach as well.
+    now can be swept — and the age floor (``history.archive.lock_stale_seconds``)
+    keeps a long merge started by a worker that is somehow still alive out
+    of reach as well.
     """
-    cutoff = now - LOCK_STALE_SECONDS
+    cutoff = now - stale_seconds
     for path in Path(db_dir).glob(f'.{cluster}-*'):
         if not path.name.endswith(_TEMP_SUFFIXES):
             continue
@@ -715,10 +715,10 @@ def _sync_dir(db_dir: str) -> None:
         os.close(fd)
 
 
-def warn_if_archives_unbounded(cfg: UIRecorderConfig) -> None:
+def warn_if_archives_unbounded(archive: HistoryArchiveConfig, storage_dir: str) -> None:
     """Warn at startup when archives are configured to accumulate forever.
 
-    ``archive_retention_days: 0`` disables expiry outright, and nothing
+    ``history.archive.retention_days: 0`` disables expiry outright, and nothing
     else in the recorder reclaims an archive. It is a legitimate choice —
     some deployments archive onto a volume they prune themselves — but it
     is the one recorder setting whose cost stays invisible until a disk
@@ -726,20 +726,21 @@ def warn_if_archives_unbounded(cfg: UIRecorderConfig) -> None:
     discovered. Informational only: the worker starts normally, exactly
     like the unauthenticated-UI warning.
     """
-    if not cfg.archive_enabled or cfg.archive_retention_days > 0:
+    if not archive.enabled or archive.retention_days > 0:
         return
 
     logger.warning(
         'recorder_archives_unbounded',
         category='recorder',
-        db_dir=cfg.db_dir,
-        archive_window_hours=cfg.archive_window_hours,
+        storage_dir=storage_dir,
+        window_hours=archive.window_hours,
         message=(
-            f'ui.recorder.archive_retention_days is 0, so compressed recorder archives in '
-            f'{cfg.db_dir} are kept forever and nothing reclaims that disk. Watch '
-            f'drakkar_recorder_archive_bytes, prune the directory yourself, or set '
-            f'ui.recorder.archive_retention_days (or DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS) '
-            f'to a number of days covering at least two {cfg.archive_window_hours}h windows.'
+            f'history.archive.retention_days is 0, so compressed recorder archives in '
+            f'{storage_dir} are kept forever and nothing reclaims that disk. Watch '
+            f'drakkar_recorder_archive_bytes, prune the folder yourself, or set '
+            f'history.archive.retention_days (or DK_HISTORY__ARCHIVE__RETENTION_DAYS) '
+            f'to a number of days covering the {archive.due_after_hours}h due delay plus one '
+            f'{archive.window_hours}h window.'
         ),
     )
 

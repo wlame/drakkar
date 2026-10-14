@@ -57,27 +57,14 @@ from drakkar.cache import (
     CacheEngine,
     CacheScope,
 )
-from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
-from tests.conftest import make_ui_config
+from drakkar.config import CacheConfig, CacheExchangeConfig
+from tests.conftest import split_cache_overrides
 
 # --- helpers ---------------------------------------------------------------
 #
 # Mirror the helpers in the other sync test files so this file stays
 # self-contained — the same construct appears there too, but
 # duplicating keeps test failures localized to one file.
-
-
-def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
-    """UIConfig pointing at tmp_path; events off, config on (needed for peer sync)."""
-    defaults: dict[str, Any] = {
-        'enabled': True,
-        'db_dir': str(tmp_path),
-        'store_events': False,
-        'store_config': True,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
@@ -92,13 +79,14 @@ async def _make_engine(
     worker_id: str = 'me',
     cluster_name: str = 'prod',
     cache_overrides: dict[str, Any] | None = None,
-    debug_overrides: dict[str, Any] | None = None,
 ) -> CacheEngine:
     """Spin up a started CacheEngine with peer_sync on by default."""
     cache = Cache(origin_worker_id=worker_id)
+    cache_fields, exchange = split_cache_overrides(cache_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**(cache_overrides or {})),
-        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        config=make_cache_config(**cache_fields),
+        exchange=exchange,
+        storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,
@@ -223,7 +211,7 @@ async def test_peer_cursor_advances_to_last_row_when_batch_full(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -254,7 +242,7 @@ async def test_peer_cursor_picks_up_remaining_tail_on_next_cycle(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -310,7 +298,7 @@ async def test_full_batch_all_same_updated_at_ms_drains_remainder_same_cycle(tmp
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -364,7 +352,7 @@ async def test_full_batch_all_same_ms_with_large_tail_drains_multiple_pages(tmp_
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -415,7 +403,7 @@ async def test_full_batch_same_ms_drain_handles_non_lex_insertion_order(tmp_path
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -466,7 +454,7 @@ async def test_full_batch_mixed_updated_at_ms_drain_no_tail_is_noop(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -516,7 +504,7 @@ async def test_mixed_ms_full_batch_with_same_ms_tail_drains_remainder(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -581,7 +569,7 @@ async def test_peer_cursor_advances_to_last_row_ts_when_partial_batch(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=100)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -616,7 +604,7 @@ async def test_peer_cursor_never_regresses_on_partial_batch(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -671,7 +659,7 @@ async def test_peer_cursor_tracks_future_skewed_peer_timestamps(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=100)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
         # Peer timestamp: ~50 years in the future (well past any local now_ms).
@@ -741,7 +729,7 @@ async def test_peer_cursor_unchanged_when_zero_rows_returned(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=3)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
@@ -777,7 +765,7 @@ async def test_peer_error_does_not_affect_other_peers(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=100)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
         # Good peer
@@ -980,7 +968,8 @@ async def test_sync_registered_as_system_periodic_task(tmp_path, monkeypatch):
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
         config=make_cache_config(),
-        ui_config=make_debug_config(tmp_path),
+        exchange=CacheExchangeConfig(),
+        storage_dir=str(tmp_path),
         worker_id='me',
         cluster_name='prod',
         recorder=None,
@@ -996,7 +985,7 @@ async def test_sync_registered_as_system_periodic_task(tmp_path, monkeypatch):
         call = sync_calls[0]
         assert call['system'] is True
         assert call['on_error'] == 'continue'
-        # Interval is whatever peer_sync.interval_seconds resolved to
+        # Interval is whatever fleet.cache_exchange.interval_seconds resolved to
         # (default 30s); we just assert it was passed, not its value.
         assert call['seconds'] > 0
     finally:
@@ -1004,7 +993,7 @@ async def test_sync_registered_as_system_periodic_task(tmp_path, monkeypatch):
 
 
 async def test_sync_not_registered_when_peer_sync_disabled(tmp_path, monkeypatch):
-    """When ``peer_sync.enabled=false``, no ``cache.sync`` periodic should
+    """When ``fleet.cache_exchange.enabled=false``, no ``cache.sync`` periodic should
     be scheduled — the loop would be a waste of wakeups on an engine
     that can't pull from peers.
     """
@@ -1024,8 +1013,9 @@ async def test_sync_not_registered_when_peer_sync_disabled(tmp_path, monkeypatch
 
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
-        config=make_cache_config(peer_sync=CachePeerSyncConfig(enabled=False)),
-        ui_config=make_debug_config(tmp_path),
+        config=make_cache_config(),
+        exchange=CacheExchangeConfig(enabled=False),
+        storage_dir=str(tmp_path),
         worker_id='me',
         cluster_name='prod',
         recorder=None,
@@ -1057,7 +1047,7 @@ async def test_cursor_filters_already_seen_rows(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=100)},
+        cache_overrides={'exchange': CacheExchangeConfig(page_size=100)},
     )
     try:
         await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')

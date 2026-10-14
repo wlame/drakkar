@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from drakkar import partition as partition_module
-from drakkar.config import UIConfig, UIRecorderConfig
+from drakkar.config import CacheExchangeConfig, UIConfig, UIRecorderConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -33,6 +33,22 @@ def make_ui_config(**kwargs) -> UIConfig:
         assert 'recorder' not in kwargs, 'mix of flat recorder kwargs and recorder= is ambiguous'
         kwargs['recorder'] = UIRecorderConfig(**recorder_kwargs)
     return UIConfig(**kwargs)
+
+
+def split_cache_overrides(overrides: dict | None) -> tuple[dict, CacheExchangeConfig]:
+    """Split a test's cache overrides into ``CacheConfig`` fields and exchange settings.
+
+    Cache-engine tests pass one ``cache_overrides`` dict; its ``'exchange'``
+    entry (a ``CacheExchangeConfig`` or a plain dict) becomes the engine's
+    ``fleet.cache_exchange`` settings and the rest builds the ``CacheConfig``.
+    """
+    remaining = dict(overrides or {})
+    exchange = remaining.pop('exchange', None)
+    if exchange is None:
+        exchange = CacheExchangeConfig()
+    elif isinstance(exchange, dict):
+        exchange = CacheExchangeConfig(**exchange)
+    return remaining, exchange
 
 
 # Default ceiling for wait_for. It is a safety net that turns a stuck test

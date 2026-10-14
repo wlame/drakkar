@@ -50,7 +50,7 @@ async def make_db(path, *, worker_name=WORKER, cluster_name=CLUSTER, events=(), 
 @pytest.fixture
 def ui_config(tmp_path):
     return UIConfig(
-        recorder={'db_dir': str(tmp_path), 'store_events': True, 'store_config': True},
+        recorder={'store_events': True, 'store_config': True},
         release={'enabled': False},
     )
 
@@ -58,10 +58,11 @@ def ui_config(tmp_path):
 class Ctx:
     """Builds a QueryContext over one open connection, counting flushes."""
 
-    def __init__(self, config, db, db_path, *, worker_name=WORKER, cluster_name=CLUSTER):
+    def __init__(self, config, db, db_path, *, worker_name=WORKER, cluster_name=CLUSTER, storage_dir=''):
         self.flushes = 0
         self.context = QueryContext(
             config=config,
+            storage_dir=storage_dir,
             worker_name=worker_name,
             cluster_name=cluster_name,
             reader=lambda: db,
@@ -212,7 +213,7 @@ class TestCrossWorkerSweep:
         empty = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(empty) as db:
-            queries = EventQueries(Ctx(ui_config, db, empty).context)
+            queries = EventQueries(Ctx(ui_config, db, empty, storage_dir=str(tmp_path)).context)
             events = await queries.cross_trace(partition=7, msg_offset=70)
 
         assert [e['event'] for e in events] == ['consumed', 'committed']
@@ -229,7 +230,7 @@ class TestCrossWorkerSweep:
         empty = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(empty) as db:
-            queries = EventQueries(Ctx(ui_config, db, empty).context)
+            queries = EventQueries(Ctx(ui_config, db, empty, storage_dir=str(tmp_path)).context)
             events = await queries.cross_trace(partition=7, msg_offset=70)
 
         assert events == []
@@ -247,7 +248,7 @@ class TestCrossWorkerSweep:
         empty = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(empty) as db:
-            queries = EventQueries(Ctx(ui_config, db, empty).context)
+            queries = EventQueries(Ctx(ui_config, db, empty, storage_dir=str(tmp_path)).context)
             events = await queries.cross_trace(partition=7, msg_offset=70)
 
         assert {e['worker_name'] for e in events} == {'good'}
@@ -261,7 +262,7 @@ class TestCrossWorkerSweep:
         empty = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(empty) as db:
-            queries = EventQueries(Ctx(ui_config, db, empty).context)
+            queries = EventQueries(Ctx(ui_config, db, empty, storage_dir=str(tmp_path)).context)
             events = await queries.cross_trace(partition=9, msg_offset=90)
 
         assert {e['worker_name'] for e in events} == {'archived'}
@@ -292,8 +293,8 @@ class TestDiscoverWorkers:
         own = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own).context)
-            workers = {w['worker_name']: w for w in await queries.discover_workers()}
+            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
+            workers = {w['worker_name']: w for w in await queries.discover_workers(30)}
 
         assert workers['fresh']['online'] is True
         assert workers['stale']['online'] is False, 'a crashed worker leaves its symlink behind'
@@ -311,8 +312,8 @@ class TestDiscoverWorkers:
         own = await make_db(tmp_path / f'{WORKER}-20260101-000000.db')
 
         async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own).context)
-            (worker,) = await queries.discover_workers()
+            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
+            (worker,) = await queries.discover_workers(30)
 
         assert worker['worker_name'] == 'eventsonly'
         assert worker['online'] is True
@@ -322,9 +323,9 @@ class TestDiscoverWorkers:
         ui_config.recorder.store_config = False
 
         async with aiosqlite.connect(own) as db:
-            queries = EventQueries(Ctx(ui_config, db, own).context)
+            queries = EventQueries(Ctx(ui_config, db, own, storage_dir=str(tmp_path)).context)
 
-            assert await queries.discover_workers() == []
+            assert await queries.discover_workers(30) == []
 
 
 class TestScanBudget:

@@ -1,6 +1,7 @@
 """Tests for Drakkar main application."""
 
 import asyncio
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -87,9 +88,10 @@ class HttpOnlyHandler(BaseDrakkarHandler[_D, _D, _D, _D]):
 
 
 @pytest.fixture
-def test_config() -> DrakkarConfig:
+def test_config(tmp_path) -> DrakkarConfig:
     return DrakkarConfig(
         kafka=KafkaConfig(brokers='localhost:9092'),
+        storage={'dir': str(tmp_path / 'storage')},
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
@@ -107,9 +109,10 @@ def test_config() -> DrakkarConfig:
 
 
 @pytest.fixture
-def test_config_no_sinks() -> DrakkarConfig:
+def test_config_no_sinks(tmp_path) -> DrakkarConfig:
     return DrakkarConfig(
         kafka=KafkaConfig(brokers='localhost:9092'),
+        storage={'dir': str(tmp_path / 'storage')},
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
@@ -1651,7 +1654,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_clean_drain(test_confi
 
     # Force the watchdog dir to a writable temp path so the test never
     # races a real on-disk file from a developer machine.
-    test_config.ui.recorder.db_dir = str(tmp_path)
+    test_config.storage.dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     wire_kafka_source(app, AsyncMock())
@@ -1681,7 +1684,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.ui.recorder.db_dir = str(tmp_path)
+    test_config.storage.dir = str(tmp_path)
     # Tighten the drain timeout so the test runs quickly.
     test_config.executor.drain_timeout_seconds = 1
 
@@ -1710,13 +1713,13 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
 
 
 async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
-    """When ``debug.db_dir`` is empty the watchdog is skipped entirely;
+    """When ``storage.dir`` is empty the watchdog is skipped entirely;
     ``_shutdown`` must still complete without referencing the missing
     watchdog object.
     """
     from drakkar.lifecycle import AppLifecycle
 
-    test_config.ui.recorder.db_dir = ''  # disk-less mode
+    test_config.storage.dir = ''  # disk-less mode
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     wire_kafka_source(app, AsyncMock())
@@ -1743,7 +1746,7 @@ async def test_lifecycle_shutdown_drain_exception_still_runs_teardown(test_confi
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.ui.recorder.db_dir = str(tmp_path)
+    test_config.storage.dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     wire_kafka_source(app, AsyncMock())
@@ -1795,7 +1798,7 @@ async def test_lifecycle_claim_watchdog_slot_tolerates_oserror(test_config, tmp_
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.ui.recorder.db_dir = str(tmp_path)
+    test_config.storage.dir = str(tmp_path)
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     lifecycle = AppLifecycle(app)
 
@@ -1827,7 +1830,7 @@ async def test_lifecycle_claim_watchdog_slot_no_op_when_disabled(test_config):
     """
     from drakkar.lifecycle import AppLifecycle
 
-    test_config.ui.recorder.db_dir = ''  # disk-less
+    test_config.storage.dir = ''  # disk-less
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     lifecycle = AppLifecycle(app)
     assert lifecycle._watchdog is None
@@ -1920,17 +1923,81 @@ async def test_ui_disabled_warns_that_probes_are_unserved(test_config):
     assert any(e['event'] == 'ui_disabled_no_probes' for e in cap)
 
 
-async def test_empty_db_dir_disables_the_watchdog_rather_than_using_cwd(test_config):
+async def test_empty_storage_dir_disables_the_watchdog_rather_than_using_cwd(test_config):
     """Falling back to CWD would break the no-on-disk-state promise on read-only mounts."""
     cfg = test_config.model_copy(deep=True)
-    cfg.ui.recorder.db_dir = ''
+    cfg.storage.dir = ''
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     with capture_logs() as cap:
         await app._lifecycle._setup_watchdog()
 
     assert app._lifecycle._watchdog is None
-    assert any(e['event'] == 'watchdog_disabled_no_db_dir' for e in cap)
+    assert any(e['event'] == 'watchdog_disabled_no_storage_dir' for e in cap)
+
+
+async def test_prepare_storage_creates_a_missing_folder_with_mode_0700(test_config, tmp_path):
+    """Own files are private to the worker: a folder it creates is owner-only."""
+    folder = tmp_path / 'own' / 'files'
+    cfg = test_config.model_copy(deep=True)
+    cfg.storage.dir = str(folder)
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._prepare_storage()
+
+    assert folder.is_dir()
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize('mode', [0o750, 0o777], ids=['owner-and-group', 'world-writable'])
+async def test_prepare_storage_keeps_the_mode_of_an_existing_folder(test_config, tmp_path, mode):
+    """An operator-provided folder (a mounted volume) keeps the mode the operator gave it.
+
+    A world-writable folder is kept too: the recorder warns about it at start
+    rather than the worker silently changing a mode it does not own.
+    """
+    folder = tmp_path / 'mounted'
+    folder.mkdir()
+    folder.chmod(mode)
+    cfg = test_config.model_copy(deep=True)
+    cfg.storage.dir = str(folder)
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._prepare_storage()
+
+    assert stat.S_IMODE(folder.stat().st_mode) == mode
+
+
+async def test_prepare_storage_memory_only_creates_nothing(test_config, tmp_path, monkeypatch):
+    """storage.dir empty is the memory-only mode: no folder anywhere, not even in the CWD."""
+    monkeypatch.chdir(tmp_path)
+    cfg = test_config.model_copy(deep=True)
+    cfg.storage.dir = ''
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._prepare_storage()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_prepare_storage_runs_before_the_watchdog(test_config, monkeypatch):
+    """The watchdog reads its file from storage.dir, so the folder must exist first."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    calls: list[str] = []
+
+    async def record(name):
+        calls.append(name)
+        if name == '_setup_watchdog':
+            raise RuntimeError('stop after the first two boot steps')
+
+    monkeypatch.setattr(app._lifecycle, '_prepare_storage', lambda: record('_prepare_storage'))
+    monkeypatch.setattr(app._lifecycle, '_setup_watchdog', lambda: record('_setup_watchdog'))
+    monkeypatch.setattr(app._lifecycle, '_shutdown', AsyncMock())
+
+    with pytest.raises(RuntimeError, match='first two boot steps'):
+        await app._lifecycle._async_run()
+
+    assert calls == ['_prepare_storage', '_setup_watchdog']
 
 
 async def test_watchdog_write_failure_disables_it_and_continues(test_config, monkeypatch):
@@ -2103,7 +2170,7 @@ async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tm
     would make every set/get silently discard instead of persisting."""
     cfg = test_config.model_copy(deep=True)
     cfg.cache.enabled = True
-    cfg.cache.db_dir = str(tmp_path)
+    cfg.storage.dir = str(tmp_path)
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     await app._lifecycle._start_cache()
@@ -2112,6 +2179,40 @@ async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tm
         assert app._cache_engine is not None
         app._handler.cache.set('k', 'v')
         assert app._handler.cache.peek('k') == 'v'
+    finally:
+        await app._cache_engine.stop()
+
+
+async def test_start_cache_enables_peer_sync_without_own_store_config(test_config, tmp_path):
+    """The own ``ui.recorder.store_config`` only decides what the recorder
+    writes into its own file; it must not switch off the cache exchange."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.cache.enabled = True
+    cfg.storage.dir = str(tmp_path)
+    cfg.ui.recorder.store_config = False
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._start_cache()
+
+    try:
+        assert app._cache_engine._peer_sync_enabled is True
+    finally:
+        await app._cache_engine.stop()
+
+
+async def test_start_cache_wires_the_exchange_settings(test_config, tmp_path):
+    """fleet.cache_exchange reaches the engine: switching it off disables peer sync."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.cache.enabled = True
+    cfg.storage.dir = str(tmp_path)
+    cfg.fleet.cache_exchange.enabled = False
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._start_cache()
+
+    try:
+        assert app._cache_engine._peer_sync_enabled is False
+        assert (tmp_path / f'{app._worker_id}-cache.db.actual').exists()
     finally:
         await app._cache_engine.stop()
 
