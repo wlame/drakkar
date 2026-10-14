@@ -43,7 +43,7 @@ flowchart LR
 - **Typed messages** — Pydantic models as type parameters, auto de/serialization
 - **Operator UI** — live executor timeline, partition lag, message tracing, and a Message Probe that runs a pasted message through the full pipeline with zero footprint on production state
 - **UI customization** — handler-defined probe tabs, links/badges/formats on any field, declared dashboard pages — all server-side, no client code
-- **Cache** (optional) — `self.cache` key/value store with write-behind SQLite and peer sync across workers
+- **Cache** (optional) — `self.cache` key/value store with write-behind SQLite and a cache exchange between workers over HTTP
 - **Offload** — `await self.offload(fn, ...)` keeps CPU-bound hook work off the event loop
 - **Webapp** (optional) — the same handler pipeline exposed as a synchronous HTTP endpoint with auth and rate limits
 - **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log), runtime-health and host-pressure monitors, task cost/throughput stats

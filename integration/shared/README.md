@@ -17,15 +17,17 @@ shared folder is `/shared` too. The directory holds:
 3. **Merge results** — files merged from the Debug UI, in `merged/`.
 4. **Cache databases** — write-behind stores for the framework cache
    (`self.cache`). The cache file lives in `storage.dir`, so it sits at the
-   top level too.
+   top level too. It is private to its worker even here: the harness
+   shares the folder only because it is also the fleet's shared folder.
 5. **Registry cards** — one JSON file per worker in `fleet/workers/`, used
-   for the workers list.
+   for the workers list and the cache exchange.
 
-Only the cache publishes a symlink. Peers scan for the `-cache.db` symlinks
-to find each other's cache files for the periodic peer-sync loop that
-propagates cluster/global-scope entries. No worker opens another worker's
-live recorder file: the Message Trace reads the sealed files in the history
-folder.
+No worker opens another worker's files at the top level. The cache
+exchange propagates cluster/global-scope entries over HTTP: every
+`fleet.cache_exchange.interval_seconds` each worker reads the registry
+cards and pulls new rows from the other workers with
+`GET /api/v1/peer/cache/changes` at the URL on their card. The Message
+Trace reads the sealed files in the history folder.
 
 `<cluster>` is the cluster name with every character outside
 `[a-zA-Z0-9_-]` replaced by `_`. The harness clusters are `main cluster`
@@ -53,15 +55,13 @@ never changes again.
 ### Cache
 
 ```
-{worker_name}-cache.db.actual                  # the real SQLite file
-{worker_name}-cache.db                         # symlink → .actual file
+{worker_name}-cache.db                         # the SQLite file (WAL: -wal, -shm sidecars)
 ```
 
-The cache does **not** rotate files — a single `.actual` file per worker
-accumulates entries and prunes on TTL expiration. The stable
-`{worker_name}-cache.db` path is reserved as a symlink so peer workers can
-discover it with a glob. Cache peer-sync uses the symlink path to open a
-read-only connection and pull new rows since its per-peer cursor.
+The cache does **not** rotate files — a single file per worker
+accumulates entries and prunes on TTL expiration. Only its owner opens it.
+Other workers get its cluster/global rows over HTTP, page by page after a
+per-peer cursor.
 
 Because this directory is a host mount, **all of these files persist
 across restarts**.
@@ -86,8 +86,9 @@ shared/
 ├── worker-1-2026-10-14__09_00_00.db                 # recorder: live file
 ├── worker-1-2026-10-14__09_00_00.db-wal
 ├── worker-1-2026-10-14__09_00_00.db-shm
-├── worker-1-cache.db.actual                         # cache: actual file
-├── worker-1-cache.db -> worker-1-cache.db.actual    # cache: stable symlink
+├── worker-1-cache.db                                # cache file
+├── worker-1-cache.db-wal
+├── worker-1-cache.db-shm
 ├── worker-1.watchdog
 ├── worker-2-2026-10-14__09_00_01.db
 ├── ...
@@ -132,7 +133,7 @@ sqlite3 "file:integration/shared/history/main_cluster/worker-1-2026-10-14__08_00
 ### Cache (key/value entries)
 
 ```bash
-# While running — follow the symlink
+# Count the rows
 sqlite3 integration/shared/worker-1-cache.db "SELECT count(*) FROM cache_entries"
 
 # Inspect scope distribution
@@ -155,7 +156,7 @@ Stop the workers first.
 # Remove everything (recorder + history + merge results + cache + cards)
 rm -rf integration/shared/history integration/shared/merged integration/shared/fleet
 rm -f integration/shared/*.db integration/shared/*.db-wal integration/shared/*.db-shm \
-  integration/shared/*.db.actual* integration/shared/*.watchdog
+  integration/shared/*.watchdog
 
 # Remove only recorder history, keep caches
 # (the "__" of the timestamp keeps the glob off the "-cache.db" names)
@@ -163,9 +164,17 @@ rm -rf integration/shared/history integration/shared/merged
 rm -f integration/shared/*__*.db integration/shared/*__*.db-wal integration/shared/*__*.db-shm
 
 # Remove only caches, keep recorder
-rm -f integration/shared/*-cache.db integration/shared/*-cache.db.actual*
+rm -f integration/shared/*-cache.db integration/shared/*-cache.db-wal integration/shared/*-cache.db-shm
 
 # Remove only one worker's own files of both kinds (its sealed files stay in history/)
 rm -f integration/shared/worker-1-*.db integration/shared/worker-1-*.db-wal \
-  integration/shared/worker-1-*.db-shm integration/shared/worker-1-*.db.actual*
+  integration/shared/worker-1-*.db-shm
+
+# Files an older release left: the .actual cache files
+rm -f integration/shared/*-cache.db.actual*
 ```
+
+An older release made `{worker_name}-cache.db` a link to a
+`{worker_name}-cache.db.actual` file. Delete both before the workers start
+(the "Remove only caches" line removes the link): a link that is still
+there is followed to the old file.

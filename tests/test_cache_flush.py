@@ -113,7 +113,7 @@ async def test_flush_once_inserts_row_for_single_set(tmp_path):
         engine._cache.set('k', 'hello')  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         key, scope, value, size_bytes, _created, _updated, expires, origin = row
@@ -155,7 +155,7 @@ async def test_flush_once_stores_size_bytes_matching_utf8_length(tmp_path):
         engine._cache.set('k', {'name': 'alice', 'age': 30, 'items': [1, 2, 3]})  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         _key, _scope, value, size_bytes, *_ = row
@@ -177,7 +177,7 @@ async def test_flush_once_preserves_scope(tmp_path):
         engine._cache.set('global_k', 'v', scope=CacheScope.GLOBAL)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'local_k'))[1] == 'local'
         assert (await _fetch_row(db_path, 'cluster_k'))[1] == 'cluster'
         assert (await _fetch_row(db_path, 'global_k'))[1] == 'global'
@@ -195,7 +195,7 @@ async def test_flush_once_preserves_ttl(tmp_path):
         engine._cache.set('no_ttl_k', 'v')  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         ttl_row = await _fetch_row(db_path, 'ttl_k')
         no_ttl_row = await _fetch_row(db_path, 'no_ttl_k')
         assert ttl_row is not None
@@ -217,7 +217,7 @@ async def test_flush_once_deletes_existing_row(tmp_path):
         engine._cache.set('k', 'v')  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'k')) is not None
 
         engine._cache.delete('k')  # type: ignore[reportPrivateUsage]
@@ -237,7 +237,7 @@ async def test_flush_once_delete_nonexistent_is_harmless(tmp_path):
         engine._cache.delete('never_set')  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
         # no crash, no row added
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert await _count_rows(db_path) == 0
     finally:
         await engine.stop()
@@ -252,7 +252,7 @@ async def test_flush_once_memory_scope_writes_no_row(tmp_path):
         engine._cache.set('mem_k', 'v', scope=CacheScope.MEMORY)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert await _count_rows(db_path) == 0
         # the value is still served from memory
         assert engine._cache.peek('mem_k') == 'v'  # type: ignore[reportPrivateUsage]
@@ -270,7 +270,7 @@ async def test_flush_once_memory_scope_purges_stale_row_of_earlier_local_write(t
         engine._cache.set('k', 'old-persisted', scope=CacheScope.LOCAL)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'k')) is not None
 
         engine._cache.set('k', 'memory-only', scope=CacheScope.MEMORY)  # type: ignore[reportPrivateUsage]
@@ -302,7 +302,7 @@ async def test_flush_once_batches_mixed_ops_in_one_call(tmp_path):
         engine._cache.delete('delete_me')  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         # 3 new rows present, delete_me gone
         assert await _count_rows(db_path) == 3
         assert (await _fetch_row(db_path, 'delete_me')) is None
@@ -352,7 +352,7 @@ async def test_atomic_dirty_swap_isolates_mid_flush_writes(tmp_path):
         # restore to avoid leaking patched method
         engine._writer_db.executemany = original_executemany  # type: ignore[reportPrivateUsage,assignment]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         # 'first' is in DB (was in the snapshot)
         assert (await _fetch_row(db_path, 'first')) is not None
         # 'during_flush' is NOT yet in DB — it went into the new dirty map
@@ -407,7 +407,7 @@ async def test_lww_rejects_older_updated_at_ms(tmp_path):
         cache._dirty['k'] = DirtyOp(op=Op.SET, entry=older)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         # newer value still in DB — LWW rejected the older one
@@ -452,7 +452,7 @@ async def test_lww_tiebreak_prefers_smaller_origin_worker_id(tmp_path):
         cache._dirty['k'] = DirtyOp(op=Op.SET, entry=second)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         # 'w1' < 'w2' lexicographically — w1's value wins
@@ -496,7 +496,7 @@ async def test_lww_tiebreak_larger_origin_rejected(tmp_path):
         cache._dirty['k'] = DirtyOp(op=Op.SET, entry=second)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         assert row[2] == '"from_w1"'  # unchanged
@@ -540,7 +540,7 @@ async def test_lww_newer_updated_at_wins_regardless_of_origin(tmp_path):
         cache._dirty['k'] = DirtyOp(op=Op.SET, entry=newer)  # type: ignore[reportPrivateUsage]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         row = await _fetch_row(db_path, 'k')
         assert row is not None
         assert row[2] == '"from_w2_newer"'
@@ -796,7 +796,7 @@ async def test_stop_performs_final_drain(tmp_path):
     await engine.stop()
 
     # Reconnect to the DB and verify the row is there.
-    db_path = tmp_path / 'w1-cache.db.actual'
+    db_path = tmp_path / 'w1-cache.db'
     row = await _fetch_row(db_path, 'k')
     assert row is not None, 'final drain did not persist the dirty entry'
     assert row[2] == '"last_write"'
@@ -810,7 +810,7 @@ async def test_stop_final_drain_safe_when_dirty_empty(tmp_path):
     assert engine._cache._dirty == {}  # type: ignore[reportPrivateUsage]
     await engine.stop()
     # No row should have been created from an empty drain.
-    db_path = tmp_path / 'w1-cache.db.actual'
+    db_path = tmp_path / 'w1-cache.db'
     assert await _count_rows(db_path) == 0
 
 
@@ -831,7 +831,7 @@ async def test_stop_final_drain_runs_before_writer_close(tmp_path):
     # Writer must now be closed
     assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
     # But the row must be present — proving drain → close ordering
-    db_path = tmp_path / 'w1-cache.db.actual'
+    db_path = tmp_path / 'w1-cache.db'
     row = await _fetch_row(db_path, 'proof')
     assert row is not None
 
@@ -965,7 +965,7 @@ async def test_flush_once_cancel_mid_commit_restores_snapshot(tmp_path):
         engine._writer_db.commit = original_commit  # type: ignore[reportPrivateUsage,assignment]
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'k1')) is not None
         assert (await _fetch_row(db_path, 'k2')) is not None
         # _dirty drained normally after restore + re-flush.
@@ -1067,7 +1067,7 @@ async def test_stop_final_drain_persists_ops_after_mid_flush_cancel(tmp_path):
         # delegates to the original → the row lands in the DB.
         await engine.stop()
 
-    db_path = tmp_path / 'w1-cache.db.actual'
+    db_path = tmp_path / 'w1-cache.db'
     row = await _fetch_row(db_path, 'payload')
     assert row is not None, 'final drain should have persisted the re-queued op'
     assert row[2] == '"must_persist"'
@@ -1192,7 +1192,7 @@ async def test_cache_flush_handles_database_locked(tmp_path):
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
         assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'k1')) is not None
         assert (await _fetch_row(db_path, 'k2')) is not None
     finally:
@@ -1236,7 +1236,7 @@ async def test_cache_flush_handles_disk_io_error(tmp_path):
 
         # Subsequent flush succeeds.
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert (await _fetch_row(db_path, 'payload')) is not None
     finally:
         await engine.stop()
@@ -1280,7 +1280,7 @@ async def test_cache_flush_error_does_not_corrupt_subsequent_flush(tmp_path):
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
         assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         for key in ('a', 'b', 'c'):
             assert (await _fetch_row(db_path, key)) is not None
     finally:
@@ -1301,9 +1301,9 @@ async def test_cache_engine_start_handles_corrupt_db(tmp_path):
     file + retry), we'd revisit the assertion here.
     """
     # Pre-create a corrupt file at the path the engine will open. The
-    # engine's ``_cache_db_file_path`` uses a deterministic ``.actual``
-    # suffix per worker id, so we can stage the fault in advance.
-    corrupt_path = tmp_path / 'w1-cache.db.actual'
+    # engine's ``_cache_db_file_path`` is deterministic per worker id, so
+    # we can stage the fault in advance.
+    corrupt_path = tmp_path / 'w1-cache.db'
     corrupt_path.write_bytes(b'not a valid sqlite file' * 1000)
 
     engine = await _make_engine(tmp_path, worker_id='w1')

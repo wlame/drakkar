@@ -2,7 +2,7 @@
 
 This task focuses on the engine's **lifecycle contract** — opening the
 writer connection, applying the schema, putting the DB in WAL mode,
-creating the `<worker>-cache.db` file + `-cache.db` symlink, and closing
+creating the `<worker>-cache.db` file, and closing
 cleanly on stop. The flush loop, reader connection, peer sync, and
 cleanup loop are wired up in later tasks (7/8/9/10/11+); here we only
 verify that the engine's bootstrap work is correct in isolation.
@@ -15,7 +15,6 @@ point of this task is that the schema actually lands on disk.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import aiosqlite
@@ -65,51 +64,24 @@ async def test_start_opens_writer_connection(tmp_path):
 
 
 async def test_start_creates_cache_db_file(tmp_path):
-    """The underlying cache DB file exists on disk after start().
-
-    The DB file is stored at ``<worker>-cache.db.actual`` so that the
-    stable ``<worker>-cache.db`` name can be a symlink (peer discovery
-    filters on ``os.path.islink``).
-    """
+    """The cache file ``<worker>-cache.db`` is a plain file on disk after start()."""
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
     try:
-        actual = tmp_path / 'w1-cache.db.actual'
-        assert actual.exists()
+        path = tmp_path / 'w1-cache.db'
+        assert path.is_file()
+        assert not path.is_symlink()
     finally:
         await engine.stop()
 
 
-async def test_start_creates_symlink_pointing_at_db(tmp_path):
-    """Live symlink ``<worker>-cache.db`` → ``<worker>-cache.db.actual``.
-
-    Peer discovery (``discover_peer_dbs(..., suffix='-cache.db')``)
-    filters on ``os.path.islink``, so the stable-name path *must* be a
-    symlink for peers to pick us up.
-    """
+async def test_stop_keeps_the_cache_file(tmp_path):
+    """The cache file stays on disk after a graceful stop (persistence across restarts)."""
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
-    try:
-        link = tmp_path / 'w1-cache.db'
-        assert link.is_symlink(), 'expected peer-discovery symlink at <worker>-cache.db'
-        resolved = os.path.realpath(link)
-        assert resolved == str((tmp_path / 'w1-cache.db.actual').resolve())
-        assert os.path.exists(resolved)
-    finally:
-        await engine.stop()
-
-
-async def test_stop_removes_live_link(tmp_path):
-    """Graceful stop removes the peer-discovery symlink so peers stop
-    trying to pull from a shut-down worker."""
-    engine = await _make_engine(tmp_path, worker_id='w1')
-    await engine.start()
-    link = tmp_path / 'w1-cache.db'
-    assert link.is_symlink()
     await engine.stop()
-    assert not link.is_symlink()
-    # the underlying DB file should still be on disk (persistence across restarts)
-    assert (tmp_path / 'w1-cache.db.actual').exists()
+
+    assert (tmp_path / 'w1-cache.db').is_file()
 
 
 async def test_start_applies_schema_table(tmp_path):
@@ -117,7 +89,7 @@ async def test_start_applies_schema_table(tmp_path):
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
     try:
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute('PRAGMA table_info(cache_entries)')
             rows = await cursor.fetchall()
@@ -143,7 +115,7 @@ async def test_start_applies_both_indexes(tmp_path):
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
     try:
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='cache_entries'")
             rows = await cursor.fetchall()
@@ -277,7 +249,6 @@ async def test_start_with_empty_storage_dir_disables_engine(tmp_path):
         assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
         # no file created anywhere under tmp_path
         assert not (tmp_path / 'w1-cache.db').exists()
-        assert not (tmp_path / 'w1-cache.db.actual').exists()
         assert any(e['event'] == 'cache_engine_disabled_no_storage_dir' for e in cap)
     finally:
         await engine.stop()
@@ -297,7 +268,7 @@ async def test_start_puts_the_cache_file_in_storage_dir(tmp_path):
     )
     await engine.start()
     try:
-        assert (storage / 'w1-cache.db.actual').exists()
+        assert (storage / 'w1-cache.db').exists()
     finally:
         await engine.stop()
 
@@ -316,7 +287,6 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
     try:
         assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
         assert not (tmp_path / 'w1-cache.db').exists()
-        assert not (tmp_path / 'w1-cache.db.actual').exists()
     finally:
         await engine.stop()
 

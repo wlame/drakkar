@@ -47,6 +47,12 @@ are `DK_` plus the YAML path with `__` between the levels.
 
 `shared.dir` empty means "the same folder as `storage.dir`".
 
+The cache file is no longer shared. Each worker keeps
+`<storage.dir>/<worker>-cache.db` to itself, and workers pull each other's
+`cluster` and `global` cache rows over HTTP, from the URL on each
+[registry card](fleet.md). So `storage.dir` does not need to be shared for
+the cache any more, but every worker must reach the UI port of its peers.
+
 ## 3. Rename the moved keys
 
 | Old YAML path | New YAML path | Old environment variable | New environment variable |
@@ -102,6 +108,20 @@ These keys are new. Their defaults work for most deployments.
 See [Configuration](configuration.md) for every field, and
 [Fleet registry](fleet.md) for how workers find each other.
 
+Two existing keys changed what they cover:
+
+- **`ui.allowed_ws_origins`** also decides the cross-origin reads that the
+  UI sends to every worker of the cluster (trace, label trace, databases
+  list). **With `ui.auth_token` set, list the origin of every worker
+  here**, for example `["http://10.0.3.17:8080", "http://10.0.3.18:8080"]`.
+  Otherwise the UI of one worker cannot read the others and lists them as
+  unreachable. See [Cross-origin reads](security.md#cross-origin-reads).
+- **`ui.auth_token`** does not protect the new routes under
+  `/api/v1/peer/`: workers call them on each other without a token. Anyone
+  who can reach the UI port can read the `cluster` and `global` cache rows
+  of a worker that serves the cache exchange. See
+  [The public peer route](security.md#the-public-peer-route).
+
 ## 6. Kubernetes example
 
 Before:
@@ -151,6 +171,11 @@ volumeMounts:
    and `fleet=<provider>` (`fleet=off` when the UI is off or no folder
    resolves).
 3. Start the other workers. The workers list in the UI shows every peer.
+   With the cache on, `drakkar_fleet_peer_requests_total{outcome="ok"}`
+   grows on each worker once a peer has new `cluster` or `global` rows.
+   Other outcomes mean that a peer could not be reached at the URL on its
+   card, or answered with an error; the log event
+   `fleet_peer_request_failed` names the peer and the URL.
 4. Wait for one rotation (`ui.recorder.rotation_interval_hours`, default 1
    hour), or stop one worker cleanly. Then look in
    `<shared.dir>/history/<cluster>/` (`<storage.dir>/history/<cluster>/`
@@ -177,6 +202,7 @@ The worker does not delete the old files. Delete them yourself:
 |---|---|
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` (and its `-wal`, `-shm`) | Rotated recorder files. |
 | `<worker>-live.db` | Link to the live recorder file. Workers no longer open each other's live files. |
+| `<worker>-cache.db` (a link) and `<worker>-cache.db.actual` (and its `-wal`, `-shm`) | The old cache link and cache file. The cache file is now a plain `<worker>-cache.db`, private to its worker. Delete both **before** the first start: the worker does not remove them, and an old link with that name is followed to the old `.actual` file. |
 | `.dbstats.db` | Statistics cache of the Databases page. Sealed files now carry a meta file. |
 | `.archive-<cluster>.lock` | The old archive lock. The lock is now `history/<cluster>/.archive.lock`. |
 | `<cluster>-<from>__<to>.db.gz` in `storage.dir` | Old archives. The archive pass now works only inside `<shared.dir>/history/<cluster>/`. |

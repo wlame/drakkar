@@ -138,7 +138,7 @@ async def test_cleanup_deletes_rows_with_expired_ttl(tmp_path):
         await _stage_raw_set(engine, expired)
         await engine._flush_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert 'expired' in await _fetch_keys(db_path)
 
         await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
@@ -160,7 +160,7 @@ async def test_cleanup_preserves_rows_with_no_ttl(tmp_path):
 
         await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert 'forever' in await _fetch_keys(db_path)
     finally:
         await engine.stop()
@@ -179,7 +179,7 @@ async def test_cleanup_preserves_rows_with_future_ttl(tmp_path):
 
         await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert 'fresh' in await _fetch_keys(db_path)
     finally:
         await engine.stop()
@@ -199,7 +199,7 @@ async def test_cleanup_mixed_ttls(tmp_path):
 
         await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         remaining = await _fetch_keys(db_path)
         assert remaining == {'no_ttl', 'future'}
     finally:

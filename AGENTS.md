@@ -36,8 +36,12 @@ breaking change, never a refactor:
   order they were given
 - the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads the
   sealed recorder files that other workers of its cluster publish into the
-  shared history folder (`<shared.dir>/history/<cluster>/`), and the cache
-  files of other workers sharing its `storage.dir`
+  shared history folder (`<shared.dir>/history/<cluster>/`)
+- the cache exchange: peers pull each other's own `cluster`/`global` rows
+  over `GET /api/v1/peer/cache/changes` (parameters, check order and 400
+  messages, row shape, paging rule: `tests/fixtures/cache_changes.json`),
+  gated by the card's `features.cache` marks; the cache file itself is
+  private to its worker
 - the history meta file `<name>.db.meta.json` (schema 1: fields, sorted
   compact JSON, no trailing newline) and the archive lock body of
   `history/<cluster>/.archive.lock` (`tests/fixtures/history_meta.json`) —
@@ -122,11 +126,15 @@ parametrize).
   Every read of live worker state goes through `dispatch_to_loop(...)` to the
   main loop, plus a dedicated SQLite reader connection. Follow that pattern
   for any new endpoint.
-- Route modules are factories returning leaf APIRouters; `server.py` walks
-  them to register `/api/v1/...` aliases. Do not nest routers behind a
-  combining `include_router` — on FastAPI ≥ 0.139 included routes are hidden
-  from the app-level table and the alias walk (a startup guard raises if the
-  walk finds nothing).
+- Route modules are factories returning leaf APIRouters that `server.py`
+  includes one by one. Do not nest routers behind a combining
+  `include_router` — on FastAPI ≥ 0.139 included routes are hidden from the
+  app-level table, which the OpenAPI parity test reads.
+- Routes under `/api/v1/peer/` (`routes_peer.py`) carry no `require_auth`:
+  other workers call them without a token. They reveal only the
+  `cluster`/`global` cache rows this worker originated. The fan-out paths
+  (`cors.py`) answer CORS with the `/ws` origin rule; their preflight runs
+  before auth.
 - Three separate HTTP servers: UI server `:8080`, opt-in HTTP source `:8090`
   (synchronous ingress, no health routes — readiness is per-request),
   Prometheus exporter `:9090` (not FastAPI). Kubernetes probes live on the UI
@@ -155,7 +163,7 @@ drakkar/
   executor.py              subprocess pool (argv exec, process-group kill)
   sinks/                   sink implementations + DLQ + circuit breaker
   sources/                 input-source protocol, registry, handler validation
-  cache/                   LWW SQLite cache + peer sync
+  cache/                   LWW SQLite cache + the HTTP cache exchange (client and query parsing)
   fleet/                   worker registry: cards, providers, plugin lookup, test kit, service
   recorder/                flight recorder (SQLite event log)
   uiserver/                UI server: routes + message probe runner

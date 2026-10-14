@@ -186,10 +186,10 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_flush_entries_total` | Counter | `op` (`set`, `delete`) | Entries drained from the dirty map to SQLite per flush cycle, by op type. Measures flush throughput, not rows actually modified (LWW may reject a SET). |
 | `drakkar_cache_flush_failures_total` | Counter | -- | Flush cycles that raised. Consecutive failures mean cache writes accumulate in memory (lost on shutdown if the final drain also fails); after 5 in a row the worker logs `cache_flush_failing_repeatedly` at ERROR. **Alert on a rising rate.** |
 | `drakkar_cache_cleanup_removed_total` | Counter | -- | Rows removed from the SQLite DB by the cleanup loop (entries whose TTL elapsed). A sudden spike means many entries expiring together. |
-| `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer worker's cache DB by the sync loop, per peer. |
-| `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows the sync loop attempted to UPSERT into the local DB. Equals or less than `sync_entries_fetched_total` when LWW rejects some. |
-| `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer failures during the sync cycle (connection refused, corrupt DB, timeout). One increment per failed cycle; sync loop keeps running. |
-| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of peer-sync cycles that exceeded `fleet.cache_exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline. A sustained non-zero rate signals a slow-peer or peer-count-vs-interval imbalance — either tune the deadline up, stagger peers, or reduce the number of peers pulled per cycle. |
+| `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer over HTTP ([cache exchange](cache.md#cache-exchange)) and accepted, per peer. Counted after the page commits. Rows the worker rejected are not counted here; they go to `drakkar_cache_sync_errors_total`. |
+| `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows from a peer passed to the LWW upsert of the local DB, per peer. Counted with the same rows as `sync_entries_fetched_total`, so the two are equal; rows that LWW keeps unchanged are still counted. |
+| `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer exchange errors: one per failed request (timeout, refused connection, a status other than 200, an answer that is not the expected JSON), one per page that could not be applied locally, and one per rejected row (wrong scope or not the peer's own origin). The loop keeps running. |
+| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of exchange cycles that hit `fleet.cache_exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline; the cut peers are not counted as failures. A sustained non-zero rate signals slow peers, or more peers than one interval can pull — raise the deadline and the interval, or raise `max_concurrent_peers`. |
 | `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
 | `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
 | `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |
@@ -198,6 +198,17 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 Cache flush/sync/cleanup loop durations are captured by the existing
 `drakkar_periodic_task_duration_seconds{name="cache.flush|cache.sync|cache.cleanup"}`
 histogram — no dedicated cache-only timing histograms.
+
+Each HTTP request of the exchange is also counted in the fleet metrics
+`drakkar_fleet_peer_requests_total{endpoint="cache_changes", outcome}`
+(`ok`, `http_error`, `timeout`, `transport_error`, `bad_body`) and timed in
+`drakkar_fleet_peer_request_duration_seconds{endpoint}`. See
+[Fleet registry — Metrics](fleet.md#metrics). The exchange logs
+`fleet_peer_request_failed`, `fleet_peer_backoff` and
+`fleet_peer_rows_rejected` ([Fleet registry — Log events](fleet.md#log-events)),
+`cache_peer_sync_failed` when a pulled page cannot be applied locally
+(fields `peer`, `error`), and `cache_peer_sync_cycle_timeout` when a cycle
+hits its deadline.
 
 #### Webapp
 
@@ -531,7 +542,8 @@ Multi-purpose debug page with:
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across the partitions of this worker.
     A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. See [Cross-Worker Trace](#cross-worker-trace).
 - **Database management** -- list this worker's own recorder files and the shared history folders (sealed files, archives, merge results) with event counts and sizes, download history files, merge several of them into one, and view per-file breakdown by event type. See [The Databases page](local-databases.md#the-databases-page).
-- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
+- **Live file download** -- `GET /api/v1/debug/download-live` answers a consistent snapshot of this worker's live recorder file: a copy made with the SQLite backup API on its own read-only connection, in rollback-journal format, so it opens on its own. The temp copy is removed at once. `404` in memory-only mode, `500` `{"error": "Snapshot failed: ..."}` when the copy fails. Behind `ui.auth_token` like the other debug routes.
+- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, nothing for peers to pull. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
 
@@ -1159,7 +1171,13 @@ What each mode searches:
 - **By label**: the current worker's live database only.
 
 No worker opens another worker's live database. Events of other workers
-come only from their sealed files.
+come from their sealed files, or from the workers themselves: the UI
+sends the trace, label-trace and databases requests to every worker of
+the cluster that is not offline, and lists the workers that did not
+answer as unreachable. Those reads are cross-origin. With `ui.auth_token`
+set, list the origin of every worker in `ui.allowed_ws_origins`, or only
+the serving worker answers (see
+[Cross-origin reads](security.md#cross-origin-reads)).
 
 Each returned event carries a `worker_name` field identifying which
 worker processed it. Labels are stored as JSON in the `labels` column

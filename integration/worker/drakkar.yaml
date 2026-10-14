@@ -370,8 +370,9 @@ ui:
 # The handler-facing key/value cache surfaced as `self.cache` on every
 # handler. Backed by an in-memory dict for hot reads and a per-worker
 # SQLite file (`<WORKER_ID>-cache.db`) for durability across restarts,
-# with a periodic peer-sync loop that pulls from other workers'
-# cache DBs for cross-worker visibility.
+# with a periodic cache exchange that pulls the cluster/global rows of
+# other workers over HTTP (GET /api/v1/peer/cache/changes) for
+# cross-worker visibility.
 #
 # This is completely separate from the `sinks.redis.hot_match_cache`
 # instance above — that is an *external* Redis service used by
@@ -386,9 +387,9 @@ cache:
   # stub (peek/get return None, set/delete silently discard) — handler
   # code runs unchanged.
   enabled: true
-  # The cache file lives in storage.dir (below). Keeping every worker's
-  # storage.dir on the one shared volume lets the peer-sync loop discover
-  # other workers' cache DBs.
+  # The cache file lives in storage.dir (below) and only this worker
+  # opens it. Peers find each other through the registry cards and pull
+  # rows over HTTP, so the cache does not need the shared volume.
   # Memory → SQLite flush cadence. Shorter = less data lost on a crash;
   # longer = fewer SQLite transactions per worker. 3s matches the
   # recorder's own flush interval for operational consistency.
@@ -410,9 +411,11 @@ storage:
   dir: "/shared"
 
 fleet:
-  # Cache exchange: pulls recent cluster/global rows from other workers,
-  # LWW-merges them into our local DB, and invalidates overlapping memory
-  # entries so the next read sees the newer value.
+  # Cache exchange: pulls new cluster/global rows from the other workers
+  # over HTTP, at the URL on their registry card (ui.host 0.0.0.0 above
+  # makes this worker reachable to them), LWW-merges them into our local
+  # DB, and invalidates overlapping memory entries so the next read sees
+  # the newer value.
   cache_exchange:
     enabled: true
     interval_seconds: 30.0

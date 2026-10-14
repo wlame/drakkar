@@ -2,8 +2,9 @@
 
 A framework-provided key/value cache accessible as `self.cache` on every
 handler. Memory-backed for hot reads, flushed to a per-worker SQLite file
-via a periodic write-behind loop, and optionally shared across workers via
-a periodic peer-sync loop.
+via a periodic write-behind loop, and optionally shared across workers by
+the [cache exchange](#cache-exchange): a periodic loop that pulls the
+`cluster` and `global` rows of other workers over HTTP.
 
 The cache is **opt-in** (`cache.enabled=false` by default). When disabled,
 `handler.cache` is a no-op stub so handler code can call `self.cache.set(...)`
@@ -17,7 +18,7 @@ The handler-facing surface is five methods:
 
 | Method | Sync? | What it does |
 |--------|-------|--------------|
-| `set(key, value, *, ttl=None, scope=CacheScope.LOCAL)` | sync | Store a value with optional TTL (seconds) and peer-sync scope. Memory write now; SQLite on the next flush cycle. |
+| `set(key, value, *, ttl=None, scope=CacheScope.LOCAL)` | sync | Store a value with optional TTL (seconds) and a scope that decides which peers may pull it. Memory write now; SQLite on the next flush cycle. |
 | `await get(key, *, as_type=None)` | **async** | Lookup with memory → DB fallback; `None` on miss. `as_type=SomeModel` revives the JSON via `model_validate()` for a typed return. |
 | `peek(key)` | sync | Memory-only probe, no DB fallback. TTL-aware, but a key that lives only on disk reports `None`. |
 | `delete(key)` | sync | Drop from memory, schedule the DB-row deletion for the next flush. Returns `True` iff the key was in memory. Local-only — peers keep their copy. |
@@ -58,8 +59,8 @@ Drakkar's cache gives you all of these for free, plus:
 - `arrange()` can short-circuit tasks with
   [`PrecomputedResult`](handler.md#precomputed-task-results-skip-the-subprocess)
   built from a cache hit — skipping the subprocess entirely.
-- Workers in the same cluster can share cached values via peer sync
-  (eventually consistent, LWW).
+- Workers can share cached values through the
+  [cache exchange](#cache-exchange) (eventually consistent, LWW).
 - Operators inspect cache contents in the operator UI and scrape size/hit
   metrics via Prometheus.
 
@@ -75,7 +76,7 @@ flowchart LR
     MEM -->|peek / get hit| R["return value"]
     H -->|get on miss| DB
     DB -->|warm| MEM
-    PEER[("peer-cache.db\nother workers")] -. sync every Ns .-> DB
+    PEER["peer workers\nGET /api/v1/peer/cache/changes"] -. pull every Ns .-> DB
     CLEAN["cleanup loop\nevery Ns"] -. delete expired .-> DB
 
     style H fill:#fef3c7,stroke:#d97706,color:#1a1a1a
@@ -95,7 +96,7 @@ flowchart LR
     MEM -->|peek / get hit| R["return value"]
     H -->|get on miss| DB
     DB -->|warm| MEM
-    PEER[("peer-cache.db\nother workers")] -. sync every Ns .-> DB
+    PEER["peer workers\nGET /api/v1/peer/cache/changes"] -. pull every Ns .-> DB
     CLEAN["cleanup loop\nevery Ns"] -. delete expired .-> DB
 
     style H fill:#422006,stroke:#f59e0b,color:#fef3c7
@@ -114,12 +115,13 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 | Loop | Default interval | What it does |
 |------|------------------|--------------|
 | `cache.flush` | `flush_interval_seconds` (3s) | Drains the pending `_dirty` map to SQLite via `UPSERT` / `DELETE` in one transaction |
-| `cache.sync` | `fleet.cache_exchange.interval_seconds` (30s) | Pulls recent rows from peer workers' `-cache.db` files, LWW-merges into local DB |
+| `cache.sync` | `fleet.cache_exchange.interval_seconds` (30s) | Pulls new `cluster`/`global` rows from peer workers over HTTP and LWW-merges them into the local DB. See [Cache exchange](#cache-exchange) |
 | `cache.cleanup` | `cleanup_interval_seconds` (60s) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
 
 A reader aiosqlite connection is opened alongside the writer so `get()`
 DB-fallback queries never queue behind a flush/sync/cleanup commit. WAL
 mode lets the reader see consistent snapshots during concurrent writes.
+The same reader serves the pages that peers pull from this worker.
 
 ---
 
@@ -139,7 +141,7 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
             # Fast path: synchronous memory peek (no DB, no I/O)
             cached = self.cache.peek(cache_key)
             if cached is None:
-                # Slower path: memory miss, check SQLite (local + peer-synced)
+                # Slower path: memory miss, check SQLite (local + pulled from peers)
                 cached = await self.cache.get(cache_key)
 
             if cached is not None:
@@ -191,26 +193,127 @@ fleet:
   cache_exchange:
     enabled: true
     interval_seconds: 30.0
-    page_size: 500
-    timeout_seconds: 5.0
-    # Upper bound on a single sync cycle. When None (default), derived as
-    # interval_seconds * 0.9 so the next scheduled tick never overlaps the
-    # current one. Set an explicit value when peers live on slow storage
-    # (NFS, cross-region) and you want a tighter cap than the derived
-    # default — but stay strictly below interval_seconds (config load
-    # fails otherwise, so a misconfiguration surfaces at startup).
+    page_size: 500                # rows per page pulled from a peer, 1-1000
+    timeout_seconds: 5.0          # one request to a peer
+    max_concurrent_peers: 4       # peers pulled at the same time
+    # Upper bound on one exchange cycle. null (default) means
+    # interval_seconds * 0.9, so the next tick never overlaps the current
+    # one. An explicit value must stay strictly below interval_seconds
+    # (config load fails otherwise, so a misconfiguration surfaces at
+    # startup).
     cycle_deadline_seconds: null
 ```
 
-`cycle_deadline_seconds` caps each `cache.sync` cycle. When the deadline
-fires, `_sync_once` tears down the in-flight peer reads, ticks the
-unlabelled `cache_peer_sync_timeouts_total` counter, and raises
-`TimeoutError` so the periodic-task wrapper classifies the run as
-`status=error` — dashboards keyed on
-`drakkar_periodic_task_runs_total{status='error'}` pick up deadline breaches through
-the same alerting path as other failures. The periodic loop keeps
-running (the wrapper's default on-error behavior is to log + schedule
-the next tick), so a single deadline fire does not disable peer sync.
+---
+
+## Cache exchange
+
+Workers do not read each other's cache files. Each worker keeps its cache
+file private in its own `storage.dir`, and pulls the rows of other workers
+over HTTP. Every `fleet.cache_exchange.interval_seconds` (default 30) the
+`cache.sync` loop asks each peer worth a pull for the `cluster` and
+`global` rows that this peer originated, from
+`GET /api/v1/peer/cache/changes`. The wire format is specified in
+[Local Databases](local-databases.md#cache-exchange).
+
+Nothing on the message path waits for the exchange: sources, the executor,
+sinks and offset commits run the same with the exchange slow, failing or
+off.
+
+### Which peers are pulled
+
+The peers come from the [fleet registry](fleet.md) snapshot. In each cycle
+a peer is pulled only when all of these hold:
+
+- The registry lists it. A worker the registry does not list is never
+  pulled. With no registry (provider `none`, or the UI off) nothing is
+  pulled.
+- Its `online` is not `false`. `online: null` (liveness unknown) does not
+  stop a pull.
+- Its card `state` is not `starting`.
+- Its card carries `features.cache`. A worker puts it on its card only
+  while it serves the exchange: the cache, `storage.dir` and
+  `fleet.cache_exchange` are on. Cards of the `static` provider come from
+  the config and carry no `features` object at all: such a peer is pulled
+  every cycle, without the mark check below. A `static` peer with the
+  cache off answers 404 and backs off like any failing peer.
+- It is not backing off after failures (see
+  [Peer unreachable](#peer-unreachable)).
+- One of the scopes asked of it has a card mark past this worker's cursor
+  for it, so nothing is requested when nothing is new.
+
+The scopes asked of a peer depend on its cluster (`cluster_name` on its
+card): a peer of the same cluster is asked for `cluster` and `global`, any
+other peer for `global` only. `local` rows never leave a worker. See
+[Cross-cluster visibility](#cross-cluster-visibility).
+
+The card mark is `features.cache` on the peer's card: for each scope, the
+`(updated_at_ms, key)` of the newest row that peer originated. A worker
+raises its marks after each committed flush and publishes them with its
+next card heartbeat.
+
+### Paging and cursors
+
+A pull asks for pages of `fleet.cache_exchange.page_size` rows (default
+500, 1 to 1000) after a `(updated_at_ms, key)` cursor, until the peer
+answers `more: false`. A worker that restarts, or a peer with a large
+backlog, therefore catches up in one cycle, unless the cycle deadline
+cuts the pull; the next cycle continues from the cursor.
+
+- Each page is applied in one transaction with the
+  [LWW upsert](#consistency-model), and the memory entries of its keys are
+  dropped so the next `get()` reads the merged value. The commit, the
+  metrics and the memory step are protected from the cycle deadline as
+  one unit.
+- After a page is applied, the cursor moves to the page's last row. Rows
+  that share one `updated_at_ms` across a page boundary are neither lost
+  nor applied twice, because the cursor includes the key.
+- After a complete pull (`more: false`), the cursor moves up to the card
+  mark, so rows deleted or expired on the peer do not cause an empty pull
+  every cycle.
+- Cursors live in memory. A restarted worker pulls every peer from the
+  start once; LWW rejects the rows it already has.
+
+### Concurrency and the cycle deadline
+
+At most `fleet.cache_exchange.max_concurrent_peers` peers (default 4) are
+pulled at the same time; the others wait for a free slot. Each request
+has a connect timeout of 2 seconds and a total timeout of
+`fleet.cache_exchange.timeout_seconds` (default 5).
+
+The whole cycle ends at `fleet.cache_exchange.cycle_deadline_seconds`
+(default `0.9 x interval_seconds`). When the deadline fires, the worker
+cuts the peers that are still pulling or still waiting for a slot. A cut
+peer is **not** counted as a failure and does not back off; the pages it
+already applied keep their cursor. The worker counts the cut cycle in
+`drakkar_cache_peer_sync_timeouts_total`, logs
+`cache_peer_sync_cycle_timeout`, and the periodic-task wrapper records the
+run with `status=error`, so dashboards keyed on
+`drakkar_periodic_task_runs_total{status='error'}` see it. The loop keeps
+running: one deadline does not turn the exchange off.
+
+### What a worker accepts
+
+A worker applies only the rows that the peer itself originated
+(`origin_worker_id` equals the peer's name on its card) and that have a
+scope it asked for. Other rows are dropped, counted in
+`drakkar_cache_sync_errors_total{peer}`, and logged once per peer per
+cycle as `fleet_peer_rows_rejected` with the counts by reason (`scope`,
+`origin`). These answers fail the whole request as `bad_body`: one that
+is not the expected JSON shape, one larger than 64 MiB, and a page whose
+rows are not strictly after the cursor and in `(updated_at_ms, key)` order
+(a faulty peer cannot keep a pull looping). The timeout
+`fleet.cache_exchange.timeout_seconds` covers the whole request, the body
+included.
+
+Peer requests go to the URL on the peer's card (`ui.public_url`, else
+`http://<outbound ip>:<ui.port>/`). They ignore the proxy environment
+variables and do not follow redirects. So every worker must reach the
+UI port of its peers at that URL: across hosts, bind `ui.host` to an
+address peers can reach, or set `ui.public_url`.
+
+The serving route needs no token, even with `ui.auth_token` set; see
+[Security posture](security.md) for what that exposes.
 
 ---
 
@@ -306,10 +409,12 @@ flush. Returns `True` if the key was present in memory, `False` otherwise.
 
 !!! warning "Delete is local-only — use TTL for cross-worker invalidation"
     `delete(key)` removes the row from **this worker's** cache DB. Peers
-    that already synced the value keep their copy until it expires via
-    TTL or is overwritten. Worse, if a peer's copy has a newer
-    `updated_at_ms` than any local state, the next sync cycle may
-    **re-pull the deleted value back** (LWW will accept it).
+    that already pulled the value keep their copy until it expires via
+    TTL or is overwritten. Worse, the deleted key can **come back**:
+    when the worker that originated the key writes it again, or when
+    this worker restarts (its exchange cursors live in memory, so it
+    pulls every peer from the start once), the next pull brings the
+    peer's row back and LWW accepts it.
 
     For cross-worker invalidation, **use TTL** — set a short TTL when
     writing, or overwrite with a dummy/tombstone value. True delete
@@ -328,20 +433,20 @@ access). Does not consult the DB.
 class CacheScope(StrEnum):
     MEMORY = 'memory'     # this worker's memory only; never flushed to SQLite
     LOCAL = 'local'       # this worker only; peers never pull
-    CLUSTER = 'cluster'   # same-cluster peers pull via sync
-    GLOBAL = 'global'     # all peers (any cluster) pull via sync
+    CLUSTER = 'cluster'   # same-cluster peers pull it through the exchange
+    GLOBAL = 'global'     # all peers (any cluster) pull it through the exchange
 ```
 
 The scopes form a reach ladder — each step widens where the entry can
 travel: process memory → this worker's DB file → same-cluster peers →
 all peers.
 
-For the persisted scopes, scope filters peer sync's `SELECT` when
-another worker pulls from your cache DB:
+For the persisted scopes, the scope decides which peers may pull an entry
+from this worker through the [cache exchange](#cache-exchange):
 
-- Same cluster peer pulls `scope IN ('cluster', 'global')`
-- Different cluster peer pulls `scope = 'global'` only
-- `scope = 'local'` never leaves this worker
+- A peer of the same cluster pulls `cluster` and `global` entries.
+- A peer of another cluster pulls `global` entries only.
+- `local` entries never leave this worker.
 
 `MEMORY` entries never reach the DB at all. A `MEMORY` set stores the
 value in memory and records a **delete tombstone** for the key instead
@@ -377,9 +482,9 @@ writes without touching consumers.
 | "Do I need this value to survive a cluster-wide crash?" | **DB sink** (Postgres, Redis with persistence). Cache entries live in per-worker SQLite files with TTL retention — fine for optimization, not for durability-critical state. |
 | "Is recomputation cheap (< subprocess launch cost)?" | **Compute every time.** A 50us Python function is not worth caching. |
 | "Is recomputation expensive, and would it be OK to recompute on a cold cache?" | **Cache.** Cold start is bounded by whatever time it takes for reasonable cache population via normal traffic. |
-| "Do I need strict consistency across workers?" | **Not cache.** Cache is eventually consistent (peer sync lags + LWW + no tombstones). Use Redis / Postgres / a distributed consensus system. |
+| "Do I need strict consistency across workers?" | **Not cache.** Cache is eventually consistent (exchange lag + LWW + no tombstones). Use Redis / Postgres / a distributed consensus system. |
 | "Is the value small, JSON-serializable, and idempotent?" | **Cache fits well.** |
-| "Does the value contain secrets?" | **Not cache.** Cache DBs are downloadable from the UI (same as recorder DBs). No redaction layer applies to cache values. |
+| "Does the value contain secrets?" | **Not cache.** `cluster` and `global` values are served without a token to anyone who can reach the UI port, and the `/debug/cache` entries browser shows every persisted value. No redaction layer applies to cache values. |
 
 ---
 
@@ -394,9 +499,11 @@ preload** on startup — adding it would stall startup and race with
 normal traffic. This is deliberate (YAGNI: normal traffic warms the
 cache within one flush cycle).
 
-The peer-sync cursor resets to 0 on restart, so the worker also
-re-pulls everything from peers once. Bounded by TTL cleanup and LWW
-rejection — no runaway work.
+The exchange cursors live in memory, so a restarted worker also pulls
+every peer from the start once. It pages until each peer answers
+`more: false`, so it catches up in one cycle unless the cycle deadline
+cuts it. Expired rows are not served, and LWW rejects rows that are not
+newer — no runaway work.
 
 ### TTL vs. delete
 
@@ -404,39 +511,51 @@ rejection — no runaway work.
 writing; never call `delete` unless you mean "remove this from my own
 worker's memory, and peers may still have it."
 
-Reasoning: peers who synced a value before a `delete` keep their copy.
-If any peer has `updated_at_ms` newer than your "deleted" state, the
-next sync may re-pull the value back into your DB via LWW. TTL
-naturally expires everywhere (every worker runs its own cleanup loop).
+Reasoning: peers who pulled a value before a `delete` keep their copy.
+When the originating worker writes the key again, or when your worker
+restarts and pulls from the start, the value comes back into your DB via
+LWW. TTL naturally expires everywhere (every worker runs its own cleanup
+loop, and a peer never serves an expired row).
 
 ### Peer unreachable
 
-The sync loop iterates peers one at a time, each wrapped in
-`try/except`. A failed peer (connection refused, corrupt DB, missing
-file, read timeout) logs a warning, increments
-`drakkar_cache_sync_errors_total{peer=...}`, and the loop continues
-to the next peer. The worker keeps running. One bad peer cannot break
-the whole sync cycle.
+Each peer is pulled in its own task, so one bad peer cannot break the
+cycle, and the worker keeps running. A request fails on a timeout, a
+refused connection or another transport error, any status other than
+`200`, or an answer that is not the expected JSON shape. A failed
+request:
 
-The peer's cursor is unaffected by other peers' state — each peer has
-its own `_peer_cursors[peer_name]` entry. Recovery is automatic on the
-next sync tick.
+- counts one error in `drakkar_cache_sync_errors_total{peer}` and one
+  request in `drakkar_fleet_peer_requests_total{endpoint="cache_changes", outcome}`
+  (`timeout`, `transport_error`, `http_error` or `bad_body`);
+- makes the worker skip that peer for 1, 2, 4, 8, then 16 cycles (16 for
+  every further failure in a row); one successful pull resets it;
+- logs `fleet_peer_request_failed` (warning) once at the start of a run of
+  failures, and `fleet_peer_backoff` (info) at each failure, with the
+  cycles to skip.
+
+A page that arrives but cannot be applied to the local file logs
+`cache_peer_sync_failed` and counts one error, but does not back the peer
+off: the fault is local. Each peer has its own cursor, and pages applied
+before a failure keep it, so the next pull continues from there.
 
 ### Cross-cluster visibility
 
-Peer sync takes each peer's cluster from the [fleet registry](fleet.md).
-Workers are grouped by `cluster_name` (from `DrakkarConfig.cluster_name`
-or `cluster_name_env`). A peer the registry does not list, or every peer
-when the registry is off, counts as an unknown cluster.
+The exchange takes each peer's cluster from its card in the
+[fleet registry](fleet.md). Workers are grouped by `cluster_name` (from
+`DrakkarConfig.cluster_name` or `cluster_name_env`).
 
-A peer's scope filter depends on cluster membership:
+The scopes asked of a peer depend on cluster membership:
 
-- Peer in same cluster as self → pulls `scope IN ('cluster', 'global')`
-- Peer in different cluster → pulls `scope = 'global'` only
+- Peer in same cluster as self → `cluster` and `global`
+- Peer in different cluster → `global` only
 
 Unclustered workers (`cluster_name=''`) are treated as a single
 implicit cluster — they pull cluster-scoped entries from other
 unclustered workers, and global-scoped entries from anyone.
+
+A worker the registry does not list is never pulled, whatever its
+cluster. With no registry, nothing is pulled.
 
 ### LRU eviction
 
@@ -479,7 +598,7 @@ consequences, all by design:
 
 Re-scoping a key **to** `MEMORY` purges its disk row on the next flush
 (the tombstone described in [CacheScope](#cachescope)); re-scoping back
-to a persisted scope resumes normal flushing. Peers that synced a
+to a persisted scope resumes normal flushing. Peers that pulled a
 wider-scoped value before the re-scope keep their copy until its TTL
 expires — the same local-only limitation as `delete`.
 
@@ -488,8 +607,11 @@ expires — the same local-only limitation as `delete`.
 The recorder redacts secrets before writing `worker_config`
 ([see the warning in Observability](observability.md#worker_config-autodiscovery)).
 The cache does **not** apply such redaction: cache values are written
-verbatim. Do not put secrets in the cache if the DB file is
-downloadable through the UI in your deployment.
+verbatim. The `/debug/cache` entries browser shows every persisted value
+(behind `ui.auth_token` when one is set). `cluster` and `global` values are
+also served by `GET /api/v1/peer/cache/changes`, which needs no token, to
+anyone who can reach the UI port of a worker that serves the exchange. Do
+not put secrets in the cache.
 
 ### Delete is local-only (the main sharp edge)
 
@@ -507,21 +629,36 @@ See [`delete()` above](#deletekey) for the full story.
   process-local: no durability window, no peer visibility, no LWW —
   they live and die with the worker process. Everything below concerns
   the persisted scopes.
-- **Eventually consistent** across workers. A `set()` on worker A is
-  visible on worker B at most ~(flush_interval + sync_interval) later
-  (default: 3s + 30s = 33s).
+- **Eventually consistent** across workers. A `set()` on worker A
+  reaches worker B in four steps: A flushes it, A publishes its new card
+  mark with the next registry heartbeat, B refreshes its registry
+  snapshot, and B runs its next exchange cycle.
 - **Worst-case staleness**, concretely: local durability is bounded by
   `flush_interval_seconds` (default 3s); cross-worker freshness is
-  bounded by `flush_interval_seconds + fleet.cache_exchange.interval_seconds`
-  (default 3s + 30s = 33s). Size intervals based on your tolerance —
-  halving both to 1.5s/15s trades more SQLite + peer-disk traffic for
-  tighter staleness. The cache never promises stricter consistency than
-  those intervals; anything that needs real consistency should use a
-  real DB sink, not this cache.
+  bounded by `flush_interval_seconds + fleet.registry.heartbeat_seconds +
+  fleet.registry.refresh_seconds + fleet.cache_exchange.interval_seconds`
+  (default 3s + 10s + 15s + 30s = 58s), when the pull succeeds. Size
+  intervals based on your tolerance — shorter intervals trade more SQLite
+  writes, card writes and peer requests for tighter staleness. The cache
+  never promises stricter consistency than those intervals; anything
+  that needs real consistency should use a real DB sink, not this cache.
 - **LWW (last-write-wins)** by `updated_at_ms`, with lexicographically
   smaller `origin_worker_id` as the tiebreaker for equal timestamps.
-  Identical SQL (`LWW_UPSERT_SQL`) is used by local flushes and
-  peer-sync merges, so local and cross-worker paths cannot diverge.
+  Identical SQL (`LWW_UPSERT_SQL`) is used by local flushes and by the
+  pages pulled from peers, so local and cross-worker paths cannot
+  diverge.
+- **No relays.** A worker serves only the rows it originated. A worker
+  that starts after another worker has gone never gets the gone worker's
+  rows, even when a third worker still holds them.
+- **Expiry uses the serving worker's clock.** A peer serves a row while
+  the row is unexpired on the peer's own clock.
+- **A late flush can be missed.** The cursor moves by
+  `(updated_at_ms, key)`. When a peer flushes a row after this worker has
+  already pulled a row with a higher `(updated_at_ms, key)` from that
+  peer, this worker never pulls the late row.
+  `set()` takes its timestamp when it is called, so a `set()` from a
+  [`handler.offload()`](offload.md) thread can be flushed after a newer
+  `set()` from the event loop and produce such a row.
 - **No tombstones in v1.** `delete` is local-only. Use TTL.
 - **Durability window** = `flush_interval_seconds` (default 3s). A
   worker crash between `set()` and the next flush loses the
@@ -597,7 +734,10 @@ handler asked of the cache without disturbing its state.
 - [Observability](observability.md) — Prometheus metrics, operator UI details
 - [Performance](performance.md) — when caching helps, the `PrecomputedResult`
   fast path
-- [Fleet registry](fleet.md) — where peer sync learns each peer's
-  cluster
+- [Fleet registry](fleet.md) — where the cache exchange finds its peers:
+  their URL, cluster, state, liveness and card marks
+- [Local Databases](local-databases.md#cache-exchange) — the cache file
+  and the wire format of the exchange
+- [Security posture](security.md) — what the public peer route exposes
 - [Integration Tests](integration.md) — the docker-compose demo exercises
-  cache fast-path, peer sync, and disk persistence
+  cache fast-path, the cache exchange, and disk persistence

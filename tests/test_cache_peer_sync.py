@@ -31,7 +31,6 @@ from typing import Any
 import aiosqlite
 import pytest
 
-from drakkar import cache as cache_module
 from drakkar import metrics
 from drakkar.cache import (
     Cache,
@@ -39,7 +38,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import set_peer_cluster, split_cache_overrides, wait_for
+from tests.conftest import FakePeers, set_peer_cluster, split_cache_overrides, wait_for
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
 
@@ -79,37 +78,15 @@ async def _seed_peer_cache_db(
     peer_name: str,
     rows: list[dict[str, Any]],
 ) -> Path:
-    """Create a peer ``-cache.db.actual`` + symlink with the given rows.
+    """Seed rows into a peer served in this process (``tests.conftest.FakePeers``).
 
-    Mirrors the helper in ``test_cache_sync_pull`` so the two test files
-    stay drop-in compatible — no production behavior is shared between
-    them other than the engine itself.
+    The engine's fake fleet lives in ``<storage.dir>/peers`` (here
+    ``tmp_path``); ``set_peer_cluster`` lists the peer. Row defaults: global
+    scope, no TTL, timestamps 1000, origin the peer itself.
     """
-    actual = tmp_path / f'{peer_name}-cache.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        await db.executescript(cache_module.SCHEMA_CACHE_ENTRIES)
-        for r in rows:
-            value = r.get('value', '"v"')
-            size = r.get('size_bytes', len(value.encode('utf-8')))
-            await db.execute(
-                'INSERT INTO cache_entries '
-                '(key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
-                ' expires_at_ms, origin_worker_id) VALUES (?,?,?,?,?,?,?,?)',
-                (
-                    r['key'],
-                    r.get('scope', CacheScope.GLOBAL.value),
-                    value,
-                    size,
-                    r.get('created_at_ms', 1000),
-                    r.get('updated_at_ms', 1000),
-                    r.get('expires_at_ms'),
-                    r.get('origin_worker_id', peer_name),
-                ),
-            )
-        await db.commit()
-    link = tmp_path / f'{peer_name}-cache.db'
-    link.symlink_to(actual.name)
-    return actual
+    peers = FakePeers(tmp_path / 'peers')
+    peers.seed(peer_name, rows)
+    return peers.db_path(peer_name)
 
 
 # --- deadline-firing behavior -----------------------------------------------
@@ -228,10 +205,8 @@ async def test_peer_sync_cycle_normal_does_not_increment_counter(tmp_path):
 
         # No timeout tick.
         assert after == before
-        # Normal sync returned rows from the peer.
-        assert 'peer1' in result
-        keys = {row[0] for row in result['peer1']}
-        assert keys == {'k1', 'k2'}
+        # Normal sync applied both rows of the peer (the result counts them).
+        assert result == {'peer1': 2}
     finally:
         await engine.stop()
 
@@ -304,9 +279,7 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
         # No new timeout — cycle ran normally.
         assert after_second == before_second
         # And we got the peer's row.
-        assert 'peer1' in result
-        keys = {row[0] for row in result['peer1']}
-        assert keys == {'k1'}
+        assert result == {'peer1': 1}
     finally:
         await engine.stop()
 
@@ -470,7 +443,7 @@ async def test_concurrent_sync_once_smoke(tmp_path):
         # Final DB state: every peer row + the one local row. No
         # duplicates (UPSERT via LWW guarantees one row per key even
         # when both sync cycles UPSERT the same peer rows).
-        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db')) as db:
             cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
             rows = await cur.fetchall()
             await cur.close()
@@ -492,12 +465,12 @@ async def test_concurrent_sync_across_cycles(tmp_path):
     regresses from one cycle to the next, even when two cycles interleave
     reads/writes of the cursor map.
 
-    The strict monotonicity contract (``_advance_cursor``: full-batch →
-    advance to last row's ``updated_at_ms``, partial-batch →
-    ``max(last_row_ts, cursor_ms)``) must survive concurrent invocation.
-    A regression where two overlapping cycles both read the same old
-    cursor value and one writes back a smaller value would skip rows on
-    the next cycle — hard to spot in production but trivially caught here.
+    The cursor (the ``(updated_at_ms, key)`` of the last row pulled, or
+    the card's mark after a complete pull) must stay monotonic under
+    concurrent invocation. A regression where two overlapping cycles both
+    read the same old cursor value and one writes back a smaller value
+    would re-pull rows — hard to spot in production but trivially caught
+    here.
     """
     # Use batch_size=2 so a peer with 4 rows takes multiple cycles to
     # fully drain. The early cycles return full batches (cursor advances
@@ -535,7 +508,7 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         # monotonicity. Before the first cycle: no cursor at all.
         assert 'peer1' not in engine._peer_cursors  # type: ignore[reportPrivateUsage]
 
-        cursor_history: list[int] = []
+        cursor_history: list[tuple[int, str]] = []
 
         # Run 3 concurrent cycles. Each cycle calls ``_sync_once`` and
         # independently advances the cursor. After gather returns,
@@ -565,7 +538,7 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         # more on cycle 2, partial/zero pull on cycle 3). Concurrent
         # cycles within a round may all race to the same cursor value,
         # but the UPSERT path is idempotent so the outcome is the same.
-        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db')) as db:
             cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
             rows = await cur.fetchall()
             await cur.close()
@@ -579,7 +552,7 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         # peer is fully drained. If a race had advanced the cursor past
         # 1003 (impossible given strict monotonicity in the SQL) or
         # rolled it back below, this catches it.
-        assert cursor_history[-1] == 1003, f'cursor must settle at 1003 after full drain; history: {cursor_history}'
+        assert cursor_history[-1] == (1003, 'k4'), f'cursor must settle on the last row; history: {cursor_history}'
     finally:
         await engine.stop()
 
@@ -748,7 +721,7 @@ async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
         # Also assert the DB got the new value (commit ran before sleep,
         # so this should always hold — sanity check that the shield
         # protected the commit itself).
-        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db')) as db:
             cur = await db.execute('SELECT value FROM cache_entries WHERE key = ?', ('shared',))
             row = await cur.fetchone()
             await cur.close()
@@ -807,8 +780,7 @@ async def _orphan_peer_commit(engine: CacheEngine, *, commit_sleep: float) -> tu
         )
     # The deadline fired while the shielded commit was still sleeping —
     # the engine must be holding a live reference to the orphan.
-    pending = engine._pending_peer_commit
-    assert pending is not None and not pending.done(), 'orphaned commit task must stay referenced'
+    assert any(not task.done() for task in engine._pending_peer_commits), 'orphaned commit task must stay referenced'
     return row, original_commit
 
 
@@ -829,12 +801,12 @@ async def test_stop_awaits_orphaned_peer_commit(tmp_path):
     # then drain + close without touching a closed connection.
     await engine.stop()
 
-    assert engine._pending_peer_commit is None, 'stop() must consume the orphan reference'
+    assert not engine._pending_peer_commits, 'stop() must consume the orphan reference'
     _ = original_commit  # writer is closed; nothing to restore
 
     # The orphaned commit's row actually landed before the writer closed.
     async with (
-        aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db,
+        aiosqlite.connect(str(tmp_path / 'me-cache.db')) as db,
         db.execute('SELECT value FROM cache_entries WHERE key = ?', ('orphaned',)) as cur,
     ):
         row = await cur.fetchone()
@@ -860,11 +832,50 @@ async def test_next_sync_cycle_awaits_orphaned_peer_commit(tmp_path):
         # it must first wait the orphan out and clear the reference.
         await engine._sync_once()
 
-        pending = engine._pending_peer_commit
-        assert pending is None, 'next sync cycle must await and clear the orphaned commit'
+        assert not engine._pending_peer_commits, 'next sync cycle must await and clear the orphaned commit'
 
         # Restore the real commit so stop()'s drain is not slowed down.
         assert engine._writer_db is not None
+        engine._writer_db.commit = original_commit  # type: ignore[method-assign,assignment]
+    finally:
+        await engine.stop()
+
+
+async def test_every_commit_of_parallel_pulls_stays_tracked(tmp_path):
+    """Pulls run in parallel: a fast peer's finished commit must not drop the
+    tracking of a slow peer's commit that its cancelled awaiter left running;
+    the next cycle waits for it."""
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0)},
+    )
+    try:
+        assert engine._writer_db is not None
+        original_commit = engine._writer_db.commit
+        calls = 0
+
+        async def second_commit_is_slow(*args: Any, **kwargs: Any):
+            nonlocal calls
+            calls += 1
+            await original_commit(*args, **kwargs)
+            if calls == 2:
+                await asyncio.sleep(0.3)
+
+        engine._writer_db.commit = second_commit_is_slow  # type: ignore[method-assign,assignment]
+        fast = engine._apply_peer_rows(peer_name='peer-a', rows=[_make_peer_row('a', '"a"', 9_999_999_999)])
+        slow = asyncio.wait_for(
+            engine._apply_peer_rows(peer_name='peer-b', rows=[_make_peer_row('b', '"b"', 9_999_999_999)]),
+            timeout=0.1,
+        )
+        outcomes = await asyncio.gather(fast, slow, return_exceptions=True)
+        assert outcomes[0] is None and isinstance(outcomes[1], TimeoutError)
+
+        await engine._sync_once()
+
+        commits = [task for task in asyncio.all_tasks() if task.get_name() == 'cache.peer_commit']
+        assert all(task.done() for task in commits), 'the next cycle must wait for every running peer commit'
         engine._writer_db.commit = original_commit  # type: ignore[method-assign,assignment]
     finally:
         await engine.stop()

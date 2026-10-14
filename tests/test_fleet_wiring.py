@@ -15,7 +15,8 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
-from tests.conftest import wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
+from tests.fleet_fakes import MemoryRegistry, MemoryStore
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -104,7 +105,7 @@ async def test_the_static_provider_gets_the_configured_peers(tmp_path):
     await app._fleet.stop()
 
     assert isinstance(app.fleet._provider, StaticRegistry)
-    assert app.fleet.peer_cluster('w-2') == 'search'
+    assert [(view.card['worker'], view.card['cluster']) for view in app.fleet.peer_views()] == [('w-2', 'search')]
 
 
 async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
@@ -274,7 +275,7 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
 
     app._fleet.stop = recorded_stop
     app._lifecycle._handle_signal()
-    await asyncio.wait_for(run, timeout=5)
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
     assert provider.states[0] == 'starting'
     assert provider.states[-1] == 'draining'
@@ -285,7 +286,7 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     assert order.index('recorder.stop') < order.index('fleet.stop') < order.index('ui_server.stop')
 
 
-async def test_the_cache_engine_asks_the_registry_for_peer_clusters(tmp_path, monkeypatch):
+async def test_the_cache_engine_reads_the_registrys_peer_views(tmp_path, monkeypatch):
     provider = StaticRegistry([{'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.2:8080/'}])
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: provider)
     app._config.cache.enabled = True
@@ -293,12 +294,25 @@ async def test_the_cache_engine_asks_the_registry_for_peer_clusters(tmp_path, mo
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
     await wait_for(lambda: app.fleet.snapshot().refreshed_at is not None)
-    lookup = app.cache_engine._peer_cluster
+    views = app.cache_engine._peer_views()
     app._lifecycle._handle_signal()
-    await asyncio.wait_for(run, timeout=5)
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
-    assert lookup('w-2') == 'search'
-    assert lookup('w-9') is None
+    assert [(view.card['worker'], view.card['cluster']) for view in views] == [('w-2', 'search')]
+
+
+async def test_the_card_carries_the_cache_marks_once_the_cache_engine_runs(tmp_path, monkeypatch):
+    store = MemoryStore()
+    app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: MemoryRegistry(store))
+    app._config.cache.enabled = True
+
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    # The first card can go out before the cache engine starts; a later
+    # publish (the running state) carries the features.
+    await wait_for(lambda: store.cards.get('w-1', ({},))[0].get('features') == {'cache': {}})
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
 
 class _BlockedRegistry:
@@ -330,9 +344,9 @@ async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypa
     app._config.fleet.registry.timeout_seconds = 0.05
 
     run = asyncio.create_task(app._lifecycle._async_run())
-    await asyncio.wait_for(_wait_until(lambda: app.is_ready), timeout=5)
+    await asyncio.wait_for(_wait_until(lambda: app.is_ready), timeout=WAIT_FOR_TIMEOUT_SECONDS)
     app._lifecycle._handle_signal()
-    await asyncio.wait_for(run, timeout=5)
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
     assert source.calls[:3] == ['bind', 'start', 'run']
     assert 'stop' in source.calls

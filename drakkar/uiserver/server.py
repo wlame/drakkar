@@ -58,6 +58,7 @@ from drakkar.uihost import ResolvedBundle
 # Re-export the helpers here so test imports and patches like
 # ``drakkar.uiserver.server.hook_flags`` keep working; ``noqa: F401`` keeps
 # the re-exports visible without tripping ruff's unused-import check.
+from drakkar.uiserver.cors import install_fanout_cors
 from drakkar.uiserver.server_helpers import (
     hook_flags,  # noqa: F401  (re-exported for tests)
     origin_allowed,  # noqa: F401  (re-exported for tests)
@@ -522,10 +523,6 @@ class UIDeps:
         return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
 
 
-# Legacy JSON API paths that live outside the ``/api/`` namespace but still
-# get a versioned alias (contract v1). Everything under ``/api/`` maps by the
-# strip-``/api``-prefix rule in ``_v1_alias_path``; this table carries the
-# irregular ones.
 def create_ui_app(
     config: UIConfig,
     recorder: EventRecorder,
@@ -565,6 +562,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
     from drakkar.uiserver.routes_pages import create_pages_router
+    from drakkar.uiserver.routes_peer import create_peer_router
     from drakkar.uiserver.routes_renderers import create_renderers_router
     from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
@@ -603,6 +601,10 @@ def create_ui_app(
                 )
         return await call_next(request)
 
+    # The browser fan-out reads three debug paths cross-origin; their
+    # preflight must answer before auth (it carries no token).
+    install_fanout_cors(app, config)
+
     if ui_source is None:
         # Derived, not defaulted: identity must never report a served bundle
         # ('release') next to a null ui_version. Deriving both from ui_root
@@ -637,6 +639,7 @@ def create_ui_app(
         create_uipages_router(deps),
         create_renderers_router(deps),
         create_openapi_router(deps),
+        create_peer_router(deps),
     )
     for router in routers:
         app.include_router(router)

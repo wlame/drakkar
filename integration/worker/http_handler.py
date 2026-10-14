@@ -130,8 +130,8 @@ class HttpSearchHandler(
         A consequence worth knowing when reading the harness: because the
         hook does not run on the live HTTP path, this worker never writes
         to the framework cache itself. Its precomputed fast-track is
-        primed only by rows peer-sync pulls from the Kafka workers' cache
-        files.
+        primed only by rows the cache exchange pulls from the Kafka
+        workers over HTTP.
 
         The ``CollectResult`` is discarded either way: it targets
         Postgres, Mongo and Redis sinks this worker does not configure,

@@ -24,14 +24,14 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Recorder archiving | `history.archive.enabled` | **on** | Fold the sealed files of each cluster history folder into per-cluster `.db.gz` window archives; off = sealed files and merge results are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
-| Worker registry | `fleet.registry.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, peer clusters for the cache exchange; needs `ui.enabled` |
+| Worker registry | `fleet.registry.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `ui.enabled` |
 | Cross-worker fleet view | a `shared.dir` every worker mounts (or one shared `storage.dir`) | — | History trace over the cluster's sealed files, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
 | Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
 | Task cost & throughput | `throughput.cost_label` | **off** (empty) | Naming a numeric task label enables per-task speed and windowed throughput ([Throughput](throughput.md)) |
-| Cache exchange | `fleet.cache_exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
+| Cache exchange | `fleet.cache_exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence: each worker pulls the `cluster`/`global` rows of its registry peers over HTTP |
 | Kafka input source | `sources.kafka.enabled` | **off** | Consumer group, poll loop, `arrange()`, offset commits |
 | HTTP input source | `sources.http.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
 | Aligned startup | `sources.kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
@@ -87,15 +87,18 @@ the failure mode so you can decide what your deployment needs.
    folders are silent: each worker simply sees only itself. Set `ui.public_url` per worker so the card and
    cross-links carry a reachable address instead of the bind IP.
 6. **The cache engine needs `storage.dir` too.** The cache file lives
-   there; with `storage.dir` empty the cache runs memory-only (WARN
-   `cache_engine_disabled_no_storage_dir`) and the cache exchange turns
-   itself off.
-7. **Cache exchange takes clusters from the registry.** A worker learns
-   each peer's cluster from the [fleet registry](fleet.md); a peer the
-   registry does not list (or every peer, with the registry off) counts as
-   an unknown cluster, so only its `global` rows are pulled. Real
-   cross-worker exchange additionally needs the shared directory from
-   rule 5.
+   there, private to the worker; with `storage.dir` empty the cache runs
+   memory-only (WARN `cache_engine_disabled_no_storage_dir`) and the cache
+   exchange turns itself off.
+7. **Cache exchange needs the registry and reachable UI ports.** A worker
+   pulls only the peers that the [fleet registry](fleet.md) lists, at the
+   URL on each card, so it needs the registry of rule 5 (`ui.enabled` and
+   a card folder all workers see). A peer the registry does not list is
+   never pulled; with the registry off nothing is pulled. `static` peers
+   (their cards carry no cache marks) are pulled every cycle. Every worker must
+   also reach the UI port of its peers: across hosts, bind `ui.host` to a
+   reachable address or set `ui.public_url`. The cache file itself is
+   never shared. **Silent** when unmet: the cache simply stays local.
 8. **The webapp needs handler support — checked at construction.** A
    worker with `sources.http.enabled` and a handler that lacks the HTTP
    hooks (`arrange_http_request` + `on_http_request_complete` plus the
@@ -194,16 +197,19 @@ Workers discover each other, the UI's worker switcher fills in, and
 tracing follows a message across workers. Any worker that implements the
 on-disk format can share the directory ([spec](local-databases.md)).
 
-### Tier 4 — handler cache + peer sync
+### Tier 4 — handler cache + cache exchange
 
 ```yaml
 cache:
   enabled: true
-  # the cache file lives in storage.dir — already shared from Tier 3
+  # the cache file lives in storage.dir, private to this worker
 ```
 
-`self.cache` / `h.Cache()` becomes persistent and (thanks to the Tier 3
-shared directory) converges across the fleet via LWW peer sync.
+`self.cache` becomes persistent and converges across the fleet: each
+worker pulls the `cluster` and `global` rows of the peers it finds through
+the Tier 3 registry, over HTTP, and merges them by last-write-wins (see
+[Cache exchange](cache.md#cache-exchange)). The workers must reach each
+other's UI port.
 
 ### Tier 5 — synchronous HTTP ingress
 
@@ -228,8 +234,12 @@ config and the worker serves HTTP only.
   port.
 - More than one worker? → one shared folder on every worker (rule 5), `ui.public_url` set per worker.
 - Cache not syncing? → check that the peers appear in the workers list
-  (rule 7), the shared directory (rule 6), and that both workers are in
-  the same cluster for `cluster`-scoped keys.
+  (rule 7), that `drakkar_fleet_peer_requests_total` shows `ok` requests
+  (otherwise the UI ports are not reachable at the card URLs), and that
+  both workers are in the same cluster for `cluster`-scoped keys.
+- Token set and the UI shows other workers as unreachable? → list every
+  worker origin in `ui.allowed_ws_origins`
+  ([Cross-origin reads](security.md#cross-origin-reads)).
 - Webapp 500s at the first request? → it can't: the worker rejects a
   hook-less handler at startup (rule 8).
 - Worker will not start with `no input source enabled`? → turn on

@@ -94,7 +94,7 @@ async def test_flush_failure_rolls_back_partial_batch(tmp_path):
         # transaction. Cleanup is a natural "next unrelated commit".
         await engine._cleanup_once()
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert await _db_keys(db_path) == set(), 'rolled-back flush batch must not reach the DB'
 
         # The failed ops were restored to the dirty map — a healthy flush
@@ -148,7 +148,7 @@ async def test_peer_commit_waits_for_writer_lock(tmp_path):
             assert not commit.done(), 'peer commit must block until the writer lock is free'
         await asyncio.wait_for(commit, timeout=2.0)
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert await _db_keys(db_path) == {'peer-key'}
     finally:
         await engine.stop()
@@ -188,7 +188,7 @@ async def test_flush_holds_writer_lock_against_concurrent_cleanup(tmp_path):
         await asyncio.wait_for(cleanup, timeout=2.0)
         engine._writer_db.commit = original_commit  # type: ignore[method-assign,assignment]
 
-        db_path = tmp_path / 'w1-cache.db.actual'
+        db_path = tmp_path / 'w1-cache.db'
         assert await _db_keys(db_path) == {'slow-key'}
     finally:
         await engine.stop()

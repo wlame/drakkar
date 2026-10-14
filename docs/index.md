@@ -105,7 +105,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- failed deliveries route to a DLQ topic with error metadata
 - **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
-- **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers
+- **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + an eventually-consistent exchange between workers over HTTP
 - **[Operator UI](observability.md#operator-ui)** -- the versioned [drakkar-ui](https://github.com/wlame/drakkar-ui) SPA (fetched from GitHub Releases at startup, one cache shared by co-located workers) with executor timeline, partition lag, message tracing. There is no HTML fallback in the package: with nothing cached the worker runs API-only and page requests answer 503
 - **[UI customization](ui-enrichment.md)** -- a handler-defined [Message Probe tab](probe-user-details.md), [links/badges/formats/detail panels](ui-enrichment.md) on any probe field or table column, and [declared dashboard pages](ui-pages.md) -- all opt-in, no client-side code
 - **[Timeline tuning](ui-timeline.md)** -- configurable history depth, first-match-wins bar color rules from task labels/fields, and label roles (tag, caption, highlight, filter, marker) for the Live timeline
@@ -223,7 +223,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | Page | Contents |
 |------|----------|
 | [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, lifecycle hooks |
-| [Cache](cache.md) | `self.cache` API, scope rules, peer sync, LWW semantics, "delete is local-only" sharp edge |
+| [Cache](cache.md) | `self.cache` API, scope rules, the cache exchange, LWW semantics, "delete is local-only" sharp edge |
 | [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
 | [Annotations](annotations.md) | `self.annotate(...)` — handler-authored diagnostics surfaced per message/task/window in the UI |
 | [Probe User Details](probe-user-details.md) | `probe_details_model` — a handler-defined tab in the Message Probe, `probe_field()` views and write caps |
@@ -247,7 +247,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Throughput](throughput.md) | Opt-in task cost and speed via the `cost_label` role, plus windowed worker throughput |
 | [Offload](offload.md) | `await self.offload(fn, ...)` — CPU-bound hook work on a thread pool instead of freezing the event loop |
 | [Threads & Pools](threads.md) | Map of the worker's execution mechanisms — event loop, subprocess pool, two thread pools — and their sizing rules |
-| [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, peer sync, mixed-fleet support |
+| [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, the cache exchange wire format, mixed-fleet support |
 | [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
 | [Config Calculator](calculator.md) | Interactive calculator for recommended config values |
 | [Integration Tests](integration.md) | Docker Compose test environment, chaos test scenario |

@@ -35,7 +35,7 @@ Drakkar is narrower and more opinionated than any of them — the sweet spot is 
 
 | Tool | Input sources | Work stage | Python-native? | Notes |
 |------|--------------|-----------|----------------|-------|
-| **Drakkar** | Kafka only | **Subprocess pool** (external binary via stdin/stdout) | Yes (3.13+) | Built-in DLQ, circuit breakers, flight recorder, peer-sync cache, live operator UI. Offsets commit per-partition after *all* sinks ack. |
+| **Drakkar** | Kafka only | **Subprocess pool** (external binary via stdin/stdout) | Yes (3.13+) | Built-in DLQ, circuit breakers, flight recorder, a cache shared across workers, live operator UI. Offsets commit per-partition after *all* sinks ack. |
 | **Celery** | Broker-agnostic (Redis, RabbitMQ, SQS, Kafka via plugin) | In-process Python function | Yes | General task queue; no native Kafka partition ordering; one broker at a time per worker. |
 | **Faust** | Kafka only | In-process async Python (streams & tables) | Yes | Stream-processing DSL (agents, tables, windows). No first-class subprocess executor; you bring your own. |
 | **Kafka Streams** | Kafka only | In-process JVM code | No (Java/Scala) | Stateful stream processor with changelog-backed stores. No Python. |
@@ -136,17 +136,17 @@ Yes. An `ExecutorTask` can list multiple `source_offsets`; it only completes the
 
 ### What does the built-in cache give me?
 
-Framework-provided `self.cache` on every handler: in-memory LRU + write-behind per-worker SQLite + optional cross-worker peer sync with last-write-wins. Survives restarts (per-worker persistence), optionally shares across the fleet. See [Cache — What it solves](cache.md#what-it-solves).
+Framework-provided `self.cache` on every handler: in-memory LRU + write-behind per-worker SQLite + an optional cross-worker cache exchange with last-write-wins. Survives restarts (per-worker persistence), optionally shares across the fleet. See [Cache — What it solves](cache.md#what-it-solves).
 
 ### How do workers discover each other's caches?
 
-Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`storage.dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
+Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its UI server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `fleet.cache_exchange.interval_seconds` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
 
-What happens if the filesystem isn't shared: peer sync finds zero peers and the cache operates single-worker. No error, no warning — it just behaves like a local cache. If you *want* cluster-wide cache, mount a shared volume (NFS, EFS, hostPath in k8s) and point every worker's `storage.dir` at it.
+What happens without a registry (provider `none`, or the UI off): nothing is pulled and the cache operates single-worker. With the `static` provider the listed peers are pulled every cycle: their cards carry no marks to skip a pull with. No error — it just behaves like a local cache. If you *want* a cluster-wide cache, give the workers one card folder (the default `filesystem` provider in `shared.dir`) and make sure every worker can reach the UI port of the others at the URL on their cards.
 
-Fallbacks when a peer DB is unreachable: the sync loop wraps each peer in `try/except`, logs a warning, increments `drakkar_cache_sync_errors_total{peer=...}`, and continues to the next peer. Broken symlinks (peer's DB file gone) are silently skipped — the peer may come back later with a fresh file. One bad peer cannot break the whole sync cycle. See [Cache — Peer unreachable](cache.md#peer-unreachable).
+Fallbacks when a peer is unreachable: each peer is pulled in its own task. A failed request (timeout, refused connection, a status other than 200, a malformed answer) increments `drakkar_cache_sync_errors_total{peer=...}`, logs `fleet_peer_request_failed` once, and backs that peer off for 1, 2, 4, 8, then 16 cycles; one success resets it. One bad peer cannot break the whole cycle. See [Cache — Peer unreachable](cache.md#peer-unreachable).
 
-Trust boundary: the shared `storage.dir` is shared-trust — anyone who can write to it can inject cache entries that peers will read. There is no per-write signature or auth. Restrict directory permissions to the worker user (see [Why are peer workers trusted?](#why-are-peer-workers-trusted)).
+Trust boundary: a worker sends exchange requests to the URL on every card in the card folder, and the `/api/v1/peer/` route is public — `ui.auth_token` does not cover it. A worker applies only rows that the peer originated itself, in the scopes it asked for, but anyone who can write the card folder can plant a card whose URL serves rows under that card's name. Restrict the card folder to the worker user (see [Why are peer workers trusted?](#why-are-peer-workers-trusted) and [Security posture](security.md#the-public-peer-route)).
 
 ### What if two workers write the same cache key?
 
@@ -158,7 +158,7 @@ Last-write-wins based on `updated_at_ms`, with `origin_worker_id` as a lexicogra
 
 ### What's the difference between `CacheScope.LOCAL` and `CLUSTER`?
 
-`LOCAL` lives only in the worker that wrote it. `CLUSTER` is peer-synced and readable by other workers in the same cluster. See [Choosing a scope](cache.md#choosing-a-scope).
+`LOCAL` lives only in the worker that wrote it. `CLUSTER` is pulled by other workers in the same cluster through the cache exchange. See [Choosing a scope](cache.md#choosing-a-scope).
 
 ### How does cache interaction with SQLite actually work?
 
@@ -235,7 +235,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache exchange reads peers' cache files from `storage.dir`, so cluster-wide cache peer sync needs a shared `storage.dir` instead.
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's UI port must be reachable from the others at the URL on its registry card (set `ui.host: 0.0.0.0`, or `ui.public_url`).
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
@@ -265,9 +265,10 @@ Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs c
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
-1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/api/v1/debug/download/{path}`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
-2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The `Origin` header is validated on every handshake, token or not, against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). An untokened worker still accepts the cross-origin handshakes the cluster view is built on, but not a page that is off loopback reaching a worker over loopback — see [Security](security.md#the-loopback-bind-and-the-operators-browser).
+1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/api/v1/debug/download/{path}`, `/api/v1/debug/download-live`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
+2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The `Origin` header is validated on every handshake, token or not, against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). An untokened worker still accepts the cross-origin handshakes the cluster view is built on, but not a page that is off loopback reaching a worker over loopback — see [Security](security.md#the-loopback-bind-and-the-operators-browser). The same rule decides the cross-origin reads that the UI sends to every worker of the cluster (trace, label trace, databases list): with a token set, list every worker origin in `allowed_ws_origins` — see [Cross-origin reads](security.md#cross-origin-reads).
 3. **Read-only views remain accessible** — both before and after enabling auth. `/`, `/live`, `/partitions`, `/sinks`, `/history` and the per-task views are SPA routes backed by read-only flight-recorder endpoints; the extra gating listed above is on the mutating / data-exposing ones.
+4. **The peer route stays public.** `GET /api/v1/peer/cache/changes` needs no token, because other workers call it without one. It serves the `cluster` and `global` cache rows this worker originated — see [The public peer route](security.md#the-public-peer-route).
 
 Even with auth, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
 
@@ -372,7 +373,7 @@ Rescue procedure when a task is truly wedged past the timeout:
 
 1. Open `/live` → **Executors** tab and look for tasks whose `oldest_running_sec` exceeds `task_timeout_seconds`.
 2. Hit `/api/v1/debug/processors` to get the coroutine stack for each wedged task via the `stuck_tasks` field.
-3. Check worker logs for the task's `task_id` — you'll usually find the downstream call (sink, cache, peer sync) that's blocked.
+3. Check worker logs for the task's `task_id` — you'll usually find the downstream call (sink, cache) that's blocked.
 4. If the stack shows the subprocess already exited and the coroutine is wedged in sink or recorder code, a worker restart is the safest recovery — Kafka's cooperative-sticky rebalance will reassign the partition to another worker, which will re-poll the un-committed offset range and retry the work.
 5. There is no in-UI "force complete" button today by design: marking a wedged task as succeeded could silently ack a half-applied side effect. Operators are expected to restart the worker instead.
 
@@ -427,9 +428,9 @@ See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary 
 
 ### Why are peer workers trusted?
 
-The cache exchange reads other workers' cache files in `storage.dir` directly (see `drakkar/cache/engine.py`), and every worker reads, archives and serves the sealed recorder files in `<shared.dir>/history/` (see `drakkar/recorder/archive.py`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared folder can inject cache entries, or plant recorder files that your workers will archive and serve.
+Every worker reads, archives and serves the sealed recorder files in `<shared.dir>/history/` (see `drakkar/recorder/archive.py`), and the cache exchange sends requests to the URL on every registry card and applies the `cluster` and `global` rows it gets back (see `drakkar/cache/exchange.py`). There's no per-write signature, no auth check between workers, no schema-level integrity verification. Anyone who can write to the shared folder can plant recorder files that your workers will archive and serve, or plant a card whose URL serves cache rows under that card's name. The worker filters those rows to the card's own origin and the scopes it asked for, which stops `local` rows and rows that claim another worker, but not rows under the planted name.
 
-Treat a shared `storage.dir` or `shared.dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
+Treat `shared.dir` (and the card folder, when it lives elsewhere) as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
 ### How is the UI protected?
 
@@ -437,7 +438,7 @@ Auth is opt-in (see [Is the UI safe](#is-the-ui-safe-to-expose-to-a-team-of-oper
 
 1. **Default loopback bind** (`ui.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
 2. **Startup warning when unauthenticated.** With `ui.enabled=true` and an empty `auth_token`, the worker emits a `ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
-3. **Bearer token when `auth_token` is set, Origin check always.** With a token, every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes. The WebSocket stream authenticates inside its handshake, and validates the `Origin` header on every handshake whether or not a token is set. See `drakkar/uiserver/server_helpers.py::origin_allowed` and `drakkar/uiserver/server.py::token_matches`.
+3. **Bearer token when `auth_token` is set, Origin check always.** With a token, every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes, and the routes under `/api/v1/peer/` for the cache exchange between workers. The WebSocket stream authenticates inside its handshake, and validates the `Origin` header on every handshake whether or not a token is set. See `drakkar/uiserver/server_helpers.py::origin_allowed` and `drakkar/uiserver/server.py::token_matches`.
 
 If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
 

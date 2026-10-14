@@ -867,7 +867,7 @@ To require auth on the protected endpoints (database download, merge, message pr
 - **Configure via YAML:** set `ui.auth_token: <value>` in your config.
 - **Or via environment:** export `DK_UI__AUTH_TOKEN=<value>` (overrides YAML when both are set).
 
-When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
+When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header), and so do the three cross-origin reads of the UI fan-out. The routes under `/api/v1/peer/` are never protected: other workers call them without a token for the [cache exchange](cache.md#cache-exchange). See [Security posture](security.md#the-public-peer-route). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
 
 The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and UI server are constructed. See `drakkar/app_security.py::warn_if_ui_unauthenticated` for the implementation.
 
@@ -880,11 +880,11 @@ Top-level `ui.*` fields configure the UI server itself and the presentation sett
 | `enabled` | `bool` | `true` | | Enable or disable the entire UI feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
 | `host` | `str` | `'127.0.0.1'` | | Bind address for the UI server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host — when binding to a non-loopback address inside anything other than a fully-trusted private network, set `auth_token` (see below). |
 | `port` | `int` | `8080` | 1--65535 | Port for the web UI (FastAPI server). |
-| `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
+| `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. `/healthz`, `/readyz` and the routes under `/api/v1/peer/` (the [cache exchange](cache.md#cache-exchange)) never need the token. With a token set, list every worker origin in `allowed_ws_origins` so the UI can read the other workers of the cluster. |
 | `probe_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
 | `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `<shared.dir>/merged/`. The archive pass deletes merge results after `history.merged_retention_days`; with archiving off, or with that set to `0`, nothing reclaims them. `false` serves `403` instead — independently of `auth_token`. |
 | `kafka_read_enabled` | `bool` | `true` | | Serve `GET /api/v1/debug/kafka/*` — ad-hoc reads of the configured topics (source, DLQ, and each Kafka sink by instance name; never an arbitrary topic). Reads use `assign()`-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. `false` serves `403` instead — independently of `auth_token`. When the resolved Kafka security of any readable topic is not PLAINTEXT while `auth_token` is empty, startup logs a warning naming the exposed aliases. See [Kafka Read API](kafka-read.md). |
-| `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
+| `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. The same rule decides the cross-origin reads (CORS) of `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI sends to every worker of the cluster; with `auth_token` set, list the origin of every worker here, or those reads fail and the UI shows the other workers as unreachable (see [Cross-origin reads](security.md#cross-origin-reads)). Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
 | `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
 | `expose_env_vars` | `list[str]` | `[]` | | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
 | `max_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the web UI in list views. |
@@ -1064,15 +1064,15 @@ ui:
 
 ## Cache (`cache:`)
 
-A handler-accessible key/value cache with in-memory hot reads, write-behind SQLite persistence, and optional cross-worker peer-sync. **Disabled by default** -- when `enabled: false`, `handler.cache` is a no-op stub so handler code can call `self.cache.set(...)` unconditionally without `if` guards.
+A handler-accessible key/value cache with in-memory hot reads, write-behind SQLite persistence, and an optional cross-worker [cache exchange](cache.md#cache-exchange) over HTTP. **Disabled by default** -- when `enabled: false`, `handler.cache` is a no-op stub so handler code can call `self.cache.set(...)` unconditionally without `if` guards.
 
-See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and the [periodic loops](cache.md#how-it-flows) (flush, cleanup, peer-sync).
+See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and the [periodic loops](cache.md#how-it-flows) (flush, cleanup, exchange).
 
 ### Cache Settings
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in [`storage.dir`](#storage-and-shared); with `storage.dir: ""` the engine warns and continues without persistence -- in-memory only. |
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in [`storage.dir`](#storage-and-shared) and is private to the worker; `storage.dir` does not need to be shared for the cache. With `storage.dir: ""` the engine warns (`cache_engine_disabled_no_storage_dir`) and continues without persistence -- in-memory only, and with no cache exchange. |
 | `flush_interval_seconds` | `float` | `3.0` | > 0 | Interval (seconds) for the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
 | `cleanup_interval_seconds` | `float` | `60.0` | > 0 | Interval (seconds) for the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
 | `max_memory_entries` | `int \| null` | `10000` | >= 1 or `null` | Cap for the in-memory LRU. `null` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
@@ -1094,7 +1094,7 @@ under [`fleet.cache_exchange`](#fleet-cache-exchange).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `storage.dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''` runs memory-only: no own files, no history, no cache file. |
+| `storage.dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''` runs memory-only: no own files, no history, no cache file and no cache exchange. |
 | `shared.dir` | `str` | `''` | The folder every worker of one fleet sees: registry cards, sealed history, daily archives, merge results. `''` means the same folder as `storage.dir`, which is right for workers on one host. |
 
 ```yaml
@@ -1159,17 +1159,19 @@ provider plugin are on [Fleet registry](fleet.md).
 
 ### Cache exchange (`fleet.cache_exchange:`) {#fleet-cache-exchange}
 
-How this worker pulls `cluster` and `global` cache rows from its peers
-(last-write-wins by `updated_at_ms`). See [Cache](cache.md).
+How this worker pulls `cluster` and `global` cache rows from its peers over
+HTTP (`GET /api/v1/peer/cache/changes`, last-write-wins by `updated_at_ms`),
+and whether it serves its own rows to them. The peers come from the
+[fleet registry](#fleet-registry). See [Cache](cache.md#cache-exchange).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation. Flush and cleanup loops still run. |
+| `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation: the worker pulls nothing, its card carries no `features.cache`, and its peer route answers `404`. Flush and cleanup loops still run. Needs `cache.enabled` and a non-empty `storage.dir`. |
 | `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between exchange cycles. |
-| `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. |
-| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer. One slow peer cannot block the rest. |
-| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. |
-| `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. |
+| `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. A pull asks for pages until the peer answers `more: false`. |
+| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer; the connect timeout is 2 seconds. One slow peer cannot block the rest. |
+| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. Peers still pulling or waiting when it fires are cut, and are not counted as failures. |
+| `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. The others wait for a free slot within the same cycle. |
 
 ```yaml
 fleet:
@@ -1184,6 +1186,7 @@ fleet:
     page_size: 500
     timeout_seconds: 5.0
     cycle_deadline_seconds: null      # null = interval_seconds * 0.9
+    max_concurrent_peers: 4
 ```
 
 ---

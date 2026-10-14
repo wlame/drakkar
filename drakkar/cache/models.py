@@ -59,8 +59,8 @@ class CacheScope(StrEnum):
     """Reach discriminator for a cache entry.
 
     The persisted values (LOCAL and wider) match the SQL schema's
-    ``CHECK(scope IN (...))`` constraint and the peer-sync scope-filter
-    WHERE clauses. Keep those in lockstep with ``cache_entries.scope``
+    ``CHECK(scope IN (...))`` constraint and the scope filter of the
+    changes query. Keep those in lockstep with ``cache_entries.scope``
     column constraints. ``MEMORY`` is deliberately absent from the CHECK:
     memory-scoped entries never reach the DB, and the constraint doubles
     as a guard that would loudly reject one if it ever leaked to disk.

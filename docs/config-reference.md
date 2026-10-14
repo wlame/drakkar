@@ -492,7 +492,10 @@ ui:
   # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
                                    # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
-  allowed_ws_origins: []           # WebSocket Origin allowlist. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
+                                   # Never covers /healthz, /readyz and /api/v1/peer/ (the cache exchange).
+  allowed_ws_origins: []           # Origin allowlist for /ws and for the cross-origin reads of the UI fan-out
+                                   # (debug/trace, debug/trace-by-label, debug/databases). With auth_token set,
+                                   # list every worker origin. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
 
   # --- Side-effecting endpoints (gated independently of auth_token) ---
   probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
@@ -690,7 +693,7 @@ history:
 
 📚 [Upgrading](upgrading.md) · [Cache page](cache.md)
 
-How workers find each other and exchange cache rows. The pipeline itself does not depend on it.
+How workers find each other and exchange cache rows. Peers pull `cluster`/`global` cache rows over HTTP from the URL on each registry card. The pipeline itself does not depend on it.
 
 ```yaml
 fleet:
@@ -711,8 +714,8 @@ fleet:
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
-    page_size: 500                 # 1-1000 rows per page. env: DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE
-    timeout_seconds: 5             # time limit for one request to a peer. env: DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS
+    page_size: 500                 # 1-1000 rows per page; pages until the peer says more=false. env: DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE
+    timeout_seconds: 5             # time limit for one request to a peer (connect: 2 s). env: DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS
     cycle_deadline_seconds: null   # hard cap on one cycle; null = interval x 0.9; must be < interval_seconds.
                                    # env: DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS
     max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS

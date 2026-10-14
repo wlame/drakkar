@@ -327,8 +327,8 @@ served from cache).
 **5. Memoize via the framework [cache](cache.md).**
 Strategies 4 works best when combined with a real cache: `self.cache`
 gives you an in-memory dict with LRU eviction, a write-behind SQLite
-persistence layer (results survive worker restarts), and optional
-peer-sync (results shared across workers in the same cluster, LWW
+persistence layer (results survive worker restarts), and an optional
+cache exchange (results shared across workers over HTTP, LWW
 merged). Pair `self.cache.peek(key)` in `arrange()` with
 `PrecomputedResult` on a hit, and `self.cache.set(key, ..., ttl=...)`
 in `on_task_complete` on a subprocess run. Track the hit rate via

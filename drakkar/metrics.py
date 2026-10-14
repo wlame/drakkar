@@ -571,7 +571,7 @@ cache_cleanup_removed = Counter(
 # idle clusters where LWW rejects most rows.
 cache_sync_entries_fetched = Counter(
     'drakkar_cache_sync_entries_fetched_total',
-    'Total cache entries pulled from a peer cache DB by the sync loop',
+    'Total cache entries pulled from a peer by the cache exchange',
     ['peer'],
 )
 cache_sync_entries_upserted = Counter(
@@ -586,7 +586,7 @@ cache_sync_entries_upserted = Counter(
 # loop itself keeps running so one bad peer cannot break the whole worker.
 cache_sync_errors = Counter(
     'drakkar_cache_sync_errors_total',
-    'Total per-peer failures during the cache peer-sync cycle',
+    'Total per-peer failures of the cache exchange: failed requests, failed applies and rejected rows',
     ['peer'],
 )
 
@@ -650,6 +650,22 @@ fleet_registry_snapshot_age = Gauge(
 fleet_duplicate_worker_name = Counter(
     'drakkar_fleet_duplicate_worker_name_total',
     "Other live instances seen publishing this worker's name.",
+)
+
+# --- Requests to peer workers ---
+# One request is one page of the cache exchange (endpoint=cache_changes).
+# outcome: ok, http_error (any status other than 200), timeout,
+# transport_error (refused, DNS, reset) or bad_body (not the answer shape).
+fleet_peer_requests = Counter(
+    'drakkar_fleet_peer_requests_total',
+    'Requests this worker sent to peer workers, by endpoint and outcome.',
+    ['endpoint', 'outcome'],
+)
+fleet_peer_request_duration = Histogram(
+    'drakkar_fleet_peer_request_duration_seconds',
+    'Time of one request this worker sent to a peer worker, by endpoint.',
+    ['endpoint'],
+    buckets=FLEET_REGISTRY_DURATION_BUCKETS,
 )
 
 

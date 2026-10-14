@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable, Coroutine, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,8 +56,6 @@ class FleetSnapshot:
 
     peers: tuple[SnapshotEntry, ...] = ()
     refreshed_at: float | None = None
-    # worker name -> cluster name, for the cache exchange's per-peer lookup.
-    clusters: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -95,11 +93,15 @@ class FleetRegistry:
         config: FleetRegistryConfig,
         identity: WorkerIdentity,
         provider_options: Mapping[str, Any] | None = None,
+        features: Callable[[], dict[str, Any]] | None = None,
         logger: Any = None,
         now_monotonic: Callable[[], float] = time.monotonic,
         now_epoch: Callable[[], float] = time.time,
     ) -> None:
         self._provider = provider
+        # The card's ``features``, read at every publish: the subsystems
+        # that fill it (the cache engine) may start after the registry.
+        self._features = features
         self._provider_name = provider_name
         self._config = config
         self._identity = identity
@@ -182,10 +184,6 @@ class FleetRegistry:
                 )
             )
         return views
-
-    def peer_cluster(self, worker: str) -> str | None:
-        """The cluster of peer ``worker`` from the last snapshot, or ``None`` when it is not listed."""
-        return self._snapshot.clusters.get(worker)
 
     async def stop(self) -> None:
         """Stop the loops, withdraw this worker's card, stop the provider. Safe to call twice."""
@@ -275,6 +273,7 @@ class FleetRegistry:
             self._identity,
             state=state,
             heartbeat_at=datetime.fromtimestamp(self._now_epoch(), UTC),
+            features=self._features() if self._features is not None else None,
         )
         await self._call('publish', lambda: self._provider.publish(card))
 
@@ -286,11 +285,7 @@ class FleetRegistry:
             fleet_registry_snapshot_age.set(now - (self._created_at if last_good is None else last_good))
             return
         peers = await self._peers_from(listed, now)
-        self._snapshot = FleetSnapshot(
-            peers=tuple(peers),
-            refreshed_at=now,
-            clusters={entry.card['worker']: entry.card['cluster'] for entry in peers},
-        )
+        self._snapshot = FleetSnapshot(peers=tuple(peers), refreshed_at=now)
         fleet_registry_snapshot_age.set(0)
         self._set_peer_gauge(peers)
 

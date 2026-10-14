@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from prometheus_client import REGISTRY
 from prometheus_client.metrics import MetricWrapperBase
 
 from drakkar import metrics
@@ -464,3 +465,13 @@ def test_delete_and_flush_delete_counters_are_independent():
     assert user_after - user_before == 1  # user delete ticked
     # Flush counter did NOT move — flush hasn't run yet
     assert flush_after - flush_before == 0
+
+
+def test_the_cache_exchange_metric_help_texts():
+    # Help text is a contract: every implementation publishes the same words.
+    helps = {metric.name: metric.documentation for metric in REGISTRY.collect()}
+
+    assert helps['drakkar_cache_sync_entries_fetched'] == 'Total cache entries pulled from a peer by the cache exchange'
+    assert helps['drakkar_cache_sync_errors'] == (
+        'Total per-peer failures of the cache exchange: failed requests, failed applies and rejected rows'
+    )

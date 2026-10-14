@@ -75,10 +75,11 @@ ui:
 # No top-level cache: block here — the framework's in-process cache stays
 # disabled on this worker (every handler.cache call becomes a no-op). Its
 # arrange() still runs the inherited two-tier precomputed-cache lookup, but
-# that fast track can only ever hit on rows peer-synced in from the Kafka
-# workers' cache DBs, which needs cache.enabled=true AND a shared
-# cluster_name on both sides — neither holds here. This worker demonstrates
-# the Kafka-source-off / HTTP-only path, not cross-cluster cache sharing.
+# that fast track can only ever hit on rows the cache exchange pulls in
+# over HTTP from the Kafka workers, which needs cache.enabled=true here AND
+# the same cluster_name on both sides (the Kafka workers write
+# cluster-scoped rows) — neither holds here. This worker demonstrates the
+# Kafka-source-off / HTTP-only path, not cross-cluster cache sharing.
 
 # This worker's own files (recorder, cache, crash marker). Same folder as
 # the main cluster's workers, so the Debug UI's workers page lists this one

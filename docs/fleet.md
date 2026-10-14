@@ -6,9 +6,9 @@ the others. Two features use the cards:
 
 - the **workers list** of the UI (the worker switcher, the Live page, every
   view that shows more than one worker), served at `GET /api/v1/workers`;
-- the **cache exchange**, which takes each peer's cluster from the registry
-  to decide whether to pull that peer's `cluster` rows or only its `global`
-  rows.
+- the **cache exchange**, which pulls cache rows only from the peers the
+  registry lists. It takes each peer's URL, cluster, state, liveness and
+  `features.cache` marks from the cards (see [Cache](cache.md#cache-exchange)).
 
 The message pipeline does not use the registry. Sources, the executor,
 sinks and offset commits run exactly the same with the registry switched
@@ -20,7 +20,8 @@ With nothing configured, a worker uses the **filesystem** provider and keeps
 the cards in `<shared.dir>/fleet/workers/` (or `<storage.dir>/fleet/workers/`
 when `shared.dir` is empty). Workers that see the same folder see each
 other. The workers list shows each peer with its state, version and
-liveness, and the cache exchange knows each peer's cluster.
+liveness, and the cache exchange knows where each peer answers and what
+it has to pull.
 
 The registry needs the UI server (`ui.enabled: true`), because peers and
 browsers reach a worker through the URL on its card. With the UI off, the
@@ -38,8 +39,9 @@ registry is off and the worker logs `fleet_registry_disabled_no_ui` once.
 | a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock |
 
 With `none` the workers list shows only the current worker, and the cache
-exchange treats every peer's cluster as unknown, so it pulls only `global`
-rows.
+exchange pulls nothing. `static` cards come from the config and carry no
+`features` object, so the cache exchange pulls every `static` peer each
+cycle, without the mark check.
 
 ### `filesystem`
 
@@ -131,7 +133,7 @@ A card is a JSON object, at most 4096 bytes:
 {
   "backend": "python",
   "cluster": "search",
-  "features": {},
+  "features": {"cache": {"cluster": {"key": "match|a", "ms": 1760348411000}}},
   "heartbeat_at": "2026-10-13T09:40:11.000210Z",
   "instance": "9c41e0b27fd34a1e",
   "schema": 1,
@@ -154,7 +156,7 @@ A card is a JSON object, at most 4096 bytes:
 | `version` | no | The worker's release, as `/api/v1/identity` reports it. |
 | `state` | no | `starting`, `running` or `draining`. |
 | `started_at`, `heartbeat_at` | no | Process start and the time of this publish, on the writer's clock. Informational only: liveness never uses them. |
-| `features` | no | An object for optional capabilities. Unknown keys are ignored. |
+| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `fleet.cache_exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. |
 
 A card whose required field is missing, empty (`worker`, `url`) or of the
 wrong type, or whose optional field has the wrong type, is skipped; the
@@ -351,6 +353,8 @@ context for them.
 | `drakkar_fleet_registry_duration_seconds` | histogram | `op` | Duration of registry provider calls in seconds. |
 | `drakkar_fleet_registry_snapshot_age_seconds` | gauge | — | Seconds since the last successful registry refresh; 0 right after one. |
 | `drakkar_fleet_duplicate_worker_name_total` | counter | — | Other live instances seen publishing this worker's name. |
+| `drakkar_fleet_peer_requests_total` | counter | `endpoint` (`cache_changes`), `outcome` (`ok`, `http_error`, `timeout`, `transport_error`, `bad_body`) | Requests this worker sent to peer workers, by endpoint and outcome. |
+| `drakkar_fleet_peer_request_duration_seconds` | histogram | `endpoint` | Time of one request this worker sent to a peer worker, by endpoint. |
 
 ## Log events
 
@@ -367,6 +371,9 @@ context for them.
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
 | `fleet_duplicate_worker_name` | warning | Another live process publishes this worker's name; once per instance. |
 | `fleet_registry_entry_point_scan_failed`, `fleet_registry_entry_point_load_failed`, `fleet_registry_entry_point_invalid` | warning | A provider plugin could not be found or loaded. |
+| `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
+| `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
+| `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |
 
 ## Settings
 
@@ -393,5 +400,7 @@ Every key has a `DK_` environment override, for example
   card. Protect the folder like the rest of `shared.dir`.
 - It is not used by the pipeline: a worker with no peers processes messages
   exactly like one in a large fleet.
-- It does not carry cache data. The cache exchange takes only each peer's
-  cluster from the registry (see [Cache](cache.md)).
+- It does not carry cache data. The cards carry only the marks of the
+  newest cache rows; the rows themselves travel over HTTP, from the URL
+  on the card (see [Cache](cache.md#cache-exchange)). A card in the folder
+  therefore decides where a worker sends its exchange requests.

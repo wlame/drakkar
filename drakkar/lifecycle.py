@@ -537,6 +537,9 @@ class AppLifecycle:
             config=registry,
             identity=app.worker_identity,
             provider_options=options,
+            # The cache engine starts after the registry, so its marks are
+            # read at each publish.
+            features=lambda: app._cache_engine.features() if app._cache_engine is not None else {},
         )
         await app._fleet.start()
 
@@ -700,7 +703,7 @@ class AppLifecycle:
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
                 recorder=app._recorder,
-                peer_cluster=app._fleet.peer_cluster if app._fleet is not None else None,
+                peer_views=app._fleet.peer_views if app._fleet is not None else None,
             )
             # The handler-facing Cache: origin_worker_id is this worker's
             # id so LWW tiebreaks during peer-sync can identify our writes.

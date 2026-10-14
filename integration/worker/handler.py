@@ -158,7 +158,7 @@ class RipgrepHandler(
       - If memory missed, ``await self.cache.get(cache_key)`` checks the
         local SQLite file (where the periodic flush has persisted
         earlier writes), and also reaches cross-worker values that
-        peer-sync has pulled into our DB. ``get`` is a loop-only
+        the cache exchange has pulled into our DB. ``get`` is a loop-only
         coroutine, so this tier runs in ``arrange()`` after the offload
         returns.
 
@@ -507,8 +507,8 @@ class RipgrepHandler(
             # inside _build_scan_plan; here — back on the loop, where
             # coroutines are allowed — a memory miss falls through to
             # await self.cache.get(), which checks the local SQLite file
-            # (populated by the background flush loop and by peer-sync
-            # pulls from other workers). This is how we see values
+            # (populated by the background flush loop and by the cache
+            # exchange, which pulls rows from other workers over HTTP). This is how we see values
             # persisted across worker restarts AND values produced by
             # peers — neither of which a hand-rolled dict cache could do.
             cached_stdout = entry['cached_stdout']
@@ -696,8 +696,8 @@ class RipgrepHandler(
 
         # Persist into the framework cache for subsequent fast-track
         # hits. ``scope=CLUSTER`` shares across all workers in the same
-        # cluster (cluster_name) — the periodic peer-sync loop pulls
-        # recent rows from peer ``-cache.db`` files and LWW-merges. This
+        # cluster (cluster_name) — the periodic cache exchange pulls new
+        # cluster rows from each peer over HTTP and LWW-merges them. This
         # demonstrates cross-worker cache sharing in the integration
         # scenario; switch to LOCAL to keep per-worker caches isolated,
         # or GLOBAL to share across clusters. TTL cleans old entries

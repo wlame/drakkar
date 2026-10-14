@@ -1,15 +1,22 @@
 """Shared test fixtures for Drakkar tests."""
 
 import asyncio
+import contextlib
+import sqlite3
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import yaml
 
 from drakkar import partition as partition_module
+from drakkar.cache.changes import parse_changes_query
+from drakkar.cache.models import _now_ms
+from drakkar.cache.sql import CHANGES_FIELDS, OWN_MARK_SQL, SCHEMA_CACHE_ENTRIES, changes_query
 from drakkar.config import CacheExchangeConfig, UIConfig, UIRecorderConfig
+from drakkar.fleet.service import PeerView
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -220,20 +227,120 @@ def minimal_config_yaml_file(minimal_config_dict: dict, tmp_path: Path) -> Path:
     return config_path
 
 
-class PeerClusters(dict):
-    """Stands in for the worker registry's ``peer_cluster`` lookup in cache tests."""
+class FakePeers:
+    """Peer workers for cache-exchange tests, served in this process.
 
-    def __call__(self, worker: str) -> str | None:
-        return self.get(worker)
+    Each peer is a cache DB file ``<folder>/<name>.db`` answered through the
+    real changes query (``parse_changes_query`` + ``changes_sql``) by an
+    ``httpx.MockTransport``. A peer is listed (has a card) once its cluster
+    is set; its card carries the ``features.cache`` marks of the rows it
+    originated, as a real worker publishes them.
+    """
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.clusters: dict[str, str] = {}
+        self.cards: dict[str, dict[str, Any]] = {}
+        self.online: dict[str, bool | None] = {}
+        # Per-peer failure: an HTTP status to answer, or an exception to raise.
+        self.failures: dict[str, Any] = {}
+        # Per-peer delay in seconds before answering.
+        self.delays: dict[str, float] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
+
+    def db_path(self, name: str) -> Path:
+        return self.folder / f'{name}.db'
+
+    def seed(self, name: str, rows: list[dict[str, Any]]) -> None:
+        """Insert rows into the peer's cache DB (defaults: global scope, origin = the peer, timestamps 1000)."""
+        with contextlib.closing(sqlite3.connect(self.db_path(name))) as db, db:
+            db.executescript(SCHEMA_CACHE_ENTRIES)
+            for r in rows:
+                value = r.get('value', '"v"')
+                db.execute(
+                    'INSERT OR REPLACE INTO cache_entries (key, scope, value, size_bytes, created_at_ms, '
+                    'updated_at_ms, expires_at_ms, origin_worker_id) VALUES (?,?,?,?,?,?,?,?)',
+                    (
+                        r['key'],
+                        r.get('scope', 'global'),
+                        value,
+                        r.get('size_bytes', len(value.encode('utf-8'))),
+                        r.get('created_at_ms', 1000),
+                        r.get('updated_at_ms', 1000),
+                        r.get('expires_at_ms'),
+                        r.get('origin_worker_id', name),
+                    ),
+                )
+
+    def marks(self, name: str) -> dict[str, dict[str, Any]]:
+        """The peer's card marks: its newest own row per exchanged scope."""
+        if not self.db_path(name).exists():
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        with contextlib.closing(sqlite3.connect(self.db_path(name))) as db:
+            for scope in ('cluster', 'global'):
+                row = db.execute(OWN_MARK_SQL, (name, scope)).fetchone()
+                if row is not None:
+                    found[scope] = {'ms': row[0], 'key': row[1]}
+        return found
+
+    def views(self) -> list[PeerView]:
+        """The registry's peer views: one per peer whose cluster is set."""
+        views = []
+        for name, cluster in sorted(self.clusters.items()):
+            card = {
+                'worker': name,
+                'cluster': cluster,
+                'url': f'http://{name}.peers.test:8080/',
+                'state': 'running',
+                'features': {'cache': self.marks(name)},
+                **self.cards.get(name, {}),
+            }
+            views.append(PeerView(card=card, age_seconds=1.0, online=self.online.get(name, True), last_seen_ts=0.0))
+        return views
+
+    async def _handle(self, request: httpx.Request) -> httpx.Response:
+        name = request.url.host.split('.')[0]
+        params = dict(request.url.params)
+        self.requests.append((name, params))
+        if name in self.delays:
+            await asyncio.sleep(self.delays[name])
+        failure = self.failures.get(name)
+        if isinstance(failure, BaseException):
+            raise failure
+        if isinstance(failure, int):
+            return httpx.Response(failure, json={'error': 'failing on purpose'})
+        query = parse_changes_query(params)
+        if isinstance(query, str):
+            return httpx.Response(400, json={'error': query})
+        sql, args = changes_query(
+            origin=name, scopes=query.scopes, now_ms=_now_ms(), after=query.after, limit=query.limit + 1
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path(name))) as db:
+            fetched = db.execute(sql, args).fetchall()
+        rows = [dict(zip(CHANGES_FIELDS, row, strict=True)) for row in fetched[: query.limit]]
+        return httpx.Response(200, json={'rows': rows, 'more': len(fetched) > query.limit})
+
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self._handle)
+
+
+def fake_peers(engine: Any) -> FakePeers:
+    """The engine's fake peer fleet, created and wired on first use (folder ``<storage.dir>/peers``)."""
+    peers = getattr(engine, '_test_peers', None)
+    if peers is None:
+        peers = FakePeers(Path(engine._storage_dir) / 'peers')
+        engine._test_peers = peers
+        engine._peer_views = peers.views
+        engine._peer_transport = peers.transport()
+    return peers
 
 
 def set_peer_cluster(engine: Any, peer: str, cluster: str | None) -> None:
-    """Make ``engine`` see ``peer`` in ``cluster``, as the registry would report it.
-
-    ``None`` leaves the peer unlisted, so its cluster is unknown and only its
-    ``global`` rows are pulled.
-    """
-    lookup = engine._peer_cluster if isinstance(engine._peer_cluster, PeerClusters) else PeerClusters()
-    if cluster is not None:
-        lookup[peer] = cluster
-    engine._peer_cluster = lookup
+    """List ``peer`` in the registry with ``cluster``; ``None`` leaves it unlisted (never pulled)."""
+    peers = fake_peers(engine)
+    if cluster is None:
+        peers.clusters.pop(peer, None)
+    else:
+        peers.clusters[peer] = cluster

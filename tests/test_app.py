@@ -2212,7 +2212,7 @@ async def test_start_cache_wires_the_exchange_settings(test_config, tmp_path):
 
     try:
         assert app._cache_engine._peer_sync_enabled is False
-        assert (tmp_path / f'{app._worker_id}-cache.db.actual').exists()
+        assert (tmp_path / f'{app._worker_id}-cache.db').exists()
     finally:
         await app._cache_engine.stop()
 

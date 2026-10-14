@@ -29,8 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `{"own": [...], "history": {"folders": [...]}}`. Files are
   downloaded with `GET /api/v1/debug/download/{path}`, where `path` is
   relative to `shared.dir`; own files in `storage.dir` are not
-  downloadable. `POST /api/v1/debug/merge` takes the same paths.
-  `GET /api/v1/debug/archives/{name}` is removed.
+  downloadable by path (`GET /api/v1/debug/download-live` serves a
+  snapshot of the live file). `POST /api/v1/debug/merge` takes the same
+  paths. `GET /api/v1/debug/archives/{name}` is removed.
+- **The cache exchange runs over HTTP.** Workers no longer read each
+  other's cache files. The cache file is a plain
+  `<storage.dir>/<worker>-cache.db`, private to its worker. Workers pull
+  each other's rows from `GET /api/v1/peer/cache/changes`, so every worker
+  must reach the UI port of its peers at the URL on their registry card.
+  Delete an old `<worker>-cache.db` link and `<worker>-cache.db.actual`
+  file before the first start: a link that is still there is followed to
+  the old file. See `docs/upgrading.md`.
 
 ### Added
 
@@ -71,6 +80,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.trace.history_max_files` and `ui.trace.history_max_seconds`.
 - **Merge results expire.** The archive pass deletes merge results older
   than `history.merged_retention_days` (default 32 days).
+- **Cache exchange over HTTP.** Every `fleet.cache_exchange.interval_seconds`
+  a worker pulls the `cluster` and `global` rows that other workers
+  originated. It pulls only peers the registry lists, that are not offline
+  or starting, and whose card mark is past its cursor. It asks for pages of
+  `page_size` rows after a `(updated_at_ms, key)` cursor until the peer
+  says `more: false`, applies each page in one transaction, and pulls at
+  most `max_concurrent_peers` peers at once. A failing peer is skipped for
+  1, 2, 4, 8, then 16 cycles. An answer over 64 MiB, or with rows out of
+  cursor order, is a failed request. Only rows the peer originated, of an
+  asked scope, are applied. See `docs/cache.md`.
+- **`GET /api/v1/peer/cache/changes`** (UI contract v1.23) serves one page
+  of this worker's own `cluster`/`global` rows: `{"rows": [...], "more":
+  bool}`, 400 on bad parameters, 404 when the cache or the exchange is
+  off, 503 when the read does not answer within 5 s.
+  `tests/fixtures/cache_changes.json` pins the parameters and the paging.
+- **Registry cards carry `features.cache`:** per scope, the
+  `{"ms", "key"}` of the newest row the worker originated.
+- **`GET /api/v1/debug/download-live`** answers a consistent snapshot of
+  the live recorder file (SQLite backup API, rollback journal). 404 in
+  memory-only mode, 500 when the copy fails.
+- **CORS on the UI fan-out reads.** `/api/v1/debug/trace`,
+  `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases` answer
+  cross-origin requests with the origin rule of `/ws`
+  (`ui.allowed_ws_origins`); the preflight needs no token. With
+  `ui.auth_token` set, list every worker origin in `ui.allowed_ws_origins`.
+- **New metrics** `drakkar_fleet_peer_requests_total{endpoint, outcome}`
+  and `drakkar_fleet_peer_request_duration_seconds{endpoint}`.
+- **New log events** `fleet_peer_request_failed`, `fleet_peer_backoff` and
+  `fleet_peer_rows_rejected`.
 
 ### Changed
 
@@ -87,11 +125,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `url`. The current worker's `url` no longer reads `http://None:<port>/`.
   With the registry off (UI off, provider `none`, no card folder) the list
   shows only the current worker.
-- **The cache exchange takes each peer's cluster from the registry.** A
-  peer the registry does not list counts as an unknown cluster: only its
-  `global` rows are pulled. The log events `cache_peer_missing_worker_config`,
+- **The cache exchange takes its peers from the registry.** It uses each
+  card's URL, cluster, state, liveness and `features.cache`. A worker the
+  registry does not list is never pulled; with no registry nothing is
+  pulled. The log events `cache_peer_missing_worker_config`,
   `cache_peer_cluster_resolve_failed` and `recorder_peer_scan_failed` are
   gone.
+- **`fleet.cache_exchange.max_concurrent_peers` is now used** (default 4).
+- **`drakkar_cache_sync_entries_fetched_total`,
+  `drakkar_cache_sync_entries_upserted_total` and
+  `drakkar_cache_sync_errors_total` count the HTTP exchange:** rows pulled
+  and applied, and as errors the failed requests, the pages that could not
+  be applied and the rejected rows. `drakkar_cache_peer_sync_timeouts_total`
+  still counts cycles that hit the deadline; the peers it cuts are not
+  failures.
+- **`cache_peer_sync_failed` now means that a pulled page could not be
+  applied locally** (fields `peer`, `error`).
 - **Log events that named the old folder key are renamed:**
   `recorder_storage_dir_world_writable`, `recorder_storage_dir_network_fs`,
   `watchdog_disabled_no_storage_dir`, `cache_engine_disabled_no_storage_dir`.
@@ -124,8 +173,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flock` archive lock `.archive-<cluster>.lock`.** The Databases page reads
   sealed-file statistics from meta files and keeps own-file statistics in
   memory. It no longer lists cache files.
-- **Log events** `dbstats_cache_reset`, `recorder_dbstats_purged` and
-  `recorder_dbstats_warm_failed`.
+- **The file-based cache peer sync:** the `<worker>-cache.db` link, the
+  `.actual` cache file name, the scan of `storage.dir` for other workers'
+  cache files, and the same-millisecond drain.
+- **Log events** `dbstats_cache_reset`, `recorder_dbstats_purged`,
+  `recorder_dbstats_warm_failed` and `db_live_link_failed`.
 
 ### Fixed
 
@@ -148,6 +200,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archive pass took `merged-*.db` files in `db_dir` as sources and deleted
   them. Merge results now live in `<shared.dir>/merged/`, outside every
   history folder, and are deleted only after `history.merged_retention_days`.
+
+### Security
+
+- **`/api/v1/peer/` is public.** `ui.auth_token` does not protect it,
+  because workers call it on each other without a token. Anyone who can
+  reach the UI port can read the `cluster` and `global` cache rows of a
+  worker that serves the cache exchange. A worker also sends requests to
+  the URL on every registry card, so a planted card makes it request that
+  URL; it applies only the rows that card's worker originated, in the
+  scopes it asked for. See `docs/security.md`.
 
 ## [2.3.0] - 2026-09-22
 

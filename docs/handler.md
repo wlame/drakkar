@@ -466,7 +466,7 @@ async def arrange(self, messages, pending):
         # Fast path: synchronous memory peek (zero I/O)
         cached = self.cache.peek(cache_key)
         if cached is None:
-            # Slower path: memory miss, check SQLite (local + peer-synced)
+            # Slower path: memory miss, check SQLite (local + pulled from peers)
             cached = await self.cache.get(cache_key)
 
         if cached is not None:

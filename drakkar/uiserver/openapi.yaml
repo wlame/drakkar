@@ -19,6 +19,15 @@ info:
     One optional bearer token protects every /api/* route: configure
     ui.auth_token and send `Authorization: Bearer <t>` or `?token=<t>`;
     with no token configured, auth is disabled (private-contour default).
+    Routes under /api/v1/peer/ are always public (worker-to-worker cache
+    exchange).
+
+
+    Not modeled by OpenAPI but part of the contract: GET /api/v1/debug/trace,
+    /api/v1/debug/trace-by-label and /api/v1/debug/databases answer
+    cross-origin reads (CORS) with the /ws origin rule; an OPTIONS preflight
+    on them needs no token and answers 204 when the origin is allowed, 403
+    otherwise (see api-contract-v1.md, Conventions).
 
 
     Not modeled by OpenAPI but part of the contract: `GET /ws` upgrades to a
@@ -45,6 +54,8 @@ tags:
     description: Operator debug tools (databases, trace, metrics, probe).
   - name: cache
     description: Read-only handler-cache browser.
+  - name: peer
+    description: Worker-to-worker routes (always public; the UI does not call them).
   - name: kafka-read
     description: Ad-hoc reads of the configured Kafka topics (no consumer-group side effects).
   - name: config
@@ -581,6 +592,35 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '404':
           description: No such file.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/download-live:
+    get:
+      tags: [debug-tools]
+      operationId: getDownloadLive
+      summary: Download a snapshot of the live recorder file
+      description: >-
+        A consistent snapshot of the serving worker's live recorder file,
+        made with the SQLite backup API, as an attachment named like the
+        live file, with Cache-Control no-store. 404 in memory-only mode or
+        when no live file is open. The bearer token may ride as ?token=
+        (v1.23).
+      responses:
+        '200':
+          description: The snapshot.
+          content:
+            application/x-sqlite3:
+              schema: {type: string, format: binary}
+        '404':
+          description: No live file on this worker.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '500':
+          description: 'The snapshot failed ("Snapshot failed: <reason>").'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -1139,6 +1179,62 @@ paths:
                 additionalProperties: true
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/peer/cache/changes:
+    get:
+      tags: [peer]
+      operationId: getPeerCacheChanges
+      summary: Cache rows this worker originated, after a cursor
+      description: >-
+        Rows whose origin_worker_id is the serving worker, scope in scopes,
+        not expired on the serving worker's clock, (updated_at_ms, key) after
+        (after_ms, after_key), ordered by (updated_at_ms, key), at most
+        limit rows; more is true when further rows exist. The local scope is
+        never served. Always public (v1.23). 400 messages, in check order:
+        "scopes must be cluster, global or both", "after_ms and after_key
+        must be given together", "after_ms must be an integer", "limit must
+        be an integer from 1 to 1000"; they run before the 404 check. A
+        repeated parameter: the last value wins.
+      security: []
+      parameters:
+        - name: scopes
+          in: query
+          required: true
+          description: cluster, global or cluster,global.
+          schema: {type: string}
+        - name: after_ms
+          in: query
+          required: false
+          schema: {type: integer}
+        - name: after_key
+          in: query
+          required: false
+          schema: {type: string}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 500}
+      responses:
+        '200':
+          description: One page of rows.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PeerCacheChanges'}
+        '400':
+          description: Invalid parameters.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: The cache or the cache exchange is off on this worker.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '503':
+          description: The cache read did not finish within 5 seconds, or failed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1201,7 +1297,7 @@ components:
       required: [detail]
 
     ErrorEnvelope:
-      description: Legacy envelope used by merge/download errors.
+      description: Legacy envelope used by merge/download, download-live and peer-route errors.
       type: object
       properties:
         error: {type: string}
@@ -2302,6 +2398,31 @@ components:
         expires_at_ms: {type: [integer, 'null']}
         origin_worker_id: {type: [string, 'null']}
       required: [key, size_bytes, created_at_ms, updated_at_ms]
+
+    PeerCacheRow:
+      type: object
+      properties:
+        key: {type: string}
+        scope: {type: string, enum: [cluster, global]}
+        value:
+          type: string
+          description: The stored JSON text, unparsed.
+        size_bytes: {type: integer}
+        created_at_ms: {type: integer}
+        updated_at_ms: {type: integer}
+        expires_at_ms: {type: [integer, 'null']}
+        origin_worker_id: {type: string}
+      required: [key, scope, value, size_bytes, created_at_ms, updated_at_ms,
+                 expires_at_ms, origin_worker_id]
+
+    PeerCacheChanges:
+      type: object
+      properties:
+        rows:
+          type: array
+          items: {$ref: '#/components/schemas/PeerCacheRow'}
+        more: {type: boolean}
+      required: [rows, more]
 
     CacheEntriesPage:
       type: object

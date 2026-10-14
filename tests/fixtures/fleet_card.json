@@ -46,6 +46,28 @@
         "url": "http://10.0.0.5:8080/?a=1&b=<2>"
       },
       "bytes": "{\"cluster\":\"\",\"schema\":1,\"url\":\"http://10.0.0.5:8080/?a=1&b=<2>\",\"worker\":\"w<1>&2\"}"
+    },
+    {
+      "name": "cache_features",
+      "card": {
+        "schema": 1,
+        "worker": "w-1",
+        "cluster": "search",
+        "url": "http://10.0.0.5:8080/",
+        "features": {
+          "cache": {
+            "global": {
+              "ms": 1760000000123,
+              "key": "k:2"
+            },
+            "cluster": {
+              "key": "k/1",
+              "ms": 1760000000000
+            }
+          }
+        }
+      },
+      "bytes": "{\"cluster\":\"search\",\"features\":{\"cache\":{\"cluster\":{\"key\":\"k/1\",\"ms\":1760000000000},\"global\":{\"key\":\"k:2\",\"ms\":1760000000123}}},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
     }
   ],
   "valid": [

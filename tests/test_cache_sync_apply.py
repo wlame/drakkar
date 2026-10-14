@@ -42,7 +42,6 @@ from typing import Any
 
 import aiosqlite
 
-from drakkar import cache as cache_module
 from drakkar import metrics
 from drakkar.cache import (
     LWW_UPSERT_SQL,
@@ -54,7 +53,7 @@ from drakkar.cache import (
     Op,
 )
 from drakkar.config import CacheConfig
-from tests.conftest import set_peer_cluster, split_cache_overrides
+from tests.conftest import FakePeers, set_peer_cluster, split_cache_overrides
 
 # --- helpers ---------------------------------------------------------------
 #
@@ -96,42 +95,20 @@ async def _seed_peer_cache_db(
     peer_name: str,
     rows: list[dict[str, Any]],
 ) -> Path:
-    """Create a peer cache DB + symlink with the given rows.
+    """Seed rows into a peer served in this process (``tests.conftest.FakePeers``).
 
-    Row defaults: scope=LOCAL (so the pull scope filter excludes them
-    unless test bumps to CLUSTER/GLOBAL), no TTL, timestamps at 1000,
-    origin set to the peer name.
+    The engine's fake fleet lives in ``<storage.dir>/peers`` (here
+    ``tmp_path``); ``set_peer_cluster`` lists the peer. Row defaults: global
+    scope, no TTL, timestamps 1000, origin the peer itself.
     """
-    actual = tmp_path / f'{peer_name}-cache.db.actual'
-    async with aiosqlite.connect(str(actual)) as db:
-        await db.executescript(cache_module.SCHEMA_CACHE_ENTRIES)
-        for r in rows:
-            value = r.get('value', '"v"')
-            size = r.get('size_bytes', len(value.encode('utf-8')))
-            await db.execute(
-                'INSERT INTO cache_entries '
-                '(key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
-                ' expires_at_ms, origin_worker_id) VALUES (?,?,?,?,?,?,?,?)',
-                (
-                    r['key'],
-                    r.get('scope', CacheScope.GLOBAL.value),
-                    value,
-                    size,
-                    r.get('created_at_ms', 1000),
-                    r.get('updated_at_ms', 1000),
-                    r.get('expires_at_ms'),
-                    r.get('origin_worker_id', peer_name),
-                ),
-            )
-        await db.commit()
-    link = tmp_path / f'{peer_name}-cache.db'
-    link.symlink_to(actual.name)
-    return actual
+    peers = FakePeers(tmp_path / 'peers')
+    peers.seed(peer_name, rows)
+    return peers.db_path(peer_name)
 
 
 async def _fetch_local_row(tmp_path: Path, worker_id: str, key: str) -> tuple | None:
-    """Fetch a row from our own ``<worker>-cache.db.actual``."""
-    db_path = tmp_path / f'{worker_id}-cache.db.actual'
+    """Fetch a row from our own ``<worker>-cache.db``."""
+    db_path = tmp_path / f'{worker_id}-cache.db'
     async with aiosqlite.connect(str(db_path)) as db:
         cur = await db.execute(
             'SELECT key, scope, value, size_bytes, created_at_ms, '

@@ -194,6 +194,26 @@ async def test_the_card_published_at_start_has_the_contract_fields():
     assert card['features'] == {}
 
 
+async def test_every_publish_reads_the_features_supplier_at_that_moment():
+    # The cache engine can start after the registry: the supplier is read
+    # at each publish, never once at construction.
+    store = MemoryStore()
+    features: dict = {}
+    service = FleetRegistry(
+        MemoryRegistry(store),
+        provider_name='memory',
+        config=_config(heartbeat_seconds=0.02),
+        identity=OWN,
+        features=lambda: dict(features),
+    )
+
+    await service.start()
+    await wait_for(lambda: 'w-1' in store.cards)
+    features['cache'] = {'cluster': {'ms': 5, 'key': 'k'}}
+    await wait_for(lambda: store.cards['w-1'][0]['features'] == {'cache': {'cluster': {'ms': 5, 'key': 'k'}}})
+    await service.stop()
+
+
 async def test_heartbeats_republish_the_card():
     provider = _Recording(MemoryStore())
     service = _service(provider, heartbeat_seconds=0.02)
@@ -272,15 +292,6 @@ async def test_peer_views_compute_liveness_at_read_time():
     assert views['ageing'].online is False
     assert views['static-peer'].online is None
     assert views['static-peer'].last_seen_ts is None
-
-
-async def test_peer_cluster_answers_from_the_snapshot():
-    provider = _Listing([PeerCard(card=_peer('w-2', cluster='search'), age_seconds=1.0)])
-    service = _service(provider)
-    await service._refresh_once()
-
-    assert service.peer_cluster('w-2') == 'search'
-    assert service.peer_cluster('w-9') is None
 
 
 async def test_the_peers_gauge_counts_by_liveness():

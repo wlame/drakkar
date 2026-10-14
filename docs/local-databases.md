@@ -18,7 +18,8 @@ code.
 A worker uses two folders:
 
 - **`storage.dir`** holds the worker's own files. The live recorder file
-  is opened only by its owner.
+  and the cache file are opened only by their owner, so this folder does
+  not need to be shared.
 - **`shared.dir`** is the folder every worker of a fleet sees. It holds the
   recorder history of each cluster, the archives, the merge results and the
   [registry cards](fleet.md). When `shared.dir` is empty, the worker uses
@@ -30,8 +31,7 @@ A worker uses two folders:
 |---|---|
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. The **live file**: WAL mode, opened only by its owner. Rotated. |
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` *(older ones)* | The **backlog**: own files that are closed but not yet moved into the history folder, because a seal or a move failed, or a clean stop had no time left. See [Sealing](#sealing-and-the-history-folder). |
-| `<worker>-cache.db.actual` | LWW key/value cache. Never rotated. |
-| `<worker>-cache.db` → `.actual` *(symlink)* | Discovery pointer for the cache. Peers scan for it; see [Cache peer sync](#cache-peer-sync). |
+| `<worker>-cache.db` | LWW key/value cache. A plain file, never rotated, opened only by its owner. Peers get its `cluster` and `global` rows over HTTP; see [Cache exchange](#cache-exchange). |
 | `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). |
 
 ### Shared files (`shared.dir`)
@@ -91,7 +91,7 @@ persistence flag needs a directory to write into:
 | `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster inside the database. The meta file of each sealed file still names both. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
 | `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |
-| `cache.enabled: true` with `storage.dir: ''` | Startup warning + effective disable — the cache never runs memory-only. |
+| `cache.enabled: true` with `storage.dir: ''` | Startup warning `cache_engine_disabled_no_storage_dir` and the cache engine stays off: no cache file, nothing persisted, and no [cache exchange](#cache-exchange) in either direction. |
 
 Any combination is valid: for example `store_config: true` with
 `store_events: false` keeps each recorder file named after its worker and
@@ -281,8 +281,9 @@ The connection discipline is:
 
 - **One writer connection per live DB** (SQLite allows a single writer
   anyway).
-- **A dedicated read-only reader connection** per live DB for UI queries
-  and cache `get()` fallback, so reads never queue behind flush commits.
+- **A dedicated read-only reader connection** per live DB for UI queries,
+  cache `get()` fallback and the cache pages that peers pull, so reads
+  never queue behind flush commits.
 - **`journal_mode=WAL` on the live file**, set on the writer at open
   (persisted in the DB header; readers inherit it). WAL lets the reader
   connection read consistent snapshots while the writer commits.
@@ -297,11 +298,9 @@ The connection discipline is:
 |---|---|
 | Recorder writer, own reader | 5000 ms |
 | Cache writer, own reader | 10000 ms |
-| Cache peer/cluster ephemeral reads | 5000 ms |
 
-  The cache's own connections wait longer so a checkpoint can't fail a
-  local flush; **peer** reads time out fast so a lock-wedged peer stays
-  inside the per-peer failure isolation.
+  The cache's connections wait longer so a checkpoint can't fail a local
+  flush. No worker opens another worker's cache file.
 - **`synchronous=NORMAL` on every WAL writer** — the
   recorder (including the connection rotation opens) and the handler cache.
 
@@ -795,7 +794,18 @@ normative shape is in `drakkar-ui/docs/api-contract-v1.md`.
 
 Any other path, an unsafe path segment, a symlink, a path that resolves
 outside `shared.dir`, or a missing file answers `404`. Own files in
-`storage.dir` are not downloadable: download a file once it is sealed.
+`storage.dir` are not downloadable by path: download a file once it is
+sealed.
+
+**Live file.** `GET /api/v1/debug/download-live` takes no path. It answers
+a consistent snapshot of the serving worker's live recorder file. The
+worker makes the copy with the SQLite backup API, on its own read-only
+connection, so the recorder keeps writing during the copy. The copy uses a
+rollback journal, so it opens on its own. It goes to an owner-only temp
+file in `storage.dir`, which is removed before the answer starts. The route
+answers `404` in memory-only mode or before the first live file exists, and
+`500` `{"error": "Snapshot failed: ..."}` when the copy fails. It is behind
+`ui.auth_token` like the other debug routes.
 
 **Merge.** `POST /api/v1/debug/merge` takes the same `.db` paths (sealed
 files and merge results) and writes
@@ -836,50 +846,96 @@ of the worker's own cluster, newest first. It stops after
 searches the live file only. Every returned event carries `worker_name`. No
 worker opens another worker's live file.
 
-## Cache peer sync
+## Cache exchange
 
-Peers are discovered by scanning `storage.dir/*-cache.db` symlinks (that
-is why the `.actual` indirection exists). For each peer, every `fleet.cache_exchange.interval_seconds`:
+No worker opens another worker's cache file. Every
+`fleet.cache_exchange.interval_seconds` (default 30) a worker pulls the
+`cluster` and `global` rows that other workers originated, over HTTP, from
+`GET /api/v1/peer/cache/changes` at the URL on each peer's
+[registry card](fleet.md#the-card). This section is the wire rule. Which
+peers are pulled, the paging, the failure handling and the limits are on
+the [Cache](cache.md#cache-exchange) page.
 
-1. **Cluster resolution**: take the peer's cluster from the
-   [fleet registry](fleet.md) snapshot. Same cluster (including
-   both-empty) → pull scopes `('cluster','global')`; different, or a peer
-   the registry does not list (or no registry at all) → `('global')` only.
-   `local` never leaves its worker.
-2. **Cursor pull**: `WHERE <scope> AND (expires_at_ms IS NULL OR
-   expires_at_ms > now) AND updated_at_ms > cursor ORDER BY
-   updated_at_ms ASC, key ASC LIMIT page_size`, then drain same-
-   millisecond ties keyed on `key >` continuation.
-3. **Apply through the LWW UPSERT** (below) and invalidate touched
-   in-memory keys. The commit + metrics + invalidation trio is
-   cancellation-atomic.
-4. Per-peer failures are isolated; each cycle is bounded by
-   `fleet.cache_exchange.cycle_deadline_seconds` (default `interval × 0.9`).
+**Request.**
+`GET <card url>/api/v1/peer/cache/changes?scopes=cluster,global&after_ms=<ms>&after_key=<key>&limit=<n>`
+
+| Parameter | Rule |
+|---|---|
+| `scopes` | `cluster`, `global` or `cluster,global`. Required. |
+| `after_ms`, `after_key` | The cursor: both or neither. Absent means "from the start". `after_ms` is an integer (an optional minus and ASCII digits, signed 64-bit). |
+| `limit` | An integer from 1 to 1000. Default 500. |
+
+A repeated parameter keeps its last value. The checks run in the order of
+the table, and the first one that fails answers `400` `{"error": ...}`:
+
+| Failure | `error` |
+|---|---|
+| `scopes` missing, empty, unknown, or with an empty item | `scopes must be cluster, global or both` |
+| only one of `after_ms`, `after_key` | `after_ms and after_key must be given together` |
+| `after_ms` not an integer | `after_ms must be an integer` |
+| `limit` not an integer, or outside 1..1000 | `limit must be an integer from 1 to 1000` |
+
+**Answer.** `200` `{"rows": [...], "more": <bool>}`. Each row has `key`,
+`scope`, `value` (the stored JSON text, not parsed), `size_bytes`,
+`created_at_ms`, `updated_at_ms`, `expires_at_ms` (or `null`) and
+`origin_worker_id`. The served rows are exactly the rows that:
+
+- the serving worker originated (`origin_worker_id` is its own name);
+- have a requested scope;
+- are not expired on the serving worker's clock;
+- come after the cursor: `(updated_at_ms, key) > (after_ms, after_key)`.
+
+They are ordered by `(updated_at_ms, key)`, at most `limit` of them. `more`
+is `true` when more such rows remain. The `local` scope is never served,
+and no worker serves the rows of another worker. The cursor compares the
+pair, not `updated_at_ms` alone, so rows that share one `updated_at_ms` are
+kept apart by `key`: a page boundary inside such a group neither loses nor
+repeats a row. Each scope is one search of the `idx_cache_scope_updated`
+index in the cursor order, which stops at the page size, so a page costs
+about its own size however many rows the cache holds.
+
+`404` `{"error": "The cache exchange is off on this worker"}` when the
+cache, `storage.dir` or `fleet.cache_exchange` is off, or the cache engine
+has stopped. The parameter checks run first, so a bad request answers
+`400` even on such a worker. `503`
+`{"error": "The cache did not answer in time"}` when the read does not
+finish within 5 seconds.
+
+The route needs no token, even with `ui.auth_token` set: workers call it on
+each other and send none. See [Security posture](security.md).
+
+**The card mark.** A worker that serves the exchange puts
+`features.cache` on its registry card: for each scope, the
+`{"ms": <updated_at_ms>, "key": <key>}` of the newest row it originated.
+A scope with no such row is absent, so `{"cache": {}}` means "the exchange
+is on, nothing to pull yet". `features` is `{}` when the worker does not
+serve. The worker reads the marks from its file at start and raises them
+after every committed flush. The card carries the new marks at its next
+publish (every `fleet.registry.heartbeat_seconds`, default 10). A peer
+asks for a page only when a mark is past its cursor for that worker.
 
 The **LWW conflict rule** is one shared SQL statement used by both the
-local flush path and the peer-apply path: incoming `updated_at_ms`
-strictly greater wins; on a tie the lexicographically **smaller**
-`origin_worker_id` wins; otherwise the stored row is kept. Two workers
-observing the same conflict converge on the same survivor.
+local flush path and the path that applies pulled rows: incoming
+`updated_at_ms` strictly greater wins; on a tie the lexicographically
+**smaller** `origin_worker_id` wins; otherwise the stored row is kept. Two
+workers observing the same conflict converge on the same survivor.
 
 ## Sharing folders across workers
 
 Running a fleet against one shared folder — history, archives, merge
-results, the registry and the cache exchange — is a **supported deployment
-mode**, and the reason this page is written as a specification rather than
-as a description. Two layouts are common:
+results and the registry — is a **supported deployment mode**, and the
+reason this page is written as a specification rather than as a
+description. The cache does not use the shared folder: the
+[cache exchange](#cache-exchange) runs over HTTP, and each cache file stays
+in its worker's own `storage.dir`. Two layouts are common:
 
 - **One host.** The workers of one host share one `storage.dir` and leave
   `shared.dir` empty. Each file name carries the worker name, and the
   history folders are created inside `storage.dir`.
 - **A fleet across hosts.** Each worker has its own `storage.dir` on a
   local disk, and every worker mounts one shared folder as `shared.dir`.
-  The live file stays on the local disk. Only sealed files go to the shared
-  mount, in a background job.
-
-The cache exchange finds its peers' cache files in `storage.dir` (see
-[Cache peer sync](#cache-peer-sync)), so it needs workers that share
-`storage.dir`.
+  The live file and the cache file stay on the local disk. Only sealed
+  files go to the shared mount, in a background job.
 
 What makes sharing safe:
 
@@ -887,17 +943,15 @@ What makes sharing safe:
   the canonical datetime format (this page);
 - sealed files never change, so readers take no locks;
 - one archiver per cluster folder, chosen by an exclusive create, with ages
-  measured on the file server's clock and a fence before every publish;
-- per-peer failure isolation in the cache exchange, so one lock-wedged
-  worker cannot stall the others.
+  measured on the file server's clock and a fence before every publish.
 
 Requirements: every worker mounts the same shared folder; the mount path
 may differ, because no file stores an absolute path. The filesystem must support an exclusive create (`O_EXCL`) and a
 rename inside one folder: the archive lock and the move of a sealed file
 into the history folder rely on both. Keep `ui.recorder.store_config: true` (the default) so every
 recorder file names the worker and cluster that wrote it inside the
-database; discovery and the cache exchange's cluster rule come from the
-[fleet registry](fleet.md).
+database; discovery, and the peers and clusters of the cache exchange,
+come from the [fleet registry](fleet.md).
 
 Every worker trusts the shared folder. Anyone who can write it can plant
 files that the workers archive and serve. See
@@ -905,17 +959,22 @@ files that the workers archive and serve. See
 
 ## Removed files
 
-Earlier releases wrote three more files into `storage.dir`. The worker no
-longer writes or reads them:
+Earlier releases wrote five more files into `storage.dir`. The worker no
+longer writes them:
 
 | File | Replaced by |
 |---|---|
 | `<worker>-live.db` *(symlink)* | Nothing. No worker opens another worker's live file. |
+| `<worker>-cache.db` *(symlink)* | Nothing. The cache file itself now has this name; peers pull rows over HTTP. See [Cache exchange](#cache-exchange). |
+| `<worker>-cache.db.actual` | `<worker>-cache.db`, a plain file. |
 | `.dbstats.db` | Meta files for sealed files, and in-memory statistics for own files. See [The Databases page](#the-databases-page). |
 | `.archive-<cluster>.lock` (`flock`) | `history/<cluster>/.archive.lock`. See [The archive lock](#the-archive-lock). |
 
-The worker does not delete them. Delete them by hand after the upgrade; see
-the [upgrade guide](upgrading.md#8-old-files).
+The worker does not delete them. Delete them by hand; see the
+[upgrade guide](upgrading.md#8-old-files). Delete the two cache files
+**before** the first start: the new cache file has the name of the old
+link, and a link that is still there is followed to the old `.actual`
+file.
 
 ## Watchdog file
 

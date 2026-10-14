@@ -7,6 +7,7 @@ Routes:
   * ``/api/v1/debug/databases``         — own files, then the shared history folders.
   * ``/api/v1/debug/merge``             — merge history files into ``merged/``.
   * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
+  * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file.
   * ``/api/v1/debug/archives``          — compressed archives of every cluster folder.
   * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or sealed history.
   * ``/api/v1/debug/label-keys``        — distinct label keys across events.
@@ -24,19 +25,22 @@ as 422 errors at runtime.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import os
 import re
 import secrets
+import sqlite3
 import stat
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
@@ -94,6 +98,65 @@ DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
 
 # A sanitized cluster folder name (``drakkar.recorder.history.sanitize_cluster``).
 _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
+
+NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
+# The live-file snapshot is streamed in chunks of this size.
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+# Exclusive, owner-only, never through a link: the temp file holds a copy
+# of the recorder file.
+_SNAPSHOT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+_SNAPSHOT_SIDECARS = ('', '-journal', '-wal', '-shm')
+
+
+def _backup_into(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+    """Copy every page of ``source`` into ``target`` in one step.
+
+    One step, not many: a stepped backup restarts whenever another
+    connection (the recorder's flush) writes the source between steps.
+    """
+    source.backup(target)
+
+
+def _snapshot_live_file(live_path: str) -> BinaryIO:
+    """A consistent copy of the live recorder file, as an open handle to an unlinked temp file.
+
+    Made with the SQLite backup API on its own read-only connection: never
+    the recorder's reader, which the UI pages read through and which would
+    be held for the whole copy. In WAL mode the copy's read transaction
+    does not block the recorder's writer. The copy goes to a dot-named,
+    owner-only temp file beside the live file and is switched to a rollback
+    journal, so it opens on its own. The temp file is unlinked before the
+    handle is returned, so nothing is left behind even when the download
+    breaks. Blocking: run it in a thread.
+    """
+    folder, name = os.path.split(live_path)
+    temp = os.path.join(folder, f'.{name}.{secrets.token_hex(8)}.download')
+    os.close(os.open(temp, _SNAPSHOT_FLAGS, 0o600))
+    try:
+        source = sqlite3.connect(f'file:{live_path}?mode=ro', uri=True)
+        try:
+            target = sqlite3.connect(temp)
+            try:
+                _backup_into(source, target)
+                target.execute('PRAGMA journal_mode=DELETE')
+            finally:
+                target.close()
+        finally:
+            source.close()
+        # The response closes the handle after the last chunk.
+        return open(temp, 'rb')
+    finally:
+        for suffix in _SNAPSHOT_SIDECARS:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp + suffix)
+
+
+def _read_chunks(handle: BinaryIO) -> Iterator[bytes]:
+    """Stream ``handle`` to the client and close it after the last chunk."""
+    with handle:
+        while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
+            yield chunk
+
 
 # The paths, relative to ``shared.dir``, that the download and merge
 # endpoints act on. The first segment picks the folder; the folder fixes
@@ -627,6 +690,33 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             # on <a> navigations); no-store keeps token-bearing responses
             # out of shared proxy/CDN caches.
             headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @router.get('/api/v1/debug/download-live', dependencies=[Depends(deps.require_auth)])
+    async def debug_download_live():
+        """Download a consistent snapshot of this worker's live recorder file.
+
+        404 in memory-only mode or before the first file exists; 500 when
+        the snapshot fails. See :func:`_snapshot_live_file`.
+        """
+        live_path = recorder.db_path if recorder.storage_dir else ''
+        if not live_path or not await asyncio.to_thread(os.path.isfile, live_path):
+            return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
+        try:
+            handle = await asyncio.to_thread(_snapshot_live_file, live_path)
+        except (OSError, sqlite3.Error) as exc:
+            await logger.awarning('debug_download_live_failed', category='debug', db_path=live_path, error=str(exc))
+            return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
+        size = os.fstat(handle.fileno()).st_size
+        return StreamingResponse(
+            _read_chunks(handle),
+            media_type='application/x-sqlite3',
+            headers={
+                'Content-Disposition': f'attachment; filename="{os.path.basename(live_path)}"',
+                'Content-Length': str(size),
+                # Same reason as /debug/download: the URL may carry ?token=.
+                'Cache-Control': 'no-store, private',
+            },
         )
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])

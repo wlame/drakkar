@@ -2,12 +2,15 @@
 
 Kept separate from the cache classes so the DDL/DML can be inspected
 without pulling in the engine's runtime imports (asyncio, structlog,
-peer-discovery, etc.). Tests that only need the schema text — for
-example, to materialise a peer DB in a fixture — depend on this module
+httpx, etc.). Tests that only need the schema text — for example, to
+materialise a peer's cache file in a fixture — depend on this module
 alone.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
 
 # `cache_entries` is the single table backing every worker's cache DB file.
 # The schema mirrors `CacheEntry` one-to-one so the flush path can bind
@@ -24,10 +27,11 @@ from __future__ import annotations
 # - ``idx_cache_expires`` is partial (only rows with a TTL), to speed up the
 #   cleanup loop's "DELETE WHERE expires_at_ms <= now" without widening the
 #   index to cover NULL rows that never expire.
-# - ``idx_cache_scope_updated`` is composite; the peer-sync loop filters
-#   rows by ``scope IN (...)`` and orders them by ``updated_at_ms`` for
-#   cursor-based pagination. Having both columns in one index means the
-#   planner can walk rows in exactly the cursor order.
+# - ``idx_cache_scope_updated`` is composite; the changes query a peer
+#   pulls through searches one scope at a time and orders the rows by
+#   ``updated_at_ms`` for cursor-based pagination. Having both columns in
+#   one index means the planner walks the rows of each scope in the cursor
+#   order and stops at the page size.
 SCHEMA_CACHE_ENTRIES = """
 CREATE TABLE IF NOT EXISTS cache_entries (
     key               TEXT    NOT NULL PRIMARY KEY,
@@ -92,13 +96,65 @@ WHERE
 """
 
 
+# ---- cache exchange: the serving side ---------------------------------------
+
+# Column order of a served row; the answer keys use the same names.
+CHANGES_FIELDS: tuple[str, ...] = (
+    'key',
+    'scope',
+    'value',
+    'size_bytes',
+    'created_at_ms',
+    'updated_at_ms',
+    'expires_at_ms',
+    'origin_worker_id',
+)
+
+
+def changes_query(
+    *, origin: str, scopes: Sequence[str], now_ms: int, after: tuple[int, str] | None, limit: int
+) -> tuple[str, list[Any]]:
+    """The SQL and parameters of one page of ``GET /api/v1/peer/cache/changes``.
+
+    Own-origin rows of the requested scopes that are not expired at the
+    server's ``now``, after the ``(updated_at_ms, key)`` cursor, in cursor
+    order, at most ``limit`` rows. The row-value comparison keeps rows that
+    share one ``updated_at_ms`` apart by key, so a page boundary inside such
+    a group neither loses nor repeats a row.
+
+    One sub-select per scope, each walking ``idx_cache_scope_updated`` and
+    stopping at ``limit`` rows, joined with ``UNION ALL`` under an outer
+    order and limit. A single ``scope IN (...)`` query sorted every row of
+    both scopes after the cursor on every page; this one reads at most
+    ``limit`` rows per scope.
+    """
+    cursor = 'AND (updated_at_ms, key) > (?, ?) ' if after is not None else ''
+    one_scope = (
+        f'SELECT {", ".join(CHANGES_FIELDS)} FROM cache_entries '
+        'WHERE origin_worker_id = ? AND scope = ? '
+        'AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
+        f'{cursor}ORDER BY updated_at_ms, key LIMIT ?'
+    )
+    params: list[Any] = []
+    for scope in scopes:
+        params += [origin, scope, now_ms, *(after or ()), limit]
+    if len(scopes) == 1:
+        return one_scope, params
+    parts = ' UNION ALL '.join(f'SELECT * FROM ({one_scope})' for _scope in scopes)
+    return f'{parts} ORDER BY updated_at_ms, key LIMIT ?', [*params, limit]
+
+
+# The newest own-origin row of one scope: the high-water mark the worker
+# card carries, read once at start. Parameters: origin, scope.
+OWN_MARK_SQL = (
+    'SELECT updated_at_ms, key FROM cache_entries '
+    'WHERE origin_worker_id = ? AND scope = ? '
+    'ORDER BY updated_at_ms DESC, key DESC LIMIT 1'
+)
+
+
 # ---- runtime tunables (non-SQL) --------------------------------------------
 
-# Explicit per-connection busy timeouts, in milliseconds, so lock
-# contention on a shared cache DB behaves the same no matter which worker
-# opened it (see docs/local-databases.md). The
-# engine's own writer/reader wait longer than ephemeral peer reads: the
-# local engine should ride out a checkpoint, while a slow PEER must fail
-# fast and be isolated by the per-peer error handling.
+# Explicit busy timeout of the engine's own writer and reader, in
+# milliseconds: the local engine rides out a checkpoint rather than failing.
 BUSY_TIMEOUT_MS = 10000
-PEER_BUSY_TIMEOUT_MS = 5000
