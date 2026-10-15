@@ -82,6 +82,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Startup refuses a worker whose results go to sinks when it has none.
+NO_SINKS_ERROR = (
+    'No sinks configured, but results are delivered to sinks (the Kafka source is on, '
+    'or sources.http.sinks_enabled is true). Add at least one sink to the sinks: section in config.'
+)
+
 
 def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     """The options mapping the configured registry provider's factory receives.
@@ -194,11 +200,9 @@ class AppLifecycle:
             await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
             await self._report_kafka_security()
 
-            # validate at least one sink is configured
-            if app._config.sinks.is_empty:
-                raise SinkNotConfiguredError(
-                    'No sinks configured. Add at least one sink to the sinks: section in config.'
-                )
+            # A source that delivers results to sinks needs at least one.
+            if app._config.sinks.is_empty and app._config.sources.delivers_to_sinks:
+                raise SinkNotConfiguredError(NO_SINKS_ERROR)
 
             await self._build_executor_pool()
             await self._start_observability()

@@ -19,6 +19,26 @@ def test_sources_both_disabled_is_a_config_error():
         _config(sources={})
 
 
+@pytest.mark.parametrize(
+    ('kafka', 'http', 'http_sinks', 'expected'),
+    [
+        (True, False, False, True),
+        (True, True, False, True),
+        (False, True, True, True),
+        (False, True, False, False),
+        (False, False, True, False),
+    ],
+    ids=['kafka', 'kafka-and-http', 'http-with-sinks', 'http-without-sinks', 'http-off-sinks-flag-on'],
+)
+def test_delivers_to_sinks_when_the_kafka_source_or_http_sinks_are_on(kafka, http, http_sinks, expected):
+    sources = SourcesConfig(
+        kafka=KafkaSourceConfig(enabled=kafka, topic='t', consumer_group='g'),
+        http=WebAppConfig(enabled=http, sinks_enabled=http_sinks),
+    )
+
+    assert sources.delivers_to_sinks is expected
+
+
 def test_sources_default_flags_are_false():
     sources = SourcesConfig()
     assert sources.kafka.enabled is False

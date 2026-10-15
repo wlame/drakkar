@@ -116,3 +116,13 @@ class SourcesConfig(BaseModel):
     def enabled_names(self) -> list[str]:
         """Enabled source names in the fixed start order (kafka, then http)."""
         return [name for name in ('kafka', 'http') if getattr(self, name).enabled]
+
+    @property
+    def delivers_to_sinks(self) -> bool:
+        """Whether results of an enabled source go to the sinks.
+
+        The Kafka source always delivers to sinks. The HTTP source does so
+        only with ``sinks_enabled``; otherwise the handler's response is
+        the whole result, and a worker with only that source needs no sink.
+        """
+        return self.kafka.enabled or (self.http.enabled and self.http.sinks_enabled)

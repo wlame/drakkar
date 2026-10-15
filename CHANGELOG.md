@@ -112,6 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An HTTP-only worker may run without sinks.** Startup requires at least
+  one sink only when results go to sinks: the Kafka source is on, or
+  `sources.http.sinks_enabled` is true. The error now says so.
 - **A window is archived `history.archive.due_after_hours` (default 48)
   after it ends**, instead of one window later. Retention must now cover
   that delay plus one window.

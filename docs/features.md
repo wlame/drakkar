@@ -42,7 +42,10 @@ comes from. A config with neither fails to load
 (`no input source enabled: ...`). See [Input Sources](sources.md).
 
 Sinks are not a toggle either: **at least one sink instance (of any type)
-is required** — a worker with zero sinks fails startup. The DLQ is built
+is required when results go to sinks**, that is when the Kafka source is on
+or `sources.http.sinks_enabled` is true. Such a worker with zero sinks fails
+startup. An HTTP-only worker with `sinks_enabled: false` (the default)
+answers each request with the handler's response and needs no sink. The DLQ is built
 whenever the Kafka source is on (topic `{sources.kafka.topic}_dlq`) or
 `dlq.topic` is set, and the circuit breaker always wraps sink delivery.
 

@@ -427,6 +427,41 @@ async def test_app_no_sinks_raises(test_config_no_sinks):
         await app._lifecycle._async_run()
 
 
+def _http_only_without_sinks(test_config: DrakkarConfig, *, http_sinks: bool) -> DrakkarConfig:
+    """An HTTP-only worker with an empty sinks: section."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.sources.kafka.enabled = False
+    cfg.sources.http.enabled = True
+    cfg.sources.http.port = 0
+    cfg.sources.http.sinks_enabled = http_sinks
+    cfg.sinks = SinksConfig()
+    return cfg
+
+
+async def test_an_http_only_worker_without_sinks_starts(test_config, monkeypatch):
+    """With the Kafka source off and sources.http.sinks_enabled off, no result reaches a sink."""
+    app = DrakkarApp(handler=WebCapableHandler(), config=_http_only_without_sinks(test_config, http_sinks=False))
+
+    # The sources start after the sink check, the sink connect and the DLQ
+    # build: reaching the HTTP bind proves startup accepted no sinks.
+    def reached_the_sources(*a, **kw):
+        raise RuntimeError('reached the sources')
+
+    monkeypatch.setattr('drakkar.sources.http.WebApp', reached_the_sources)
+    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', AsyncMock())
+
+    with pytest.raises(RuntimeError, match='reached the sources'):
+        await app._lifecycle._async_run()
+
+
+async def test_http_sinks_enabled_without_sinks_fails_at_startup(test_config):
+    """sources.http.sinks_enabled routes results to sinks, so a worker with none is misconfigured."""
+    app = DrakkarApp(handler=WebCapableHandler(), config=_http_only_without_sinks(test_config, http_sinks=True))
+
+    with pytest.raises(SinkNotConfiguredError, match='No sinks configured'):
+        await app._lifecycle._async_run()
+
+
 async def test_async_run_startup_failure_tears_down_started_subsystems(test_config, monkeypatch):
     """A startup step that raises after the recorder opened must still run ``_shutdown``.
 

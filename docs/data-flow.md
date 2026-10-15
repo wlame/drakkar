@@ -27,7 +27,7 @@ When `DrakkarApp.run()` is called, the framework:
 
 After `on_startup`, the framework builds all components in this order:
 
-1. **Validates sinks are configured** -- if `sinks.is_empty` is True (no sinks of any type defined), raises `SinkNotConfiguredError` immediately. At least one sink must be configured.
+1. **Validates sinks are configured** -- if `sinks.is_empty` is True (no sinks of any type defined) and results go to sinks (`sources.delivers_to_sinks`: the Kafka source is on, or `sources.http.sinks_enabled` is true), raises `SinkNotConfiguredError` immediately. An HTTP-only worker with `sinks_enabled: false` may have no sinks.
 
 2. **Creates the ExecutorPool** with:
    - `executor.binary_path` (default: `None` -- each task must then provide its own `binary_path`)
