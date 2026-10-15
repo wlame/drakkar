@@ -20,7 +20,7 @@ from pathlib import Path
 import aiosqlite
 from structlog.testing import capture_logs
 
-from drakkar.cache import CacheEngine
+from drakkar.cache import Cache, CacheEngine, CacheScope
 from drakkar.config import CacheConfig, CacheExchangeConfig
 from tests.conftest import split_cache_overrides
 
@@ -250,6 +250,55 @@ async def test_start_with_empty_storage_dir_disables_engine(tmp_path):
         # no file created anywhere under tmp_path
         assert not (tmp_path / 'w1-cache.db').exists()
         assert any(e['event'] == 'cache_engine_disabled_no_storage_dir' for e in cap)
+    finally:
+        await engine.stop()
+
+
+def _memory_only_engine(max_memory_entries: int) -> CacheEngine:
+    return CacheEngine(
+        config=CacheConfig(enabled=True, max_memory_entries=max_memory_entries),
+        exchange=CacheExchangeConfig(),
+        storage_dir='',
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+
+
+async def test_memory_only_mode_keeps_no_pending_writes():
+    """With ``storage.dir: ""`` no flush ever runs, so a pending write would
+    stay for the life of the worker: many distinct keys must not grow the
+    cache past its memory cap."""
+    engine = _memory_only_engine(max_memory_entries=10)
+    cache = Cache(origin_worker_id='w1', max_memory_entries=10)
+    engine.attach_cache(cache)
+    await engine.start()
+    try:
+        for i in range(1000):
+            cache.set(f'k{i}', i)
+            cache.set(f'm{i}', i, scope=CacheScope.MEMORY)
+            cache.delete(f'd{i}')
+
+        assert len(cache._dirty) == 0  # type: ignore[reportPrivateUsage]
+        assert len(cache._memory) == 10  # type: ignore[reportPrivateUsage]
+        assert cache.peek('m999') == 999
+        # An evicted key is gone: there is no file to fall back to.
+        assert await cache.get('k0') is None
+    finally:
+        await engine.stop()
+
+
+async def test_a_cache_attached_after_a_memory_only_start_keeps_no_pending_writes():
+    engine = _memory_only_engine(max_memory_entries=10)
+    await engine.start()
+    cache = Cache(origin_worker_id='w1', max_memory_entries=10)
+    try:
+        engine.attach_cache(cache)
+        cache.set('k', 1)
+        cache.delete('d')
+
+        assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
+        assert cache.peek('k') == 1
     finally:
         await engine.stop()
 

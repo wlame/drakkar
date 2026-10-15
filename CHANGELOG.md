@@ -181,6 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Memory-only mode no longer keeps a pending write per key.** With
+  `cache.enabled` and an empty `storage.dir`, every `set()` and `delete()`
+  left a pending write that no flush ever took, one per distinct key, past
+  `max_memory_entries`. The cache now keeps none in that mode.
 - **Partition lag no longer shows the whole partition when the broker reports
   no committed offset.** The worker uses its own last commit instead. If no
   offset is known, `committed_offset` is `null` and lag counts from the

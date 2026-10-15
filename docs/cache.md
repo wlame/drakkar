@@ -204,6 +204,12 @@ fleet:
     cycle_deadline_seconds: null
 ```
 
+With `storage.dir: ""` (memory-only mode) the cache has no file, and every
+entry behaves like a `memory` entry: an entry the LRU evicts is gone, a
+restart loses all of them, and nothing is pulled from or served to peers.
+The worker logs `cache_engine_disabled_no_storage_dir` at start. The cache
+then keeps no pending writes, so `max_memory_entries` bounds its memory.
+
 ---
 
 ## Cache exchange

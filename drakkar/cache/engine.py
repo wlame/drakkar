@@ -131,6 +131,9 @@ class CacheEngine:
         self._config = config
         self._exchange = exchange
         self._storage_dir = storage_dir
+        # True once start() found no storage folder: nothing is persisted,
+        # so an attached Cache keeps no pending writes.
+        self._memory_only = False
         self._worker_id = worker_id
         self._cluster_name = cluster_name
         self._recorder = recorder
@@ -316,6 +319,8 @@ class CacheEngine:
         self._cache = cache
         if self._reader_db is not None:
             cache.attach_reader_db(self._reader_db)
+        if self._memory_only:
+            cache.disable_pending_writes()
 
     def _resolve_db_dir(self) -> str:
         """Return the folder the cache DB lives in (``storage.dir``), or ``''`` for memory-only."""
@@ -377,6 +382,11 @@ class CacheEngine:
                 worker_id=self._worker_id,
                 reason='storage.dir is empty (memory-only mode), so there is no cache file',
             )
+            # No flush will ever run, so the Cache must keep no pending
+            # writes: they would grow by one per distinct key.
+            self._memory_only = True
+            if self._cache is not None:
+                self._cache.disable_pending_writes()
             return
 
         # Owner-only when we create it: the cache DB inside holds handler

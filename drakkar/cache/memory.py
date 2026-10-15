@@ -20,7 +20,9 @@ we pop the LRU key (the first item in iteration order). The evicted key's
 dirty-op is **preserved** — the DB is the source of truth, and any pending
 SET still needs to reach it via flush. Losing the dirty entry would silently
 drop the write. Evicted entries fall through to the DB on next read; the DB
-will re-warm ``_memory`` in ``get()``. ``CacheScope.MEMORY`` entries are the
+will re-warm ``_memory`` in ``get()``. In memory-only mode (``storage.dir``
+empty) no flush ever runs, so the engine switches the dirty map off
+(``disable_pending_writes``) and an evicted entry is simply gone. ``CacheScope.MEMORY`` entries are the
 exception: they have no DB row to fall through to, so eviction (and worker
 restart) simply loses them — the next read is a miss. Best-effort by design.
 
@@ -98,6 +100,9 @@ class Cache:
         self._memory: OrderedDict[str, CacheEntry] = OrderedDict()
         # pending mutations for the next flush
         self._dirty: dict[str, DirtyOp] = {}
+        # False once the engine says no flush will ever run (memory-only
+        # mode): set/delete then record no pending mutations at all.
+        self._keeps_pending_writes = True
         self._origin_worker_id = origin_worker_id
         self._max_memory_entries = max_memory_entries
         # Reader-only aiosqlite connection. ``CacheEngine.start()`` wires
@@ -206,9 +211,9 @@ class Cache:
             # cheap no-op at flush time, so we record it unconditionally
             # rather than trying to guess disk state from here.
             if scope is CacheScope.MEMORY:
-                self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+                self._record_pending(key, DirtyOp(op=Op.DELETE, entry=None))
             else:
-                self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
+                self._record_pending(key, DirtyOp(op=Op.SET, entry=entry))
 
             # Write-path metrics. ``writes{scope}`` ticks once per user intent
             # — we count the call, not row transitions (matches the "throughput
@@ -464,7 +469,7 @@ class Cache:
                 self._refresh_memory_gauges()
             # A DELETE op overwrites any prior SET; flush will see the final
             # state only. Entry is None since the row is going away.
-            self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+            self._record_pending(key, DirtyOp(op=Op.DELETE, entry=None))
         # User intent counter — ticks once per delete call regardless of
         # whether the key was actually in memory (mirrors the "throughput
         # not state" semantics used by flush/sync).
@@ -566,6 +571,26 @@ class Cache:
                     popped_any = True
             if popped_any:
                 self._refresh_memory_gauges()
+
+    def disable_pending_writes(self) -> None:
+        """Keep no pending writes from now on, and drop the ones recorded.
+
+        The engine calls this in memory-only mode (``storage.dir`` empty),
+        where no flush ever runs. Each ``set`` and ``delete`` would
+        otherwise leave a pending write for the life of the worker, one
+        per distinct key, past ``max_memory_entries``.
+        """
+        with self._lock:
+            self._keeps_pending_writes = False
+            self._dirty.clear()
+
+    def _record_pending(self, key: str, op: DirtyOp) -> None:
+        """Record ``op`` as the pending write of ``key`` unless pending writes are off.
+
+        Caller must hold ``self._lock``.
+        """
+        if self._keeps_pending_writes:
+            self._dirty[key] = op
 
     def swap_dirty(self) -> dict[str, DirtyOp]:
         """Atomically swap ``_dirty`` for a fresh empty dict and return the
