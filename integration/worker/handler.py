@@ -638,8 +638,8 @@ class RipgrepHandler(
         """Per-TASK delivery — one call per (pattern, file_path) subprocess.
 
         Emits fine-grained per-task records: full detail to Kafka/Mongo,
-        a scalar summary to the Postgres archive (one row per task), and
-        a cached summary to Redis. Request-level aggregation happens
+        a scalar summary to the Postgres archive (one row per request the
+        task served), and a cached summary to Redis. Request-level aggregation happens
         later in on_message_complete.
 
         Also populates the framework cache with this task's stdout so
@@ -728,6 +728,16 @@ class RipgrepHandler(
             match_count=len(matches),
             duration_seconds=result.duration_seconds,
         )
+        # One Postgres detail row per request this task served. A merged
+        # task does the work of every message in the window that asked for
+        # the same pair, and each of those requests counts it as succeeded
+        # in its rollup, so each gets its own row. dict.fromkeys drops a
+        # request id listed twice (one request redelivered into the same
+        # window) and keeps the order.
+        served_request_ids = list(dict.fromkeys(meta.get('fan_in_request_ids') or [meta['request_id']]))
+        summaries_per_request = [
+            summary.model_copy(update={'request_id': request_id}) for request_id in served_request_ids
+        ]
 
         # custom Prometheus metric
         search_match_count.observe(len(matches))
@@ -757,9 +767,10 @@ class RipgrepHandler(
             postgres=[
                 dk.PostgresPayload(
                     table='search_results',
-                    data=summary,
+                    data=request_summary,
                     sink='archive_results_db',
-                ),
+                )
+                for request_summary in summaries_per_request
             ],
             mongo=[dk.MongoPayload(collection='search_archive', data=output)],
             redis=[

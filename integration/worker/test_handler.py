@@ -12,7 +12,7 @@ behaviour so any implementation of it stays provably identical.
 from pathlib import Path
 
 import pytest
-from handler import _human_file_size, _scan_target_module
+from handler import RipgrepHandler, _human_file_size, _scan_target_module
 from http_handler import MIRRORED_RESULTS_SINK, HttpSearchHandler
 from models import SearchRequest, SearchResponse
 
@@ -197,6 +197,34 @@ async def test_http_search_handler_response_reports_one_row_per_succeeded_task()
     assert [m.match_count for m in response.matches] == [2, 0]
     assert {m.pattern for m in response.matches} == {'import', 'class'}
     assert [m.task_id for m in response.matches] == [tasks[0].task_id, tasks[1].task_id]
+
+
+async def test_ripgrep_handler_writes_a_search_results_row_for_every_request_a_merged_task_served() -> None:
+    # One task serves every message of a window that asked for the same
+    # pair. Each of those requests counts the task as succeeded in its
+    # rollup, so each must also find its own detail row.
+    task = dk.ExecutorTask(
+        task_id=dk.make_task_id('rg'),
+        args=['1', 'import', '/project/drakkar', '--fail=0'],
+        metadata={
+            'request_id': 'req-1',
+            'fan_in_request_ids': ['req-1', 'req-2', 'req-3'],
+            'pattern': 'import',
+            'file_path': '/project/drakkar',
+            'repeat': 1,
+        },
+        source_offsets=[10, 11, 12],
+    )
+
+    handler = RipgrepHandler()
+    handler.total_collected = 0  # on_ready sets it before any task runs
+
+    collected = await handler.on_task_complete(_result(task, 'one\ntwo\n'))
+
+    assert collected is not None
+    rows = [payload.data for payload in collected.postgres if payload.table == 'search_results']
+    assert [row.request_id for row in rows] == ['req-1', 'req-2', 'req-3']
+    assert {row.match_count for row in rows} == {2}
 
 
 @pytest.mark.parametrize(

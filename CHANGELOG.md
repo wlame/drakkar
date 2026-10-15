@@ -181,6 +181,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`just verify-delivery` no longer reports requests that shared a task.**
+  The harness runs one task for every message in a window that asks for
+  the same pattern and file, but wrote that task's `search_results` row
+  under the first request only. Each request it served now gets its own
+  row.
 - **The integration harness no longer stalls on a minified file.** The
   search over the whole repository matched one 1.5 MB line in a vendored,
   minified file. The result was too large for the Kafka sink and for the

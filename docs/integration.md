@@ -493,7 +493,7 @@ read. Nothing here verifies the mirrored 1%:
 | `no_loss` | A produced request has no `request_summaries` row. An offset was committed past a message whose sinks never confirmed. |
 | `no_phantom` | A summary row exists for an id nobody sent. A corrupted key path, or a database still holding rows from an earlier run. |
 | `update_not_reordered` | A request above the notify threshold still reads `notified = false`. The handler appends `UPDATE notified` immediately after the `UPSERT` that creates the row, and the upsert never writes that column -- so an `UPDATE` that ran first matched nothing and lost the write. This is the on-disk signature of the Postgres sink executing payloads out of order. |
-| `task_rows_present` | A rollup reports successful tasks but wrote no `search_results` rows. The per-request summary was delivered while the per-task writes behind it were not. |
+| `task_rows_present` | A rollup reports successful tasks but wrote no `search_results` rows. The per-request summary was delivered while the per-task writes behind it were not. A task that several requests share (the same pattern and file in one window) writes one row for each of them. |
 | `duplication_bounded` | `search_results` rows per request passed the cap. At-least-once permits duplicates -- the flood phase redelivers every request on purpose -- but this many means messages are being replayed in a loop. |
 
 Run it once the producer has finished and the pipeline has drained:
