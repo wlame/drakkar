@@ -45,5 +45,11 @@ while [ "$i" -lt "$REPEAT" ]; do
     i=$((i + 1))
 done
 
-# last run — output goes to stdout
-rg --no-filename --no-line-number "$PATTERN" "$TARGET" 2>/dev/null || true
+# last run — output goes to stdout. A matching line longer than
+# MAX_COLUMNS characters is cut to its first MAX_COLUMNS, with a note at
+# the end; it still counts as one match. A minified file is often one long
+# line, and a single such line would make the task's result too big for
+# the Kafka sink and the DLQ.
+MAX_COLUMNS=500
+rg --no-filename --no-line-number --max-columns="$MAX_COLUMNS" --max-columns-preview \
+    "$PATTERN" "$TARGET" 2>/dev/null || true

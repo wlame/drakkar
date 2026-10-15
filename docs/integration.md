@@ -143,7 +143,8 @@ so the main and fast clusters see it as usual. An HTTP error or a timeout
 Each search message flows through:
 
 1. [arrange()](handler.md#arrange-required) -- creates a ripgrep task with CLI args
-2. Executor runs `/usr/local/bin/run-rg` (ripgrep wrapper)
+2. Executor runs `/usr/local/bin/run-rg` (ripgrep wrapper). A matching line longer
+   than 500 characters is cut, so one result stays well under the Kafka message limit.
 3. [on_task_complete()](handler.md#on_task_complete) routes results based on match count:
    - **Always**: Kafka (full result), Postgres (metrics row), MongoDB (archive), Redis (cached summary)
    - **match_count > 20**: HTTP webhook notification

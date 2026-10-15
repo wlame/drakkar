@@ -181,6 +181,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The integration harness no longer stalls on a minified file.** The
+  search over the whole repository matched one 1.5 MB line in a vendored,
+  minified file. The result was too large for the Kafka sink and for the
+  DLQ, so the partition stopped committing. `run-rg.sh` now cuts a matching
+  line after 500 characters.
 - **Memory-only mode no longer keeps a pending write per key.** With
   `cache.enabled` and an empty `storage.dir`, every `set()` and `delete()`
   left a pending write that no flush ever took, one per distinct key, past
