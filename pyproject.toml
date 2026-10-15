@@ -180,6 +180,10 @@ venv = ".venv"
 # timezone (UTC wrote T00:00:00Z, UTC+2 wrote T22:00:00Z) and the file
 # churned on every re-lock.
 exclude-newer = "2026-08-28T00:00:00Z"
+# Security fixes published after that date, let in one package at a time so
+# the rest of the lock does not move: pymongo 4.18.2 and urllib3 2.8.0 fix
+# the advisories pip-audit reports for 4.17.0 and 2.7.0. Same 7-day rule.
+exclude-newer-package = { pymongo = "2026-10-08T00:00:00Z", urllib3 = "2026-10-08T00:00:00Z" }
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]

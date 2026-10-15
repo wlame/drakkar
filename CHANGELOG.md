@@ -220,6 +220,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The lock file moves to pymongo 4.18.2 and urllib3 2.8.0.** They fix
+  the advisories `pip-audit` reports for pymongo 4.17.0 and urllib3 2.7.0
+  (urllib3 comes only with the docs tools). `[tool.uv]
+  exclude-newer-package` lets in these two packages only.
 - **`/api/v1/peer/` is public.** `ui.auth_token` does not protect it,
   because workers call it on each other without a token. Anyone who can
   reach the UI port can read the `cluster` and `global` cache rows of a
