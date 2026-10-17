@@ -1369,20 +1369,28 @@ async def test_a_pass_that_outlives_the_shutdown_time_is_left_and_the_provider_s
     await wait_for(pass_future.done)
 
 
-async def test_the_stop_waits_for_a_pass_in_progress_at_most_the_grace_and_still_stops_the_election(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(core_mod, 'ELECTION_STOP_GRACE_SECONDS', 0.2)
-    election = MemoryElection(ElectionStore())
+def _stuck_pass_in_window(monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Install an archive pass whose window does not end when stop() asks, like a merge on a slow mount.
+
+    Returns the event the pass sets once it is in its window, and the event
+    that lets the window end.
+    """
     in_window = threading.Event()
     window_may_end = threading.Event()
 
     def stuck_pass(shared_dir, **kwargs) -> None:
         in_window.set()
-        # A window that does not end when stop() asks, like a merge on a slow mount.
         window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
+    return in_window, window_may_end
+
+
+async def test_the_stop_waits_for_a_pass_in_progress_until_only_the_reserve_is_left_and_still_stops_the_election(
+    tmp_path, monkeypatch
+):
+    election = MemoryElection(ElectionStore())
+    in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
     rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-stuck-pass')
     await rec.start()
     rec._start_archive_pass()
@@ -1391,22 +1399,67 @@ async def test_the_stop_waits_for_a_pass_in_progress_at_most_the_grace_and_still
     try:
         started = time.monotonic()
         with capture_logs() as logs:
-            await rec.stop(timeout=WAIT_FOR_TIMEOUT_SECONDS)
+            await rec.stop(timeout=1.0, election_reserve_seconds=0.5)
         stop_seconds = time.monotonic() - started
     finally:
         window_may_end.set()
 
-    # The shutdown time was long; the wait took only the grace.
-    assert stop_seconds < WAIT_FOR_TIMEOUT_SECONDS / 2
+    # The wait ended when 0.5 s of the 1 s were left, not with the shutdown time.
+    assert stop_seconds < 1.0
     (abandoned,) = [entry for entry in logs if entry['event'] == 'recorder_archive_pass_abandoned']
     assert abandoned['category'] == 'recorder'
-    assert 0.2 <= abandoned['waited_seconds'] < WAIT_FOR_TIMEOUT_SECONDS / 2
+    # At most the time left less the reserve; the seal before the wait took a little of it.
+    assert 0.2 <= abandoned['waited_seconds'] <= 0.55
     assert abandoned['detail'] == 'the pass is fenced at its next check and its lease expires on its own'
     # The provider stop still made its attempt with the time that was left.
     assert election.calls['stop'] == 1
     pass_future = rec._archive_pass_future
     assert pass_future is not None
     await wait_for(pass_future.done)
+
+
+async def test_a_reserve_larger_than_the_time_left_abandons_the_pass_at_once_and_still_stops_the_election(
+    tmp_path, monkeypatch
+):
+    election = MemoryElection(ElectionStore())
+    in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-reserve-too-large')
+    await rec.start()
+    rec._start_archive_pass()
+    await wait_for(in_window.is_set)
+
+    try:
+        with capture_logs() as logs:
+            await rec.stop(timeout=1.0, election_reserve_seconds=5.0)
+    finally:
+        window_may_end.set()
+
+    (abandoned,) = [entry for entry in logs if entry['event'] == 'recorder_archive_pass_abandoned']
+    assert abandoned['waited_seconds'] < 0.1
+    assert election.calls['stop'] == 1
+    pass_future = rec._archive_pass_future
+    assert pass_future is not None
+    await wait_for(pass_future.done)
+
+
+async def test_a_stop_without_a_deadline_waits_until_the_pass_in_progress_ends(tmp_path, monkeypatch):
+    election = _OrderRecordingElection()
+    in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-no-deadline')
+    await rec.start()
+    rec._start_archive_pass()
+    await wait_for(in_window.is_set)
+
+    with capture_logs() as logs:
+        stopping = asyncio.create_task(rec.stop(election_reserve_seconds=5.0))
+        await asyncio.sleep(0.3)
+        # Still waiting for the window: no deadline, so no reserve to keep.
+        assert not stopping.done()
+        window_may_end.set()
+        await asyncio.wait_for(stopping, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    assert 'recorder_archive_pass_abandoned' not in [entry['event'] for entry in logs]
+    assert election.order[-1] == 'stop'
 
 
 class _FailingStartFilesystemElection(FilesystemElection):

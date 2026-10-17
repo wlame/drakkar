@@ -695,9 +695,10 @@ class AppLifecycle:
     def _wire_io_executor(self) -> None:
         """Resize asyncio's default to_thread executor when io.max_threads is set.
 
-        Every ``asyncio.to_thread`` call in the process — handler blocking
-        I/O plus the framework's own background file work — shares this one
-        pool, which Python caps at ``min(32, cpu_count + 4)``. Installing a
+        Every ``asyncio.to_thread`` call on the main loop — handler blocking
+        I/O plus the framework's own short file work — shares this one pool,
+        which Python caps at ``min(32, cpu_count + 4)``. The UI server's and
+        the webapp's loops keep pools of their own. Installing a
         replacement via ``loop.set_default_executor`` lifts that cap;
         ``asyncio.run``'s cleanup (``shutdown_default_executor``) then owns
         its shutdown exactly as it owns the stock pool's, so lifecycle
@@ -1159,8 +1160,13 @@ class AppLifecycle:
             if app._recorder:
                 try:
                     # The seal always runs; moving the file into the history
-                    # folder gets only the shutdown time that is left.
-                    await app._recorder.stop(timeout=max(deadline - time.monotonic(), 0.0))
+                    # folder gets only the shutdown time that is left. The
+                    # wait for an archive pass in progress keeps the time of
+                    # one registry call for the card withdraw below.
+                    await app._recorder.stop(
+                        timeout=max(deadline - time.monotonic(), 0.0),
+                        election_reserve_seconds=self._registry_stop_reserve_seconds(),
+                    )
                 except Exception as exc:
                     await log.awarning(
                         'recorder_stop_failed',
@@ -1244,6 +1250,13 @@ class AppLifecycle:
 
             await log.ainfo('drakkar_stopped', category='lifecycle')
             close_logging()
+
+    def _registry_stop_reserve_seconds(self) -> float:
+        """The stop time the recorder keeps for the registry: one call's time limit while a registry runs, else 0."""
+        app = self._app
+        if app._fleet is None:
+            return 0.0
+        return app._config.fleet.registry.resilience.timeout_seconds
 
     async def _drain_sources(self, sources: list[Source], deadline: float) -> None:
         """Wait for every source's in-flight work, all against one ``deadline``.

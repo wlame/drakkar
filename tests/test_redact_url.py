@@ -62,6 +62,31 @@ def test_redact_url_leaves_benign_query_params_alone(url):
     assert redact_url(url) == url
 
 
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        # An error text that quotes the URL goes on after the value; the cause must stay readable.
+        (
+            'postgresql://h/db?password=x: connection refused',
+            'postgresql://h/db?password=***: connection refused',
+        ),
+        ('redis://h/0?token=abc def', 'redis://h/0?token=*** def'),
+        ('postgresql://h/db?password=x\nnext line', 'postgresql://h/db?password=***\nnext line'),
+        # Only ASCII white space ends the value: a no-break space is redacted with it.
+        ('redis://h/0?token=abc\u00a0def', 'redis://h/0?token=***'),
+    ],
+)
+def test_redact_url_keeps_the_text_after_a_secret_value(text, expected):
+    assert redact_url(text) == expected
+
+
+def test_redact_url_still_redacts_a_colon_inside_a_secret_value():
+    assert (
+        redact_url('postgresql://h/db?password=pa:ss&sslmode=require')
+        == 'postgresql://h/db?password=***&sslmode=require'
+    )
+
+
 def test_redact_url_empty_value_still_redacts_shape():
     # An empty secret value stays empty-shaped but must not break parsing.
     assert redact_url('postgresql://host/db?password=') == 'postgresql://host/db?password=***'

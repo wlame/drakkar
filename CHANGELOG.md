@@ -58,14 +58,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recorder_archive_fenced` has the new fields `provider` and `reason`, and
   its `detail` text follows the reason. The `filesystem` election runs its
   file calls on a thread of its own, not on the shared `to_thread` pool. At
-  stop, the recorder waits at most 2 seconds for an archive pass in
-  progress, so the card withdraw and the connections close keep their time.
-  A lock that cannot be read counts as `unconfirmed`, not as `taken_over`. A
-  pass whose lease another worker took over sends no `release`. The worker
-  removes credentials from a provider's error text before it logs it. The
-  config reference also masks numbers and booleans under a secret-looking
-  key of `plugin_options`. See `docs/fleet.md`, `docs/local-databases.md`
-  and `docs/configuration.md`.
+  stop, the recorder waits for an archive pass in progress until only
+  `fleet.registry.resilience.timeout_seconds` of the shutdown time is left
+  (all of it when no registry runs), so the card withdraw keeps its time.
+  A provider is single-use: after `stop`, an election provider must refuse
+  every call, `start` included, so an abandoned pass is fenced at its next
+  check. The new kit check `check_calls_after_stop_are_refused` tests it,
+  and the built-in `filesystem` providers fail a `start` after `stop` with
+  `provider stopped`. A lock that cannot be read counts as `unconfirmed`,
+  not as `taken_over`. A pass whose lease another worker took over sends no
+  `release`. The worker removes credentials from a provider's error text
+  before it logs it; a redacted query value ends at white space, so the text
+  after the URL stays. The config reference also masks numbers and booleans
+  under a secret-looking key of `plugin_options`. See `docs/fleet.md`,
+  `docs/local-databases.md` and `docs/configuration.md`.
 
 ### Fixed
 

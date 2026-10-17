@@ -63,7 +63,12 @@ class RegistryContext:
 
 
 class RegistryProvider(Protocol):
-    """Storage of worker cards. Every method may raise; the service counts and logs the failure."""
+    """Storage of worker cards. Every method may raise; the service counts and logs the failure.
+
+    A provider is single-use: the service never calls ``start`` after
+    ``stop``. The built-in ``filesystem`` provider raises on such a call, so
+    a misuse shows at once instead of leaving a provider with no thread.
+    """
 
     async def start(self, ctx: RegistryContext) -> None:
         """Prepare the provider, before any other method.

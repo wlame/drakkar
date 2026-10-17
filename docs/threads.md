@@ -12,7 +12,7 @@ page is the map.
 |---|---|---|---|---|
 | **Event loop** (main thread) | all `async` framework + handler code: arrange, hooks, sinks, recorder, scheduling | exactly 1 — not configurable | held while running Python | no — cooperative |
 | **Executor subprocesses** | the tasks themselves (your binary) | `executor.max_executors` | separate processes: none | **yes** — real parallelism |
-| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call: handler blocking I/O, plus the framework's database-stats scans | `io.max_threads` (0 = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
+| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call on the main loop: handler blocking I/O, plus the framework's own short file work | `io.max_threads` (0 = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
 | **Offload pool** | `handler.offload(...)` — CPU-bound Python in hooks | `offload.max_threads` (0 = auto: `ceil(max_executors / 4)`, min 2) | held for pure Python; released only by numpy-style extensions | mostly no (GIL) |
 
 Plus service threads you never size: the runtime-health sampler (it must
@@ -25,7 +25,20 @@ archive pass runs on a thread of its own (`drakkar-archive`), and the
 daemon thread of their own (`drakkar-fleet-<worker>`,
 `drakkar-election-files-<worker>`), one call at a time. None of them takes a
 thread from the blocking-I/O pool, so a hung network mount under
-`shared.dir` holds those threads only.
+`shared.dir` holds only their own threads.
+
+Two other kinds of work read such a folder from a `to_thread` pool:
+
+- At startup, the check that the folder named by
+  `fleet.registry.filesystem.dir` can be created and written runs in the
+  blocking-I/O pool, limited to `fleet.registry.resilience.timeout_seconds`.
+  A check that does not end in time fails the startup. Its thread stays
+  held until the mount answers.
+- The debug UI routes that work on `shared.dir` (the databases list, the
+  history trace, the merge, the downloads and the archive list) run on the
+  UI server's own event loop. Their file calls use the thread pools of that
+  loop, not the pool that `io.max_threads` sizes. A hung mount holds those
+  threads and slows the debug pages, not the pipeline.
 
 ## Choosing the mechanism
 
@@ -54,8 +67,9 @@ you when this rule was broken and by which call site.
 
 ## The blocking-I/O pool (`io.max_threads`)
 
-Every `asyncio.to_thread` call in the process shares **one** pool:
-asyncio's default executor. Python sizes it `min(32, cpu_count + 4)` —
+Every `asyncio.to_thread` call on the main event loop shares **one** pool:
+asyncio's default executor. (The debug UI server and the webapp server run
+their own loops, and with them their own pools.) Python sizes it `min(32, cpu_count + 4)` —
 which quietly means a 32-thread ceiling on any host with 28+ CPUs. If a
 handler fans out blocking filesystem reads, that ceiling caps I/O
 concurrency no matter how many cores the host has; and when the storage
@@ -79,9 +93,11 @@ Sizing considerations:
   "the pool is my bottleneck on a healthy day"; it does nothing for "the
   storage is the bottleneck" — check [Host Pressure](host-pressure.md)'s
   per-mount RTT before reaching for it.
-- The pool is shared with the framework's own background file work
-  (archive compaction, database-stats scans). Those are occasional and
-  short; handler fan-out dominates in practice.
+- The pool is shared with the framework's own file work on the main loop
+  (the watchdog file, the scan for recorder files to seal, the trace of
+  this worker's closed recorder files, the startup check of the registry
+  folder). That work is occasional and short; handler fan-out dominates in
+  practice.
 - A reasonable starting point for I/O-heavy handlers on big hosts is a
   small multiple of `executor.max_executors` — the executor pool already
   expresses how much concurrent work the deployment intends.

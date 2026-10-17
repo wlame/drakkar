@@ -147,12 +147,6 @@ FLUSH_BYTES_HIGH_WATER = 64 * 1024 * 1024
 # high-water mark above; everything else in a row is bounded and small.
 _HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
 
-# The longest the stop waits for an archive pass in progress before it stops
-# the election provider. The pass only has to finish its current provider
-# call to end; a pass that takes longer is abandoned, so the registry withdraw
-# and the connections close that follow the recorder keep their share of the
-# shutdown time.
-ELECTION_STOP_GRACE_SECONDS = 2.0
 # The ``detail`` of ``recorder_archive_pass_abandoned``; the text is part of the log contract.
 ARCHIVE_PASS_ABANDONED_DETAIL = 'the pass is fenced at its next check and its lease expires on its own'
 
@@ -857,7 +851,7 @@ class EventRecorder(EventWriter):
         )
         await self._db.commit()
 
-    async def stop(self, timeout: float | None = None) -> None:
+    async def stop(self, timeout: float | None = None, *, election_reserve_seconds: float = 0.0) -> None:
         """Flush, then seal the live file and move it into the history folder.
 
         ``timeout`` is the shutdown time left (``None``: no limit). The seal
@@ -867,8 +861,9 @@ class EventRecorder(EventWriter):
         is not moved stays in ``storage.dir`` and the next start with the
         same worker name seals it. A started election provider is stopped
         last, with one attempt inside the time left, after the archive pass in
-        progress; the wait for that pass takes at most
-        :data:`ELECTION_STOP_GRACE_SECONDS` of the time left.
+        progress. The wait for that pass keeps ``election_reserve_seconds`` of
+        the time left for the shutdown steps after the recorder (the registry
+        withdraw); see :meth:`_wait_for_archive_pass`.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         self._running = False
@@ -938,7 +933,7 @@ class EventRecorder(EventWriter):
                 await self._publish_until(path, meta, deadline)
         # Last: an archive pass still running in its thread releases its
         # lease through the provider, so the provider stops after that pass.
-        await self._stop_election(deadline)
+        await self._stop_election(deadline, election_reserve_seconds)
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.
@@ -1442,39 +1437,47 @@ class EventRecorder(EventWriter):
         )
         return True
 
-    async def _stop_election(self, deadline: float | None) -> None:
+    async def _stop_election(self, deadline: float | None, reserve_seconds: float = 0.0) -> None:
         """Stop the election provider once, after the archive pass in progress, with one attempt inside ``deadline``.
 
-        A provider that never started is counted as a skipped stop. Without
-        archive passes the election is not in use, and nothing is counted;
-        a second call counts nothing either.
+        The wait for the pass keeps ``reserve_seconds`` of the time left (see
+        :meth:`_wait_for_archive_pass`); the provider stop then gets all the
+        time that is left. A provider that never started is counted as a
+        skipped stop. Without archive passes the election is not in use, and
+        nothing is counted; a second call counts nothing either.
         """
         if self._election_stop_done or not self._archives():
             return
         self._election_stop_done = True
-        await self._wait_for_archive_pass(deadline)
+        await self._wait_for_archive_pass(deadline, reserve_seconds)
         if not self._election_started:
             self._election_caller.skip('stop', OUTCOME_NOT_STARTED)
             return
         await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=_time_left(deadline))
 
-    async def _wait_for_archive_pass(self, deadline: float | None) -> None:
-        """Wait for an archive pass still running in its thread, at most :data:`ELECTION_STOP_GRACE_SECONDS`.
+    async def _wait_for_archive_pass(self, deadline: float | None, reserve_seconds: float) -> None:
+        """Wait for an archive pass still running in its thread, until only ``reserve_seconds`` of ``deadline`` are left.
 
         ``stop()`` has asked the pass to end after its current window; until
-        then it still calls the election provider. The wait also ends with
-        ``deadline``. A pass that outlives the wait is left to finish on its
-        own and logged as ``recorder_archive_pass_abandoned``: it is fenced at
-        its next check, and its lease runs out.
+        then it still calls the election provider. A pass ends only between
+        windows, so the wait is not capped at a fixed time: a fixed cap would
+        abandon a window that the shutdown time could still let finish. It
+        ends when the time left is down to ``reserve_seconds`` (the time the
+        shutdown steps after the recorder need), or at once when less is
+        left. Without a ``deadline`` it lasts until the pass ends. A pass that
+        outlives the wait is left to finish on its own and logged as
+        ``recorder_archive_pass_abandoned``. It is fenced at its next check,
+        because a provider refuses every call after its ``stop`` (and every
+        lease call fails once the loop is closed), and its lease runs out.
         """
         running = self._archive_pass_future
         if running is None or running.done():
             return
         time_left = _time_left(deadline)
-        grace = ELECTION_STOP_GRACE_SECONDS if time_left is None else min(time_left, ELECTION_STOP_GRACE_SECONDS)
+        wait_seconds = None if time_left is None else max(time_left - reserve_seconds, 0.0)
         waiting = asyncio.wrap_future(running)
         started = time.monotonic()
-        done, _ = await asyncio.wait({waiting}, timeout=grace)
+        done, _ = await asyncio.wait({waiting}, timeout=wait_seconds)
         if not done:
             waiting.cancel()
             await logger.awarning(

@@ -684,12 +684,17 @@ history:
   is counted `not_started`) and the next pass tries the start again. While
   the circuit breaker is open, a pass skips the start until the cooldown has
   passed. At a clean stop the recorder lets the pass in progress end its
-  window, then stops the provider once, inside the shutdown time left. It
-  waits for that pass at most 2 seconds of the time left, so the registry
-  withdraw and the connections close that come after it keep their share. A
-  pass that is still running then is left to end on its own and logged as
-  `recorder_archive_pass_abandoned` (fields `waited_seconds` and `detail`):
-  it is fenced at its next check, and its lease runs out.
+  window, then stops the provider once, inside the shutdown time left. A
+  pass ends only between windows, so the wait has no fixed limit. While a
+  worker registry runs, the wait keeps `fleet.registry.resilience.timeout_seconds`
+  of the time left for the card withdraw that comes after the recorder:
+  it ends when the time left is down to that value, or at once when less
+  is left. Without a registry it can use all the time left. A pass that is
+  still running then is left to end on its own and logged as
+  `recorder_archive_pass_abandoned` (fields `waited_seconds` and `detail`).
+  The provider then stops with the time that is left. A provider refuses
+  every call after its stop, so the abandoned pass is fenced at its next
+  check, and its lease runs out.
 - **Bounded calls.** The archive pass runs in a thread of its own, and
   every provider call runs on the event loop under the
   [`resilience`](fleet.md#resilience) block of
@@ -775,6 +780,10 @@ passed to the factory unchanged, and the config reference masks its values.
 - `start` is called again after a failure, so it must leave nothing behind
   that a second call would trip over. `stop` is called at most once, and
   only after a `start` that succeeded.
+- A provider is single-use. After `stop`, every other method must raise,
+  `start` included. The worker's stop can leave an archive pass in its
+  window, and that pass is fenced at its next check only because the
+  provider refuses the call.
 - The methods run on the event loop. Do blocking work in a thread of your
   own, as for the [registry](fleet.md#writing-a-provider).
 - `ctx.connections` resolves the entries of the `connections` config; see

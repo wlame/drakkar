@@ -17,7 +17,7 @@ import structlog
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE
 from drakkar.fleet.card import CARD_SCHEMA, MAX_CARD_BYTES, decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext, RegistryFactory
-from drakkar.providers.thread import ProviderThread
+from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
 
 # Cards live in this subfolder of the registry folder, one file per worker.
 WORKERS_FOLDER = 'workers'
@@ -192,10 +192,15 @@ class FilesystemRegistry:
         self._reported_files: set[str] = set()
         self._logger: Any = structlog.get_logger()
         self._runner: ProviderThread | None = None
+        self._stopped = False
 
     async def start(self, ctx: RegistryContext) -> None:
+        """Start the provider thread; a retried start keeps it, and a start after :meth:`stop` raises."""
+        if self._stopped:
+            raise RuntimeError(PROVIDER_STOPPED)
         self._logger = ctx.logger
-        self._runner = ProviderThread(name=f'drakkar-fleet-{sanitize_worker_name(ctx.worker)}')
+        if self._runner is None:
+            self._runner = ProviderThread(name=f'drakkar-fleet-{sanitize_worker_name(ctx.worker)}')
 
     async def publish(self, card: dict[str, Any]) -> None:
         await self._run(lambda: self._publish_sync(card))
@@ -217,6 +222,7 @@ class FilesystemRegistry:
         await self._run(lambda: self._withdraw_sync(worker, instance))
 
     async def stop(self) -> None:
+        self._stopped = True
         if self._runner is not None:
             self._runner.stop()
 

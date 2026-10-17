@@ -325,6 +325,24 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     assert order.index('recorder.stop') < order.index('fleet.stop') < order.index('ui_server.stop')
 
 
+@pytest.mark.parametrize(('provider', 'reserve'), [('filesystem', 0.7), ('none', 0.0)], ids=['registry', 'no-registry'])
+async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_runs(
+    tmp_path, monkeypatch, provider, reserve
+):
+    app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
+    app._config.fleet.registry.provider = provider
+    app._config.fleet.registry.resilience.timeout_seconds = 0.7
+
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    recorder = app._recorder
+    assert isinstance(recorder, MagicMock)
+    assert recorder.stop.call_args.kwargs['election_reserve_seconds'] == reserve
+
+
 async def test_the_registry_gets_the_shared_connections_and_they_close_after_it_inside_the_drain_time(
     tmp_path, monkeypatch
 ):
@@ -608,11 +626,13 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
 
 
 async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp_path, monkeypatch):
-    """The stop waits for an archive pass only for its grace, so the card withdraw after it still gets time."""
-    monkeypatch.setattr(core_mod, 'ELECTION_STOP_GRACE_SECONDS', 0.2)
+    """The wait for an archive pass keeps one registry call's time limit, so the card withdraw after it gets time."""
     provider = _RecordingRegistry()
     _install_plugins(monkeypatch, registry={'recording': lambda _options: provider})
-    app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': {'provider': 'recording'}})
+    # The reserve (0.5 s) is shorter than the drain budget (1 s), which is
+    # shorter than the stuck window.
+    registry = {'provider': 'recording', 'resilience': {'timeout_seconds': 0.5}}
+    app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': registry})
     in_window = threading.Event()
     window_may_end = threading.Event()
 
@@ -628,14 +648,15 @@ async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp
         assert app._recorder is not None
         app._recorder._start_archive_pass()
         await wait_for(in_window.is_set)
-        # The drain budget (1 s) is longer than the grace and shorter than the stuck window.
         with capture_logs() as logs:
             app._lifecycle._handle_signal()
             await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
     finally:
         window_may_end.set()
 
-    assert [entry['event'] for entry in logs].count('recorder_archive_pass_abandoned') == 1
+    (abandoned,) = [entry for entry in logs if entry['event'] == 'recorder_archive_pass_abandoned']
+    # The wait stopped when about the reserve was left of the drain budget.
+    assert abandoned['waited_seconds'] <= 0.55
     assert provider.withdrawn
 
 

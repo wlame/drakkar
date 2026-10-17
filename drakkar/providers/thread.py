@@ -13,6 +13,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+# The error text of a ``start`` after ``stop``. A provider is single-use: the
+# built-in providers that own a thread do not start a new one after it ended.
+PROVIDER_STOPPED = 'provider stopped'
+
 
 @dataclass(frozen=True)
 class _ThreadJob:

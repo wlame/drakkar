@@ -509,6 +509,9 @@ Rules for the lifecycle methods:
   the shutdown time is spent, and not for a `start` that the shutdown
   cancelled half way. Open clients lazily, or make sure that a missing
   `stop` leaks nothing that outlives the process.
+- **A provider is single-use.** The worker never calls `start` after
+  `stop`. The built-in `filesystem` provider raises `provider stopped` on
+  such a call, so a misuse shows at once.
 - **`online` is optional.** Set `PeerCard.online` to `True` or `False` only
   when your service decides liveness itself. Leave it `None` otherwise: the
   worker then judges `age_seconds` against `offline_after_seconds`.

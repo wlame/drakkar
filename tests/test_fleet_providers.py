@@ -473,6 +473,26 @@ async def test_filesystem_stop_without_start_is_a_no_op(make_filesystem):
     await make_filesystem().stop()
 
 
+async def test_filesystem_a_retried_start_keeps_the_first_thread(make_filesystem):
+    registry = make_filesystem()
+    await registry.start(_context())
+    first = registry._runner
+
+    await registry.start(_context())
+
+    assert registry._runner is first
+    await registry.stop()
+
+
+async def test_filesystem_a_start_after_stop_fails(make_filesystem):
+    registry = make_filesystem()
+    await registry.start(_context())
+    await registry.stop()
+
+    with pytest.raises(RuntimeError, match=r'^provider stopped$'):
+        await registry.start(_context())
+
+
 async def test_filesystem_a_failed_rename_leaves_no_temp_file(make_filesystem, registry_dir):
     folder = registry_dir / 'workers'
     (folder / 'w-1.json').mkdir(parents=True)

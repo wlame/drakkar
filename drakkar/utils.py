@@ -12,7 +12,17 @@ from collections.abc import Awaitable, Callable
 # Query parameters whose value is secret material. Matched by substring so
 # variants like ``sslpassword`` or ``api_token`` are caught too — over-redacting
 # an odd parameter name in a log line is harmless, leaking a secret is not.
-_SENSITIVE_QUERY_PARAM = re.compile(r'(?i)([?&][^=&#]*(?:password|passwd|pwd|secret|token|key)[^=&#]*=)[^&#]*')
+# The value ends at the next ``&``, ``#`` or white space, and colons that end
+# it stay: an error text that quotes a URL goes on after it
+# (``...?password=x: connection refused``), and that cause must stay
+# readable. A colon inside the value (``pa:ss``) is still redacted. White
+# space is spelled out as the ASCII set ``\t\n\f\r`` and space rather than
+# ``\s``, whose meaning differs between regex engines (Unicode here). The
+# pattern is part of the redaction contract; keep it byte for byte the same
+# in every implementation.
+_SENSITIVE_QUERY_PARAM = re.compile(
+    r'(?i)([?&][^=&#]*(?:password|passwd|pwd|secret|token|key)[^=&#]*=)(?:[^&#\t\n\f\r ]*[^&#\t\n\f\r :])?'
+)
 
 
 def redact_url(url: str) -> str:

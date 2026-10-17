@@ -35,7 +35,7 @@ from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.fleet.card import sanitize_worker_name
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
-from drakkar.providers.thread import ProviderThread
+from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
 from drakkar.recorder.archive_lock import DEFAULT_REFRESH_SECONDS, FILESYSTEM_PROVIDER, ArchiveLock
 from drakkar.recorder.history import history_dir
 
@@ -81,10 +81,20 @@ class ElectionContext:
 
 
 class ElectionProvider(Protocol):
-    """Leases on scopes, one holder per scope. Every method may raise; the caller counts and logs the failure."""
+    """Leases on scopes, one holder per scope. Every method may raise; the caller counts and logs the failure.
+
+    A provider is single-use. After ``stop`` every other method must raise,
+    ``start`` included: the worker's stop may abandon an archive pass that
+    is still in its window, and that pass is fenced at its next check only
+    because the provider refuses the call.
+    """
 
     async def start(self, ctx: ElectionContext) -> None:
-        """Prepare the provider, before any other method. A failed ``start`` is retried, so it must leave nothing behind."""
+        """Prepare the provider, before any other method.
+
+        A failed ``start`` is retried, so it must leave nothing behind. A
+        ``start`` after ``stop`` raises: the provider is not started again.
+        """
         ...
 
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
@@ -109,7 +119,10 @@ class ElectionProvider(Protocol):
         ...
 
     async def stop(self) -> None:
-        """Release what ``start`` took. Called at most once, last; leases are released by their holders."""
+        """Release what ``start`` took. Called at most once, last; leases are released by their holders.
+
+        Every call after it must raise (see the class docstring).
+        """
         ...
 
 
@@ -141,7 +154,13 @@ class FilesystemElection:
         self._stopped = False
 
     async def start(self, ctx: ElectionContext) -> None:
-        """Remember the worker and its shared folder, and start the provider thread; no file is opened."""
+        """Remember the worker and its shared folder, and start the provider thread; no file is opened.
+
+        A retried ``start`` keeps the thread of the first one. A ``start``
+        after :meth:`stop` raises ``RuntimeError``: the provider is single-use.
+        """
+        if self._stopped:
+            raise RuntimeError(PROVIDER_STOPPED)
         self._ctx = ctx
         if self._runner is None:
             self._runner = ProviderThread(name=f'{ELECTION_THREAD_PREFIX}{sanitize_worker_name(ctx.worker)}')
@@ -171,7 +190,7 @@ class FilesystemElection:
 
         A call after the stop raises at once, so a pass that outlived the
         stop is fenced at its next check instead of waiting for a thread
-        that is gone.
+        that is gone. A ``start`` after it raises too.
         """
         self._stopped = True
         if self._runner is not None:

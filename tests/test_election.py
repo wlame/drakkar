@@ -152,6 +152,25 @@ async def test_the_kit_fails_a_provider_that_lets_two_holders_in():
         await electiontest.check_one_holder_at_a_time(lambda: _EveryoneHolds(store), store.advance, LEASE_SECONDS)
 
 
+class _AnswersAfterStop(MemoryElection):
+    """A broken provider: its fencing check and its start still work after stop."""
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        return self._store.holder(scope) == token
+
+    async def start(self, ctx: ElectionContext) -> None:
+        self.started_with = ctx
+
+
+async def test_the_kit_fails_a_provider_that_answers_calls_after_stop():
+    store = ElectionStore()
+
+    with pytest.raises(AssertionError, match='a call after stop did not fail: is_held, start'):
+        await electiontest.check_calls_after_stop_are_refused(
+            lambda: _AnswersAfterStop(store), store.advance, LEASE_SECONDS
+        )
+
+
 # --- the filesystem provider ---
 
 
@@ -286,6 +305,19 @@ async def test_the_filesystem_election_refuses_calls_after_stop(tmp_path):
 
     with pytest.raises(RuntimeError, match='stopped'):
         await provider.is_held(SCOPE, electiontest.TOKEN_A)
+
+
+@pytest.mark.parametrize('started', [True, False], ids=['started', 'never-started'])
+async def test_a_filesystem_election_start_after_stop_fails_and_starts_no_thread(tmp_path, started):
+    provider = await _started_filesystem(tmp_path) if started else FilesystemElection()
+    await provider.stop()
+    threads_before = set(threading.enumerate())
+
+    with pytest.raises(RuntimeError, match=r'^provider stopped$'):
+        await provider.start(electiontest.make_context('w-1', shared_dir=str(tmp_path)))
+
+    new_threads = set(threading.enumerate()) - threads_before
+    assert not [thread for thread in new_threads if thread.name.startswith('drakkar-election-files-')]
 
 
 async def test_a_lock_read_error_on_refresh_reads_as_unconfirmed(tmp_path, monkeypatch):

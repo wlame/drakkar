@@ -98,19 +98,30 @@ class ElectionStore:
 
 
 class MemoryElection:
-    """An election provider whose leases live in an :class:`ElectionStore`; ``calls`` counts every method call."""
+    """An election provider whose leases live in an :class:`ElectionStore`; ``calls`` counts every method call.
+
+    Like every provider, it refuses each call after :meth:`stop` (the call is
+    still counted).
+    """
 
     def __init__(self, store: ElectionStore) -> None:
         self._store = store
         self.calls: Counter[str] = Counter()
         self.started_with: ElectionContext | None = None
+        self.stopped = False
+
+    def _refuse_after_stop(self) -> None:
+        if self.stopped:
+            raise RuntimeError('provider stopped')
 
     async def start(self, ctx: ElectionContext) -> None:
         self.calls['start'] += 1
+        self._refuse_after_stop()
         self.started_with = ctx
 
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
         self.calls['acquire'] += 1
+        self._refuse_after_stop()
         holder = self._store.holder(scope)
         if holder is not None and holder != token:
             return False
@@ -119,6 +130,7 @@ class MemoryElection:
 
     async def refresh(self, scope: str, token: str) -> bool:
         self.calls['refresh'] += 1
+        self._refuse_after_stop()
         if self._store.holder(scope) != token:
             return False
         lease_seconds = self._store.leases[scope][2]
@@ -127,12 +139,15 @@ class MemoryElection:
 
     async def is_held(self, scope: str, token: str) -> bool:
         self.calls['is_held'] += 1
+        self._refuse_after_stop()
         return self._store.holder(scope) == token
 
     async def release(self, scope: str, token: str) -> None:
         self.calls['release'] += 1
+        self._refuse_after_stop()
         if self._store.holder(scope) == token:
             del self._store.leases[scope]
 
     async def stop(self) -> None:
         self.calls['stop'] += 1
+        self.stopped = True

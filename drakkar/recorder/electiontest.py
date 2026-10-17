@@ -218,6 +218,38 @@ async def check_acquire_is_idempotent_for_the_holder(
     _expect(still_held is True, f'a second acquire by the holder lost the lease ({still_held!r})')
 
 
+async def check_calls_after_stop_are_refused(
+    make_provider: ElectionMaker, advance: Advance, lease_seconds: float
+) -> None:
+    """After ``stop`` every other method raises, ``start`` included.
+
+    The worker's stop may abandon an archive pass that still holds its
+    lease; the pass is fenced at its next check only because the provider
+    refuses the call. The lease taken here is left to run out, as the
+    abandoned pass's lease is.
+    """
+    provider = make_provider()
+    await provider.start(make_context('kit-stopped'))
+    took = await provider.acquire(SCOPE_A, TOKEN_A, lease_seconds)
+    await provider.stop()
+    calls_after_stop: dict[str, Callable[[], Awaitable[Any]]] = {
+        'is_held': lambda: provider.is_held(SCOPE_A, TOKEN_A),
+        'refresh': lambda: provider.refresh(SCOPE_A, TOKEN_A),
+        'release': lambda: provider.release(SCOPE_A, TOKEN_A),
+        'acquire': lambda: provider.acquire(SCOPE_A, TOKEN_A, lease_seconds),
+        'start': lambda: provider.start(make_context('kit-stopped')),
+    }
+    answered: list[str] = []
+    for name, call in calls_after_stop.items():
+        try:
+            await call()
+        except Exception:
+            continue
+        answered.append(name)
+    _expect(took is True, f'the first acquire of a free scope answered {took!r}')
+    _expect(not answered, f'a call after stop did not fail: {", ".join(answered)}')
+
+
 ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]], ...] = (
     check_one_holder_at_a_time,
     check_refresh_keeps_the_lease,
@@ -226,4 +258,5 @@ ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]
     check_release_only_by_the_holder,
     check_scopes_are_independent,
     check_acquire_is_idempotent_for_the_holder,
+    check_calls_after_stop_are_refused,
 )
