@@ -91,6 +91,13 @@ config uses keys that moved or were removed (YAML paths; as env vars they are DK
 ```
 
 The [upgrade guide](upgrading.md) has the full table with YAML and env names.
+The newest move is `fleet.registry.timeout_seconds`, now
+`fleet.registry.resilience.timeout_seconds` (env:
+`DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`).
+
+A config error does not repeat the value it rejected. A bad `connections`
+block, for example, reports the key and the rule, never the connection
+string.
 
 ---
 
@@ -1119,7 +1126,11 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.window_hours` | `int` | `24` | >= 1, and >= `ui.recorder.rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned). |
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
-| `archive.lock_stale_seconds` | `int` | `7200` | >= 1 | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. |
+| `archive.lock_stale_seconds` | `int` | `7200` | >= 1; at most `86400` when `archive.election.provider` is `consul` | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. It is also the lease length of every [election provider](local-databases.md#the-election-provider). |
+| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder) or the name of a provider plugin (entry-point group `drakkar.election_providers`). `consul`, `redis` and `postgres` are reserved names; see [Fleet registry](fleet.md#providers). Every worker of one cluster must use the same provider. |
+| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
+| `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
+| `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. YAML only. |
 | `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
 
 ```yaml
@@ -1130,6 +1141,8 @@ history:
     due_after_hours: 48
     retention_days: 30
     lock_stale_seconds: 7200
+    election:
+      provider: filesystem
   merged_retention_days: 32
 ```
 
@@ -1147,15 +1160,49 @@ provider plugin are on [Fleet registry](fleet.md).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), or the name of a provider plugin. Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), or the name of a provider plugin. `consul`, `redis` and `postgres` are reserved names; see [Fleet registry](fleet.md#providers). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
 | `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
-| `offline_after_seconds` | `int` | `30` | >= 1, and >= `2 * heartbeat_seconds` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. |
+| `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. |
 | `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. |
-| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one registry operation. |
+| `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
 | `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
 | `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
-| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. |
+| `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of a `consul` provider. `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
+| `consul.service_name` | `str` | `drakkar` | non-empty | Setting of a `consul` provider: the Consul service that lists the workers. Used only with `mode: catalog`. |
+| `redis`, `postgres` | block | `{}` | | Reserved blocks of the `redis` and `postgres` providers. They have no keys. |
+| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. YAML only. |
+
+### Resilience block (`resilience:`) {#resilience-block}
+
+How the worker calls a provider: a time limit per attempt, retries with
+doubling waits, and a circuit breaker. The same block sits at
+`fleet.registry.resilience` and at `history.archive.election.resilience`.
+The meaning of each part, the outcomes and the metrics are on
+[Fleet registry](fleet.md#resilience).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one attempt of an operation. A retry gets its own limit. |
+| `retries` | `int` | `2` | >= 0 | Attempts after the first one, made only after a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. `0` means one attempt. |
+| `backoff_seconds` | `float` | `0.2` | >= 0 | Wait before the first retry. The wait doubles for each further retry. |
+| `backoff_max_seconds` | `float` | `5.0` | >= 0, and >= `backoff_seconds` | Longest wait between two attempts. |
+| `breaker.failure_threshold` | `int` | `5` | >= 1 | Failed operations in a row that open the breaker. While it is open, operations are skipped without a call. |
+| `breaker.cooldown_seconds` | `float` | `30.0` | >= 0 | Time the breaker stays open before one operation may probe the provider. A probe that succeeds closes the breaker; one that fails reopens it with a fresh cooldown. |
+
+```yaml
+fleet:
+  registry:
+    resilience:
+      timeout_seconds: 5.0
+      retries: 2
+      backoff_seconds: 0.2
+      backoff_max_seconds: 5.0
+      breaker:
+        failure_threshold: 5
+        cooldown_seconds: 30.0
+```
 
 ### Cache exchange (`fleet.cache_exchange:`) {#fleet-cache-exchange}
 
@@ -1179,7 +1226,7 @@ fleet:
     provider: filesystem
     heartbeat_seconds: 10
     refresh_seconds: 15
-    offline_after_seconds: 30
+    offline_after_seconds: 60
   cache_exchange:
     enabled: true
     interval_seconds: 30.0
@@ -1188,6 +1235,74 @@ fleet:
     cycle_deadline_seconds: null      # null = interval_seconds * 0.9
     max_concurrent_peers: 4
 ```
+
+---
+
+## Connections (`connections:`) {#connections}
+
+Named connections to shared services. A provider that keeps its data in
+Consul, Redis or Postgres takes the address, the credentials and the key
+prefix or schema from here, so they are written once and shared by every
+feature that names the connection. `connections` has one map per service
+type, and each map goes from a connection name that you choose to its
+settings. A feature that names no connection uses `main`. How features name
+and share a connection is on [Fleet registry](fleet.md#connections).
+
+Which feature names which entry: `fleet.registry.connection` and
+`history.archive.election.connection`.
+
+### Consul (`connections.consul.<name>`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `address` | `str` | `http://127.0.0.1:8500` | | Base URL of the Consul HTTP API. |
+| `token` | `str` | `''` | | ACL token sent with every request. Empty means none. **Secret.** |
+| `datacenter` | `str` | `''` | | Datacenter to address. Empty means the datacenter of the agent. |
+| `key_prefix` | `str` | `drakkar` | segments of letters, digits, `_`, `.`, `-` joined by `/`; no leading or trailing `/` | Key prefix of everything a feature stores in Consul. |
+
+### Redis (`connections.redis.<name>`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `url` | `str` | `redis://localhost:6379/0` | | Redis connection URL, typically with the password in it. **Secret.** |
+| `key_prefix` | `str` | `drakkar:` | letters, digits, `_`, `:`, `.`, `-`; may be empty | Prefix of every key a feature stores in Redis. |
+
+### Postgres (`connections.postgres.<name>`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `dsn` | `str` | required | | asyncpg-compatible connection string, typically with user and password. **Secret.** |
+| `schema` | `str` | `drakkar` | lower-case identifier, `[a-z_][a-z0-9_]*` | Schema that holds the tables a feature creates. |
+| `manage_schema` | `bool` | `true` | | Create the schema and the tables when they are missing. Off, they must already exist. |
+| `pool_min` | `int` | `1` | >= 1 | Minimum connections in the pool. |
+| `pool_max` | `int` | `4` | >= 1, and >= `pool_min` | Maximum connections in the pool. |
+
+```yaml
+connections:
+  consul:
+    main:
+      address: http://consul.internal:8500
+      key_prefix: drakkar
+  postgres:
+    main:
+      schema: drakkar
+      # dsn: set from the environment, see below
+```
+
+Put the **secret** fields in the environment, not in the YAML file:
+
+```bash
+export DK_CONNECTIONS__POSTGRES__MAIN__DSN='postgresql://drakkar:...@db.internal/drakkar'
+export DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
+export DK_CONNECTIONS__REDIS__MAIN__URL='redis://:...@redis.internal:6379/0'
+```
+
+Write connection names in lower case: the environment path is lower-cased
+when it is read, so a name with capital letters cannot be set from a `DK_`
+variable. A wrong value fails the load with the path and the rule, for
+example `connections.postgres.main.schema 'Bad-Name' must be a lower-case
+identifier ([a-z_][a-z0-9_]*)`; the message does not repeat a secret. See
+[Security](security.md#provider-credentials).
 
 ---
 

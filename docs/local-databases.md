@@ -41,7 +41,7 @@ A worker uses two folders:
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | A **sealed** recorder file: rollback journal, no sidecars, never changes again. |
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json` | The [meta file](#the-meta-file) of that sealed file: its statistics, written once by the owner. |
 | `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
-| `history/<cluster>/.archive.lock` | The [archive lock](#the-archive-lock) of the folder. It exists while one worker of the cluster runs an archive pass. |
+| `history/<cluster>/.archive.lock` | The [archive lock](#the-archive-lock) of the folder, made by the default `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster runs an archive pass. |
 | `merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` | The result of a merge started from the UI. Deleted after `history.merged_retention_days`; see [Merge results expire](#merge-results-expire). |
 | `fleet/workers/<worker>.json` | Registry card of the default `filesystem` provider. See [Fleet registry](fleet.md). |
 
@@ -58,8 +58,8 @@ Rules:
   `immutable=1`, which takes no locks.
 - **Of the history folders, a worker writes only into the one of its own
   cluster.** It publishes its sealed files there. The worker that holds the
-  archive lock also writes the archives there and deletes the sealed files
-  it archived.
+  archive lease (with the default provider: the archive lock) also writes
+  the archives there and deletes the sealed files it archived.
 - Timestamp format in recorder filenames is exactly
   `%Y-%m-%d__%H_%M_%S` (UTC).
 - DB files and meta files are created with `0600` permissions. The worker
@@ -519,10 +519,10 @@ Age-based and count-based retention (the old `retention_hours` /
 one compressed, merged database per cluster, and deletes only the sealed
 files it successfully merged. A worker's pass works only inside the history
 folder of its own cluster, `<shared.dir>/history/<cluster>/`. The window
-math, file names and lock protocol (`drakkar/recorder/archive.py`,
-`drakkar/recorder/archive_lock.py`) are part of the on-disk spec, so a
-fleet sharing one `shared.dir` archives correctly no matter which worker
-does the work for a given cluster.
+math, file names and the protocol of the default lock
+(`drakkar/recorder/archive.py`, `drakkar/recorder/archive_lock.py`) are part
+of the on-disk spec, so a fleet sharing one `shared.dir` archives correctly
+no matter which worker does the work for a given cluster.
 
 ### When the pass runs
 
@@ -530,9 +530,10 @@ Every worker runs the pass after each rotation tick, as a background job
 (one at a time), when `history.archive.enabled` is true. A worker that
 stops ends its pass after the window in progress and skips expiry and
 pruning; the windows left stay due for the next pass of any worker. The
-[archive lock](#the-archive-lock) lets one worker of the cluster work at a
-time. The others skip the tick and lose nothing: any window still due is
-picked up on a later tick.
+[election provider](#the-election-provider) lets one worker of the cluster
+work at a time (by default through the [archive lock](#the-archive-lock)).
+The others skip the tick and lose nothing: any window still due is picked up
+on a later tick.
 
 ### Defaults walkthrough
 
@@ -556,7 +557,7 @@ With `ui.recorder.rotation_interval_hours: 1` and `history.archive`
   file created at the window's own start closes the window out 24h
   later), plus the ~48h due delay after the window closes before
   archiving actually runs.
-- Once due, the worker that holds the archive lock merges the window's
+- Once due, the worker that holds the archive lease merges the window's
   sealed files into one `<cluster>-<from>__<to>.db.gz` in the same folder,
   then deletes the sealed files and the meta files it merged.
 - `retention_days: 30` deletes a `.db.gz` file once its window
@@ -595,15 +596,21 @@ files are never candidates either.
 
 ### The archive lock
 
-Every worker of the cluster tries to create
+The archive lock is the lease of the default election provider,
+`filesystem` (see [The election provider](#the-election-provider)). Every
+worker of the cluster tries to create
 `history/<cluster>/.archive.lock` with an exclusive create, mode `0600`.
 One worker wins and runs the pass; the others skip the tick. The lock body
 is compact JSON with sorted keys, pinned by
 `tests/fixtures/history_meta.json`:
 
 ```json
-{"acquired_at":"2026-10-14T02:00:00.125000Z","instance":"9c41e0b27fd34a1e","token":"5f0c1d2e3a4b6978","worker":"search-worker-3"}
+{"acquired_at":"2026-10-14T02:00:00.125000Z","instance":"9c41e0b27fd34a1e","provider":"filesystem","token":"5f0c1d2e3a4b6978","worker":"search-worker-3"}
 ```
+
+The `provider` key names the election provider that made the lock, here
+`filesystem`. A worker of release 2.4.0 reads this body without trouble: it
+looks at `token`, `worker` and `instance` and ignores the other keys.
 
 - **Refresh.** The holder refreshes the lock's modification time every 60
   seconds while its pass runs. At the end of the pass it deletes the lock,
@@ -611,7 +618,8 @@ is compact JSON with sorted keys, pinned by
 - **Takeover.** A lock older than `history.archive.lock_stale_seconds`
   (default 7200) belongs to a dead archiver. The next worker renames it
   aside to `.archive.lock.stale.<token>` (one rename wins), deletes it, and
-  creates its own lock. Log: `recorder_archive_lock_taken_over`. When two
+  creates its own lock. Log: `recorder_archive_lock_taken_over` (field
+  `provider`: `filesystem`). When two
   workers take over at once, the slower one can move aside the fresh lock
   the faster one just created. It then sees that the lock is not stale,
   puts it back with a hard link (which never overwrites a newer lock) and
@@ -625,14 +633,170 @@ is compact JSON with sorted keys, pinned by
 - **Fencing.** Right before it publishes an archive, and before it deletes
   any source, the holder reads the lock again. When the token is no longer
   its own — another worker took the lock over — the pass publishes nothing
-  and deletes nothing. Log: `recorder_archive_fenced`.
+  and deletes nothing. Log: `recorder_archive_fenced` (see
+  [Fencing](#fencing) for its fields).
 
 The lock uses only an exclusive create, renames and modification times. It
 does not use `flock`.
 
+### The election provider
+
+Which worker of a cluster builds the archives is decided by an **election
+provider**. It gives out **leases**: one holder per *scope*, and the scope is
+the sanitized cluster name (the name of the history folder). A pass takes
+the lease under a token of its own (16 hex characters, new for every pass),
+refreshes it while it works, checks it right before each publish, and
+releases it at the end.
+
+```yaml
+history:
+  archive:
+    lock_stale_seconds: 7200     # the lease length, for every provider
+    election:
+      provider: filesystem       # the default: the archive lock above; or a plugin name
+      # connection: main         # read by the consul, redis and postgres providers
+      # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
+      # plugin_options: {}       # passed unchanged to a provider plugin
+```
+
+- **One provider per cluster.** Every worker of a cluster must use the same
+  provider. Workers on different providers cannot see each other's leases,
+  so nothing then keeps two of them from archiving at the same time.
+- **The lease length** is `history.archive.lock_stale_seconds` (default
+  7200) whichever provider is used. The holder refreshes the lease every 60
+  seconds. A holder that died stops refreshing, and once the lease length has
+  passed another worker may take the scope over. With a `consul` provider
+  the value may not exceed 86400.
+- **Providers.** `filesystem` is built in. Other providers are plugins of the
+  entry-point group `drakkar.election_providers`, in the same way as for the
+  [fleet registry](fleet.md#writing-a-provider). The names `consul`, `redis`
+  and `postgres` are reserved for providers that keep the lease in a service
+  reached through a [named connection](fleet.md#connections); this release
+  ships none of them, and a plugin of that name is checked like the
+  built-in (its connection must be declared). An unknown name fails startup
+  with a message that lists the providers that exist, for example
+  `history.archive.election.provider 'consul' is not known; known providers: filesystem`.
+  The name is checked whenever `history.archive.enabled` is true and the UI
+  is on, also with `storage.dir: ''`. With archiving off, any name is
+  accepted.
+- **Start and stop.** The provider starts at the first archive pass, not at
+  worker start. When the start fails, that pass ends at once (its `acquire`
+  is counted `not_started`) and the next pass tries the start again. While
+  the circuit breaker is open, a pass skips the start until the cooldown has
+  passed. At a clean stop the recorder lets the pass in progress end its
+  window, then stops the provider once, inside the shutdown time left.
+- **Bounded calls.** The archive pass runs in a thread of its own, and
+  every provider call runs on the event loop under the
+  [`resilience`](fleet.md#resilience) block of
+  `history.archive.election`. The thread waits for one call at most as long
+  as the longest the call can take (every attempt and every wait) plus one
+  second. A hung provider therefore holds up the archive thread for a
+  bounded time and never the event loop or the rotation.
+- **A lease that cannot be confirmed counts as lost.** A call that fails,
+  times out or is skipped by the open breaker reads as "not held". A refresh
+  that does not answer `True` ends the refreshing, and every later check of
+  that pass answers "not held" without a provider call.
+
+#### Fencing
+
+Before it publishes an archive and before it deletes any source, the pass
+asks the provider whether it still holds the lease. If not, it publishes and
+deletes nothing and counts in `drakkar_recorder_archive_failures_total`.
+`recorder_archive_fenced` is logged with these fields: `provider`,
+`cluster`, `name` (the archive about to be published) and `reason`:
+
+| `reason` | Meaning |
+|---|---|
+| `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. |
+| `unconfirmed` | The provider could not confirm the lease: the call failed or timed out, or the breaker was open. The lease may still be held. |
+
+Both reasons stop the pass the same way. The text in the `detail` field of
+the line always speaks of a takeover; read `reason` for the cause.
+
+#### Writing an election provider
+
+A provider is a class with six async methods and a factory that builds it
+from an options mapping:
+
+```python
+from drakkar.recorder.election import ElectionContext
+
+
+class EtcdElection:
+    def __init__(self, options):
+        self._address = options['address']
+
+    async def start(self, ctx: ElectionContext) -> None:
+        """Prepare the provider. ctx carries worker, instance, cluster, shared_dir,
+        logger, options and the shared connections. Called again after a failure."""
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        """Take the scope for the token. False while another token holds a live lease."""
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        """Extend the lease. False when the token no longer holds it."""
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        """True while the token holds the scope (the fencing check)."""
+
+    async def release(self, scope: str, token: str) -> None:
+        """Free the scope, but only while the token holds it."""
+
+    async def stop(self) -> None:
+        """Release what start took. Called at most once, last."""
+
+
+def make_election(options):
+    return EtcdElection(options)
+```
+
+```toml
+[project.entry-points."drakkar.election_providers"]
+etcd = "drakkar_etcd:make_election"
+```
+
+Select it with `history.archive.election.provider: etcd`. `plugin_options` is
+passed to the factory unchanged, and the config reference masks its values.
+
+- `acquire` answers `True` when the scope is free, when its lease has run
+  out, and when `token` already holds it. The last rule matters: an acquire
+  that is retried after a lost answer must not lock out its own holder.
+- `release` changes nothing while another token holds the scope.
+- `start` is called again after a failure, so it must leave nothing behind
+  that a second call would trip over. `stop` is called at most once, and
+  only after a `start` that succeeded.
+- The methods run on the event loop. Do blocking work in a thread of your
+  own, as for the [registry](fleet.md#writing-a-provider).
+- `ctx.connections` resolves the entries of the `connections` config; see
+  [Connections](fleet.md#connections).
+
+`drakkar.recorder.electiontest` holds the checks every election provider
+should pass. They need no test framework and raise `AssertionError`:
+
+```python
+import pytest
+
+from drakkar.recorder import electiontest
+
+
+@pytest.mark.parametrize('check', electiontest.ELECTION_CHECKS)
+async def test_etcd_election(check, etcd_service):
+    await check(lambda: EtcdElection({'address': etcd_service.address}), etcd_service.advance, 600)
+```
+
+`make_provider()` returns a new, not started provider that shares its
+storage with the others the same check makes (two of them stand for two
+workers). `advance(seconds)` makes every stored lease that much older on the
+provider's clock. The last argument is the lease length the checks acquire
+with.
+
+Every provider operation is counted in `drakkar_provider_calls_total` with
+`feature="election"` and the `op` `start`, `acquire`, `refresh`, `is_held`,
+`release` or `stop`; see [Fleet registry — Metrics](fleet.md#metrics).
+
 ### The sweep
 
-With the lock held, the pass first deletes work files older than
+With the lease held, the pass first deletes work files older than
 `lock_stale_seconds`, together with their `-wal`, `-shm` and `-journal`
 sidecars:
 
@@ -650,7 +814,7 @@ Each deletion logs `recorder_archive_temp_swept`.
 
 Each due window is merged with the same engine `POST /api/v1/debug/merge`
 uses, gzip-compressed, and published under its final name with an atomic
-rename. All of this happens on dot-prefixed work files named with the lock
+rename. All of this happens on dot-prefixed work files named with the lease
 token. Only after the archive is durably on disk (its directory entry
 fsynced) are the sealed files it covers deleted, together with their meta
 files — any failure before the rename leaves every source untouched for the
@@ -666,10 +830,10 @@ next tick to retry.
   recognized and simply deleted, never re-merged (which would duplicate
   their events).
 
-A pass that took the lock and did not finish cleanly — a window failed, the
+A pass that took the lease and did not finish cleanly — a window failed, the
 pass was fenced, or an unexpected error — counts in
 `drakkar_recorder_archive_failures_total`. At the start of every pass,
-before it tries the lock, each worker refreshes
+before it tries the lease, each worker refreshes
 `drakkar_recorder_archive_bytes` and `drakkar_recorder_archive_files` from
 the archives in its cluster's history folder.
 
@@ -723,6 +887,8 @@ history:
     due_after_hours: 48              # archive a window this long after it ends; must be >= rotation_interval_hours
     retention_days: 30               # delete archives older than this; 0 = keep forever; must cover due_after_hours + window_hours
     lock_stale_seconds: 7200         # an archive lock or work file older than this belongs to a dead archiver
+    election:
+      provider: filesystem           # which worker archives: the lock file above, or a plugin name
   merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
 ```
 
@@ -833,7 +999,7 @@ worker writes a small JSON card to `<shared.dir>/fleet/workers/<worker>.json`
 of its peers every `fleet.registry.refresh_seconds`. The workers list
 answers from that in-memory snapshot. Liveness comes from the card's age on
 the file server's clock: a peer is `online` while its card is no older than
-`fleet.registry.offline_after_seconds` (default 30). See
+`fleet.registry.offline_after_seconds` (default 60). See
 [Fleet registry](fleet.md) for the card format and the rules.
 
 **Message trace** (`GET /api/v1/debug/trace`) searches this worker's own
@@ -942,8 +1108,9 @@ What makes sharing safe:
 - fixed DDL, filenames, meta file and lock body bytes, JSON encodings, and
   the canonical datetime format (this page);
 - sealed files never change, so readers take no locks;
-- one archiver per cluster folder, chosen by an exclusive create, with ages
-  measured on the file server's clock and a fence before every publish.
+- one archiver per cluster folder, chosen by the election provider (by
+  default an exclusive create, with ages measured on the file server's
+  clock) and a fence before every publish.
 
 Requirements: every worker mounts the same shared folder; the mount path
 may differ, because no file stores an absolute path. The filesystem must support an exclusive create (`O_EXCL`) and a

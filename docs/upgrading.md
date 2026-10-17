@@ -10,6 +10,11 @@ Follow the steps below in order. Plan the upgrade **with all workers
 stopped**: a worker of this release does not read the files an older
 release wrote, and an older and a newer worker cannot run side by side.
 
+!!! note "Coming from release 2.4.0?"
+    Steps 1 to 8 describe the move to the `storage`, `shared`, `history` and
+    `fleet` sections, which 2.4.0 already has. Go to
+    [Upgrading from 2.4.0: provider settings](#from-2-4-0).
+
 ## 1. List the keys you use today
 
 Search your YAML files **and** your environment (Kubernetes manifests,
@@ -68,6 +73,9 @@ the cache any more, but every worker must reach the UI port of its peers.
 | `cache.peer_sync.timeout_seconds` | `fleet.cache_exchange.timeout_seconds` | `DK_CACHE__PEER_SYNC__TIMEOUT_SECONDS` | `DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS` |
 | `cache.peer_sync.cycle_deadline_seconds` | `fleet.cache_exchange.cycle_deadline_seconds` | `DK_CACHE__PEER_SYNC__CYCLE_DEADLINE_SECONDS` | `DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS` |
 
+`fleet.registry.offline_after_seconds` has a new default in this release:
+60 seconds, not 30. See [the provider settings section](#from-2-4-0).
+
 Two rules changed together with the keys:
 
 - `history.archive.retention_days` must now cover the due delay plus one
@@ -98,7 +106,7 @@ These keys are new. Their defaults work for most deployments.
 | `fleet.registry.heartbeat_seconds` | `10` | How often a worker publishes its card. |
 | `fleet.registry.refresh_seconds` | `15` | How often a worker reads the other cards. |
 | `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. |
-| `fleet.registry.timeout_seconds` | `5` | Time limit for one registry operation. |
+| `fleet.registry.resilience.timeout_seconds` | `5` | Time limit for one attempt of a registry operation. The `resilience` block also holds retries and a circuit breaker; see [Fleet registry](fleet.md#resilience). |
 | `fleet.registry.filesystem.dir` | `''` | Card folder. `''` = `<shared.dir>/fleet`. |
 | `fleet.registry.static.peers` | `[]` | Fixed peer list for the `static` provider. |
 | `fleet.cache_exchange.max_concurrent_peers` | `4` | Peers pulled from in parallel. |
@@ -169,7 +177,8 @@ volumeMounts:
 2. Read the startup line `drakkar_starting`. Its summary shows
    `storage=<folder>`, `shared=<folder>` when the shared folder differs,
    and `fleet=<provider>` (`fleet=off` when the UI is off or no folder
-   resolves).
+   resolves). When the archive election provider is not `filesystem`, it
+   also shows `election=<provider>` after `fleet=`.
 3. Start the other workers. The workers list in the UI shows every peer.
    With the cache on, `drakkar_fleet_peer_requests_total{outcome="ok"}`
    grows on each worker once a peer has new `cluster` or `global` rows.
@@ -215,3 +224,88 @@ The worker does not delete the old files. Delete them yourself:
     seals it and moves it into the history folder like a file of its own.
     Delete the old files before the first start if you do not want them in
     the history.
+
+## Upgrading from 2.4.0: provider settings {#from-2-4-0}
+
+The calls from a worker to a registry provider and to an archive election
+provider now follow one set of rules: a time limit per attempt, retries, and
+a circuit breaker. The new `connections` section declares the shared
+services that providers use. One key moved, one default changed, and some
+log events were replaced. The card format is the same as in 2.4.0, and the
+archive lock is the same file with one more key in its body.
+
+### 1. Move the registry timeout
+
+| Old YAML path | New YAML path | Old environment variable | New environment variable |
+|---|---|---|---|
+| `fleet.registry.timeout_seconds` | `fleet.registry.resilience.timeout_seconds` | `DK_FLEET__REGISTRY__TIMEOUT_SECONDS` | `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS` |
+
+The old key fails the load with the moved-key message, as in step 7 above:
+
+```
+config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
+  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds
+```
+
+The value now limits **one attempt**. By default an operation makes up to
+three attempts (`resilience.retries: 2`) with waits of 0.2 s and 0.4 s
+between them. Set `retries: 0` for one attempt per operation, as in 2.4.0.
+
+### 2. Check the offline limit
+
+`fleet.registry.offline_after_seconds` now defaults to `60` (it was `30`),
+and it must be at least `10` for every provider. A value you set explicitly
+still loads and keeps its meaning, for example `30` with the default
+heartbeat of `10`. Only the default moved: with it, a worker that stopped
+publishing shows as offline after 60 seconds, not after 30. A value below
+`10` fails the load with
+`fleet.registry.offline_after_seconds (9) must be >= 10`.
+
+### 3. Update log filters and alerts
+
+| Old log event | Now |
+|---|---|
+| `fleet_registry_publish_failed`, `fleet_registry_list_failed`, `fleet_registry_withdraw_failed` | `provider_call_failed` with `feature="registry"` and `op` set to `publish`, `list` or `withdraw`. At most once a minute per operation; `suppressed` says how many failures it stands for. |
+| `fleet_registry_start_failed` | `provider_call_failed` with `op="start"`. The worker no longer replaces a provider that fails to start with `none`: it tries the start again at the next heartbeat. |
+| `fleet_registry_entry_point_scan_failed`, `fleet_registry_entry_point_load_failed`, `fleet_registry_entry_point_invalid` | `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid`. The field `group` names the entry-point group. |
+
+`fleet_registry_stop_failed` and `fleet_registry_loop_failed` keep their
+names. `fleet_registry_stop_failed` now means that the registry's own stop
+raised; a provider whose `stop` fails shows as `provider_call_failed` with
+`op="stop"`.
+
+The metric `drakkar_fleet_registry_errors_total` changed its meaning. It
+counts operations that failed after their retries (one count per operation)
+and loop iterations that raised. Its `op` label has two more values, `start`
+and `stop`. The three metrics `drakkar_provider_calls_total`,
+`drakkar_provider_call_duration_seconds` and `drakkar_provider_breaker_open`
+are new. See [Fleet registry](fleet.md#metrics).
+
+### 4. Know what else changed
+
+- **Config errors do not repeat the rejected value.** A load error names the
+  key and the rule, but no longer prints the offending input, so a wrong
+  `connections` block cannot print a connection string.
+- **The archive lock body has a `provider` key.** For the default election
+  provider it is `"provider":"filesystem"`. A worker of 2.4.0 ignores the key.
+- **`recorder_archive_fenced` has two more fields,** `provider` and
+  `reason` (`taken_over` or `unconfirmed`), and `recorder_archive_lock_taken_over`
+  has `provider`. See [Fencing](local-databases.md#fencing).
+- **The summary line** shows ` election=<provider>` after `fleet=` when
+  `history.archive.election.provider` is not `filesystem`.
+- **New sections and keys** need no action. `connections` is empty by
+  default. `fleet.registry.connection`, `fleet.registry.consul`,
+  `history.archive.election` and the `resilience` blocks have working
+  defaults.
+
+### 5. If you wrote a registry provider plugin
+
+- `start` can be called again after a failure, so it must leave nothing behind.
+- `stop` is not called when no `start` succeeded, while the breaker is open,
+  or when the shutdown time is spent.
+- A `PeerCard` may carry `online`; leave it `None` if your service has no
+  liveness verdict of its own.
+- `RegistryContext` has a `connections` field for the shared connections.
+
+See [Writing a provider](fleet.md#writing-a-provider).
+

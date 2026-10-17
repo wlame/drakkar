@@ -168,7 +168,7 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in its history folder. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
 | `drakkar_recorder_unsealed_files` | Gauge | -- | Own recorder files closed but not yet sealed into the history folder: files waiting for the background move, plus the backlog of failed seals and moves. Alert when it stays above `0` for two rotation intervals: the history folder is unwritable, or another process holds the file. See [Sealing](local-databases.md#sealing-and-the-history-folder). |
 | `drakkar_recorder_seal_failures_total` | Counter | -- | Recorder files whose sealing failed; they stay in the backlog and are retried. Counts a failed seal and a failed move into the history folder (log `recorder_seal_failed`, field `stage`). |
-| `drakkar_recorder_archive_failures_total` | Counter | -- | Archive passes that failed after taking the archive lock: a window failed, the pass was fenced because another worker took the lock over, or an unexpected error. |
+| `drakkar_recorder_archive_failures_total` | Counter | -- | Archive passes that failed after taking the archive lock (the lease of the election provider): a window failed, the pass was fenced (another worker took the lease over, or the provider could not confirm it; see `reason` of `recorder_archive_fenced`), or an unexpected error. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
@@ -209,6 +209,31 @@ Each HTTP request of the exchange is also counted in the fleet metrics
 `cache_peer_sync_failed` when a pulled page cannot be applied locally
 (fields `peer`, `error`), and `cache_peer_sync_cycle_timeout` when a cycle
 hits its deadline.
+
+#### Fleet registry and provider operations
+
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the archive election makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_provider_calls_total` | Counter | `feature` (`registry`, `election`), `provider`, `op`, `outcome` | Provider operations by outcome: `ok`, `error`, `timeout`, `skipped_open` (the breaker was open, nothing was called) or `not_started` (the provider has not started). A retried operation counts once, with the outcome of its last attempt. |
+| `drakkar_provider_call_duration_seconds` | Histogram | `feature`, `provider`, `op` | Duration of one operation with its retries and the waits between them. Skipped and not started operations have no sample. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30. |
+| `drakkar_provider_breaker_open` | Gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open. A breaker that stays open means the provider is down; the operations are skipped and the log carries `provider_breaker_opened`. Alert on it. |
+| `drakkar_fleet_registry_errors_total` | Counter | `op` | Registry operations that failed or timed out, and loop iterations that raised. An operation counts once, retries included, and an operation with no attempt (open breaker, not started) does not count. `op` is `start`, `publish`, `list`, `withdraw` or `stop`. |
+| `drakkar_fleet_registry_duration_seconds` | Histogram | `op` | Duration of registry operations, all attempts included. |
+
+The other `drakkar_fleet_*` metrics (peers, snapshot age, duplicate worker
+names, peer requests) are in [Fleet registry — Metrics](fleet.md#metrics).
+
+The provider log events:
+
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `provider_started` | info | A provider started; after failed starts, logged once when a start succeeds. |
+| `provider_call_failed` | warning | An operation failed after its retries. At most once a minute per operation; `suppressed` counts the failures the line stands for. |
+| `provider_breaker_opened` | warning | A breaker opened (once per opening; a failed probe does not log it again). |
+| `provider_breaker_closed` | info | A probe succeeded and the breaker closed. |
+| `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call. At most once a minute per loop, with `suppressed`. |
 
 #### Webapp
 
@@ -810,7 +835,12 @@ byte-level spec. The short version:
   `recorder_archive_lock_put_back_failed` reports when a third worker's
   lock came first. Ages are measured on the file server's clock. Right before it publishes, the
   holder checks that the lock still holds its token; if another worker took
-  it over, the pass publishes and deletes nothing (`recorder_archive_fenced`).
+  it over, the pass publishes and deletes nothing (`recorder_archive_fenced`,
+  with the fields `provider` and `reason`: `taken_over`, or `unconfirmed`
+  when the election provider could not confirm the lease). This is the
+  default `filesystem` election provider; `history.archive.election` selects
+  another one, and every worker of a cluster must use the same.
+  See [Local Databases — The election provider](local-databases.md#the-election-provider).
 - **Sources die last.** A sealed file is deleted only once its archive is
   durably on disk. A file the merge cannot read is renamed to
   `<name>.unreadable` instead of being deleted, and a pre-existing
@@ -1075,10 +1105,12 @@ day). To tell such workers apart from healthy ones, every row of
 `/api/v1/workers` carries two liveness fields:
 
 - `online` -- `true` when the peer's card is no older than
-  `fleet.registry.offline_after_seconds` (default 30), `false` when it is
+  `fleet.registry.offline_after_seconds` (default 60), `false` when it is
   older, and `null` when the provider cannot tell (a `static` peer list,
   or a worker whose own first card write has not succeeded yet). The worker
-  serving the request always reports itself online.
+  serving the request always reports itself online. A provider whose
+  service decides liveness itself gives its own verdict, which replaces the
+  age rule.
 - `last_seen_ts` -- the serving worker's current time minus the card's
   age, in epoch seconds; `null` when the age is unknown.
 

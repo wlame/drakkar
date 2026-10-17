@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Provider settings changed.** `fleet.registry.timeout_seconds` is now
+  `fleet.registry.resilience.timeout_seconds` (env
+  `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the
+  load with the moved-key message. The value now limits one attempt, and an
+  operation retries twice by default. The default of
+  `fleet.registry.offline_after_seconds` is now 60 (it was 30), and its
+  smallest value is 10. A registry provider that fails to start is tried
+  again at the next heartbeat. It is no longer replaced with `none`. The log
+  events `fleet_registry_publish_failed`, `fleet_registry_list_failed`,
+  `fleet_registry_withdraw_failed` and `fleet_registry_start_failed` are
+  replaced by `provider_call_failed`, and `fleet_registry_entry_point_*` by
+  `provider_entry_point_*`. `drakkar_fleet_registry_errors_total` now counts
+  operations (retries are part of one operation) and loop iterations that
+  raised, and its `op` label gains `start` and `stop`. A config error no
+  longer prints the input it rejected. The archive lock body has a new key,
+  `provider`. See `docs/upgrading.md`.
+
+### Added
+
+- **Provider framework.** The worker registry and the archive election share
+  one set of rules for their calls to a provider. The blocks
+  `fleet.registry.resilience` and `history.archive.election.resilience` set
+  a time limit per attempt, retries with doubling waits, and a circuit
+  breaker. The breaker skips the provider while it is down and lets one
+  operation probe it after a cooldown. The new `connections` section
+  declares shared services by name (`consul`, `redis`, `postgres`; `main` is
+  the default). A feature names an entry with `fleet.registry.connection` or
+  `history.archive.election.connection`. Secrets come from the environment
+  and are masked in the config reference. `history.archive.election.provider`
+  (default `filesystem`) selects which worker of a cluster archives. Plugins
+  use the entry-point group `drakkar.election_providers`, and
+  `drakkar.recorder.electiontest` holds the checks a provider should pass.
+  A registry provider can give its own `online` verdict (`PeerCard.online`);
+  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The names `consul`,
+  `redis` and `postgres` are reserved, and the release ships no provider with
+  these names. The summary line shows ` election=<provider>` when the
+  election provider is not `filesystem`. New metrics:
+  `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`
+  and `drakkar_provider_breaker_open`. New log events: `provider_started`,
+  `provider_call_failed`, `provider_breaker_opened`,
+  `provider_breaker_closed`, `fleet_registry_iteration_failed`,
+  `connections_close_timed_out`, `connections_close_failed` and
+  `connection_close_failed`. `recorder_archive_fenced` has the new fields
+  `provider` and `reason`. See `docs/fleet.md`, `docs/local-databases.md`
+  and `docs/configuration.md`.
+
 ## [2.4.0] - 2026-10-15
 
 ### Breaking

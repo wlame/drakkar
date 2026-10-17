@@ -56,7 +56,8 @@ network access.
 | **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file, behind the token. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
 | **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder and `merged/` are created with mode `0700`. |
-| **Secret masking** | The config reference masks secret-flagged fields, `executor.env` and every `*.client_config` by key name; the flight recorder applies the same redaction before storing task env. |
+| **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, every `*.client_config` and the `plugin_options` of the provider plugins by key name; the flight recorder applies the same redaction before storing task env. |
+| **No input echo in config errors** | A load error of the framework config names the key and the rule but does not print the rejected value, so a wrong `connections` block cannot print a connection string. The model of your own `app:` section does not inherit this. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
 
 ## What Drakkar does not provide
@@ -79,18 +80,21 @@ Stated plainly, so nobody plans around a control that is not there:
   `shared.dir` is trusted as a peer. Every worker of the fleet trusts the
   shared folder: anyone who can write it can plant files that the workers
   archive and serve through the download endpoint. The same holds for the
-  [fleet registry](fleet.md): anyone who can write the card folder can
-  publish a card, and the workers list will show it and link to its URL.
+  [fleet registry](fleet.md): anyone who can write to the card store (the
+  card folder, for the `filesystem` provider) can publish a card, and the
+  workers list will show it and link to its URL.
   The UI links only `http` and `https` card URLs, but the Live page opens
   a connection to every listed worker and sends `ui.auth_token` with it, so
   a planted card can collect the token. A planted card also makes every
   worker send cache exchange requests to its URL, and the worker applies
   the `cluster` and `global` rows that URL serves under the card's worker
   name (see [Outbound requests to card URLs](#outbound-requests-to-card-urls)).
-  Protect the card folder like the token itself. Cards hold no secrets — a
+  Protect the card store like the token itself. Cards hold no secrets — a
   name, a cluster, a URL, a state, a release and the marks of the newest
-  cache rows — so reading the folder reveals where workers answer and the
-  newest `cluster`/`global` cache key of each worker.
+  cache rows — so reading the store reveals where workers answer and the
+  newest `cluster`/`global` cache key of each worker. The archive election
+  is trusted the same way: whoever can reach its store can take or hold the
+  lease, which decides only which worker archives.
 
 The last two are architectural trust boundaries with their own reasoning —
 see [the FAQ's trust model](faq.md#security-and-trust-model) and
@@ -176,6 +180,34 @@ The preflight (`OPTIONS`) needs no token, because a browser sends none with
 it. The read itself still needs the token when one is set. A refused
 preflight answers `403`; a refused read gets no CORS header, so the browser
 hides the answer from the page. No other path sends CORS headers.
+
+### Provider credentials
+
+The `connections` section holds the address and the credentials of the
+shared services that providers use: the Consul ACL `token`, the Redis `url`
+(with its password) and the Postgres `dsn` (with user and password).
+
+- **Set them from the environment.** For example a Kubernetes Secret that
+  becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`
+  or `DK_CONNECTIONS__REDIS__MAIN__URL`. The YAML file is often a ConfigMap
+  or sits in version control, and neither is a place for a password.
+- **Give a provider only its own access.** A provider needs the key prefix
+  or the schema of its connection and nothing else: a Consul token limited
+  to `key_prefix`, a Redis user limited to its `key_prefix`, a Postgres role
+  that owns only the `schema` (with `manage_schema: false`, a role that only
+  uses tables that already exist). Do not reuse the credentials of a sink,
+  and declare a separate named entry for each feature that needs different
+  rights.
+- **Operator views mask them.** The config reference shows a mask in place
+  of `token`, `url` and `dsn`. For `plugin_options` it masks every string
+  value at every depth: by key name (`password`, `token`, ...), and a secret-looking
+  parent key such as `credentials` or `auth` masks everything below it; a URL
+  loses its embedded credentials.
+- **Keep them out of error text.** A provider's error text goes into the log
+  line `provider_call_failed` as it is. A provider plugin must not put a
+  connection string or a token in the message of an exception. The worker
+  removes credentials from the error text of a connection that fails to
+  close (`connection_close_failed`).
 
 ## Even inside the private network
 

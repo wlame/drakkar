@@ -682,8 +682,23 @@ history:
                                    # env: DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS
     retention_days: 30             # delete archives older than this; 0 = keep forever. Must cover
                                    # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
-    lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver.
+    lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver; also the
+                                   # lease length of every election provider (<= 86400 with provider consul).
                                    # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
+    election:                      # which worker of a cluster builds the archives; see "Resilience block" below
+      provider: filesystem         # filesystem | <plugin name> (consul, redis, postgres are reserved names).
+                                   # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
+      connection: main             # entry of connections.<provider>; read by consul, redis, postgres only.
+                                   # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
+      resilience:                  # same keys and defaults as fleet.registry.resilience
+        timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
+        retries: 2                 # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__RETRIES
+        backoff_seconds: 0.2       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_SECONDS
+        backoff_max_seconds: 5.0   # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS
+        breaker:
+          failure_threshold: 5     # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
+          cooldown_seconds: 30.0   # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
+      plugin_options: {}           # passed unchanged to a provider plugin; values masked in the config reference. YAML only.
   merged_retention_days: 32        # delete UI merge results older than this; 0 = never. env: DK_HISTORY__MERGED_RETENTION_DAYS
 ```
 
@@ -695,22 +710,42 @@ history:
 
 How workers find each other and exchange cache rows. Peers pull `cluster`/`global` cache rows over HTTP from the URL on each registry card. The pipeline itself does not depend on it.
 
+**Resilience block.** `fleet.registry.resilience` and `history.archive.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff_seconds` up to `backoff_max_seconds`), and a circuit breaker that skips the provider after `failure_threshold` failed operations in a row and lets one probe through after `cooldown_seconds`. The semantics are on [Fleet registry](fleet.md#resilience).
+
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | <plugin name>; needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
+    provider: filesystem           # filesystem | static | none | <plugin name> (consul, redis, postgres are reserved names);
+                                   # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
+    connection: main               # entry of connections.<provider>; read by consul, redis, postgres only.
+                                   # env: DK_FLEET__REGISTRY__CONNECTION
     heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
     refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
-    offline_after_seconds: 30      # card older than this = offline; must be >= 2 x heartbeat_seconds.
+    offline_after_seconds: 60      # card older than this = offline; must be >= 2 x heartbeat_seconds and >= 10.
                                    # env: DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS
     prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds.
                                    # env: DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS
-    timeout_seconds: 5             # time limit for one registry operation. env: DK_FLEET__REGISTRY__TIMEOUT_SECONDS
+    resilience:                    # see "Resilience block" below; replaces the key timeout_seconds
+      timeout_seconds: 5.0         # time limit for one attempt. env: DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS
+      retries: 2                   # extra attempts after a transient error. env: DK_FLEET__REGISTRY__RESILIENCE__RETRIES
+      backoff_seconds: 0.2         # wait before the first retry, doubling. env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_SECONDS
+      backoff_max_seconds: 5.0     # longest wait between attempts; >= backoff_seconds.
+                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_MAX_SECONDS
+      breaker:
+        failure_threshold: 5       # failed operations in a row that open the breaker.
+                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__FAILURE_THRESHOLD
+        cooldown_seconds: 30.0     # open time before one probe operation.
+                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__COOLDOWN_SECONDS
     filesystem:
       dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
     static:
       peers: []                    # [{name, cluster, url}]. YAML only.
-    plugin_options: {}             # passed unchanged to a provider plugin. YAML only.
+    consul:                        # settings of a consul provider
+      mode: publish                # publish | catalog. env: DK_FLEET__REGISTRY__CONSUL__MODE
+      service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
+    redis: {}                      # reserved for the redis provider; no keys
+    postgres: {}                   # reserved for the postgres provider; no keys
+    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference. YAML only.
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
@@ -723,7 +758,9 @@ fleet:
 
 ## Connections (`connections:`)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen.
+📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
+
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials).
 
 ```yaml
 connections:

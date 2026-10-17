@@ -29,6 +29,17 @@ registry is off and the worker logs `fleet_registry_disabled_no_ui` once.
 
 ## Providers
 
+A **provider** is the part of a feature that talks to a store or a
+service. Two features have one, and each is chosen on its own:
+
+| Feature | Key | Default | Plugin entry-point group |
+|---|---|---|---|
+| Worker registry (this page) | `fleet.registry.provider` | `filesystem` | `drakkar.registry_providers` |
+| [Archive election](local-databases.md#the-election-provider) | `history.archive.election.provider` | `filesystem` | `drakkar.election_providers` |
+
+Each feature has its own `connection`, [`resilience`](#resilience) block and
+`plugin_options`. The rest of this page is about the registry.
+
 `fleet.registry.provider` selects where cards live:
 
 | Provider | Where the cards are | Liveness |
@@ -36,12 +47,24 @@ registry is off and the worker logs `fleet_registry_disabled_no_ui` once.
 | `filesystem` (default) | one JSON file per worker in a shared folder | from the file times on the file server |
 | `static` | nowhere: a fixed peer list in the config | unknown |
 | `none` | nowhere: no peers | — |
-| a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock |
+| a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock, or its own verdict |
 
 With `none` the workers list shows only the current worker, and the cache
 exchange pulls nothing. `static` cards come from the config and carry no
 `features` object, so the cache exchange pulls every `static` peer each
 cycle, without the mark check.
+
+The names `consul`, `redis` and `postgres` are reserved for providers that
+keep their data in a service reached through a [named
+connection](#connections). The config checks them: the connection they name
+must be declared. Their own settings sit in `fleet.registry.consul`
+(`mode`, `service_name`), `fleet.registry.redis` and
+`fleet.registry.postgres` (no keys); a plugin does not read these blocks, it
+gets `plugin_options`. This release ships no provider with one of these
+names. A worker starts with such a name only when a plugin of that name is
+installed. Otherwise startup fails (with the UI on, which the registry needs)
+with a message that lists the providers that exist, for example
+`fleet.registry.provider 'consul' is not known; known providers: filesystem, none, static`.
 
 ### `filesystem`
 
@@ -178,14 +201,31 @@ A worker publishes its card:
 
 A state change is published at once, not at the next heartbeat. At the end
 of a clean stop, after the recorder's last write and before the UI server
-stops, the worker withdraws its card.
+stops, the worker withdraws its card (see [Shutdown](#resilience) for when it
+does not).
 
 ## Liveness
 
 The workers list shows a peer as **online** when its card is no older than
-`fleet.registry.offline_after_seconds` (default 30), and as **offline**
+`fleet.registry.offline_after_seconds` (default 60), and as **offline**
 when it is older. `offline_after_seconds` must be at least twice
-`heartbeat_seconds`, so one late heartbeat never marks a worker offline.
+`heartbeat_seconds`, so one late heartbeat never marks a worker offline, and
+at least 10, whichever provider is used.
+
+A provider whose service decides liveness itself can say so. It sets
+`online` on the `PeerCard` it lists (for example, a card that exists only
+while a session of its owner lives). The rule is applied in this order:
+
+1. `online` is `true` or `false`: that is the answer. The age is not
+   compared with `offline_after_seconds`.
+2. `online` is not set and the age is known: online while the age is at most
+   `offline_after_seconds`.
+3. Neither is known: the peer is neither online nor offline (`null` in the
+   workers list, `unknown` in `drakkar_fleet_peers`).
+
+The same answer feeds the workers list, `drakkar_fleet_peers` and the
+[duplicate-name check](#duplicate-worker-names). Anything that is not a
+boolean in `online` is read as "not set".
 
 The age of a card is measured **on the provider's clock**, never by
 comparing one host's wall clock with another's. For the filesystem provider
@@ -214,28 +254,146 @@ current worker plus the peers of the last refresh. The current worker is
 always listed and always `online: true`. A peer row carries the fields of
 its card that are present; see the UI contract for the full row shape.
 
+## Connections {#connections}
+
+A provider that keeps its data in a service (Consul, Redis, Postgres) does
+not carry the address and the credentials itself. The config declares them
+once, under `connections.<service>.<name>`, and a feature names the entry:
+
+```yaml
+connections:
+  consul:
+    main:                                  # used when a feature names no connection
+      address: http://consul.internal:8500
+      key_prefix: drakkar
+    other-dc:
+      address: http://consul.dc2.internal:8500
+fleet:
+  registry:
+    connection: other-dc                   # default: main
+```
+
+- `connections` has one map per service type: `consul`, `redis` and
+  `postgres`. You choose the names. A feature that names none uses `main`.
+- `fleet.registry.connection` and `history.archive.election.connection` name
+  an entry. The `consul`, `redis` and `postgres` providers read it.
+  `filesystem`, `static`, `none` and plugins ignore it. A provider of those
+  three names needs its connection declared; otherwise the load fails with
+  `fleet.registry.connection 'main' is not defined under connections.consul`.
+- Features that name the same connection share one client. The first
+  feature that needs it opens it; nothing opens at startup.
+- At shutdown the worker closes the clients after the last provider has
+  stopped, the newest first, inside what is left of
+  `executor.drain_timeout_seconds`. A client
+  that fails to close is logged (`connection_close_failed`) and the others
+  are still closed. When the time runs out first, the worker logs
+  `connections_close_timed_out` and the rest go with the process.
+- Passwords and tokens belong in the environment, not in the YAML file; see
+  [Security](security.md#provider-credentials). Write connection names in
+  lower case: the environment path is lower-cased when it is read, so a name
+  with capital letters cannot be set from a `DK_` variable.
+
+Every key is in [Configuration](configuration.md#connections).
+
+## Resilience {#resilience}
+
+Every call from the worker to a provider is an **operation**. The registry
+makes five: `start`, `publish`, `list`, `withdraw` and `stop`. The archive
+election has its own. An operation runs under the `resilience` block of its
+feature: `fleet.registry.resilience` and `history.archive.election.resilience`.
+Both have the same keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `timeout_seconds` | `5` | Time limit for one attempt. Each retry gets its own limit. |
+| `retries` | `2` | Attempts after the first one, made only after a transient error. `0` means one attempt. |
+| `backoff_seconds` | `0.2` | Wait before the first retry. The wait doubles for each further retry. |
+| `backoff_max_seconds` | `5` | Longest wait between two attempts. At least `backoff_seconds`. |
+| `breaker.failure_threshold` | `5` | Failed operations in a row that open the breaker. |
+| `breaker.cooldown_seconds` | `30` | Time the breaker stays open before one operation may probe the provider. |
+
+**Retries.** A transient error is a timeout, an `OSError` (a refused or
+reset connection, for example), or a `drakkar.providers.resilience.TransientError`
+that the provider raises on purpose. Only these are retried. Any other
+error ends the operation at once. With the defaults one operation takes at
+most 3 × 5 s plus the waits of 0.2 s and 0.4 s, which is 15.6 s. The
+registry publishes the next card only after the previous publish ended, so
+keep the longest operation well below `offline_after_seconds`.
+
+**Breaker.** It counts failed operations, not attempts: an operation fails
+when its last attempt fails. After `failure_threshold` failed operations in
+a row the breaker opens. While it is open, operations are skipped without a
+call. After `cooldown_seconds` the next operation is a probe, and the others
+stay skipped until it ends. A probe that succeeds closes the breaker. A
+probe that fails opens it again with a fresh cooldown. An operation that
+started before the breaker opened does not change it when it ends late.
+
+**Outcomes.** Each operation is counted once in
+`drakkar_provider_calls_total` ([Metrics](#metrics)) with one outcome:
+
+| Outcome | Meaning |
+|---|---|
+| `ok` | The operation succeeded. |
+| `error` | It failed with an error that is not a timeout: an error that is never retried, or a transient error on the last attempt. |
+| `timeout` | The last attempt timed out, or the time left (a shutdown deadline) was too short to make an attempt. |
+| `skipped_open` | The breaker was open. The provider was not called. |
+| `not_started` | The provider has not started yet. The provider was not called. |
+
+An operation that made no attempt (`skipped_open`, `not_started`, or a
+`timeout` for lack of time) has no duration sample and does not count in
+`drakkar_fleet_registry_errors_total`.
+
+**Start.** The registry starts its provider from the publish loop. A
+`start` that fails or times out does not replace the provider with `none`.
+It is tried again at the next heartbeat, and at once when the worker's
+state changes. While the breaker is open, the start is skipped until the
+cooldown has passed, and then one start is the probe. Until a start has
+succeeded, nothing is published, listed or withdrawn: each publish tick
+counts one `publish` as `not_started`, the workers list shows only this
+worker, and `drakkar_fleet_registry_snapshot_age_seconds` grows from the
+start of the service. When a start succeeds, the worker logs
+`provider_started` and the same tick publishes the card. A provider
+therefore sees `start` called again after a failed one: it must leave
+nothing behind that a second call would trip over.
+
+**Shutdown.** The `withdraw` and the provider's `stop` run once each, with
+one attempt, both inside the time that is left of
+`executor.drain_timeout_seconds`. Each attempt is cut to the time left. A
+provider that never started gets neither call (both count as `not_started`);
+with the breaker open both are skipped at once. A stuck provider cannot hold
+the shutdown longer than that budget. A card that was not withdrawn stays
+in the store until `prune_after_seconds`, and peers show the worker as
+offline once the card is older than `offline_after_seconds`.
+
 ## Failures
 
-Every provider call runs under `fleet.registry.timeout_seconds` (default 5):
-
-- A call that fails or times out keeps the last snapshot, counts one error
-  in `drakkar_fleet_registry_errors_total{op}`, and logs
-  `fleet_registry_publish_failed`, `fleet_registry_list_failed` or
-  `fleet_registry_withdraw_failed`. Each of these logs at most once a
-  minute; the line carries how many failures it stands for (`suppressed`).
+- A failed operation, after its retries, keeps the last snapshot, counts one
+  error in `drakkar_fleet_registry_errors_total{op}` and logs
+  `provider_call_failed`. That line names the operation, the error and the
+  number of attempts, and appears at most once a minute per operation. The
+  `suppressed` field says how many failures the line stands for.
+- When the breaker opens, the worker logs `provider_breaker_opened` once.
+  It logs `provider_breaker_closed` when a probe closes it again.
+  `drakkar_provider_breaker_open` is `1` in between.
 - While refreshes fail, `drakkar_fleet_registry_snapshot_age_seconds` grows,
   so an alert can tell a stale workers list from an empty one.
 - The filesystem provider runs its file calls on its own thread. A call
   stuck on an unresponsive network mount holds only that thread: the next
-  registry call times out, and the rest of the worker does not notice.
-- A provider that fails to start is logged (`fleet_registry_start_failed`)
-  and replaced by `none` for the life of the process.
+  attempts time out, and the rest of the worker does not notice.
+- A provider that fails to start is retried; see [Resilience](#resilience).
+- An iteration of a registry loop can raise outside a provider call, for
+  example in the card builder or in the `features` supplier. The iteration
+  is counted in `drakkar_fleet_registry_errors_total` (as `op="publish"` for
+  the publish loop, `op="list"` for the refresh loop) and logged as
+  `fleet_registry_iteration_failed`, at most once a minute per loop. The loop
+  goes on. A loop that ends for good is logged as `fleet_registry_loop_failed`
+  when the worker stops; the withdraw still runs.
 
 ## Duplicate worker names
 
 Two live processes that publish one worker name overwrite each other's
 card. When a worker lists a card with its own name, another instance, and
-an age within `offline_after_seconds`, it logs `fleet_duplicate_worker_name`
+that is live by the [liveness rule](#liveness), it logs `fleet_duplicate_worker_name`
 (with the other instance and URL) once for that instance and counts it in
 `drakkar_fleet_duplicate_worker_name_total`. Give every worker a unique
 name, for example from the pod name through `worker_name_env`.
@@ -249,12 +407,14 @@ from an options mapping:
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 
 
-class ConsulRegistry:
+class EtcdRegistry:
     def __init__(self, options):
         self._address = options['address']
 
     async def start(self, ctx: RegistryContext) -> None:
-        """Called once, first. ctx carries the worker name, instance, cluster, logger, options."""
+        """Prepare the provider. ctx carries the worker name, instance, cluster,
+        logger, options and the shared connections. Called again after a
+        failure, so leave nothing behind when it raises."""
 
     async def publish(self, card: dict) -> None:
         """Store the card, replacing any card stored under the same worker name."""
@@ -268,18 +428,18 @@ class ConsulRegistry:
         """Delete the worker's card, but only while it still holds this instance."""
 
     async def stop(self) -> None:
-        """Called once, last."""
+        """Release what start took. Called at most once, last."""
 
 
 def make_registry(options):
-    return ConsulRegistry(options)
+    return EtcdRegistry(options)
 ```
 
 Register the factory as an entry point of your package:
 
 ```toml
 [project.entry-points."drakkar.registry_providers"]
-consul = "drakkar_consul:make_registry"
+etcd = "drakkar_etcd:make_registry"
 ```
 
 and select it:
@@ -287,17 +447,24 @@ and select it:
 ```yaml
 fleet:
   registry:
-    provider: consul
+    provider: etcd
     plugin_options:
-      address: consul.service:8500
+      address: etcd.service:2379
 ```
 
 `plugin_options` is passed to the factory unchanged; the provider validates
-it. A plugin name wins over a built-in name, so a package can replace
-`filesystem`. A plugin that fails to load is logged
-(`fleet_registry_entry_point_load_failed`) and skipped; startup then fails
-only if the configured name is the missing one, with a message that lists
-the providers that exist.
+it. The config reference masks its values (see
+[Security](security.md#provider-credentials)). A plugin name wins over a
+built-in name, so a package can replace `filesystem`. A plugin named
+`consul`, `redis` or `postgres` is checked like the built-in of that name:
+the connection that `fleet.registry.connection` names must be declared.
+
+A plugin that fails to load is logged and skipped
+(`provider_entry_point_load_failed`; the other two events of this family are
+`provider_entry_point_scan_failed` and `provider_entry_point_invalid`; the
+field `group` names `drakkar.registry_providers`). Startup then fails only
+if the configured name is the missing one, with a message that lists the
+providers that exist.
 
 Provider methods are coroutines that run on the worker's event loop, the
 same loop that runs the message pipeline. A method that blocks — file or
@@ -311,12 +478,38 @@ What the worker does, and what the provider does:
 
 | The worker | The provider |
 |---|---|
-| loops, timeouts, the thread or task each call runs on | storing the cards |
+| loops, time limits, retries, the breaker, the thread or task each call runs on | storing the cards |
 | building and validating cards | the age of each card on its own clock (`None` when unknown) |
-| online and offline, the snapshot, the duplicate warning | deleting old cards |
+| the snapshot, the duplicate warning | its own liveness verdict (`PeerCard.online`), when its service has one |
+| online and offline from the verdict or the age | deleting old cards |
 
 `list()` returns the caller's own card too; the worker leaves it out of the
 snapshot and builds its own row from local state.
+
+Rules for the lifecycle methods:
+
+- **`start` is retried.** A `start` that raises or times out is called
+  again at the next heartbeat, so it must leave nothing behind that a second
+  call would trip over. Nothing else is called before a `start` succeeded.
+- **`stop` may not be called.** It is called at most once, and only after a
+  `start` that succeeded. It is not called while the breaker is open or when
+  the shutdown time is spent, and not for a `start` that the shutdown
+  cancelled half way. Open clients lazily, or make sure that a missing
+  `stop` leaks nothing that outlives the process.
+- **`online` is optional.** Set `PeerCard.online` to `True` or `False` only
+  when your service decides liveness itself. Leave it `None` otherwise: the
+  worker then judges `age_seconds` against `offline_after_seconds`.
+- **Shared connections.** `ctx.connections` resolves the entries of the
+  `connections` config (it is `None` outside a worker, as in a test).
+  `await ctx.connections.acquire(kind, name, opener, closer)` returns the
+  client of `connections.<kind>.<name>`. It calls `opener(settings)` for the
+  first caller only and keeps `closer` for the shutdown, so every feature
+  that names the connection shares one client. `ctx.connections.settings(kind, name)`
+  returns the declared settings. An undeclared name raises
+  `drakkar.providers.connections.UnknownConnectionError`. A plugin takes the
+  name from its own `plugin_options`.
+- **Raise `drakkar.providers.resilience.TransientError`** for an error that
+  is worth a retry and is not already an `OSError` or a timeout.
 
 ### The test kit
 
@@ -330,14 +523,22 @@ from drakkar.fleet import testkit
 
 
 @pytest.mark.parametrize('check', testkit.PUBLISHING_CHECKS)
-async def test_consul_registry(check, consul_store):
-    await check(lambda: ConsulRegistry({'address': consul_store.address}), consul_store.advance, 600)
+async def test_etcd_registry(check, etcd_store):
+    await check(lambda: EtcdRegistry({'address': etcd_store.address}), etcd_store.advance, 600)
+
+
+@pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS)
+async def test_etcd_registry_liveness(check, etcd_store):
+    await check(lambda: EtcdRegistry({'address': etcd_store.address}), etcd_store.advance, 60)
 ```
 
 - `make_provider()` returns a new provider that shares storage with the
   others the same check builds (two of them stand for two processes).
 - `advance(seconds)` makes every stored card that much older on your clock.
-- The last argument is the age after which your provider deletes a card.
+- The last argument of `PUBLISHING_CHECKS` is the age after which your
+  provider deletes a card. The last argument of `LIVENESS_CHECKS` is the age
+  after which a card whose owner stopped publishing must no longer be
+  reported `online`. A provider that leaves `online` at `None` passes them.
 
 `testkit.check_list_shape(provider, ctx)` and
 `testkit.check_age_is_none_or_non_negative(provider, ctx)` apply to every
@@ -349,12 +550,21 @@ context for them.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `drakkar_fleet_peers` | gauge | `state` (`online`, `offline`, `unknown`) | Peers in the last registry snapshot by liveness state (this worker not counted). |
-| `drakkar_fleet_registry_errors_total` | counter | `op` (`publish`, `list`, `withdraw`) | Registry provider calls that failed or timed out. |
-| `drakkar_fleet_registry_duration_seconds` | histogram | `op` | Duration of registry provider calls in seconds. |
+| `drakkar_fleet_registry_errors_total` | counter | `op` (`start`, `publish`, `list`, `withdraw`, `stop`) | Registry operations that failed or timed out, and loop iterations that raised. An operation counts once, however many attempts it made. An operation that made no attempt (open breaker, not started) does not count. |
+| `drakkar_fleet_registry_duration_seconds` | histogram | `op` | Duration of registry operations in seconds, all attempts and the waits between them included. |
 | `drakkar_fleet_registry_snapshot_age_seconds` | gauge | — | Seconds since the last successful registry refresh; 0 right after one. |
 | `drakkar_fleet_duplicate_worker_name_total` | counter | — | Other live instances seen publishing this worker's name. |
 | `drakkar_fleet_peer_requests_total` | counter | `endpoint` (`cache_changes`), `outcome` (`ok`, `http_error`, `timeout`, `transport_error`, `bad_body`) | Requests this worker sent to peer workers, by endpoint and outcome. |
 | `drakkar_fleet_peer_request_duration_seconds` | histogram | `endpoint` | Time of one request this worker sent to a peer worker, by endpoint. |
+
+Every provider operation, of the registry and of the archive election, is
+also counted by the three provider metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `drakkar_provider_calls_total` | counter | `feature` (`registry`, `election`), `provider`, `op`, `outcome` (`ok`, `error`, `timeout`, `skipped_open`, `not_started`) | Provider operations by feature, provider, operation and [outcome](#resilience). |
+| `drakkar_provider_call_duration_seconds` | histogram | `feature`, `provider`, `op` | Duration of one provider operation with its retries. One sample per operation that made an attempt. Buckets run from 5 ms to 30 s. |
+| `drakkar_provider_breaker_open` | gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open, else `0`. |
 
 ## Log events
 
@@ -363,14 +573,20 @@ context for them.
 | `fleet_registry_started` | info | The registry service started; names the provider, instance and URL. |
 | `fleet_registry_disabled_no_ui` | warning | The UI is off, so the registry is off. |
 | `fleet_registry_disabled_no_dir` | warning | The filesystem provider has no folder, so the registry is off. |
-| `fleet_registry_start_failed` | error | The provider failed to start; the worker runs without peers. |
-| `fleet_registry_publish_failed`, `fleet_registry_list_failed`, `fleet_registry_withdraw_failed` | warning | A provider call failed or timed out; at most once a minute per operation. |
-| `fleet_registry_stop_failed` | warning | The provider failed to stop. |
-| `fleet_registry_loop_failed` | error | A registry loop stopped on an unexpected error; logged at stop, before the card is withdrawn. |
+| `provider_started` | info | A provider started (fields `feature`, `provider`). After failed starts it is logged once, when a start succeeds. |
+| `provider_call_failed` | warning | A provider operation failed after its retries (fields `feature`, `provider`, `op`, `error`, `attempts`, `suppressed`); at most once a minute per operation. `suppressed` counts the failures the line stands for. |
+| `provider_breaker_opened` | warning | A closed breaker opened (fields `feature`, `provider`, `failure_threshold`, `cooldown_seconds`). A failed probe does not log it again. |
+| `provider_breaker_closed` | info | A probe succeeded and closed the breaker. |
+| `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call (field `loop`: `publish` or `refresh`); at most once a minute per loop, with `suppressed`. The loop goes on. |
+| `fleet_registry_stop_failed` | warning | The registry's own stop raised. A provider that fails to stop shows as `provider_call_failed` with `op` `stop`. |
+| `fleet_registry_loop_failed` | error | A registry loop ended on an unexpected error; logged at stop, before the card is withdrawn. |
+| `connection_close_failed` | warning | A client of a named connection failed to close at shutdown (fields `kind`, `name`, `error`; credentials in the error are removed). |
+| `connections_close_timed_out` | warning | The shutdown time ran out while connections closed (field `timeout_seconds`). |
+| `connections_close_failed` | warning | Closing the connections raised an error of its own. |
 | `fleet_card_invalid` | warning | A card was skipped; once per file name (a file that is unreadable, not a plain file, too large or not a JSON object) or per worker (field rules). |
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
 | `fleet_duplicate_worker_name` | warning | Another live process publishes this worker's name; once per instance. |
-| `fleet_registry_entry_point_scan_failed`, `fleet_registry_entry_point_load_failed`, `fleet_registry_entry_point_invalid` | warning | A provider plugin could not be found or loaded. |
+| `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid` | warning | A provider plugin could not be found or loaded (fields `group`, `name`, `value`, `error`). `group` is `drakkar.registry_providers` or `drakkar.election_providers`. |
 | `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
 | `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
 | `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |
@@ -379,15 +595,18 @@ context for them.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, or a plugin name. |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, or a plugin name. `consul`, `redis` and `postgres` are [reserved](#providers). |
+| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
-| `fleet.registry.offline_after_seconds` | `30` | A card older than this is offline. At least `2 * heartbeat_seconds`. |
+| `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. |
 | `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. At least `offline_after_seconds`. |
-| `fleet.registry.timeout_seconds` | `5` | Time limit for one provider call. |
+| `fleet.registry.resilience.*` | see [Resilience](#resilience) | Time limit, retries, backoff and breaker for the registry's provider operations. |
 | `fleet.registry.filesystem.dir` | `""` | Card folder; empty means `<shared.dir>/fleet`. |
 | `fleet.registry.static.peers` | `[]` | The `static` peer list: `name`, `cluster`, `url`. |
+| `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of a `consul` provider. |
 | `fleet.registry.plugin_options` | `{}` | Options for a provider plugin. |
+| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; see [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
 `DK_FLEET__REGISTRY__PROVIDER=static`. The full table with constraints is in
@@ -396,8 +615,9 @@ Every key has a `DK_` environment override, for example
 ## What the registry does not do
 
 - It does not authenticate anything. A card is a public statement of where
-  a worker answers; anyone who can write the card folder can publish a
-  card. Protect the folder like the rest of `shared.dir`.
+  a worker answers; anyone who can write to the card store (the folder, for
+  the `filesystem` provider) can publish a card. Protect the store like the
+  rest of `shared.dir`.
 - It is not used by the pipeline: a worker with no peers processes messages
   exactly like one in a large fleet.
 - It does not carry cache data. The cards carry only the marks of the
