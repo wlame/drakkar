@@ -25,6 +25,7 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import UnknownProviderError
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext
+from drakkar.recorder.election_postgres import PostgresElection
 from drakkar.sources import kafka as kafka_source_module
 from tests.archive_helpers import CLUSTER, due_start, election_calls, history_folder, make_sealed_db
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
@@ -168,6 +169,43 @@ def test_registry_provider_options_for_postgres_names_the_connection_and_prune(t
     )
 
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
+
+
+def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):
+    received: list[dict] = []
+    _install_plugins(monkeypatch, election={'example-election': lambda options: received.append(dict(options))})
+    postgres_app = _app(
+        tmp_path,
+        connections={'postgres': {'reports_db': {'dsn': 'postgresql://user:secret@db/x'}}},
+        history={
+            'archive': {
+                'election': {'provider': 'postgres', 'connection': 'reports_db', 'plugin_options': {'unused': 1}}
+            }
+        },
+    )
+    plugin_app = _app(
+        tmp_path,
+        history={
+            'archive': {'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}}
+        },
+    )
+
+    postgres_args = postgres_app._lifecycle._archive_election()
+    plugin_args = plugin_app._lifecycle._archive_election()
+
+    assert isinstance(postgres_args['election'], PostgresElection)
+    assert postgres_args['election']._connection == 'reports_db'
+    assert postgres_args['election_options'] == {'connection': 'reports_db'}
+    assert received == [{'address': 'consul:8500'}]
+    assert plugin_args['election_options'] == {'address': 'consul:8500'}
+
+
+def test_archive_election_gives_the_filesystem_factory_no_options(tmp_path):
+    app = _app(tmp_path, history={'archive': {'election': {'plugin_options': {'unused': 1}}}})
+
+    arguments = app._lifecycle._archive_election()
+
+    assert arguments['election_options'] == {}
 
 
 async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):

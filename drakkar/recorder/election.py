@@ -37,6 +37,7 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
 from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
 from drakkar.recorder.archive_lock import DEFAULT_REFRESH_SECONDS, FILESYSTEM_PROVIDER, ArchiveLock
+from drakkar.recorder.election_postgres import postgres_election_factory
 from drakkar.recorder.history import history_dir
 
 # Public and stable: plugin packages name this group in their metadata.
@@ -239,7 +240,10 @@ def _acquire_in_folder(lock: ArchiveLock, folder: str) -> bool:
     return lock.acquire() or lock.is_ours()
 
 
-BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {FILESYSTEM_PROVIDER: lambda options: FilesystemElection()}
+BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {
+    FILESYSTEM_PROVIDER: lambda options: FilesystemElection(),
+    'postgres': postgres_election_factory,
+}
 
 
 class ElectionLease:

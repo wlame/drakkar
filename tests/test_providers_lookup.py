@@ -39,7 +39,10 @@ def test_resolve_factory_names_the_election_path(no_election_plugins):
     with pytest.raises(UnknownProviderError) as raised:
         resolve_factory(ELECTION_ENTRY_POINT_GROUP, BUILTIN_ELECTIONS, 'nope', config_path=ELECTION_PATH)
 
-    assert str(raised.value) == "history.archive.election.provider 'nope' is not known; known providers: filesystem"
+    assert (
+        str(raised.value)
+        == "history.archive.election.provider 'nope' is not known; known providers: filesystem, postgres"
+    )
 
 
 def test_the_election_entry_point_group_name():

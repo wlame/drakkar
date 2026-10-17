@@ -116,6 +116,21 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     return build()
 
 
+def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
+    """The options mapping the configured election provider's factory receives.
+
+    The built-ins take their settings from their own config keys; any other
+    name is a plugin and gets ``history.archive.election.plugin_options``.
+    """
+    election = config.history.archive.election
+    builders = {
+        'filesystem': dict,
+        'postgres': lambda: {'connection': election.connection},
+    }
+    build = builders.get(election.provider, lambda: dict(election.plugin_options))
+    return build()
+
+
 class AppLifecycle:
     """Lifecycle driver for :class:`DrakkarApp` (internal use).
 
@@ -533,8 +548,9 @@ class AppLifecycle:
             election.provider,
             config_path='history.archive.election.provider',
         )
+        options = election_provider_options(app._config)
         return {
-            'election': factory(election.plugin_options),
+            'election': factory(options),
             'election_caller': ResilientCaller(
                 election.resilience,
                 feature=ELECTION_FEATURE,
@@ -542,7 +558,7 @@ class AppLifecycle:
                 category='recorder',
             ),
             'election_provider_name': election.provider,
-            'election_options': election.plugin_options,
+            'election_options': options,
             'connections': app._connections,
         }
 
