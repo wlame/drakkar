@@ -10,6 +10,7 @@
   ],
   "statements": {
     "check_table": {"sql": "SELECT to_regclass($1) IS NOT NULL", "params": ["<schema>.<table>"]},
+    "ddl_lock": {"sql": "SELECT pg_advisory_xact_lock(hashtext($1))", "params": ["<schema>"]},
     "publish": {"sql": "INSERT INTO {schema}.fleet_workers (worker, instance, cluster, card, heartbeat_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (worker) DO UPDATE SET instance = EXCLUDED.instance, cluster = EXCLUDED.cluster, card = EXCLUDED.card, heartbeat_at = now()", "params": ["worker", "instance", "cluster", "card"]},
     "list_prune": {"sql": "DELETE FROM {schema}.fleet_workers WHERE heartbeat_at < now() - make_interval(secs => $1)", "params": ["prune_after_seconds"]},
     "list_select": {"sql": "SELECT card, EXTRACT(EPOCH FROM now() - heartbeat_at)::float8 FROM {schema}.fleet_workers ORDER BY worker", "params": []},

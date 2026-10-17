@@ -21,9 +21,9 @@ from drakkar.providers.postgres import (
     SCHEMA_PLACEHOLDER,
     STATEMENT_TEMPLATES,
     TRANSIENT_SQLSTATE_PREFIXES,
+    borrow,
     classify,
     close_pool,
-    connection,
     ddl_for,
     ensure_tables,
     is_transient_sqlstate,
@@ -41,13 +41,23 @@ FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json
 class FakeConnection:
     """Records every call as ``(sql, args)`` and answers ``fetchval`` with a fixed value."""
 
-    def __init__(self, fetchval_answer: Any = True) -> None:
+    def __init__(self, fetchval_answer: Any = True, fail_on_execute: Exception | None = None) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self._fail_on_execute = fail_on_execute
         self._fetchval_answer = fetchval_answer
 
     async def execute(self, sql: str, *args: Any) -> str:
         self.calls.append((sql, args))
+        if self._fail_on_execute is not None:
+            raise self._fail_on_execute
         return 'OK'
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Record the transaction boundaries among the calls."""
+        self.calls.append(('BEGIN', ()))
+        yield
+        self.calls.append(('COMMIT', ()))
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
         self.calls.append((sql, args))
@@ -163,43 +173,43 @@ def test_classify_leaves_a_non_postgres_error_alone():
     assert classify(original) is original
 
 
-async def test_connection_yields_the_acquired_connection():
+async def test_borrow_yields_the_acquired_connection():
     pool = FakePool(FakeConnection())
 
-    async with connection(pool) as conn:
+    async with borrow(pool) as conn:
         assert conn is pool.conn
 
     assert pool.acquired == 1
 
 
-async def test_connection_converts_a_transient_postgres_error():
+async def test_borrow_converts_a_transient_postgres_error():
     pool = FakePool(FakeConnection())
     original = asyncpg.exceptions.ConnectionDoesNotExistError('closed')
 
     with pytest.raises(TransientError) as caught:
-        async with connection(pool):
+        async with borrow(pool):
             raise original
 
     assert caught.value.__cause__ is original
 
 
-async def test_connection_lets_a_permanent_postgres_error_through():
+async def test_borrow_lets_a_permanent_postgres_error_through():
     pool = FakePool(FakeConnection())
 
     with pytest.raises(asyncpg.exceptions.UndefinedTableError):
-        async with connection(pool):
+        async with borrow(pool):
             raise asyncpg.exceptions.UndefinedTableError('no such table')
 
 
-async def test_connection_lets_other_errors_through():
+async def test_borrow_lets_other_errors_through():
     pool = FakePool(FakeConnection())
 
     with pytest.raises(ValueError, match='boom'):
-        async with connection(pool):
+        async with borrow(pool):
             raise ValueError('boom')
 
 
-async def test_ensure_tables_runs_the_ddl_in_order_when_managed():
+async def test_ensure_tables_runs_the_lock_and_the_ddl_in_one_transaction_when_managed():
     conn = FakeConnection()
 
     await ensure_tables(
@@ -210,8 +220,19 @@ async def test_ensure_tables_runs_the_ddl_in_order_when_managed():
         tables=[postgres.FLEET_WORKERS_TABLE],
     )
 
-    assert conn.calls == [(sql, ()) for sql in ddl_for('drakkar')]
-    assert len(conn.calls) == 5
+    lock_sql = statements_for('drakkar')['ddl_lock']
+    expected = [('BEGIN', ()), (lock_sql, ('drakkar',))]
+    expected += [(sql, ()) for sql in ddl_for('drakkar')]
+    expected.append(('COMMIT', ()))
+    assert conn.calls == expected
+    assert len(conn.calls) == 8
+
+
+async def test_ensure_tables_converts_a_transient_error_from_the_ddl():
+    conn = FakeConnection(fail_on_execute=asyncpg.exceptions.ConnectionDoesNotExistError('closed'))
+
+    with pytest.raises(TransientError):
+        await ensure_tables(FakePool(conn), schema='drakkar', manage_schema=True, connection='main', tables=[])
 
 
 async def test_ensure_tables_checks_each_table_when_not_managed():
@@ -221,6 +242,7 @@ async def test_ensure_tables_checks_each_table_when_not_managed():
     await ensure_tables(FakePool(conn), schema='drakkar', manage_schema=False, connection='main', tables=tables)
 
     check_sql = statements_for('drakkar')['check_table']
+    # Only the two probes: no transaction and no advisory lock.
     assert conn.calls == [(check_sql, ('drakkar.fleet_workers',)), (check_sql, ('drakkar.archive_locks',))]
 
 

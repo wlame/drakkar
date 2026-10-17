@@ -50,6 +50,7 @@ DDL_TEMPLATES: tuple[str, ...] = (
 
 STATEMENT_TEMPLATES: dict[str, str] = {
     'check_table': 'SELECT to_regclass($1) IS NOT NULL',
+    'ddl_lock': 'SELECT pg_advisory_xact_lock(hashtext($1))',
     'publish': (
         'INSERT INTO {schema}.fleet_workers (worker, instance, cluster, card, heartbeat_at) '
         'VALUES ($1, $2, $3, $4, now()) '
@@ -152,7 +153,7 @@ async def close_pool(pool: asyncpg.Pool) -> None:
 
 
 @asynccontextmanager
-async def connection(pool: Any) -> AsyncIterator[Any]:
+async def borrow(pool: Any) -> AsyncIterator[Any]:
     """Borrow a connection from ``pool``; a transient Postgres error leaves as ``TransientError``.
 
     ``pool`` is typed ``Any`` so a test can hand in a fake that has ``acquire()``.
@@ -167,11 +168,6 @@ async def connection(pool: Any) -> AsyncIterator[Any]:
         raise classified from exc
 
 
-# ``ensure_tables`` has a parameter named ``connection`` (the connection's
-# configured name), which shadows the helper above inside it.
-_borrowed = connection
-
-
 async def ensure_tables(
     pool: Any,
     *,
@@ -182,16 +178,24 @@ async def ensure_tables(
 ) -> None:
     """Make the tables a feature needs available.
 
-    With ``manage_schema`` the DDL runs one statement at a time (it is
-    idempotent). Without it each table is only checked, and the first missing
-    one raises ``RuntimeError`` naming the schema command that creates it.
+    With ``manage_schema`` the DDL runs in one transaction, one statement at a
+    time, after a transaction-scoped advisory lock on the schema name. The
+    lock makes workers that start together take turns: concurrent
+    ``CREATE ... IF NOT EXISTS`` statements can otherwise fail with a
+    duplicate-object error that no retry cures. Without ``manage_schema`` each
+    table is only checked, and the first missing one raises ``RuntimeError``
+    naming the schema command that creates it. ``tables`` is ignored when the
+    schema is managed (every table of the corpus is created) and only drives
+    the checks otherwise.
     """
-    async with _borrowed(pool) as conn:
-        if manage_schema:
+    async with borrow(pool) as conn:
+        if not manage_schema:
+            check_sql = render(STATEMENT_TEMPLATES['check_table'], schema)
+            for table in tables:
+                if not await conn.fetchval(check_sql, f'{schema}.{table}'):
+                    raise RuntimeError(missing_table_message(schema, table, connection))
+            return
+        async with conn.transaction():
+            await conn.execute(STATEMENT_TEMPLATES['ddl_lock'], schema)
             for statement in ddl_for(schema):
                 await conn.execute(statement)
-            return
-        check_sql = render(STATEMENT_TEMPLATES['check_table'], schema)
-        for table in tables:
-            if not await conn.fetchval(check_sql, f'{schema}.{table}'):
-                raise RuntimeError(missing_table_message(schema, table, connection))
