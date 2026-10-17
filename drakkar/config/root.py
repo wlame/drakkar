@@ -14,6 +14,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.config.cache import CacheConfig
+from drakkar.config.connections import ConnectionsConfig
 from drakkar.config.fleet import FleetConfig
 from drakkar.config.kafka import KafkaConfig
 from drakkar.config.moved_keys import find_moved_keys, moved_keys_message
@@ -124,6 +125,7 @@ class DrakkarConfig(BaseSettings):
     shared: SharedConfig = Field(default_factory=SharedConfig)
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     fleet: FleetConfig = Field(default_factory=FleetConfig)
+    connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     app: dict[str, Any] = Field(
         default_factory=dict,

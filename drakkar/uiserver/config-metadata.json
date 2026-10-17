@@ -2266,6 +2266,123 @@
           "group": "fleet"
         }
       ]
+    },
+    {
+      "key": "connections",
+      "title": "Connections (connections:)",
+      "doc_anchor": "connections-connections",
+      "entries": [
+        {
+          "path": "connections.consul.*.address",
+          "env": null,
+          "description": "Base URL of the Consul HTTP API.",
+          "full_description": "Base URL of the Consul HTTP API.",
+          "type": "string",
+          "default": "http://127.0.0.1:8500",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.token",
+          "env": null,
+          "description": "ACL token sent with every request.",
+          "full_description": "ACL token sent with every request. Empty means no token.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.datacenter",
+          "env": null,
+          "description": "Consul datacenter to address.",
+          "full_description": "Consul datacenter to address. Empty means the datacenter of the agent.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.key_prefix",
+          "env": null,
+          "description": "Key prefix of everything a feature stores in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\".",
+          "full_description": "Key prefix of everything a feature stores in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\".",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.url",
+          "env": null,
+          "description": "Redis connection URL, typically embedding the password.",
+          "full_description": "Redis connection URL, typically embedding the password.",
+          "type": "string",
+          "default": "redis://localhost:6379/0",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.key_prefix",
+          "env": null,
+          "description": "Prefix of every key a feature stores in Redis: letters, digits, \"_\", \":\", \".\" and \"-\".",
+          "full_description": "Prefix of every key a feature stores in Redis: letters, digits, \"_\", \":\", \".\" and \"-\". May be empty.",
+          "type": "string",
+          "default": "drakkar:",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.dsn",
+          "env": null,
+          "description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "full_description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.schema_name",
+          "env": null,
+          "description": "Schema that holds the tables a feature creates: a lower-case identifier.",
+          "full_description": "Schema that holds the tables a feature creates: a lower-case identifier.",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.manage_schema",
+          "env": null,
+          "description": "Create the schema and the tables of a feature when they are missing.",
+          "full_description": "Create the schema and the tables of a feature when they are missing. Off, they must already exist.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_min",
+          "env": null,
+          "description": "Minimum connections in the pool.",
+          "full_description": "Minimum connections in the pool.",
+          "type": "integer",
+          "default": 1,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_max",
+          "env": null,
+          "description": "Maximum connections in the pool.",
+          "full_description": "Maximum connections in the pool. Must be >= pool_min.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "connections"
+        }
+      ]
     }
   ]
 }

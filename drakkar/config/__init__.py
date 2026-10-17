@@ -4,13 +4,19 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 The models are split per domain across this package — ``kafka``, ``sinks``,
-``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``fleet``, ``webapp``
+``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``fleet``, ``connections``, ``webapp``
 — and assembled by ``root``.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
 from drakkar.config.cache import CacheConfig
+from drakkar.config.connections import (
+    ConnectionsConfig,
+    ConsulConnectionConfig,
+    PostgresConnectionConfig,
+    RedisConnectionConfig,
+)
 from drakkar.config.fleet import (
     CacheExchangeConfig,
     FilesystemRegistryConfig,
@@ -85,6 +91,8 @@ __all__ = [
     'CacheConfig',
     'CacheExchangeConfig',
     'CircuitBreakerConfig',
+    'ConnectionsConfig',
+    'ConsulConnectionConfig',
     'DLQConfig',
     'DocsAnchor',
     'DocsAnchorMatch',
@@ -106,7 +114,9 @@ __all__ = [
     'MongoSinkConfig',
     'MongoStatementConfig',
     'OffloadConfig',
+    'PostgresConnectionConfig',
     'PostgresSinkConfig',
+    'RedisConnectionConfig',
     'RedisSinkConfig',
     'ResilienceConfig',
     'RuntimeHealthConfig',

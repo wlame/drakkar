@@ -721,6 +721,32 @@ fleet:
     max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS
 ```
 
+## Connections (`connections:`)
+
+Named connections to shared services, declared once. A feature that needs a service names a connection and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen.
+
+```yaml
+connections:
+  consul:
+    main:
+      address: http://127.0.0.1:8500   # env: DK_CONNECTIONS__CONSUL__MAIN__ADDRESS
+      token: ''                        # ACL token; a secret. env: DK_CONNECTIONS__CONSUL__MAIN__TOKEN
+      datacenter: ''                   # '' = the agent's datacenter. env: DK_CONNECTIONS__CONSUL__MAIN__DATACENTER
+      key_prefix: drakkar              # segments of letters, digits, _ . - joined by '/'; no leading or trailing '/'.
+                                       #   env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
+  redis:
+    main:
+      url: redis://localhost:6379/0    # a secret. env: DK_CONNECTIONS__REDIS__MAIN__URL
+      key_prefix: 'drakkar:'           # letters, digits, _ : . -; may be empty. env: DK_CONNECTIONS__REDIS__MAIN__KEY_PREFIX
+  postgres:
+    main:
+      dsn: postgresql://user:password@host/db  # required; a secret. env: DK_CONNECTIONS__POSTGRES__MAIN__DSN
+      schema: drakkar                  # lower-case identifier. env: DK_CONNECTIONS__POSTGRES__MAIN__SCHEMA
+      manage_schema: true              # create the schema and tables when missing. env: DK_CONNECTIONS__POSTGRES__MAIN__MANAGE_SCHEMA
+      pool_min: 1                      # env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MIN
+      pool_max: 4                      # must be >= pool_min. env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MAX
+```
+
 ---
 
 ## App config
