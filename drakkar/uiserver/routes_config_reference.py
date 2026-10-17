@@ -181,6 +181,10 @@ _DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
     'kafka.client_config': _mask_env_dict,
     'dlq.client_config': _mask_env_dict,
     'sinks.kafka.*.client_config': _mask_env_dict,
+    # A provider plugin validates its own options, so a token or a URL with
+    # a password may sit under any key.
+    'fleet.registry.plugin_options': _mask_env_dict,
+    'history.archive.election.plugin_options': _mask_env_dict,
 }
 
 

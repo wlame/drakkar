@@ -40,6 +40,9 @@ from drakkar.recorder.history import history_dir
 # Public and stable: plugin packages name this group in their metadata.
 ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
 
+# The feature label of the election's provider calls, metrics and log lines.
+ELECTION_FEATURE = 'election'
+
 REFRESH_THREAD_NAME = 'drakkar-election-refresh'
 
 # Why a lease is no longer held (``ElectionLease.loss_reason``): the provider

@@ -1,9 +1,11 @@
-"""How the worker starts, feeds and stops the registry service."""
+"""How the worker starts, feeds and stops the registry service and the archive election."""
 
 import asyncio
 import json
 import re
 import stat
+import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,11 +17,17 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.metrics import provider_calls
+from drakkar.models import SourceMessage
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
+from drakkar.providers.lookup import UnknownProviderError
+from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext
+from drakkar.sources import kafka as kafka_source_module
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 from tests.test_lifecycle_sources import StubSource
+from tests.test_recorder_archive import CLUSTER, _due_start, _folder, _make_db
 from tests.test_sources_validation import KafkaOnlyHandler
 
 
@@ -41,13 +49,19 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
     return DrakkarApp(handler=KafkaOnlyHandler(), config=_config(tmp_path, **overrides), worker_id='w-1')
 
 
-def _install_registry_plugins(monkeypatch, factories: dict) -> None:
-    """Make ``factories`` the installed registry plugins; the other provider groups have none."""
+def _install_plugins(monkeypatch, *, registry: dict | None = None, election: dict | None = None) -> None:
+    """Make ``registry`` and ``election`` the installed plugins of their groups; no other group has any."""
+    installed = {plugins.ENTRY_POINT_GROUP: registry or {}, ELECTION_ENTRY_POINT_GROUP: election or {}}
 
     def discover(group: str) -> dict:
-        return dict(factories) if group == plugins.ENTRY_POINT_GROUP else {}
+        return dict(installed.get(group, {}))
 
     monkeypatch.setattr(lookup, 'discover_plugin_factories', discover)
+
+
+def _install_registry_plugins(monkeypatch, factories: dict) -> None:
+    """Make ``factories`` the installed registry plugins; the other provider groups have none."""
+    _install_plugins(monkeypatch, registry=factories)
 
 
 # --- which provider runs ---
@@ -150,6 +164,17 @@ async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
 
     with pytest.raises(UnknownRegistryProviderError, match="'etcd'"):
         await app._lifecycle._start_fleet()
+
+
+async def test_an_unknown_election_provider_fails_startup(tmp_path, monkeypatch):
+    _install_plugins(monkeypatch)
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    app = _app(tmp_path, history={'archive': {'election': {'provider': 'etcd'}}})
+
+    with pytest.raises(UnknownProviderError, match=re.escape("history.archive.election.provider 'etcd' is not known")):
+        await app._lifecycle._start_ui_and_recorder()
+
+    assert app._recorder is None
 
 
 # --- the registry switched off ---
@@ -355,6 +380,26 @@ async def test_a_connection_close_that_outlasts_the_drain_time_is_cut_off_and_lo
     assert 'ui_server.stop' in order
 
 
+async def test_a_connection_close_that_raises_is_logged_and_the_closers_after_it_still_run(tmp_path, monkeypatch):
+    app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
+
+    async def broken_close_all(_connections) -> None:
+        raise RuntimeError('closer table is corrupt')
+
+    monkeypatch.setattr(Connections, 'close_all', broken_close_all)
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+
+    with capture_logs() as logs:
+        app._lifecycle._handle_signal()
+        await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    (failed,) = [entry for entry in logs if entry['event'] == 'connections_close_failed']
+    assert (failed['category'], failed['error']) == ('fleet', 'closer table is corrupt')
+    assert 'ui_server.stop' in order
+    app._sink_manager.close_all.assert_awaited_once()
+
+
 async def test_the_cache_engine_reads_the_registrys_peer_views(tmp_path, monkeypatch):
     provider = StaticRegistry([{'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.2:8080/'}])
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: provider)
@@ -419,6 +464,146 @@ async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypa
 
     assert source.calls[:3] == ['bind', 'start', 'run']
     assert 'stop' in source.calls
+
+
+class _BlockedElection:
+    """Every call hangs forever, like an election service that stopped answering; ``calls`` names each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.entered = asyncio.Event()
+
+    async def _hang(self, op: str) -> None:
+        self.calls.append(op)
+        self.entered.set()
+        await asyncio.Event().wait()
+
+    async def start(self, ctx: ElectionContext) -> None:
+        await self._hang('start')
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        await self._hang('acquire')
+        return False
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        await self._hang('refresh')
+        return False
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        await self._hang('is_held')
+        return False
+
+    async def release(self, scope: str, token: str) -> None:
+        await self._hang('release')
+
+    async def stop(self) -> None:
+        await self._hang('stop')
+
+
+class _FakeConsumer:
+    """The Kafka consumer of one worker: partition 0 on subscribe, the messages a test delivers, recorded commits."""
+
+    def __init__(self, *, connection, source, on_assign, on_revoke) -> None:
+        self._on_assign = on_assign
+        self._waiting: list[SourceMessage] = []
+        self.committed: dict[int, int] = {}
+
+    def deliver(self, messages: list[SourceMessage]) -> None:
+        self._waiting.extend(messages)
+
+    async def subscribe(self) -> None:
+        self._on_assign([0])
+
+    async def poll_batch(self, max_messages: int | None = None, timeout: float = 1.0) -> list[SourceMessage]:
+        if not self._waiting:
+            # A real poll waits for the broker; an empty one must not spin the loop.
+            await asyncio.sleep(0.01)
+            return []
+        batch, self._waiting = self._waiting, []
+        return batch
+
+    async def commit(self, offsets: dict[int, int]) -> None:
+        self.committed.update(offsets)
+
+    async def pause(self, partition_ids: list[int]) -> None:
+        pass
+
+    async def resume(self, partition_ids: list[int]) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[_FakeConsumer]]:
+    """A worker with its real recorder and Kafka source, on a fake consumer; no UI server, sinks or subprocesses."""
+    values = {
+        'shared': {'dir': str(tmp_path / 'shared')},
+        'cluster_name': CLUSTER,
+        'fleet': {'registry': {'provider': 'none'}},
+    }
+    values.update(overrides)
+    app = _app(tmp_path, **values)
+    consumers: list[_FakeConsumer] = []
+
+    def make_consumer(**kwargs) -> _FakeConsumer:
+        consumer = _FakeConsumer(**kwargs)
+        consumers.append(consumer)
+        return consumer
+
+    monkeypatch.setattr(kafka_source_module, 'KafkaConsumer', make_consumer)
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr(app._sink_manager, 'connect_all', AsyncMock())
+    monkeypatch.setattr(app._sink_manager, 'close_all', AsyncMock())
+    monkeypatch.setattr(app, '_build_dlq', lambda: setattr(app, '_dlq_sink', None))
+    monkeypatch.setattr(app._lifecycle, '_build_executor_pool', AsyncMock())
+    app._executor_pool = MagicMock(active_count=0, max_executors=1)
+    return app, consumers
+
+
+def _election_calls(provider: str, op: str, outcome: str) -> float:
+    return provider_calls.labels(feature='election', provider=provider, op=op, outcome=outcome)._value.get()
+
+
+MESSAGE_COUNT = 20
+# Messages that need no task commit in milliseconds; this is far above that
+# and far below any election time limit a worker could be waiting out.
+COMMIT_BUDGET_SECONDS = 5.0
+
+
+async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypatch):
+    """Core isolation: messages are processed and committed, and shutdown ends, while every election call hangs."""
+    election = _BlockedElection()
+    _install_plugins(monkeypatch, election={'blocked-election': lambda _options: election})
+    resilience = {'timeout_seconds': 0.5, 'retries': 0}
+    app, consumers = _pipeline_app(
+        tmp_path,
+        monkeypatch,
+        history={'archive': {'election': {'provider': 'blocked-election', 'resilience': resilience}}},
+    )
+    due_source = _make_db(_folder(tmp_path), 'w-2', _due_start(time.time()))
+    timeouts_before = _election_calls('blocked-election', 'start', 'timeout')
+
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    assert app._recorder is not None
+    app._recorder._start_archive_pass()
+    await wait_for(election.entered.is_set)
+    (consumer,) = consumers
+    consumer.deliver(
+        [
+            SourceMessage(topic='input', partition=0, offset=offset, value=b'{"x": 1}', timestamp=1_000)
+            for offset in range(MESSAGE_COUNT)
+        ]
+    )
+    await wait_for(lambda: consumer.committed.get(0) == MESSAGE_COUNT, timeout=COMMIT_BUDGET_SECONDS)
+    await wait_for(lambda: _election_calls('blocked-election', 'start', 'timeout') >= timeouts_before + 1)
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    assert election.calls == ['start']
+    # No lease, no archive: the due window's source is still in the history folder.
+    assert Path(due_source).exists()
 
 
 async def _wait_until(condition) -> None:

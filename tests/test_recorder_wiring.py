@@ -1,4 +1,4 @@
-"""How the worker gives the recorder its folders and when it seals."""
+"""How the worker gives the recorder its folders and its archive election, and when it seals."""
 
 import asyncio
 import time
@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
+from drakkar.metrics import provider_calls
+from drakkar.providers import lookup
+from drakkar.providers.connections import Connections
+from drakkar.recorder import core as core_mod
+from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP
 from tests.conftest import wait_for
+from tests.fleet_fakes import ElectionStore, MemoryElection
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -42,6 +48,54 @@ async def test_the_recorder_seals_into_the_shared_history_folder_with_the_proces
         assert app._recorder._instance == app._instance
     finally:
         await app._recorder.stop()
+
+
+async def test_the_recorder_runs_the_configured_election_with_its_options_resilience_and_connections(
+    tmp_path, monkeypatch
+):
+    election = MemoryElection(ElectionStore())
+    received: dict = {}
+
+    def factory(options):
+        received['options'] = dict(options)
+        return election
+
+    def discover(group: str) -> dict:
+        return {'example-election': factory} if group == ELECTION_ENTRY_POINT_GROUP else {}
+
+    monkeypatch.setattr(lookup, 'discover_plugin_factories', discover)
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: received.update(kwargs))
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    election_config = {
+        'provider': 'example-election',
+        'plugin_options': {'address': 'consul:8500'},
+        'resilience': {'timeout_seconds': 1.5, 'retries': 0},
+    }
+    app = _app(tmp_path, history={'archive': {'election': election_config}})
+    (tmp_path / 'storage').mkdir()
+    started_ok = provider_calls.labels(feature='election', provider='example-election', op='start', outcome='ok')
+    started_before = started_ok._value.get()
+
+    app._lifecycle._create_connections()
+    await app._lifecycle._start_ui_and_recorder()
+    assert app._recorder is not None
+    try:
+        await app._recorder._archive_pass()
+        assert app._recorder._election_caller.operation_bound_seconds == 1.5
+    finally:
+        await app._recorder.stop()
+
+    assert received['options'] == {'address': 'consul:8500'}
+    ctx = election.started_with
+    assert ctx is not None
+    assert (ctx.worker, ctx.instance, ctx.cluster) == ('w-1', app._instance, 'search')
+    assert ctx.shared_dir == str(tmp_path / 'shared')
+    assert ctx.options == {'address': 'consul:8500'}
+    assert ctx.connections is app._connections
+    lease = received['lease']
+    assert (lease.provider_name, lease.scope) == ('example-election', 'search')
+    assert started_ok._value.get() == started_before + 1
+    assert election.calls['stop'] == 1
 
 
 def _runnable_app(tmp_path, monkeypatch) -> tuple[DrakkarApp, MagicMock, list[str]]:
@@ -82,6 +136,25 @@ async def test_leftover_sealing_starts_once_the_sources_run(tmp_path, monkeypatc
     await asyncio.wait_for(run, timeout=5)
 
     assert order == ['sources_started', 'leftover_sealing']
+
+
+async def test_the_shared_connections_exist_before_the_recorder_starts(tmp_path, monkeypatch):
+    app, _recorder, _order = _runnable_app(tmp_path, monkeypatch)
+    start_stand_in = app._lifecycle._start_ui_and_recorder
+    seen: dict = {}
+
+    async def start_ui_and_recorder() -> None:
+        seen['connections'] = app._connections
+        await start_stand_in()
+
+    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', start_ui_and_recorder)
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=5)
+
+    assert isinstance(seen['connections'], Connections)
+    assert seen['connections'] is app._connections
 
 
 async def test_the_recorder_stops_with_the_shutdown_time_that_is_left(tmp_path, monkeypatch):

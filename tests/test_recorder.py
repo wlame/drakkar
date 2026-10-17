@@ -2,12 +2,17 @@
 
 import asyncio
 import contextlib
+import gc
 import json
 import os
+import sqlite3
+import threading
 import time
+import warnings
 import weakref
 from collections import deque
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
@@ -32,9 +37,10 @@ from drakkar.recorder import (
     make_db_path,
 )
 from drakkar.recorder.fanout import WSSubscriber
+from drakkar.recorder.helpers import open_connection, open_reader
 from drakkar.recorder.writer import _byte_len, _capped_stdin
 from drakkar.recorder.writer import logger as writer_logger
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
 
 
 class _RecData(BaseModel):
@@ -1055,6 +1061,135 @@ async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
     await rec.stop()
 
 
+# --- A cancelled rotation ---
+
+
+def _open_connection_threads() -> int:
+    """aiosqlite worker threads alive now: each open connection has one, and it is not a daemon thread."""
+    return sum('_connection_worker_thread' in thread.name for thread in threading.enumerate())
+
+
+def _hold_next_rotation(rec, monkeypatch, moment: str) -> tuple[threading.Event, threading.Event]:
+    """Make the next rotation wait at ``moment``; returns (set once it waits, set to let an open finish).
+
+    At the two ``*_connect`` moments the open itself waits in its thread, as
+    on a slow disk, and finishes once released; at the others the rotation
+    waits on the loop until it is cancelled.
+    """
+    waiting = threading.Event()
+    release = threading.Event()
+    if moment in ('writer_connect', 'reader_connect'):
+        real_connect = sqlite3.connect
+        held = threading.Event()
+
+        def held_connect(database, *args, **kwargs):
+            # The reader opens through a read-only URI, the writer through a plain path.
+            is_reader = str(database).startswith('file:')
+            if not held.is_set() and is_reader == (moment == 'reader_connect'):
+                held.set()
+                waiting.set()
+                release.wait(WAIT_FOR_TIMEOUT_SECONDS)
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, 'connect', held_connect)
+        return waiting, release
+
+    async def wait_until_cancelled(*args, **kwargs) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    if moment == 'writer_setup':
+        monkeypatch.setattr(rec, '_create_schema', wait_until_cancelled)
+    else:
+        # After the swap: the config is written to the new file first.
+        monkeypatch.setattr(rec, '_drakkar_config', MagicMock())
+        monkeypatch.setattr(rec, 'write_config', wait_until_cancelled)
+    return waiting, release
+
+
+@pytest.mark.parametrize('moment', ['writer_connect', 'writer_setup', 'reader_connect', 'after_swap'])
+async def test_a_cancelled_rotation_leaves_no_connection_open(tmp_path, monkeypatch, unique_db_paths, moment):
+    """``stop()`` cancels a rotation wherever it is; no connection, and so no thread, may outlive it."""
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
+    await rec.start()
+    open_before = _open_connection_threads()
+    waiting, release = _hold_next_rotation(rec, monkeypatch, moment)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always', ResourceWarning)
+        rotation = asyncio.create_task(rec._rotate())
+        await wait_for(waiting.is_set)
+        rotation.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await rotation
+        await wait_for(lambda: _open_connection_threads() == open_before, timeout=5)
+        del rotation
+        gc.collect()
+    await rec.stop()
+
+    assert [str(warning.message) for warning in caught if issubclass(warning.category, ResourceWarning)] == []
+
+
+async def test_open_reader_cancelled_during_its_setup_closes_its_connection(tmp_path, monkeypatch):
+    path = str(tmp_path / 'events.db')
+    sqlite3.connect(path).close()
+    waiting = asyncio.Event()
+
+    async def wait_until_cancelled(self, sql, parameters=None) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(aiosqlite.Connection, 'execute', wait_until_cancelled)
+    open_before = _open_connection_threads()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always', ResourceWarning)
+        opening = asyncio.create_task(open_reader(path))
+        await wait_for(waiting.is_set)
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        await wait_for(lambda: _open_connection_threads() == open_before, timeout=5)
+        del opening
+        gc.collect()
+
+    assert [str(warning.message) for warning in caught if issubclass(warning.category, ResourceWarning)] == []
+
+
+async def test_an_open_that_fails_after_its_caller_was_cancelled_leaves_no_unretrieved_error(tmp_path, monkeypatch):
+    waiting = threading.Event()
+    release = threading.Event()
+    real_connect = sqlite3.connect
+
+    def held_connect(database, *args, **kwargs):
+        waiting.set()
+        release.wait(WAIT_FOR_TIMEOUT_SECONDS)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, 'connect', held_connect)
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    open_before = _open_connection_threads()
+    try:
+        # The folder does not exist, so the open fails once it is let go.
+        opening = asyncio.create_task(open_connection(str(tmp_path / 'missing' / 'events.db')))
+        await wait_for(waiting.is_set)
+        opening.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        await wait_for(lambda: _open_connection_threads() == open_before, timeout=5)
+        await asyncio.sleep(0)
+        del opening
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+
+    assert reported == []
+
+
 # --- Dedicated reader connection (H3) ---
 
 
@@ -1238,6 +1373,9 @@ async def test_stop_reader_close_failure_still_closes_writer(tmp_path):
         async def close(self):
             raise RuntimeError('simulated reader close failure')
 
+    # The real reader is closed first: left open, its non-daemon thread
+    # would outlive the test and hold the process open at exit.
+    await rec._reader_db.close()
     rec._reader_db = _ExplodingClose()  # type: ignore[assignment]
 
     # stop() should swallow the reader-close exception (logged as warning)

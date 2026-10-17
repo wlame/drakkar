@@ -69,8 +69,11 @@ from drakkar.metrics import (
 )
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.providers.connections import Connections
+from drakkar.providers.lookup import resolve_factory
+from drakkar.providers.resilience import ResilientCaller, describe_error
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
+from drakkar.recorder.election import BUILTIN_ELECTIONS, ELECTION_ENTRY_POINT_GROUP, ELECTION_FEATURE
 from drakkar.recorder.history import history_dir
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
@@ -207,8 +210,8 @@ class AppLifecycle:
 
             await self._build_executor_pool()
             await self._start_observability()
-            await self._start_ui_and_recorder()
             self._create_connections()
+            await self._start_ui_and_recorder()
             await self._start_fleet()
             self._start_runtime_health()
             self._start_throughput()
@@ -480,6 +483,7 @@ class AppLifecycle:
                 instance=app._instance,
                 archive=app._config.history.archive,
                 merged_retention_days=app._config.history.merged_retention_days,
+                **self._archive_election(),
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()
@@ -504,11 +508,43 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
+    def _archive_election(self) -> dict[str, Any]:
+        """The recorder's election arguments: the configured provider, its caller, options and the connections.
+
+        Resolved only while archiving is on, since only the archive pass
+        uses the election; an unknown provider name then fails startup.
+        With archiving off the recorder keeps its default, which never runs.
+        """
+        app = self._app
+        archive = app._config.history.archive
+        if not archive.enabled:
+            return {}
+        election = archive.election
+        factory = resolve_factory(
+            ELECTION_ENTRY_POINT_GROUP,
+            BUILTIN_ELECTIONS,
+            election.provider,
+            config_path='history.archive.election.provider',
+        )
+        return {
+            'election': factory(election.plugin_options),
+            'election_caller': ResilientCaller(
+                election.resilience,
+                feature=ELECTION_FEATURE,
+                provider=election.provider,
+                category='recorder',
+            ),
+            'election_provider_name': election.provider,
+            'election_options': election.plugin_options,
+            'connections': app._connections,
+        }
+
     def _create_connections(self) -> None:
         """Make the resolver of the named shared connections; it opens nothing until a provider asks.
 
         Made after ``on_startup``, so a handler that changes ``connections``
-        there is honoured, and before the providers that use it start.
+        there is honoured, and before the recorder and the registry, whose
+        providers use it.
         """
         app = self._app
         app._connections = Connections(app._config.connections)
@@ -1147,9 +1183,8 @@ class AppLifecycle:
             # The shared connections close once every provider that uses them
             # has stopped, inside the shutdown time that is left. A closer
             # still running when that runs out is cut off, and its client
-            # goes with the process. ``close_all`` logs a closer that raises
-            # and never raises itself, so running out of time is the one
-            # failure left here.
+            # goes with the process. ``close_all`` logs a closer that raises;
+            # an error of its own is logged here, so the closers below still run.
             if app._connections is not None:
                 close_seconds = max(deadline - time.monotonic(), 0.0)
                 try:
@@ -1160,6 +1195,13 @@ class AppLifecycle:
                         'connections_close_timed_out',
                         category='fleet',
                         timeout_seconds=round(close_seconds, 3),
+                    )
+                except Exception as exc:
+                    await log.awarning(
+                        'connections_close_failed',
+                        category='fleet',
+                        error=describe_error(exc),
+                        exc_info=True,
                     )
 
             if app._ui_server:

@@ -40,7 +40,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import HistoryArchiveConfig, ResilienceConfig, UIConfig
+from drakkar.config import HistoryArchiveConfig, UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -61,16 +61,25 @@ from drakkar.metrics import (
     recorder_seal_failures,
     recorder_unsealed_files,
 )
-from drakkar.providers.resilience import ResilientCaller
+from drakkar.providers.connections import Connections
+from drakkar.providers.resilience import OUTCOME_NOT_STARTED, ResilientCaller
 from drakkar.recorder.archive import run_archive_pass
 from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER
-from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
+from drakkar.recorder.election import (
+    ELECTION_FEATURE,
+    ElectionContext,
+    ElectionLease,
+    ElectionProvider,
+    FilesystemElection,
+)
 from drakkar.recorder.helpers import (
     BUSY_TIMEOUT_MS,
+    close_quietly,
     detect_worker_ip,
     encode_json_str,
     format_dt,
     make_db_path,
+    open_connection,
     open_reader,
     sanitize_env_value,
 )
@@ -193,6 +202,11 @@ class EventRecorder(EventWriter):
         instance: str = '',
         archive: HistoryArchiveConfig | None = None,
         merged_retention_days: int = 0,
+        election: ElectionProvider | None = None,
+        election_caller: ResilientCaller | None = None,
+        election_provider_name: str = FILESYSTEM_PROVIDER,
+        election_options: Mapping[str, Any] | None = None,
+        connections: Connections | None = None,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -204,6 +218,13 @@ class EventRecorder(EventWriter):
         empty). ``archive`` is ``history.archive``; the defaults apply when
         omitted. ``merged_retention_days`` is how long the archive pass keeps
         UI merge results (0 keeps them).
+
+        ``election`` decides which worker of the cluster archives, named
+        ``election_provider_name`` in metrics and logs; it defaults to the
+        ``filesystem`` provider. ``election_caller`` makes its calls; it
+        defaults to one built from ``archive.election.resilience``. The
+        provider starts at the first archive pass, with ``election_options``
+        and ``connections`` in its context, and stops in :meth:`stop`.
         """
         super().__init__(config)
         self._worker_name = worker_name
@@ -213,6 +234,24 @@ class EventRecorder(EventWriter):
         self._instance = instance or secrets.token_hex(8)
         self._archive = archive if archive is not None else HistoryArchiveConfig()
         self._merged_retention_days = merged_retention_days
+        # One provider and one caller serve every archive pass, so the
+        # breaker and the rate-limited failure log span the passes.
+        self._election: ElectionProvider = election if election is not None else FilesystemElection()
+        self._election_provider_name = election_provider_name
+        self._election_caller = (
+            election_caller
+            if election_caller is not None
+            else ResilientCaller(
+                self._archive.election.resilience,
+                feature=ELECTION_FEATURE,
+                provider=election_provider_name,
+                category='recorder',
+            )
+        )
+        self._election_options = dict(election_options or {})
+        self._connections = connections
+        # True once a provider ``start`` succeeded; only then is it stopped.
+        self._election_started = False
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -808,7 +847,8 @@ class EventRecorder(EventWriter):
         into the history folder runs only while time remains, so a slow
         network mount cannot hold the stop past the deadline. A file that
         is not moved stays in ``storage.dir`` and the next start with the
-        same worker name seals it.
+        same worker name seals it. A started election provider is stopped
+        last, with one attempt inside the time left.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         self._running = False
@@ -875,6 +915,9 @@ class EventRecorder(EventWriter):
             meta = await self._seal(path, seal_connection(writer, db_path=path, **self._seal_identity()))
             if meta is not None:
                 await self._publish_until(path, meta, deadline)
+        # Last: an archive pass still running in its thread releases its
+        # lease through the provider, so the provider stays up as long as it can.
+        await self._stop_election(deadline)
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.
@@ -1308,10 +1351,23 @@ class EventRecorder(EventWriter):
         measured in seconds, so it goes to the recorder's own archive thread;
         the event loop only sees this await, and the rotation loop starts it
         as a background job so it never waits for it either.
+
+        The election provider starts here at the first pass. While it has
+        not started, a pass ends at once and the next one tries again.
         """
-        if not self._archive.enabled or not self._storage_dir:
+        if not self._archives():
             return
-        lease = await self._filesystem_lease()
+        if not await self._ensure_election_started():
+            self._election_caller.skip('acquire', OUTCOME_NOT_STARTED)
+            return
+        lease = ElectionLease(
+            self._election,
+            self._election_caller,
+            asyncio.get_running_loop(),
+            scope=sanitize_cluster(self._cluster_name),
+            lease_seconds=self._archive.lock_stale_seconds,
+            provider_name=self._election_provider_name,
+        )
         if self._archive_executor is None:
             self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
         await asyncio.get_running_loop().run_in_executor(
@@ -1328,30 +1384,55 @@ class EventRecorder(EventWriter):
             ),
         )
 
-    async def _filesystem_lease(self) -> ElectionLease:
-        """A lease on the ``filesystem`` election (the lock file in the history folder) for one pass."""
-        election = FilesystemElection()
-        await election.start(
-            ElectionContext(
-                worker=self._worker_name,
-                instance=self._instance,
-                cluster=self._cluster_name,
-                shared_dir=self._shared_dir,
-                logger=logger,
-                options={},
-            )
+    def _archives(self) -> bool:
+        """Whether archive passes run at all: archiving is on and there is a storage folder."""
+        return self._archive.enabled and bool(self._storage_dir)
+
+    async def _ensure_election_started(self) -> bool:
+        """Start the election provider unless it has started; True when it is started.
+
+        The call goes through the election caller: a time limit per attempt,
+        retries, the breaker, and at most one failure line a minute.
+        """
+        if self._election_started:
+            return True
+        ctx = ElectionContext(
+            worker=self._worker_name,
+            instance=self._instance,
+            cluster=self._cluster_name,
+            shared_dir=self._shared_dir,
+            logger=logger,
+            options=self._election_options,
+            connections=self._connections,
         )
-        caller = ResilientCaller(
-            ResilienceConfig(), feature='election', provider=FILESYSTEM_PROVIDER, category='recorder'
+        result = await self._election_caller.call('start', lambda: self._election.start(ctx))
+        if not result.ok:
+            return False
+        # Set before the log await: a cancellation there must not leave a
+        # started provider that stop() would never stop.
+        self._election_started = True
+        await logger.ainfo(
+            'provider_started',
+            category='recorder',
+            feature=ELECTION_FEATURE,
+            provider=self._election_provider_name,
         )
-        return ElectionLease(
-            election,
-            caller,
-            asyncio.get_running_loop(),
-            scope=sanitize_cluster(self._cluster_name),
-            lease_seconds=self._archive.lock_stale_seconds,
-            provider_name=FILESYSTEM_PROVIDER,
-        )
+        return True
+
+    async def _stop_election(self, deadline: float | None) -> None:
+        """Stop a started election provider with one attempt, inside ``deadline``; else count the stop as skipped.
+
+        Without archive passes the election is not in use, and nothing is counted.
+        """
+        if not self._archives():
+            return
+        if not self._election_started:
+            self._election_caller.skip('stop', OUTCOME_NOT_STARTED)
+            return
+        # Cleared first, so a second stop() never stops the provider again.
+        self._election_started = False
+        remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+        await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=remaining)
 
     async def _rotate(self) -> None:
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.
@@ -1381,7 +1462,7 @@ class EventRecorder(EventWriter):
         # owner-only too. Skipping this step here would leave every
         # post-rotation file world-readable.
         secure_db_file(new_path)
-        new_db = await aiosqlite.connect(new_path)
+        new_db = await open_connection(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
             # Re-applied per connection: unlike journal_mode, synchronous is
@@ -1389,23 +1470,16 @@ class EventRecorder(EventWriter):
             await new_db.execute(WAL_SYNCHRONOUS_PRAGMA)
             await new_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
             await self._create_schema(new_db)
-        except Exception:
-            # Avoid leaking the fd: close the new connection and re-raise.
-            # self._db is still the previous (fully-initialized) writer.
-            with contextlib.suppress(Exception):
-                await new_db.close()
-            raise
-
-        # Open the new reader against the new path. Done BEFORE swapping
-        # so a concurrent debug-UI read arriving mid-swap never lands on
-        # a half-torn-down reader. If the open fails, abort: close the
-        # new writer (since we're no longer installing it) and leave the
-        # previous writer/reader pair intact so the worker stays usable.
-        try:
+            # Open the new reader against the new path. Done BEFORE swapping
+            # so a concurrent debug-UI read arriving mid-swap never lands on
+            # a half-torn-down reader.
             new_reader = await open_reader(new_path)
-        except Exception:
-            with contextlib.suppress(Exception):
-                await new_db.close()
+        except BaseException:
+            # Any failure, a cancelled rotation (stop()) included, closes the
+            # new writer: its thread is not a daemon and would hold the
+            # process open. self._db is still the previous, fully initialized
+            # writer, so the worker stays usable.
+            await close_quietly(new_db)
             raise
 
         # Atomic swap: once these lines execute, any concurrent flush or UI
@@ -1448,6 +1522,15 @@ class EventRecorder(EventWriter):
                 if meta is not None:
                     self._sealed[old_path] = meta
                     self._update_unsealed_gauge()
+        except BaseException:
+            # A rotation that ends here (cancelled, or the config write
+            # failed) still closes the old connections; closing one the seal
+            # already closed does nothing. The old file, unsealed, is sealed
+            # later as a leftover.
+            for connection in (old_reader, old_db):
+                if connection is not None:
+                    await close_quietly(connection)
+            raise
         finally:
             self._in_hand.discard(old_path)
 

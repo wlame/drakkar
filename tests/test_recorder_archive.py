@@ -17,13 +17,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from drakkar.config import HistoryArchiveConfig, ResilienceConfig
-from drakkar.metrics import recorder_archive_failures
+from drakkar.config import BreakerConfig, ConnectionsConfig, HistoryArchiveConfig, ResilienceConfig
+from drakkar.metrics import provider_calls, recorder_archive_failures
+from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, EventRecorder, format_dt
 from drakkar.recorder import archive as archive_mod
@@ -40,6 +42,7 @@ from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
 from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
 from drakkar.recorder.history import history_dir, meta_path, sanitize_cluster, write_meta
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
+from tests.fleet_fakes import ElectionStore, MemoryElection
 
 HOUR = 3600.0
 DAY = 24 * HOUR
@@ -952,7 +955,8 @@ def test_warn_if_archives_unbounded_is_silent_otherwise(cfg):
 # --- recorder wiring ----------------------------------------------------
 
 
-def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> EventRecorder:
+def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None, **election: Any) -> EventRecorder:
+    """A recorder of ``worker-1`` in ``CLUSTER``; ``election`` holds the election keyword arguments."""
     (tmp_path / 'storage').mkdir(exist_ok=True)
     config = make_ui_config(enabled=True, flush_interval_seconds=60)
     return EventRecorder(
@@ -964,6 +968,7 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> 
         instance=INSTANCE,
         archive=archive,
         merged_retention_days=7,
+        **election,
     )
 
 
@@ -1032,7 +1037,13 @@ async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_
 
 @pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
 async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage):
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=not storage))
+    election = MemoryElection(ElectionStore())
+    rec = _make_recorder(
+        tmp_path,
+        archive=HistoryArchiveConfig(enabled=not storage),
+        election=election,
+        election_provider_name='memory-off',
+    )
     if not storage:
         rec._storage_dir = ''
     calls = 0
@@ -1042,6 +1053,7 @@ async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage
         calls += 1
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
+    counted_before = {op: _election_calls('memory-off', op, 'not_started') for op in ('acquire', 'stop')}
 
     try:
         await rec._archive_pass()
@@ -1049,6 +1061,9 @@ async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage
         await rec.stop()
 
     assert calls == 0
+    # The election is not in use: it never starts and no skipped call is counted.
+    assert election.calls == {}
+    assert {op: _election_calls('memory-off', op, 'not_started') for op in ('acquire', 'stop')} == counted_before
 
 
 async def test_a_blocked_archive_pass_never_holds_up_rotation(tmp_path, monkeypatch):
@@ -1103,6 +1118,168 @@ async def test_a_recorder_stop_asks_a_running_archive_pass_to_end(tmp_path, monk
 
     assert seen['stop'] is not None
     assert seen['stop'].is_set()
+
+
+# --- the recorder's election ----------------------------------------------
+
+
+def _election_calls(provider: str, op: str, outcome: str) -> float:
+    return provider_calls.labels(feature='election', provider=provider, op=op, outcome=outcome)._value.get()
+
+
+class _FailingStartElection(MemoryElection):
+    """A memory election whose first ``failures`` starts raise."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__(ElectionStore())
+        self._failures = failures
+
+    async def start(self, ctx: ElectionContext) -> None:
+        self.calls['start'] += 1
+        if self.calls['start'] <= self._failures:
+            raise RuntimeError('election service unavailable')
+        self.started_with = ctx
+
+
+class _HangingElection(MemoryElection):
+    """A memory election whose ``start`` or ``stop`` hangs until cancelled."""
+
+    def __init__(self, *, hang_in: str) -> None:
+        super().__init__(ElectionStore())
+        self._hang_in = hang_in
+        self.hanging = asyncio.Event()
+
+    async def _hang(self) -> None:
+        self.hanging.set()
+        await asyncio.Event().wait()
+
+    async def start(self, ctx: ElectionContext) -> None:
+        await super().start(ctx)
+        if self._hang_in == 'start':
+            await self._hang()
+
+    async def stop(self) -> None:
+        await super().stop()
+        if self._hang_in == 'stop':
+            await self._hang()
+
+
+async def test_the_recorder_starts_its_election_once_with_the_worker_context(tmp_path, monkeypatch):
+    election = MemoryElection(ElectionStore())
+    connections = Connections(ConnectionsConfig())
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
+    rec = _make_recorder(
+        tmp_path,
+        election=election,
+        election_provider_name='memory-once',
+        election_options={'address': 'consul:8500'},
+        connections=connections,
+    )
+
+    with capture_logs() as logs:
+        try:
+            await rec._archive_pass()
+            await rec._archive_pass()
+        finally:
+            await rec.stop()
+
+    assert election.calls['start'] == 1
+    ctx = election.started_with
+    assert ctx is not None
+    assert (ctx.worker, ctx.instance, ctx.cluster) == ('worker-1', INSTANCE, CLUSTER)
+    assert ctx.shared_dir == str(tmp_path / 'shared')
+    assert ctx.options == {'address': 'consul:8500'}
+    assert ctx.connections is connections
+    started = [entry for entry in logs if entry['event'] == 'provider_started']
+    assert started == [
+        {
+            'event': 'provider_started',
+            'log_level': 'info',
+            'category': 'recorder',
+            'feature': 'election',
+            'provider': 'memory-once',
+        }
+    ]
+
+
+async def test_a_failed_election_start_skips_the_pass_and_the_next_pass_retries(tmp_path, monkeypatch):
+    election = _FailingStartElection(failures=1)
+    leases: list[ElectionLease] = []
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: leases.append(kwargs['lease']))
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-retry')
+    skipped_before = _election_calls('memory-retry', 'acquire', 'not_started')
+
+    try:
+        await rec._archive_pass()
+        assert leases == []
+        assert _election_calls('memory-retry', 'acquire', 'not_started') == skipped_before + 1
+        await rec._archive_pass()
+    finally:
+        await rec.stop()
+
+    assert election.calls['start'] == 2
+    assert [lease.provider_name for lease in leases] == ['memory-retry']
+    assert election.calls['stop'] == 1
+
+
+async def test_the_election_breaker_spans_archive_passes(tmp_path, monkeypatch):
+    election = _FailingStartElection(failures=99)
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
+    resilience = ResilienceConfig(retries=0, breaker=BreakerConfig(failure_threshold=1, cooldown_seconds=3600))
+    caller = ResilientCaller(resilience, feature='election', provider='memory-breaker', category='recorder')
+    rec = _make_recorder(tmp_path, election=election, election_caller=caller, election_provider_name='memory-breaker')
+    skipped_before = _election_calls('memory-breaker', 'start', 'skipped_open')
+
+    try:
+        await rec._archive_pass()
+        await rec._archive_pass()
+    finally:
+        await rec.stop()
+
+    assert election.calls['start'] == 1
+    assert caller.breaker_open
+    assert _election_calls('memory-breaker', 'start', 'skipped_open') == skipped_before + 1
+
+
+async def test_stop_never_stops_an_election_that_did_not_start(tmp_path):
+    election = MemoryElection(ElectionStore())
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-unstarted')
+    skipped_before = _election_calls('memory-unstarted', 'stop', 'not_started')
+
+    await rec.start()
+    await rec.stop()
+
+    assert election.calls['stop'] == 0
+    assert _election_calls('memory-unstarted', 'stop', 'not_started') == skipped_before + 1
+
+
+async def test_a_stop_while_the_election_start_hangs_ends_at_once_and_skips_the_provider_stop(tmp_path):
+    election = _HangingElection(hang_in='start')
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-hanging-start')
+    await rec.start()
+    rec._start_archive_pass()
+    await wait_for(election.hanging.is_set)
+
+    await asyncio.wait_for(rec.stop(), timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    assert election.calls['stop'] == 0
+
+
+async def test_the_election_stop_gets_one_attempt_inside_the_shutdown_time_left(tmp_path, monkeypatch):
+    election = _HangingElection(hang_in='stop')
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-hanging-stop')
+    timeouts_before = _election_calls('memory-hanging-stop', 'stop', 'timeout')
+    await rec.start()
+    await rec._archive_pass()
+
+    started = time.monotonic()
+    await rec.stop(timeout=1.0)
+
+    # The default per-attempt limit is 5 s; the shutdown time left cuts it.
+    assert time.monotonic() - started < 4
+    assert election.calls['stop'] == 1
+    assert _election_calls('memory-hanging-stop', 'stop', 'timeout') == timeouts_before + 1
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):

@@ -262,6 +262,23 @@ class TestMasking:
         assert entry['value']['acks'] == 'all'
         assert 'sink-secret' not in body_as_text(body)
 
+    async def test_plugin_options_are_masked_like_executor_env(self):
+        """A provider plugin takes its credentials through ``plugin_options``, a free map like ``executor.env``."""
+        options = {'token': 'abc', 'url': 'redis://:pw@h/0'}
+        config = DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            fleet={'registry': {'plugin_options': options}},
+            history={'archive': {'election': {'plugin_options': options}}},
+        )
+        config.executor.env = dict(options)
+        body = await get_config_reference(config)
+        env_value = entries_by_path(body, 'executor.env')[0]['value']
+
+        assert env_value == {'token': '***', 'url': 'redis://***:***@h/0'}
+        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+            assert entries_by_path(body, path)[0]['value'] == env_value
+        assert ':pw@' not in body_as_text(body)
+
     async def test_configured_kafka_sink_password_is_masked(self):
         from pydantic import SecretStr
 

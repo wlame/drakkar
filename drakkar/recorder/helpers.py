@@ -2,8 +2,8 @@
 
 Holds the JSON encoder fast path (orjson with stdlib fallback), the
 secret-redaction logic for env-var values, the wall-clock formatters, the
-DB-file path helpers, the read-only connection opener, and the worker
-IP detection routine.
+DB-file path helpers, the connection openers, and the worker IP
+detection routine.
 
 Everything in here is functional and free of recorder runtime state, so
 tests can exercise the encoders / sanitizers / path helpers without
@@ -12,6 +12,7 @@ constructing an :class:`EventRecorder`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import fnmatch
 import json
@@ -215,6 +216,46 @@ def make_db_path(db_dir: str, worker_name: str) -> str:
 BUSY_TIMEOUT_MS = 5000
 
 
+# Closes of connections whose open finished after its caller was cancelled;
+# held here so a pending close is not garbage-collected.
+_LATE_CLOSES: set[asyncio.Task[None]] = set()
+
+
+async def open_connection(database: str, **kwargs: Any) -> aiosqlite.Connection:
+    """``aiosqlite.connect(database, **kwargs)`` that leaves no open connection behind a cancelled caller.
+
+    The open runs in the connection's own thread. A caller cancelled during
+    it gets the cancellation at once, as with ``aiosqlite.connect``, but the
+    connection that open still produces is closed in the background. A
+    plain ``aiosqlite.connect`` drops that connection unclosed.
+    """
+    opening = asyncio.ensure_future(aiosqlite.connect(database, **kwargs))
+    try:
+        # Not ``asyncio.shield``: it reports an open that fails after the
+        # cancellation to the loop's exception handler as an error.
+        await asyncio.wait([opening])
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_late_connection)
+        raise
+    return opening.result()
+
+
+def _close_late_connection(opening: asyncio.Future[aiosqlite.Connection]) -> None:
+    """Close the connection of an open whose caller was cancelled; an open that failed left nothing open."""
+    # Reading the exception marks it retrieved, so asyncio does not log it as lost.
+    if opening.cancelled() or opening.exception() is not None:
+        return
+    closing = asyncio.ensure_future(close_quietly(opening.result()))
+    _LATE_CLOSES.add(closing)
+    closing.add_done_callback(_LATE_CLOSES.discard)
+
+
+async def close_quietly(connection: aiosqlite.Connection) -> None:
+    """Close ``connection`` on a cleanup path, where a close error must not replace the error being handled."""
+    with contextlib.suppress(Exception):
+        await connection.close()
+
+
 async def open_reader(db_path: str) -> aiosqlite.Connection:
     """Open a read-only aiosqlite connection to ``db_path``.
 
@@ -223,8 +264,14 @@ async def open_reader(db_path: str) -> aiosqlite.Connection:
     connection spawns its own worker thread, which is the property that
     lets debug-UI SELECTs run in parallel with writer flushes/commits.
     """
-    db = await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
-    await db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
+    db = await open_connection(f'file:{db_path}?mode=ro', uri=True)
+    try:
+        await db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
+    except BaseException:
+        # A cancelled caller included: the connection's thread is not a
+        # daemon, so an unclosed connection would hold the process open.
+        await close_quietly(db)
+        raise
     return db
 
 
