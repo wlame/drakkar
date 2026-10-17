@@ -621,8 +621,10 @@ cache_bytes_in_db = Gauge(
 
 
 # --- Fleet registry ---
-# One provider call is one publish, list or withdraw. Every call runs under
-# fleet.registry.timeout_seconds; a timeout counts as an error. The snapshot
+# One provider call is one operation (start, publish, list, withdraw, stop)
+# with its retries, each attempt under fleet.registry.resilience.timeout_seconds;
+# a timeout counts as an error, an operation skipped without a call does not.
+# A loop iteration that raises counts under its operation. The snapshot
 # age grows while refreshes fail, so an alert can tell a stale workers list
 # from an empty one.
 FLEET_REGISTRY_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)

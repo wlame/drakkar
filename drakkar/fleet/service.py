@@ -3,21 +3,28 @@
 Two background loops, both started by :meth:`FleetRegistry.start`:
 
 - publish: the card every ``heartbeat_seconds`` and at once on every state
-  change (``starting``, ``running``, ``draining``);
+  change (``starting``, ``running``, ``draining``). Each tick first starts
+  the provider if it has not started yet: a ``start`` that fails is tried
+  again at the next tick, and the card goes out in the same tick as the
+  ``start`` that succeeds.
 - refresh: ``list()`` every ``refresh_seconds`` into an immutable snapshot.
-  The first refresh waits for the first publish attempt, because a file
-  folder learns the server clock from its own write.
+  The first refresh waits for the first publish attempt after the provider
+  started, because a file folder learns the server clock from its own write.
 
-Every provider call runs under ``resilience.timeout_seconds``. A failed call keeps the
-last snapshot, counts an error, and logs at most once a minute per
-operation. Nothing in the message pipeline awaits this service: it serves
-the workers list and the cache exchange, and both read the snapshot.
+Every provider call goes through a :class:`ResilientCaller`: a time limit
+per attempt, bounded retries, a circuit breaker, and at most one failure
+line per operation per minute. A failed call keeps the last snapshot and
+counts an error. Each loop iteration runs under a guard: an error in card
+building, snapshot assembly or the features supplier is counted and logged,
+and the loop goes on. Nothing in the message pipeline awaits this service:
+it serves the workers list and the cache exchange, and both read the
+snapshot.
 """
 
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -27,7 +34,6 @@ import structlog
 from drakkar.config import FleetRegistryConfig
 from drakkar.fleet.card import WorkerIdentity, build_card, validate_card
 from drakkar.fleet.provider import PeerCardList, RegistryContext, RegistryProvider
-from drakkar.fleet.providers import NoneRegistry
 from drakkar.metrics import (
     fleet_duplicate_worker_name,
     fleet_peers,
@@ -35,19 +41,42 @@ from drakkar.metrics import (
     fleet_registry_errors,
     fleet_registry_snapshot_age,
 )
+from drakkar.providers.connections import Connections
+from drakkar.providers.resilience import (
+    FAILURE_LOG_INTERVAL_SECONDS,
+    OUTCOME_NOT_STARTED,
+    CallResult,
+    ResilientCaller,
+    describe_error,
+)
 
-# A failing provider logs one line per operation per this many seconds; the
-# line carries how many failures it stood for.
-FAILURE_LOG_INTERVAL_SECONDS = 60.0
+# The feature label of this service's provider calls, metrics and log lines.
+REGISTRY_FEATURE = 'registry'
+
+# The operation whose error counter a failed loop iteration adds to.
+LOOP_OPS = {'publish': 'publish', 'refresh': 'list'}
+
+# The ``drakkar_fleet_peers`` state of each liveness verdict.
+PEER_STATE_BY_VERDICT = {True: 'online', False: 'offline', None: 'unknown'}
+
+
+def _liveness(online: bool | None, age_seconds: float | None, offline_after_seconds: float) -> bool | None:
+    """The provider's verdict when it gives one, else the age rule, else ``None`` (unknown)."""
+    if online is not None:
+        return online
+    if age_seconds is None:
+        return None
+    return age_seconds <= offline_after_seconds
 
 
 @dataclass(frozen=True)
 class SnapshotEntry:
-    """One peer card as listed: its age at list time and the monotonic time of the list."""
+    """One peer card as listed: its age and the provider's verdict at list time, and the monotonic time of the list."""
 
     card: dict[str, Any]
     age_seconds: float | None
     listed_at: float
+    online: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -63,23 +92,16 @@ class PeerView:
     """A peer as the workers list shows it now.
 
     ``age_seconds`` is the listed age plus the time since the list, so a slow
-    refresh never makes a card look younger. ``online`` and ``last_seen_ts``
-    are ``None`` when the provider knows no age.
+    refresh never makes a card look younger. ``online`` is the provider's
+    verdict when it gives one, else that age against
+    ``offline_after_seconds``, else ``None``. ``last_seen_ts`` is ``None``
+    when the provider knows no age.
     """
 
     card: dict[str, Any]
     age_seconds: float | None
     online: bool | None
     last_seen_ts: float | None
-
-
-def _describe(exc: BaseException) -> str:
-    """A log-friendly error text; a timeout's own text is empty, a task group's names only itself."""
-    if isinstance(exc, BaseExceptionGroup):
-        return '; '.join(_describe(inner) for inner in exc.exceptions)
-    if isinstance(exc, TimeoutError):
-        return 'timed out'
-    return str(exc) or type(exc).__name__
 
 
 class FleetRegistry:
@@ -97,6 +119,8 @@ class FleetRegistry:
         logger: Any = None,
         now_monotonic: Callable[[], float] = time.monotonic,
         now_epoch: Callable[[], float] = time.time,
+        caller: ResilientCaller | None = None,
+        connections: Connections | None = None,
     ) -> None:
         self._provider = provider
         # The card's ``features``, read at every publish: the subsystems
@@ -109,15 +133,30 @@ class FleetRegistry:
         self._logger = logger or structlog.get_logger()
         self._now_monotonic = now_monotonic
         self._now_epoch = now_epoch
+        self._caller = (
+            caller
+            if caller is not None
+            else ResilientCaller(
+                config.resilience,
+                feature=REGISTRY_FEATURE,
+                provider=provider_name,
+                logger=self._logger,
+                now_monotonic=now_monotonic,
+            )
+        )
+        self._connections = connections
         self._created_at = now_monotonic()
         self._state = 'starting'
         # Set by set_state to publish at once instead of at the next heartbeat.
         self._state_changed = asyncio.Event()
+        # Set once a provider ``start`` succeeded. Until then nothing is
+        # published, listed or withdrawn, and the provider is never stopped.
+        self._provider_started = asyncio.Event()
+        # Set by the first publish tick that ran with the provider started.
         self._first_publish_done = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._snapshot = FleetSnapshot()
-        self._last_failure_log: dict[str, float] = {}
-        self._suppressed_failures: dict[str, int] = {}
+        self._iteration_failure_logged_at: dict[str, float] = {}
         self._reported_card_workers: set[str] = set()
         self._duplicate_instances: set[str] = set()
         self._started = False
@@ -171,25 +210,29 @@ class FleetRegistry:
         now_epoch = self._now_epoch()
         views: list[PeerView] = []
         for entry in snapshot.peers:
-            if entry.age_seconds is None:
-                views.append(PeerView(card=entry.card, age_seconds=None, online=None, last_seen_ts=None))
-                continue
-            age = entry.age_seconds + (now_monotonic - entry.listed_at)
+            age = None if entry.age_seconds is None else entry.age_seconds + (now_monotonic - entry.listed_at)
             views.append(
                 PeerView(
                     card=entry.card,
                     age_seconds=age,
-                    online=age <= self._config.offline_after_seconds,
-                    last_seen_ts=now_epoch - age,
+                    online=_liveness(entry.online, age, self._config.offline_after_seconds),
+                    last_seen_ts=None if age is None else now_epoch - age,
                 )
             )
         return views
 
-    async def stop(self) -> None:
-        """Stop the loops, withdraw this worker's card, stop the provider. Safe to call twice."""
+    async def stop(self, deadline_seconds: float | None = None) -> None:
+        """Stop the loops, withdraw this worker's card, stop the provider. Safe to call twice.
+
+        The withdraw and the provider's ``stop`` get one attempt each, both
+        inside ``deadline_seconds`` from this call; with ``None`` each has the
+        per-call timeout. While the breaker is open, or when the provider
+        never started, both are skipped at once.
+        """
         if self._stopped or not self._started:
             return
         self._stopped = True
+        deadline_at = None if deadline_seconds is None else self._now_monotonic() + deadline_seconds
         if self._task is not None:
             self._task.cancel()
             try:
@@ -202,59 +245,44 @@ class FleetRegistry:
                     'fleet_registry_loop_failed',
                     category='fleet',
                     provider=self._provider_name,
-                    error=_describe(exc),
+                    error=describe_error(exc),
                 )
-        await self._call('withdraw', lambda: self._provider.withdraw(self._identity.worker, self._identity.instance))
-        try:
-            await asyncio.wait_for(self._provider.stop(), timeout=self._config.resilience.timeout_seconds)
-        except Exception as exc:
-            await self._logger.awarning(
-                'fleet_registry_stop_failed',
-                category='fleet',
-                provider=self._provider_name,
-                error=_describe(exc),
-            )
+        if not self._provider_started.is_set():
+            self._caller.skip('withdraw', OUTCOME_NOT_STARTED)
+            self._caller.skip('stop', OUTCOME_NOT_STARTED)
+            return
+        await self._call_provider(
+            'withdraw',
+            lambda: self._provider.withdraw(self._identity.worker, self._identity.instance),
+            attempts=1,
+            deadline_seconds=self._time_left(deadline_at),
+        )
+        await self._call_provider(
+            'stop', self._provider.stop, attempts=1, deadline_seconds=self._time_left(deadline_at)
+        )
+
+    def _time_left(self, deadline_at: float | None) -> float | None:
+        return None if deadline_at is None else deadline_at - self._now_monotonic()
 
     # --- loops ---
 
     async def _run(self, first_state: str) -> None:
-        await self._start_provider()
         async with asyncio.TaskGroup() as loops:
             loops.create_task(self._publish_loop(first_state))
             loops.create_task(self._refresh_loop())
 
-    async def _start_provider(self) -> None:
-        """Start the provider; one that cannot start is replaced by ``none`` so the worker runs on alone."""
-        ctx = RegistryContext(
-            worker=self._identity.worker,
-            instance=self._identity.instance,
-            cluster=self._identity.cluster,
-            logger=self._logger,
-            options=self._provider_options,
-        )
-        try:
-            await asyncio.wait_for(self._provider.start(ctx), timeout=self._config.resilience.timeout_seconds)
-        except Exception as exc:
-            await self._logger.aerror(
-                'fleet_registry_start_failed',
-                category='fleet',
-                provider=self._provider_name,
-                error=_describe(exc),
-                hint='the worker runs without peers; fix the provider and restart',
-            )
-            self._provider = NoneRegistry()
-
     async def _publish_loop(self, first_state: str) -> None:
         """Publish ``first_state`` at once, then the current state after every heartbeat or change.
 
-        A change made while a publish runs, or before the first one, leaves
-        the event set, so the loop publishes again at once and no state is
-        skipped.
+        Once the provider has started, a change made while a publish runs, or
+        before the first one, leaves the event set, so the loop publishes
+        again at once and no state is skipped.
         """
         state = first_state
         while True:
-            await self._publish_once(state)
-            self._first_publish_done.set()
+            await self._publish_tick(state)
+            if self._provider_started.is_set():
+                self._first_publish_done.set()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._state_changed.wait(), timeout=self._config.heartbeat_seconds)
             # Cleared before reading the state: a change after this point
@@ -263,10 +291,55 @@ class FleetRegistry:
             state = self._state
 
     async def _refresh_loop(self) -> None:
+        # Set only by a publish tick that ran with the provider started, so
+        # nothing is listed before the provider starts.
         await self._first_publish_done.wait()
         while True:
-            await self._refresh_once()
+            await self._refresh_tick()
             await asyncio.sleep(self._config.refresh_seconds)
+
+    async def _publish_tick(self, state: str) -> None:
+        """One publish iteration: start the provider if it has not started, then publish ``state``."""
+        try:
+            if await self._ensure_started():
+                await self._publish_once(state)
+            else:
+                self._caller.skip('publish', OUTCOME_NOT_STARTED)
+        except Exception as exc:
+            await self._report_iteration_failure('publish', exc)
+
+    async def _refresh_tick(self) -> None:
+        """One refresh iteration; an error is counted and logged, and the loop goes on."""
+        try:
+            await self._refresh_once()
+        except Exception as exc:
+            await self._report_iteration_failure('refresh', exc)
+
+    async def _ensure_started(self) -> bool:
+        """Start the provider unless it has started; True when it is started."""
+        if self._provider_started.is_set():
+            return True
+        ctx = RegistryContext(
+            worker=self._identity.worker,
+            instance=self._identity.instance,
+            cluster=self._identity.cluster,
+            logger=self._logger,
+            options=self._provider_options,
+            connections=self._connections,
+        )
+        result = await self._call_provider('start', lambda: self._provider.start(ctx))
+        if not result.ok:
+            return False
+        # Set before the log await: a cancellation there must not leave a
+        # started provider that stop() would never withdraw from or stop.
+        self._provider_started.set()
+        await self._logger.ainfo(
+            'provider_started',
+            category='fleet',
+            feature=REGISTRY_FEATURE,
+            provider=self._provider_name,
+        )
+        return True
 
     async def _publish_once(self, state: str) -> None:
         card = build_card(
@@ -275,16 +348,16 @@ class FleetRegistry:
             heartbeat_at=datetime.fromtimestamp(self._now_epoch(), UTC),
             features=self._features() if self._features is not None else None,
         )
-        await self._call('publish', lambda: self._provider.publish(card))
+        await self._call_provider('publish', lambda: self._provider.publish(card))
 
     async def _refresh_once(self) -> None:
-        succeeded, listed = await self._call('list', self._list_checked)
+        result = await self._call_provider('list', self._list_checked)
         now = self._now_monotonic()
-        if not succeeded:
+        if not result.ok:
             last_good = self._snapshot.refreshed_at
             fleet_registry_snapshot_age.set(now - (self._created_at if last_good is None else last_good))
             return
-        peers = await self._peers_from(listed, now)
+        peers = await self._peers_from(result.value, now)
         self._snapshot = FleetSnapshot(peers=tuple(peers), refreshed_at=now)
         fleet_registry_snapshot_age.set(0)
         self._set_peer_gauge(peers)
@@ -304,6 +377,9 @@ class FleetRegistry:
             # card then reads as None and is rejected like any invalid card.
             card = getattr(listed_card, 'card', None)
             age_seconds = getattr(listed_card, 'age_seconds', None)
+            online = getattr(listed_card, 'online', None)
+            # Anything but a bool is no verdict: the workers list shows true, false or nothing.
+            online = online if isinstance(online, bool) else None
             if not isinstance(card, dict):
                 await self._report_invalid_card(card, 'not_object')
                 continue
@@ -312,52 +388,58 @@ class FleetRegistry:
                 await self._report_invalid_card(card, reason)
                 continue
             if card['worker'] == self._identity.worker:
-                await self._check_duplicate(card, age_seconds)
+                await self._check_duplicate(card, _liveness(online, age_seconds, self._config.offline_after_seconds))
                 continue
-            peers.append(SnapshotEntry(card=card, age_seconds=age_seconds, listed_at=listed_at))
+            peers.append(SnapshotEntry(card=card, age_seconds=age_seconds, listed_at=listed_at, online=online))
         return peers
 
     def _set_peer_gauge(self, peers: list[SnapshotEntry]) -> None:
-        counts = {'online': 0, 'offline': 0, 'unknown': 0}
+        counts = dict.fromkeys(PEER_STATE_BY_VERDICT.values(), 0)
         for entry in peers:
-            if entry.age_seconds is None:
-                counts['unknown'] += 1
-            elif entry.age_seconds <= self._config.offline_after_seconds:
-                counts['online'] += 1
-            else:
-                counts['offline'] += 1
+            verdict = _liveness(entry.online, entry.age_seconds, self._config.offline_after_seconds)
+            counts[PEER_STATE_BY_VERDICT[verdict]] += 1
         for state, count in counts.items():
             fleet_peers.labels(state=state).set(count)
 
     # --- calls, failures, reports ---
 
-    async def _call(self, op: str, make_call: Callable[[], Coroutine[Any, Any, Any]]) -> tuple[bool, Any]:
-        """Run one provider call under the timeout: ``(True, result)`` or ``(False, None)`` after counting it."""
-        started = time.perf_counter()
-        try:
-            result = await asyncio.wait_for(make_call(), timeout=self._config.resilience.timeout_seconds)
-        except Exception as exc:
-            fleet_registry_duration.labels(op=op).observe(time.perf_counter() - started)
-            fleet_registry_errors.labels(op=op).inc()
-            await self._log_failure(op, exc)
-            return False, None
-        fleet_registry_duration.labels(op=op).observe(time.perf_counter() - started)
-        return True, result
+    async def _call_provider(
+        self,
+        op: str,
+        make_call: Callable[[], Awaitable[Any]],
+        *,
+        attempts: int | None = None,
+        deadline_seconds: float | None = None,
+    ) -> CallResult:
+        """One provider operation through the caller, also counted in the registry's own metrics.
 
-    async def _log_failure(self, op: str, exc: Exception) -> None:
+        An operation that made no attempt (open breaker, spent deadline) has no
+        duration and is no error here: no call failed. The caller's
+        ``drakkar_provider_calls_total`` counts it by its outcome.
+        """
+        started = time.perf_counter()
+        result = await self._caller.call(op, make_call, attempts=attempts, deadline_seconds=deadline_seconds)
+        if result.attempts == 0:
+            return result
+        fleet_registry_duration.labels(op=op).observe(time.perf_counter() - started)
+        if not result.ok:
+            fleet_registry_errors.labels(op=op).inc()
+        return result
+
+    async def _report_iteration_failure(self, loop: str, exc: Exception) -> None:
+        """Count a loop iteration that raised; log it at most once a minute per loop."""
+        fleet_registry_errors.labels(op=LOOP_OPS[loop]).inc()
         now = self._now_monotonic()
-        last_logged = self._last_failure_log.get(op)
+        last_logged = self._iteration_failure_logged_at.get(loop)
         if last_logged is not None and now - last_logged < FAILURE_LOG_INTERVAL_SECONDS:
-            self._suppressed_failures[op] = self._suppressed_failures.get(op, 0) + 1
             return
-        self._last_failure_log[op] = now
-        await self._logger.awarning(
-            f'fleet_registry_{op}_failed',
+        self._iteration_failure_logged_at[loop] = now
+        await self._logger.aerror(
+            'fleet_registry_iteration_failed',
             category='fleet',
-            provider=self._provider_name,
-            error=_describe(exc),
-            timeout_seconds=self._config.resilience.timeout_seconds,
-            suppressed=self._suppressed_failures.pop(op, 0),
+            loop=loop,
+            error=describe_error(exc),
+            exc_info=exc,
         )
 
     async def _report_invalid_card(self, card: Any, reason: str) -> None:
@@ -378,12 +460,12 @@ class FleetRegistry:
             return
         await self._logger.awarning('fleet_card_invalid', category='fleet', worker=worker, reason=reason)
 
-    async def _check_duplicate(self, card: dict[str, Any], age_seconds: float | None) -> None:
+    async def _check_duplicate(self, card: dict[str, Any], is_live: bool | None) -> None:
         """Warn once per foreign instance that publishes this worker's name while it is live."""
         other_instance = card.get('instance', '')
         if other_instance == self._identity.instance:
             return
-        if age_seconds is None or age_seconds > self._config.offline_after_seconds:
+        if not is_live:
             return
         if other_instance in self._duplicate_instances:
             return

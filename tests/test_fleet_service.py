@@ -2,10 +2,13 @@
 
 Providers here are in-process fakes. Loop intervals come from configs built
 with ``model_construct`` so a test can use sub-second timings that the
-config validation would reject.
+config validation would reject. The provider caller of most tests reads the
+test's fake clock and skips the backoff waits, and makes one attempt per
+operation unless a test asks for retries.
 """
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -13,9 +16,13 @@ from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
 from drakkar.config import FleetRegistryConfig, ResilienceConfig
+from drakkar.config.connections import ConnectionsConfig
+from drakkar.config.resilience import BreakerConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.service import FleetRegistry
+from drakkar.providers.connections import Connections
+from drakkar.providers.resilience import ResilientCaller
 from tests.conftest import wait_for
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 
@@ -30,17 +37,29 @@ OWN = WorkerIdentity(
 )
 
 
-def _config(timeout_seconds: float = 1.0, **overrides) -> FleetRegistryConfig:
+def _config(timeout_seconds: float = 1.0, retries: int = 0, **overrides) -> FleetRegistryConfig:
     values = {
         'provider': 'memory',
         'heartbeat_seconds': 3600,
         'refresh_seconds': 3600,
         'offline_after_seconds': 30,
         'prune_after_seconds': 86_400,
-        'resilience': ResilienceConfig(timeout_seconds=timeout_seconds),
+        'resilience': ResilienceConfig(timeout_seconds=timeout_seconds, retries=retries),
     }
     values.update(overrides)
     return FleetRegistryConfig.model_construct(**values)
+
+
+async def _no_backoff(_seconds: float) -> None:
+    await asyncio.sleep(0)
+
+
+def _never_opening_breaker() -> ResilienceConfig:
+    """One attempt per operation and a breaker that stays closed, for tests that fail many operations in a row.
+
+    An open breaker skips ``start`` too, and the fake clock never ends its cooldown.
+    """
+    return ResilienceConfig(timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=1000))
 
 
 def _peer(worker: str, instance: str = '2222222222222222', cluster: str = 'search', **extra) -> dict:
@@ -137,20 +156,49 @@ class _Failing(_Listing):
         self.stopped = True
 
 
-def _service(provider, clock: _Clock | None = None, **config) -> FleetRegistry:
+class _StartsWhenAllowed(_Recording):
+    """A memory provider whose ``start`` raises ``ConnectionError`` until the test sets ``allowed``."""
+
+    def __init__(self, store: MemoryStore) -> None:
+        super().__init__(store)
+        self.allowed = False
+
+    async def start(self, ctx: RegistryContext) -> None:
+        if not self.allowed:
+            raise ConnectionError('registry service unreachable')
+        await super().start(ctx)
+
+
+def _service(provider, clock: _Clock | None = None, features=None, **config) -> FleetRegistry:
     clock = clock or _Clock()
+    registry_config = _config(**config)
     return FleetRegistry(
         provider,
         provider_name='memory',
-        config=_config(**config),
+        config=registry_config,
         identity=OWN,
+        features=features,
         now_monotonic=lambda: clock.monotonic,
         now_epoch=lambda: clock.epoch,
+        caller=ResilientCaller(
+            registry_config.resilience,
+            feature='registry',
+            provider='memory',
+            now_monotonic=lambda: clock.monotonic,
+            sleep=_no_backoff,
+        ),
     )
 
 
 def _sample(name: str, labels: dict | None = None) -> float:
     return REGISTRY.get_sample_value(name, labels or {}) or 0.0
+
+
+def _calls(op: str, outcome: str) -> float:
+    """``drakkar_provider_calls_total`` of this file's provider for one operation and outcome."""
+    return _sample(
+        'drakkar_provider_calls_total', {'feature': 'registry', 'provider': 'memory', 'op': op, 'outcome': outcome}
+    )
 
 
 # --- publishing ---
@@ -314,6 +362,57 @@ async def test_the_peers_gauge_counts_by_liveness():
     assert _sample('drakkar_fleet_registry_snapshot_age_seconds') == 0
 
 
+@pytest.mark.parametrize(
+    ('age', 'online', 'expected'),
+    [
+        (1000.0, True, True),
+        (1.0, False, False),
+        (None, True, True),
+        (None, False, False),
+        (1.0, None, True),
+        (1000.0, None, False),
+        (None, None, None),
+        (1000.0, 'yes', False),
+    ],
+    ids=[
+        'online-overrides-old-age',
+        'offline-overrides-young-age',
+        'online-without-age',
+        'offline-without-age',
+        'age-rule-young',
+        'age-rule-old',
+        'unknown',
+        'non-bool-verdict-ignored',
+    ],
+)
+async def test_online_from_the_provider_overrides_the_age_rule(age, online, expected):
+    provider = _Listing([PeerCard(card=_peer('w-2'), age_seconds=age, online=online)])
+    service = _service(provider)
+    await service._refresh_once()
+
+    (view,) = service.peer_views()
+
+    assert view.online is expected
+
+
+async def test_the_peers_gauge_follows_the_providers_online_verdict():
+    provider = _Listing(
+        [
+            PeerCard(card=_peer('old-but-online'), age_seconds=1000.0, online=True),
+            PeerCard(card=_peer('young-but-offline'), age_seconds=1.0, online=False),
+            PeerCard(card=_peer('online-without-age'), age_seconds=None, online=True),
+            PeerCard(card=_peer('age-rule'), age_seconds=1.0),
+        ]
+    )
+    service = _service(provider)
+
+    await service._refresh_once()
+
+    assert _sample('drakkar_fleet_peers', {'state': 'online'}) == 3
+    assert _sample('drakkar_fleet_peers', {'state': 'offline'}) == 1
+    assert _sample('drakkar_fleet_peers', {'state': 'unknown'}) == 0
+
+
 # --- invalid cards ---
 
 
@@ -373,11 +472,10 @@ async def test_failure_logs_are_limited_to_one_a_minute_per_operation():
         clock.advance(31)
         await service._refresh_once()
 
-    events = [entry['event'] for entry in logs]
-    assert events.count('fleet_registry_list_failed') == 2
-    assert events.count('fleet_registry_publish_failed') == 1
-    second_list_log = [entry for entry in logs if entry['event'] == 'fleet_registry_list_failed'][1]
-    assert second_list_log['suppressed'] == 1
+    failures = [entry for entry in logs if entry['event'] == 'provider_call_failed']
+    assert [entry['op'] for entry in failures] == ['list', 'publish', 'list']
+    assert failures[2]['suppressed'] == 1
+    assert (failures[0]['feature'], failures[0]['provider']) == ('registry', 'memory')
 
 
 async def test_call_durations_are_observed_per_operation():
@@ -389,29 +487,11 @@ async def test_call_durations_are_observed_per_operation():
     assert _sample('drakkar_fleet_registry_duration_seconds_count', {'op': 'list'}) == before + 1
 
 
-async def test_a_provider_that_fails_to_start_is_replaced_by_none():
-    class _NoStart(_Listing):
-        async def start(self, ctx: RegistryContext) -> None:
-            raise ConnectionError('consul unreachable')
-
-    provider = _NoStart([PeerCard(card=_peer('w-2'), age_seconds=1.0)])
-    service = _service(provider)
-
-    with capture_logs() as logs:
-        await service.start()
-        await wait_for(lambda: service.snapshot().refreshed_at is not None)
-        await service.stop()
-
-    assert service.snapshot().peers == ()
-    failures = [entry for entry in logs if entry['event'] == 'fleet_registry_start_failed']
-    assert len(failures) == 1
-    assert 'consul unreachable' in failures[0]['error']
-
-
 async def test_stop_withdraws_once_and_survives_a_failing_withdraw():
     provider = _Failing()
     service = _service(provider)
     await service.start()
+    await wait_for(service._provider_started.is_set)
     before = _sample('drakkar_fleet_registry_errors_total', {'op': 'withdraw'})
 
     with capture_logs() as logs:
@@ -421,14 +501,263 @@ async def test_stop_withdraws_once_and_survives_a_failing_withdraw():
     assert provider.withdrawn == 1
     assert provider.stopped
     assert _sample('drakkar_fleet_registry_errors_total', {'op': 'withdraw'}) == before + 1
-    assert [entry['event'] for entry in logs].count('fleet_registry_withdraw_failed') == 1
+    withdraw_failures = [
+        entry for entry in logs if entry['event'] == 'provider_call_failed' and entry['op'] == 'withdraw'
+    ]
+    assert len(withdraw_failures) == 1
 
 
-async def test_stop_gives_up_on_a_hanging_withdraw_after_the_timeout():
-    service = _service(_Failing(hang=True), timeout_seconds=0.05)
+async def test_stop_without_a_deadline_makes_one_withdraw_attempt_under_the_call_timeout():
+    provider = _Failing(hang=True)
+    service = _service(provider, timeout_seconds=0.05, retries=2)
     await service.start()
+    await wait_for(service._provider_started.is_set)
 
     await asyncio.wait_for(service.stop(), timeout=2)
+
+    assert provider.withdrawn == 1
+    assert provider.stopped
+
+
+# --- starting the provider ---
+
+
+async def test_a_failing_start_is_retried_each_heartbeat_and_publishes_right_after_success():
+    provider = _StartsWhenAllowed(MemoryStore())
+    clock = _Clock()
+    service = _service(provider, clock, retries=2)
+    skipped_before = _calls('publish', 'not_started')
+
+    with capture_logs() as logs:
+        await service._publish_tick('starting')
+        clock.advance(1)
+        await service._publish_tick('starting')
+        clock.advance(1)
+        provider.allowed = True
+        await service._publish_tick('starting')
+
+    failures = [entry for entry in logs if entry['event'] == 'provider_call_failed']
+    assert [(entry['op'], entry['attempts']) for entry in failures] == [('start', 3)]
+    assert 'registry service unreachable' in failures[0]['error']
+    assert _calls('publish', 'not_started') == skipped_before + 2
+    (started,) = [entry for entry in logs if entry['event'] == 'provider_started']
+    assert (started['category'], started['feature'], started['provider']) == ('fleet', 'registry', 'memory')
+    assert service._provider_started.is_set()
+    assert provider.calls == [('publish', 'starting')]
+
+
+async def test_the_provider_starts_with_the_identity_options_and_connections():
+    provider = MemoryRegistry(MemoryStore())
+    connections = Connections(ConnectionsConfig())
+    service = FleetRegistry(
+        provider,
+        provider_name='memory',
+        config=_config(),
+        identity=OWN,
+        provider_options={'region': 'north'},
+        connections=connections,
+    )
+
+    await service._publish_tick('starting')
+
+    ctx = provider.started_with
+    assert ctx is not None
+    assert (ctx.worker, ctx.instance, ctx.cluster) == ('w-1', OWN.instance, 'search')
+    assert ctx.options == {'region': 'north'}
+    assert ctx.connections is connections
+
+
+async def test_start_failures_log_once_a_minute():
+    clock = _Clock()
+    service = _service(_StartsWhenAllowed(MemoryStore()), clock, resilience=_never_opening_breaker())
+
+    with capture_logs() as within_a_minute:
+        for _tick in range(10):
+            await service._publish_tick('starting')
+            clock.advance(5)
+    clock.advance(15)
+    with capture_logs() as after_a_minute:
+        await service._publish_tick('starting')
+
+    start_failures = [entry for entry in within_a_minute if entry['event'] == 'provider_call_failed']
+    assert [entry['op'] for entry in start_failures] == ['start']
+    (next_line,) = [entry for entry in after_a_minute if entry['event'] == 'provider_call_failed']
+    assert next_line['suppressed'] == 9
+
+
+async def test_an_open_breaker_holds_start_back_until_the_cooldown_then_the_probe_starts_and_publishes():
+    provider = _StartsWhenAllowed(MemoryStore())
+    clock = _Clock()
+    resilience = ResilienceConfig(
+        timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=1, cooldown_seconds=30.0)
+    )
+    service = _service(provider, clock, resilience=resilience)
+    skipped_before = _calls('start', 'skipped_open')
+
+    await service._publish_tick('running')
+    provider.allowed = True
+    clock.advance(10)
+    await service._publish_tick('running')
+    held_back = (_calls('start', 'skipped_open') - skipped_before, list(provider.calls))
+    clock.advance(20)
+    await service._publish_tick('running')
+
+    assert held_back == (1, [])
+    assert service._provider_started.is_set()
+    assert provider.calls == [('publish', 'running')]
+
+
+async def test_nothing_is_listed_before_the_provider_starts():
+    provider = _StartsWhenAllowed(MemoryStore())
+    service = _service(provider, heartbeat_seconds=0.01, refresh_seconds=0.01, resilience=_never_opening_breaker())
+    skipped_before = _calls('publish', 'not_started')
+
+    await service.start()
+    await wait_for(lambda: _calls('publish', 'not_started') >= skipped_before + 3)
+    listed_before_start = [call for call in provider.calls if call[0] == 'list']
+    provider.allowed = True
+    await wait_for(lambda: ('list',) in provider.calls)
+    await service.stop()
+
+    assert listed_before_start == []
+
+
+async def test_stop_skips_withdraw_and_provider_stop_when_the_provider_never_started():
+    provider = _StartsWhenAllowed(MemoryStore())
+    service = _service(provider)
+    skipped_before = (_calls('withdraw', 'not_started'), _calls('stop', 'not_started'))
+    publish_skips_before = _calls('publish', 'not_started')
+    await service.start()
+    await wait_for(lambda: _calls('publish', 'not_started') > publish_skips_before)
+
+    await service.stop()
+
+    assert ('withdraw', 'w-1', OWN.instance) not in provider.calls
+    assert not provider.stopped
+    assert (_calls('withdraw', 'not_started'), _calls('stop', 'not_started')) == (
+        skipped_before[0] + 1,
+        skipped_before[1] + 1,
+    )
+
+
+# --- the loop guard ---
+
+
+async def test_an_exception_in_the_features_callback_does_not_stop_the_loops():
+    store = MemoryStore()
+    raised = []
+
+    def features() -> dict:
+        if not raised:
+            raised.append(True)
+            raise ValueError('features supplier broke')
+        return {}
+
+    service = _service(MemoryRegistry(store), features=features, heartbeat_seconds=0.01)
+    errors_before = _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'})
+
+    with capture_logs() as logs:
+        await service.start()
+        await wait_for(lambda: 'w-1' in store.cards)
+        await service.stop()
+
+    (failure,) = [entry for entry in logs if entry['event'] == 'fleet_registry_iteration_failed']
+    assert (failure['category'], failure['loop']) == ('fleet', 'publish')
+    assert failure['error'] == 'features supplier broke'
+    assert _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'}) == errors_before + 1
+
+
+async def test_an_exception_while_building_the_snapshot_does_not_stop_the_refresh_loop(monkeypatch):
+    provider = _Listing([PeerCard(card=_peer('w-2'), age_seconds=1.0)])
+    service = _service(provider, refresh_seconds=0.01)
+    original_peers_from = service._peers_from
+    raised = []
+
+    async def peers_from_once_broken(listed, listed_at):
+        if not raised:
+            raised.append(True)
+            raise KeyError('url')
+        return await original_peers_from(listed, listed_at)
+
+    monkeypatch.setattr(service, '_peers_from', peers_from_once_broken)
+    errors_before = _sample('drakkar_fleet_registry_errors_total', {'op': 'list'})
+
+    with capture_logs() as logs:
+        await service.start()
+        await wait_for(lambda: service.snapshot().refreshed_at is not None)
+        await service.stop()
+
+    (failure,) = [entry for entry in logs if entry['event'] == 'fleet_registry_iteration_failed']
+    assert failure['loop'] == 'refresh'
+    assert _sample('drakkar_fleet_registry_errors_total', {'op': 'list'}) == errors_before + 1
+    assert [entry.card['worker'] for entry in service.snapshot().peers] == ['w-2']
+
+
+async def test_loop_iteration_failures_log_once_a_minute_per_loop():
+    def features() -> dict:
+        raise ValueError('features supplier broke')
+
+    clock = _Clock()
+    service = _service(MemoryRegistry(MemoryStore()), clock, features=features)
+    errors_before = _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'})
+
+    with capture_logs() as logs:
+        await service._publish_tick('running')
+        clock.advance(30)
+        await service._publish_tick('running')
+        clock.advance(31)
+        await service._publish_tick('running')
+
+    failures = [entry for entry in logs if entry['event'] == 'fleet_registry_iteration_failed']
+    assert len(failures) == 2
+    assert _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'}) == errors_before + 3
+
+
+# --- stopping inside a deadline ---
+
+
+async def test_stop_skips_withdraw_at_once_while_the_breaker_is_open():
+    provider = _Failing()
+    resilience = ResilienceConfig(
+        timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=2, cooldown_seconds=30.0)
+    )
+    service = _service(provider, resilience=resilience)
+    await service.start()
+    await wait_for(lambda: service._caller.breaker_open)
+    skipped_before = _calls('withdraw', 'skipped_open')
+
+    started = time.monotonic()
+    await service.stop(deadline_seconds=5)
+
+    assert time.monotonic() - started < 0.5
+    assert _calls('withdraw', 'skipped_open') == skipped_before + 1
+    assert provider.withdrawn == 0
+
+
+async def test_stop_makes_one_withdraw_attempt_inside_the_deadline():
+    class _HangingWithdraw(_Listing):
+        async def withdraw(self, worker: str, instance: str) -> None:
+            self.withdrawn += 1
+            await asyncio.Event().wait()
+
+    provider = _HangingWithdraw()
+    # The real clock: the deadline has to pass while the withdraw hangs.
+    service = FleetRegistry(
+        provider,
+        provider_name='memory',
+        config=_config(timeout_seconds=5.0, retries=2),
+        identity=OWN,
+    )
+    await service.start()
+    await wait_for(service._provider_started.is_set)
+    timeouts_before = _calls('withdraw', 'timeout')
+
+    started = time.monotonic()
+    await service.stop(deadline_seconds=0.2)
+
+    assert time.monotonic() - started < 0.5
+    assert provider.withdrawn == 1
+    assert _calls('withdraw', 'timeout') == timeouts_before + 1
 
 
 # --- duplicate worker names ---
@@ -451,15 +780,29 @@ async def test_a_live_foreign_instance_with_this_name_is_reported_once_per_insta
     assert service.snapshot().peers == ()
 
 
-@pytest.mark.parametrize('age', [31.0, None], ids=['offline', 'unknown-age'])
-async def test_a_stale_or_unknown_foreign_card_with_this_name_is_not_a_duplicate(age):
-    provider = _Listing([PeerCard(card=_peer('w-1', instance='3333333333333333'), age_seconds=age)])
+@pytest.mark.parametrize(
+    ('age', 'online'),
+    [(31.0, None), (None, None), (5.0, False)],
+    ids=['offline', 'unknown-age', 'provider-says-offline'],
+)
+async def test_a_stale_or_unknown_foreign_card_with_this_name_is_not_a_duplicate(age, online):
+    provider = _Listing([PeerCard(card=_peer('w-1', instance='3333333333333333'), age_seconds=age, online=online)])
     service = _service(provider)
     before = _sample('drakkar_fleet_duplicate_worker_name_total')
 
     await service._refresh_once()
 
     assert _sample('drakkar_fleet_duplicate_worker_name_total') == before
+
+
+async def test_a_foreign_card_the_provider_calls_online_is_a_duplicate_without_an_age():
+    provider = _Listing([PeerCard(card=_peer('w-1', instance='5555555555555555'), age_seconds=None, online=True)])
+    service = _service(provider)
+    before = _sample('drakkar_fleet_duplicate_worker_name_total')
+
+    await service._refresh_once()
+
+    assert _sample('drakkar_fleet_duplicate_worker_name_total') == before + 1
 
 
 # --- start log ---
@@ -485,12 +828,13 @@ async def test_a_provider_stop_that_fails_is_logged():
 
     service = _service(_BadStop())
     await service.start()
+    await wait_for(service._provider_started.is_set)
 
     with capture_logs() as logs:
         await service.stop()
 
-    (failure,) = [entry for entry in logs if entry['event'] == 'fleet_registry_stop_failed']
-    assert failure['error'] == 'lost the session'
+    (failure,) = [entry for entry in logs if entry['event'] == 'provider_call_failed']
+    assert (failure['op'], failure['error'], failure['attempts']) == ('stop', 'lost the session', 1)
 
 
 async def test_start_twice_runs_one_set_of_loops():
@@ -548,7 +892,7 @@ async def test_a_listing_that_is_not_a_list_counts_as_a_failed_list():
         await service._refresh_once()
 
     assert _sample('drakkar_fleet_registry_errors_total', {'op': 'list'}) == before + 1
-    assert [entry['event'] for entry in logs] == ['fleet_registry_list_failed']
+    assert [(entry['event'], entry['op']) for entry in logs] == [('provider_call_failed', 'list')]
     assert service.snapshot().refreshed_at is None
 
 
@@ -582,6 +926,7 @@ async def test_stop_still_withdraws_after_a_loop_died(monkeypatch):
     service = _service(provider)
 
     async def dying_loop(first_state):
+        await service._ensure_started()
         raise RuntimeError('loop bug')
 
     monkeypatch.setattr(service, '_publish_loop', dying_loop)

@@ -64,10 +64,10 @@ class CallResult:
     attempts: int
 
 
-def _describe_error(exc: BaseException) -> str:
+def describe_error(exc: BaseException) -> str:
     """A log-friendly error text; a timeout's own text is empty, a task group's names only itself."""
     if isinstance(exc, BaseExceptionGroup):
-        return '; '.join(_describe_error(inner) for inner in exc.exceptions)
+        return '; '.join(describe_error(inner) for inner in exc.exceptions)
     if isinstance(exc, TimeoutError):
         return 'timed out'
     return str(exc) or type(exc).__name__
@@ -325,7 +325,7 @@ class ResilientCaller:
             feature=self._feature,
             provider=self._provider,
             op=op,
-            error=_describe_error(error),
+            error=describe_error(error),
             attempts=result.attempts,
             suppressed=self._suppressed_failures.pop(op, 0),
         )

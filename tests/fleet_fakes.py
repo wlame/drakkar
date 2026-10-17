@@ -26,11 +26,22 @@ class MemoryStore:
 
 
 class MemoryRegistry:
-    """A provider whose storage is a :class:`MemoryStore`."""
+    """A provider whose storage is a :class:`MemoryStore`.
 
-    def __init__(self, store: MemoryStore, prune_after_seconds: float = 86_400.0) -> None:
+    With ``offline_after_seconds`` it also reports its own liveness verdict,
+    from the store clock, the way a service that tracks liveness itself would;
+    without it ``online`` stays ``None``.
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore,
+        prune_after_seconds: float = 86_400.0,
+        offline_after_seconds: float | None = None,
+    ) -> None:
         self._store = store
         self._prune_after = prune_after_seconds
+        self._offline_after = offline_after_seconds
         self.started_with: RegistryContext | None = None
         self.stopped = False
 
@@ -47,7 +58,8 @@ class MemoryRegistry:
             if age > self._prune_after:
                 del self._store.cards[name]
                 continue
-            listed.append(PeerCard(card=dict(card), age_seconds=age))
+            online = None if self._offline_after is None else age <= self._offline_after
+            listed.append(PeerCard(card=dict(card), age_seconds=age, online=online))
         return listed
 
     async def withdraw(self, worker: str, instance: str) -> None:

@@ -15,6 +15,7 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.providers.connections import Connections
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 from tests.test_lifecycle_sources import StubSource
@@ -271,9 +272,9 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     await wait_for(lambda: provider.states[-1:] == ['running'])
     original_stop = app.fleet.stop
 
-    async def recorded_stop() -> None:
+    async def recorded_stop(deadline_seconds: float | None = None) -> None:
         order.append('fleet.stop')
-        await original_stop()
+        await original_stop(deadline_seconds=deadline_seconds)
 
     app._fleet.stop = recorded_stop
     app._lifecycle._handle_signal()
@@ -286,6 +287,62 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     assert app.lifecycle_state == 'draining'
     assert order.index('ui_and_recorder') == 0
     assert order.index('recorder.stop') < order.index('fleet.stop') < order.index('ui_server.stop')
+
+
+async def test_the_registry_gets_the_shared_connections_and_they_close_after_it_inside_the_drain_time(
+    tmp_path, monkeypatch
+):
+    received: dict = {}
+
+    class _ContextRecording(_RecordingRegistry):
+        async def start(self, ctx: RegistryContext) -> None:
+            received['ctx'] = ctx
+
+    app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: _ContextRecording())
+
+    async def recorded_close_all(_connections) -> None:
+        order.append('connections.close_all')
+
+    monkeypatch.setattr(Connections, 'close_all', recorded_close_all)
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    await wait_for(lambda: 'ctx' in received)
+    original_stop = app.fleet.stop
+
+    async def recorded_stop(deadline_seconds: float | None = None) -> None:
+        order.append('fleet.stop')
+        received['deadline_seconds'] = deadline_seconds
+        await original_stop(deadline_seconds=deadline_seconds)
+
+    app._fleet.stop = recorded_stop
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    assert isinstance(app._connections, Connections)
+    assert received['ctx'].connections is app._connections
+    drain_timeout = app._config.executor.drain_timeout_seconds
+    assert 0 < received['deadline_seconds'] <= drain_timeout
+    assert order.index('fleet.stop') < order.index('connections.close_all') < order.index('ui_server.stop')
+
+
+async def test_a_connection_close_that_outlasts_the_drain_time_is_cut_off_and_logged(tmp_path, monkeypatch):
+    app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
+    app._config.executor.drain_timeout_seconds = 0.2
+
+    async def hanging_close_all(_connections) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Connections, 'close_all', hanging_close_all)
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+
+    with capture_logs() as logs:
+        app._lifecycle._handle_signal()
+        await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    (failure,) = [entry for entry in logs if entry['event'] == 'connections_close_failed']
+    assert failure['error'] == 'timed out'
+    assert 'ui_server.stop' in order
 
 
 async def test_the_cache_engine_reads_the_registrys_peer_views(tmp_path, monkeypatch):

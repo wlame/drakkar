@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 
 from drakkar.fleet import testkit
 from drakkar.fleet.card import serialize_card
-from drakkar.fleet.provider import PeerCard, RegistryContext
+from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import (
     BUILTIN_PROVIDERS,
     FilesystemRegistry,
@@ -30,6 +30,7 @@ from drakkar.fleet.providers import (
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 
 PRUNE_AFTER = 600.0
+OFFLINE_AFTER = 60.0
 
 
 def _card(worker: str, instance: str = 'a' * 16, **extra) -> dict:
@@ -84,6 +85,33 @@ async def test_kit_publishing_checks_pass_for_filesystem(check, make_filesystem,
 async def test_kit_publishing_checks_pass_for_an_in_memory_provider(check):
     store = MemoryStore()
     await check(lambda: MemoryRegistry(store, prune_after_seconds=PRUNE_AFTER), store.advance, PRUNE_AFTER)
+
+
+@pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS, ids=lambda check: check.__name__)
+async def test_kit_liveness_checks_pass_for_filesystem(check, make_filesystem, registry_dir):
+    await check(make_filesystem, lambda seconds: _shift_card_times(registry_dir / 'workers', seconds), OFFLINE_AFTER)
+
+
+@pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS, ids=lambda check: check.__name__)
+async def test_kit_liveness_checks_pass_for_an_in_memory_provider_that_reports_online(check):
+    store = MemoryStore()
+
+    def make() -> MemoryRegistry:
+        return MemoryRegistry(store, prune_after_seconds=PRUNE_AFTER, offline_after_seconds=OFFLINE_AFTER)
+
+    await check(make, store.advance, OFFLINE_AFTER)
+
+
+async def test_kit_reports_a_provider_that_keeps_a_silent_card_online():
+    class _AlwaysOnline(MemoryRegistry):
+        async def list(self) -> PeerCardList:
+            return [
+                PeerCard(card=entry.card, age_seconds=entry.age_seconds, online=True) for entry in await super().list()
+            ]
+
+    store = MemoryStore()
+    with pytest.raises(AssertionError, match='still reported online'):
+        await testkit.check_online_follows_the_clock(lambda: _AlwaysOnline(store), store.advance, OFFLINE_AFTER)
 
 
 async def test_kit_reports_a_provider_that_does_not_list_its_own_card():

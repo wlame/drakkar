@@ -5,7 +5,7 @@ providers run them too. Each check is an ``async`` function that raises
 ``AssertionError`` with a plain message when the provider misbehaves. The
 module needs no test framework.
 
-Two groups:
+Three groups:
 
 - :func:`check_list_shape` and :func:`check_age_is_none_or_non_negative`
   apply to every provider. They take a provider instance and a context.
@@ -19,6 +19,11 @@ Two groups:
     provider's clock (move a fake clock, or set file times back);
   - ``prune_after_seconds`` is the age after which the provider deletes a
     card.
+- :data:`LIVENESS_CHECKS` also apply to providers that store cards. Each
+  takes ``(make_provider, advance, offline_after_seconds)``, the first two as
+  above; ``offline_after_seconds`` is the age past which a card whose owner
+  stopped publishing must no longer be reported ``online``. A provider that
+  leaves ``online`` at ``None`` passes them: the service then judges the age.
 
 Example with pytest::
 
@@ -26,6 +31,11 @@ Example with pytest::
     async def test_my_provider(check):
         store = MyStore()
         await check(lambda: MyProvider(store), store.advance, 600)
+
+    @pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS)
+    async def test_my_provider_liveness(check):
+        store = MyStore()
+        await check(lambda: MyProvider(store), store.advance, 60)
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -242,6 +252,27 @@ async def check_prune(make_provider: ProviderMaker, advance: Advance, prune_afte
     _expect(len(_entries_of(after_prune, 'kit-alive')) == 1, 'pruning removed a card that was just published')
 
 
+async def check_online_follows_the_clock(
+    make_provider: ProviderMaker, advance: Advance, offline_after_seconds: float
+) -> None:
+    """A fresh card is not reported offline; once its owner stops publishing past the limit, not online."""
+    async with (
+        _running(make_provider, 'kit-live', INSTANCE_A) as owner,
+        _running(make_provider, 'kit-watcher', INSTANCE_B) as watcher,
+    ):
+        await owner.publish(make_card('kit-live'))
+        fresh = _entries_of(await watcher.list(), 'kit-live')
+        await _maybe_await(advance(offline_after_seconds + 1))
+        silent = _entries_of(await watcher.list(), 'kit-live')
+    _expect(len(fresh) == 1, f'expected one card for kit-live, got {len(fresh)}')
+    _expect(fresh[0].online in (None, True), f'a card just published is reported online={fresh[0].online!r}')
+    _expect(len(silent) <= 1, f'expected at most one card for kit-live, got {len(silent)}')
+    _expect(
+        not silent or silent[0].online in (None, False),
+        f'a card not published for {offline_after_seconds + 1} s is still reported online',
+    )
+
+
 async def _maybe_await(result: Any) -> None:
     """Let ``advance`` be a plain function or a coroutine function."""
     if isinstance(result, Awaitable):
@@ -257,4 +288,8 @@ PUBLISHING_CHECKS: tuple[Callable[[ProviderMaker, Advance, float], Awaitable[Non
     check_withdraw_own_instance_only,
     check_age_grows_with_time,
     check_prune,
+)
+
+LIVENESS_CHECKS: tuple[Callable[[ProviderMaker, Advance, float], Awaitable[None]], ...] = (
+    check_online_follows_the_clock,
 )

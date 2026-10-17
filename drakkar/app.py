@@ -41,6 +41,7 @@ from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
 from drakkar.probe import build_layout, referenced_bases
+from drakkar.providers.connections import Connections
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.helpers import detect_worker_ip
 from drakkar.sinks.base import BaseSink
@@ -307,6 +308,9 @@ class DrakkarApp:
         # listens; None while the registry is off (UI off, provider none, or
         # no folder for the filesystem provider).
         self._fleet: FleetRegistry | None = None
+        # Named shared connections, made by the lifecycle before the first
+        # provider starts and closed after the last one stops.
+        self._connections: Connections | None = None
         self._ui_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None

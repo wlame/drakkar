@@ -68,6 +68,8 @@ from drakkar.metrics import (
     worker_info,
 )
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
+from drakkar.providers.connections import Connections
+from drakkar.providers.resilience import describe_error
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.recorder.history import history_dir
@@ -207,6 +209,7 @@ class AppLifecycle:
             await self._build_executor_pool()
             await self._start_observability()
             await self._start_ui_and_recorder()
+            self._create_connections()
             await self._start_fleet()
             self._start_runtime_health()
             self._start_throughput()
@@ -502,6 +505,15 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
+    def _create_connections(self) -> None:
+        """Make the resolver of the named shared connections; it opens nothing until a provider asks.
+
+        Made after ``on_startup``, so a handler that changes ``connections``
+        there is honoured, and before the providers that use it start.
+        """
+        app = self._app
+        app._connections = Connections(app._config.connections)
+
     async def _start_fleet(self) -> None:
         """Start the worker registry, or say once why it stays off.
 
@@ -544,6 +556,7 @@ class AppLifecycle:
             # The cache engine starts after the registry, so its marks are
             # read at each publish.
             features=lambda: app._cache_engine.features() if app._cache_engine is not None else {},
+            connections=app._connections,
         )
         await app._fleet.start()
 
@@ -1123,13 +1136,28 @@ class AppLifecycle:
             # still reach this worker through it.
             if app._fleet is not None:
                 try:
-                    await app._fleet.stop()
+                    await app._fleet.stop(deadline_seconds=max(deadline - time.monotonic(), 0.0))
                 except Exception as exc:
                     await log.awarning(
                         'fleet_registry_stop_failed',
                         category='fleet',
                         error=str(exc),
                         exc_info=True,
+                    )
+
+            # The shared connections close once every provider that uses them
+            # has stopped, inside the shutdown time that is left. A closer
+            # still running when that runs out is cut off, and its client
+            # goes with the process.
+            if app._connections is not None:
+                try:
+                    async with asyncio.timeout(max(deadline - time.monotonic(), 0.0)):
+                        await app._connections.close_all()
+                except Exception as exc:
+                    await log.awarning(
+                        'connections_close_failed',
+                        category='fleet',
+                        error=describe_error(exc),
                     )
 
             if app._ui_server:
