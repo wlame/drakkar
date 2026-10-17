@@ -1,0 +1,38 @@
+{
+  "_comment": "Shared corpus of the postgres registry and election providers: the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. Pinned so every implementation emits the same bytes.",
+  "schema_placeholder": "{schema}",
+  "ddl": [
+    "CREATE SCHEMA IF NOT EXISTS {schema}",
+    "CREATE TABLE IF NOT EXISTS {schema}.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n)",
+    "CREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON {schema}.fleet_workers (cluster)",
+    "CREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON {schema}.fleet_workers (heartbeat_at)",
+    "CREATE TABLE IF NOT EXISTS {schema}.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n)"
+  ],
+  "statements": {
+    "check_table": {"sql": "SELECT to_regclass($1) IS NOT NULL", "params": ["<schema>.<table>"]},
+    "publish": {"sql": "INSERT INTO {schema}.fleet_workers (worker, instance, cluster, card, heartbeat_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (worker) DO UPDATE SET instance = EXCLUDED.instance, cluster = EXCLUDED.cluster, card = EXCLUDED.card, heartbeat_at = now()", "params": ["worker", "instance", "cluster", "card"]},
+    "list_prune": {"sql": "DELETE FROM {schema}.fleet_workers WHERE heartbeat_at < now() - make_interval(secs => $1)", "params": ["prune_after_seconds"]},
+    "list_select": {"sql": "SELECT card, EXTRACT(EPOCH FROM now() - heartbeat_at)::float8 FROM {schema}.fleet_workers ORDER BY worker", "params": []},
+    "withdraw": {"sql": "DELETE FROM {schema}.fleet_workers WHERE worker = $1 AND instance = $2", "params": ["worker", "instance"]},
+    "acquire_select": {"sql": "SELECT token, worker, instance, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 FROM {schema}.archive_locks WHERE cluster = $1 FOR UPDATE", "params": ["scope"]},
+    "acquire": {"sql": "INSERT INTO {schema}.archive_locks AS held (cluster, token, worker, instance, acquired_at, refreshed_at) VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT (cluster) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, instance = EXCLUDED.instance, acquired_at = CASE WHEN held.token = EXCLUDED.token THEN held.acquired_at ELSE now() END, refreshed_at = now() WHERE held.token = EXCLUDED.token OR held.refreshed_at < now() - make_interval(secs => $5) RETURNING token", "params": ["scope", "token", "worker", "instance", "lease_seconds"]},
+    "refresh": {"sql": "UPDATE {schema}.archive_locks SET refreshed_at = now() WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]},
+    "is_held": {"sql": "SELECT 1 FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]},
+    "release": {"sql": "DELETE FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]}
+  },
+  "transient_sqlstate_prefixes": ["08", "53", "57", "40001", "40P01"],
+  "messages": {
+    "missing_table": "table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; create it with: drakkar-schema postgres --schema={schema}"
+  },
+  "schema_command": [
+    {"args": ["postgres", "--schema=drakkar"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"},
+    {"args": ["postgres", "--schema=ops_fleet"], "stdout": "CREATE SCHEMA IF NOT EXISTS ops_fleet;\n\nCREATE TABLE IF NOT EXISTS ops_fleet.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON ops_fleet.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON ops_fleet.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS ops_fleet.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"}
+  ],
+  "schema_command_usage_errors": [
+    {"args": [], "exit": 2},
+    {"args": ["postgres"], "exit": 2},
+    {"args": ["postgres", "--schema=Bad-Name"], "exit": 2},
+    {"args": ["postgres", "--schema="], "exit": 2},
+    {"args": ["mysql", "--schema=drakkar"], "exit": 2}
+  ]
+}
