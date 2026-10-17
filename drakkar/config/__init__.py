@@ -20,7 +20,7 @@ from drakkar.config.fleet import (
     StaticRegistryConfig,
 )
 from drakkar.config.kafka import KafkaConfig
-from drakkar.config.resilience import ResilienceConfig, validate_resilience
+from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
 from drakkar.config.runtime import (
     ExecutorConfig,
@@ -81,6 +81,7 @@ __all__ = [
     'TIMELINE_NUMERIC_FIELDS',
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
+    'BreakerConfig',
     'CacheConfig',
     'CacheExchangeConfig',
     'CircuitBreakerConfig',

@@ -670,10 +670,11 @@ fleet_peer_request_duration = Histogram(
 
 # --- Provider operations ---
 # One operation is one logical call of a feature (publish, list, acquire, ...)
-# with its retries. outcome: ok, error (a non-transient error, or transient
-# errors on every attempt), timeout (the last attempt timed out), skipped_open
-# (the circuit breaker was open, nothing was called) or not_started (the
-# provider is not started yet).
+# with its retries. outcome: ok, error (a non-transient error, or a transient
+# error other than a timeout on the last attempt), timeout (the last attempt
+# timed out, or no time was left to make one), skipped_open (the circuit
+# breaker was open, nothing was called) or not_started (the provider is not
+# started yet).
 # A retried operation can last several attempt timeouts, so the top buckets
 # reach past the single-call range.
 PROVIDER_CALL_DURATION_BUCKETS = (*FLEET_REGISTRY_DURATION_BUCKETS, 30)

@@ -25,8 +25,7 @@ from typing import Any
 
 import structlog
 
-from drakkar.config.resilience import ResilienceConfig
-from drakkar.config.sinks import CircuitBreakerConfig
+from drakkar.config.resilience import BreakerConfig, ResilienceConfig
 from drakkar.metrics import provider_breaker_open, provider_call_duration, provider_calls
 
 OUTCOME_OK = 'ok'
@@ -44,6 +43,10 @@ FAILURE_LOG_INTERVAL_SECONDS = 60.0
 class TransientError(Exception):
     """A provider error worth a retry that is not already an OS or timeout error."""
 
+
+# The backoff doubles per retry; past this exponent the cap has long won, and a
+# larger power of two could overflow the float multiplication for a huge ``retries``.
+MAX_BACKOFF_EXPONENT = 30
 
 # ``ConnectionError`` is an ``OSError`` and ``asyncio.TimeoutError`` is
 # ``TimeoutError``, so these three cover the standard connection and timeout
@@ -81,7 +84,7 @@ class _Admission(enum.Enum):
 class _Breaker:
     """Closed until ``failure_threshold`` failed operations in a row; then open until a probe succeeds."""
 
-    def __init__(self, config: CircuitBreakerConfig) -> None:
+    def __init__(self, config: BreakerConfig) -> None:
         self._config = config
         self._consecutive_failures = 0
         self._opened_at: float | None = None
@@ -105,8 +108,12 @@ class _Breaker:
         """Free the probe slot, whatever became of the probe (a cancelled probe records no result)."""
         self._probe_in_flight = False
 
-    def record_success(self) -> bool:
+    def record_success(self, admission: _Admission) -> bool:
         """Close the breaker and reset the count; True when this closed an open breaker."""
+        if self._opened_at is not None and admission is not _Admission.PROBE:
+            # Only the probe decides an open breaker: an operation that started before it
+            # opened and succeeded late says nothing about the provider now.
+            return False
         was_open = self._opened_at is not None
         self._consecutive_failures = 0
         self._opened_at = None
@@ -129,7 +136,10 @@ class _Breaker:
 
 
 class ResilientCaller:
-    """Calls one provider for one feature; see the module docstring for the rules."""
+    """Calls one provider for one feature; see the module docstring for the rules.
+
+    Log lines carry ``category`` (the log category of the owning feature).
+    """
 
     def __init__(
         self,
@@ -137,6 +147,7 @@ class ResilientCaller:
         *,
         feature: str,
         provider: str,
+        category: str = 'fleet',
         logger: Any = None,
         now_monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -144,6 +155,7 @@ class ResilientCaller:
         self._config = config
         self._feature = feature
         self._provider = provider
+        self._category = category
         self._logger = logger if logger is not None else structlog.get_logger()
         self._now_monotonic = now_monotonic
         self._sleep = sleep
@@ -174,7 +186,9 @@ class ResilientCaller:
         attempt's time limit is cut to the time left, and no retry starts, nor
         waits for its backoff, when that would pass the deadline. A deadline
         that is already spent makes no attempt: outcome ``timeout`` with zero
-        attempts, no breaker failure and no log line.
+        attempts, no breaker failure and no log line. It is checked before the
+        breaker, so a spent deadline on an open breaker is ``timeout``, not
+        ``skipped_open``.
 
         An operation that made no attempt (a spent deadline, an open breaker)
         is counted but has no duration to observe.
@@ -201,7 +215,7 @@ class ResilientCaller:
         self._observe_duration(op, started)
         self._count(op, result.outcome)
         if error is None:
-            await self._record_success()
+            await self._record_success(admission)
         else:
             await self._record_failure(op, result, error, admission)
         return result
@@ -234,14 +248,19 @@ class ResilientCaller:
                 return CallResult(ok=False, value=None, outcome=OUTCOME_ERROR, attempts=attempt), exc
             else:
                 return CallResult(ok=True, value=value, outcome=OUTCOME_OK, attempts=attempt), None
+            failed = CallResult(ok=False, value=None, outcome=outcome, attempts=attempt)
             delay = self._backoff_delay(retry_index=attempt - 1)
             if attempt >= max_attempts or self._time_left(deadline_at) <= delay:
-                return CallResult(ok=False, value=None, outcome=outcome, attempts=attempt), error
+                return failed, error
             await self._sleep(delay)
+            # A sleep can overrun. An attempt cut to no time would still start the call.
+            if self._time_left(deadline_at) <= 0:
+                return failed, error
 
     def _backoff_delay(self, *, retry_index: int) -> float:
         """The wait before retry ``retry_index`` (0-based): doubling from the base, capped."""
-        return min(self._config.backoff_seconds * 2**retry_index, self._config.backoff_max_seconds)
+        doubled = self._config.backoff_seconds * 2 ** min(retry_index, MAX_BACKOFF_EXPONENT)
+        return min(doubled, self._config.backoff_max_seconds)
 
     def _time_left(self, deadline_at: float | None) -> float:
         if deadline_at is None:
@@ -264,26 +283,28 @@ class ResilientCaller:
         self._count(op, outcome)
         return CallResult(ok=False, value=None, outcome=outcome, attempts=0)
 
-    async def _record_success(self) -> None:
-        if not self._breaker.record_success():
+    async def _record_success(self, admission: _Admission) -> None:
+        if not self._breaker.record_success(admission):
             return
         self._breaker_gauge.set(0)
         await self._logger.ainfo(
             'provider_breaker_closed',
-            category='fleet',
+            category=self._category,
             feature=self._feature,
             provider=self._provider,
         )
 
     async def _record_failure(self, op: str, result: CallResult, error: Exception, admission: _Admission) -> None:
         opened = self._breaker.record_failure(self._now_monotonic(), admission)
+        if opened:
+            # Before the first await: a cancelled log write must not leave an open breaker at 0.
+            self._breaker_gauge.set(1)
         await self._log_failure(op, result, error)
         if not opened:
             return
-        self._breaker_gauge.set(1)
         await self._logger.awarning(
             'provider_breaker_opened',
-            category='fleet',
+            category=self._category,
             feature=self._feature,
             provider=self._provider,
             failure_threshold=self._config.breaker.failure_threshold,
@@ -300,7 +321,7 @@ class ResilientCaller:
         self._last_failure_log[op] = now
         await self._logger.awarning(
             'provider_call_failed',
-            category='fleet',
+            category=self._category,
             feature=self._feature,
             provider=self._provider,
             op=op,
