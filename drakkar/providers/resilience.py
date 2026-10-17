@@ -200,6 +200,13 @@ class ResilientCaller:
         """True while the breaker is open, until a probe operation succeeds."""
         return self._breaker.is_open
 
+    @property
+    def operation_bound_seconds(self) -> float:
+        """The longest one operation with the configured attempts takes: every attempt's limit plus every backoff."""
+        retries = self._config.retries
+        backoffs = sum(self._backoff_delay(retry_index=index) for index in range(retries))
+        return (1 + retries) * self._config.timeout_seconds + backoffs
+
     async def call(
         self,
         op: str,

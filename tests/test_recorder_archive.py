@@ -5,6 +5,8 @@ where every ``*.db`` is a sealed file with a meta file beside it. One worker
 of the cluster holds ``.archive.lock`` while it archives.
 """
 
+import asyncio
+import functools
 import gzip
 import json
 import os
@@ -16,10 +18,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
-from drakkar.config import HistoryArchiveConfig
+from drakkar.config import HistoryArchiveConfig, ResilienceConfig
 from drakkar.metrics import recorder_archive_failures
+from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, EventRecorder, format_dt
 from drakkar.recorder import archive as archive_mod
 from drakkar.recorder import core as core_mod
@@ -32,7 +36,8 @@ from drakkar.recorder.archive import (
     warn_if_archives_unbounded,
 )
 from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
-from drakkar.recorder.history import history_dir, meta_path, write_meta
+from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
+from drakkar.recorder.history import history_dir, meta_path, sanitize_cluster, write_meta
 from tests.conftest import make_ui_config, wait_for
 
 HOUR = 3600.0
@@ -40,6 +45,30 @@ DAY = 24 * HOUR
 CLUSTER = 'search-fleet'
 OTHER_CLUSTER = 'index-fleet'
 INSTANCE = '1111111111111111'
+
+
+async def make_lease(tmp_path, cluster: str = CLUSTER, *, worker: str = 'worker-1') -> ElectionLease:
+    """A lease on the filesystem election of ``cluster``, its calls run on the test's event loop."""
+    election = FilesystemElection()
+    await election.start(
+        ElectionContext(
+            worker=worker,
+            instance=INSTANCE,
+            cluster=cluster,
+            shared_dir=str(tmp_path / 'shared'),
+            logger=structlog.get_logger(),
+            options={},
+        )
+    )
+    caller = ResilientCaller(ResilienceConfig(), feature='election', provider='filesystem', category='recorder')
+    return ElectionLease(
+        election,
+        caller,
+        asyncio.get_running_loop(),
+        scope=sanitize_cluster(cluster),
+        lease_seconds=HistoryArchiveConfig().lock_stale_seconds,
+        provider_name='filesystem',
+    )
 
 
 def _db_name(worker: str, start: float) -> str:
@@ -235,14 +264,20 @@ def _due_start(now: float, *, days_back: int = 3) -> float:
     return day_start - days_back * DAY + 10 * HOUR
 
 
-def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1'):
-    run_archive_pass(
-        str(tmp_path / 'shared'),
-        cluster=cluster,
-        worker=worker,
-        instance=INSTANCE,
-        archive=cfg or _make_config(),
-        merged_retention_days=merged_retention_days,
+async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None):
+    """Run one pass in a thread, as the recorder does, so its lease can call the provider on this loop."""
+    await asyncio.to_thread(
+        functools.partial(
+            run_archive_pass,
+            str(tmp_path / 'shared'),
+            cluster=cluster,
+            worker=worker,
+            instance=INSTANCE,
+            archive=cfg or _make_config(),
+            merged_retention_days=merged_retention_days,
+            lease=await make_lease(tmp_path, cluster, worker=worker),
+            stop=stop,
+        )
     )
 
 
@@ -254,14 +289,14 @@ def _dotfiles(folder: Path) -> list[str]:
     return sorted(p.name for p in folder.iterdir() if p.name.startswith('.'))
 
 
-def test_run_archive_pass_merges_a_due_window_and_removes_sources_and_meta_files(tmp_path):
+async def test_run_archive_pass_merges_a_due_window_and_removes_sources_and_meta_files(tmp_path):
     folder = _folder(tmp_path)
     now = time.time()
     start = _due_start(now)
     first = _make_db(folder, 'worker-1', start, event_count=2)
     second = _make_db(folder, 'worker-2', start + HOUR, event_count=3)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     for source in (first, second):
         assert not Path(source).exists()
@@ -273,12 +308,12 @@ def test_run_archive_pass_merges_a_due_window_and_removes_sources_and_meta_files
     assert _dotfiles(folder) == []
 
 
-def test_run_archive_pass_logs_the_created_archive(tmp_path):
+async def test_run_archive_pass_logs_the_created_archive(tmp_path):
     folder = _folder(tmp_path)
     _make_db(folder, 'worker-1', _due_start(time.time()))
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     (created,) = [e for e in cap if e['event'] == 'recorder_archive_created']
     assert created['cluster'] == CLUSTER
@@ -287,37 +322,37 @@ def test_run_archive_pass_logs_the_created_archive(tmp_path):
     assert created['compressed_bytes'] > 0
 
 
-def test_run_archive_pass_leaves_a_window_that_is_not_due(tmp_path):
+async def test_run_archive_pass_leaves_a_window_that_is_not_due(tmp_path):
     folder = _folder(tmp_path)
     path = _make_db(folder, 'worker-1', time.time() - HOUR)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert Path(path).exists()
     assert _archives(folder) == []
     assert not (folder / LOCK_NAME).exists()
 
 
-def test_run_archive_pass_without_a_history_folder_creates_nothing(tmp_path):
-    _run(tmp_path)
+async def test_run_archive_pass_without_a_history_folder_creates_nothing(tmp_path):
+    await _run(tmp_path)
 
     assert not (tmp_path / 'shared').exists()
 
 
-def test_run_archive_pass_never_takes_a_file_still_being_copied_in(tmp_path):
+async def test_run_archive_pass_never_takes_a_file_still_being_copied_in(tmp_path):
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     _make_db(folder, 'worker-1', start)
     incoming = folder / f'.{_db_name("worker-2", start)}.0123456789abcdef.incoming'
     incoming.write_bytes(b'half a copy')
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert incoming.exists()
     assert len(_archives(folder)) == 1
 
 
-def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
+async def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     healthy = _make_db(folder, 'worker-1', start)
@@ -325,7 +360,7 @@ def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
     corrupt.write_bytes(b'this file is not a SQLite database at all' * 8)
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     set_aside = folder / (corrupt.name + '.unreadable')
     assert not corrupt.exists()
@@ -368,13 +403,13 @@ def _archive_workers(path: Path) -> list[tuple]:
         unpacked.unlink()
 
 
-def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
+async def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
     """A source that outlived its archive must not overwrite it."""
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     first = _make_db(folder, 'worker-1', start, event_count=2)
     _make_db(folder, 'worker-2', start + HOUR, event_count=3)
-    _run(tmp_path)
+    await _run(tmp_path)
     (name,) = _archives(folder)
     published = (folder / name).read_bytes()
 
@@ -382,7 +417,7 @@ def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
     _make_db(folder, 'worker-1', start, event_count=2)
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     assert not Path(first).exists()
     assert not Path(meta_path(first)).exists()
@@ -392,35 +427,35 @@ def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
     ]
 
 
-def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
+async def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     _make_db(folder, 'worker-1', start, event_count=2)
-    _run(tmp_path)
+    await _run(tmp_path)
     (name,) = _archives(folder)
     late = _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert not Path(late).exists()
     assert _archives(folder) == [name]
     assert _events_in_archive(folder / name) == 6
 
 
-def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path):
+async def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path):
     """Sources skipped as already-archived are healthy — delete, never quarantine."""
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     _make_db(folder, 'worker-1', start, event_count=2)
     _make_db(folder, 'worker-2', start + HOUR, event_count=3)
-    _run(tmp_path)
+    await _run(tmp_path)
     (name,) = _archives(folder)
     _make_db(folder, 'worker-1', start, event_count=2)
     _make_db(folder, 'worker-2', start + HOUR, event_count=3)
     _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     assert list(folder.glob('*.db')) == []
     assert list(folder.glob('*.unreadable')) == []
@@ -428,17 +463,17 @@ def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path
     assert _events_in_archive(folder / name) == 9
 
 
-def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
+async def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
     folder = _folder(tmp_path)
     start = _due_start(time.time())
     _make_db(folder, 'worker-1', start, event_count=2)
     _make_db(folder, 'worker-2', start + HOUR, event_count=3)
-    _run(tmp_path)
+    await _run(tmp_path)
     (name,) = _archives(folder)
     _make_db(folder, 'worker-3', start + 2 * HOUR, event_count=4)
-    _run(tmp_path)
+    await _run(tmp_path)
     _make_db(folder, 'worker-4', start + 3 * HOUR, event_count=1)
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert _archives(folder) == [name]
     assert _archive_workers(folder / name) == [
@@ -453,13 +488,13 @@ def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
 # --- the archive lock ---------------------------------------------------
 
 
-def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
+async def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', _due_start(time.time()))
     holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
     assert holder.acquire()
     try:
-        _run(tmp_path)
+        await _run(tmp_path)
 
         assert Path(source).exists()
         assert _archives(folder) == []
@@ -468,21 +503,21 @@ def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
         holder.release()
 
 
-def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path):
+async def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path):
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', _due_start(time.time()))
     lock = folder / LOCK_NAME
     lock.write_text(json.dumps({'acquired_at': '', 'instance': 'dead', 'token': 'dead', 'worker': 'worker-2'}))
     _age(lock, HistoryArchiveConfig().lock_stale_seconds + 60)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert not Path(source).exists()
     assert len(_archives(folder)) == 1
     assert not lock.exists()
 
 
-def test_run_archive_pass_names_its_work_files_with_the_lock_token(tmp_path, monkeypatch):
+async def test_run_archive_pass_names_its_work_files_with_the_lock_token(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     _make_db(folder, 'worker-1', _due_start(time.time()))
     seen: dict = {}
@@ -495,13 +530,13 @@ def test_run_archive_pass_names_its_work_files_with_the_lock_token(tmp_path, mon
 
     monkeypatch.setattr(archive_mod, 'merge_databases', spy)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert seen['output'].endswith(f'.{seen["token"]}.merge.db')
     assert re.fullmatch(r'[0-9a-f]{16}', seen['token'])
 
 
-def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch):
+async def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     _make_db(folder, 'worker-1', _due_start(time.time()))
     seen: dict = {}
@@ -514,13 +549,13 @@ def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch)
 
     monkeypatch.setattr(archive_mod, '_compress', spy)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert seen == {'merge_mode': 0o600, 'archive_mode': 0o600}
     assert os.stat(folder / _archives(folder)[0]).st_mode & 0o777 == 0o600
 
 
-def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, monkeypatch):
+async def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, monkeypatch):
     """A holder that lost its lock (it stalled past the stale age and a peer
     took over) must not publish or delete: the new holder owns the folder."""
     folder = _folder(tmp_path)
@@ -538,7 +573,7 @@ def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, monkeypat
     failures_before = recorder_archive_failures._value.get()
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     assert Path(source).exists()
     assert Path(meta_path(source)).exists()
@@ -551,7 +586,33 @@ def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, monkeypat
     assert recorder_archive_failures._value.get() == failures_before + 1
 
 
-def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
+async def test_a_fenced_pass_names_the_provider(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    _make_db(folder, 'worker-1', _due_start(time.time()))
+    real_merge = archive_mod.merge_databases
+
+    def taken_over_during_merge(paths, output_path):
+        result = real_merge(paths, output_path)
+        body = {
+            'acquired_at': '',
+            'instance': 'peer',
+            'provider': 'filesystem',
+            'token': 'f' * 16,
+            'worker': 'worker-2',
+        }
+        (folder / LOCK_NAME).write_text(json.dumps(body))
+        return result
+
+    monkeypatch.setattr(archive_mod, 'merge_databases', taken_over_during_merge)
+
+    with capture_logs() as cap:
+        await _run(tmp_path)
+
+    (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
+    assert fenced['provider'] == 'filesystem'
+
+
+async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     now = time.time()
     first_start = _due_start(now, days_back=4)
@@ -570,7 +631,7 @@ def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path,
 
     monkeypatch.setattr(archive_mod, 'merge_databases', flaky)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert not Path(first_source).exists()
     assert Path(second_source).exists()
@@ -579,7 +640,7 @@ def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path,
     assert not (folder / LOCK_NAME).exists()
 
 
-def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monkeypatch):
+async def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', _due_start(time.time()))
 
@@ -590,7 +651,7 @@ def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monke
     failures_before = recorder_archive_failures._value.get()
 
     with capture_logs() as cap:
-        _run(tmp_path)
+        await _run(tmp_path)
 
     assert not (folder / LOCK_NAME).exists()
     assert Path(source).exists()
@@ -599,17 +660,17 @@ def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monke
     assert recorder_archive_failures._value.get() == failures_before + 1
 
 
-def test_a_clean_pass_counts_no_failure(tmp_path):
+async def test_a_clean_pass_counts_no_failure(tmp_path):
     folder = _folder(tmp_path)
     _make_db(folder, 'worker-1', _due_start(time.time()))
     failures_before = recorder_archive_failures._value.get()
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert recorder_archive_failures._value.get() == failures_before
 
 
-def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypatch):
+async def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     now = time.time()
     first_start = _due_start(now, days_back=4)
@@ -626,15 +687,7 @@ def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypatch):
     monkeypatch.setattr(archive_mod, 'merge_databases', merge_then_stop)
     failures_before = recorder_archive_failures._value.get()
 
-    run_archive_pass(
-        str(tmp_path / 'shared'),
-        cluster=CLUSTER,
-        worker='worker-1',
-        instance=INSTANCE,
-        archive=_make_config(),
-        merged_retention_days=0,
-        stop=stop,
-    )
+    await _run(tmp_path, stop=stop)
 
     window_start = (first_start // DAY) * DAY
     assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
@@ -644,7 +697,7 @@ def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypatch):
     assert recorder_archive_failures._value.get() == failures_before
 
 
-def test_run_archive_pass_keeps_sources_when_compression_fails(tmp_path, monkeypatch):
+async def test_run_archive_pass_keeps_sources_when_compression_fails(tmp_path, monkeypatch):
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', _due_start(time.time()))
 
@@ -653,7 +706,7 @@ def test_run_archive_pass_keeps_sources_when_compression_fails(tmp_path, monkeyp
 
     monkeypatch.setattr(archive_mod.gzip, 'open', boom)
 
-    _run(tmp_path)
+    await _run(tmp_path)
 
     assert Path(source).exists()
     assert _archives(folder) == []
@@ -676,60 +729,60 @@ WORK_FILES = [
 
 
 @pytest.mark.parametrize('name', WORK_FILES)
-def test_the_sweep_removes_a_work_file_older_than_the_stale_age(tmp_path, name):
+async def test_the_sweep_removes_a_work_file_older_than_the_stale_age(tmp_path, name):
     folder = _folder(tmp_path)
     work_file = folder / name
     work_file.write_bytes(b'left by a dead pass')
     _age(work_file, 101)
 
     with capture_logs() as cap:
-        _run(tmp_path, _make_config(lock_stale_seconds=100))
+        await _run(tmp_path, _make_config(lock_stale_seconds=100))
 
     assert not work_file.exists()
     assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [name]
 
 
 @pytest.mark.parametrize('name', WORK_FILES)
-def test_the_sweep_keeps_a_work_file_younger_than_the_stale_age(tmp_path, name):
+async def test_the_sweep_keeps_a_work_file_younger_than_the_stale_age(tmp_path, name):
     folder = _folder(tmp_path)
     work_file = folder / name
     work_file.write_bytes(b'still being written')
     _age(work_file, 50)
 
-    _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(lock_stale_seconds=100))
 
     assert work_file.exists()
 
 
-def test_the_sweep_removes_an_old_meta_file_whose_database_is_missing(tmp_path):
+async def test_the_sweep_removes_an_old_meta_file_whose_database_is_missing(tmp_path):
     folder = _folder(tmp_path)
     orphan = folder / 'worker-2-2020-01-01__00_00_00.db.meta.json'
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 101)
 
-    _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(lock_stale_seconds=100))
 
     assert not orphan.exists()
 
 
-def test_the_sweep_keeps_a_fresh_meta_file_whose_database_is_still_on_its_way(tmp_path):
+async def test_the_sweep_keeps_a_fresh_meta_file_whose_database_is_still_on_its_way(tmp_path):
     """Sealing writes the meta file first and moves the database next."""
     folder = _folder(tmp_path)
     orphan = folder / 'worker-2-2020-01-01__00_00_00.db.meta.json'
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 50)
 
-    _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(lock_stale_seconds=100))
 
     assert orphan.exists()
 
 
-def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
+async def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', time.time() - HOUR)
     _age(Path(meta_path(source)), 101)
 
-    _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(lock_stale_seconds=100))
 
     assert Path(meta_path(source)).exists()
 
@@ -737,7 +790,7 @@ def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
 # --- expiry ---------------------------------------------------------------
 
 
-def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
+async def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
     folder = _folder(tmp_path)
     now = time.time()
     _make_db(folder, 'worker-1', _due_start(now, days_back=3))
@@ -746,7 +799,7 @@ def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
     old_theirs = _make_archive(folder, OTHER_CLUSTER, now - 10 * DAY)
 
     with capture_logs() as cap:
-        _run(tmp_path, _make_config(retention_days=3))
+        await _run(tmp_path, _make_config(retention_days=3))
 
     assert not old_mine.exists()
     assert recent_mine.exists()
@@ -755,11 +808,11 @@ def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path):
     assert [e['name'] for e in cap if e['event'] == 'recorder_archive_expired'] == [old_mine.name]
 
 
-def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_path):
+async def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_path):
     folder = _folder(tmp_path)
     old_mine = _make_archive(folder, CLUSTER, time.time() - 100 * DAY)
 
-    _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention_days=0))
 
     assert old_mine.exists()
 
@@ -776,14 +829,14 @@ def _merged_file(tmp_path, name: str, age_days: float) -> Path:
     return path
 
 
-def test_run_archive_pass_prunes_merge_results_past_their_retention(tmp_path):
+async def test_run_archive_pass_prunes_merge_results_past_their_retention(tmp_path):
     _folder(tmp_path)
     old = _merged_file(tmp_path, 'merged-2026-09-01__10_00_00-0123456789abcdef.db', 40)
     young = _merged_file(tmp_path, 'merged-2026-10-10__10_00_00-0123456789abcdef.db', 3)
     in_progress = _merged_file(tmp_path, '.merged-2026-09-01__10_00_00-0123456789abcdef.tmp', 40)
 
     with capture_logs() as cap:
-        _run(tmp_path, merged_retention_days=32)
+        await _run(tmp_path, merged_retention_days=32)
 
     assert not old.exists()
     assert young.exists()
@@ -791,11 +844,11 @@ def test_run_archive_pass_prunes_merge_results_past_their_retention(tmp_path):
     assert [e['name'] for e in cap if e['event'] == 'recorder_merged_pruned'] == [old.name]
 
 
-def test_run_archive_pass_keeps_merge_results_when_their_retention_is_zero(tmp_path):
+async def test_run_archive_pass_keeps_merge_results_when_their_retention_is_zero(tmp_path):
     _folder(tmp_path)
     old = _merged_file(tmp_path, 'merged-2026-01-01__10_00_00-0123456789abcdef.db', 300)
 
-    _run(tmp_path, merged_retention_days=0)
+    await _run(tmp_path, merged_retention_days=0)
 
     assert old.exists()
 
@@ -803,7 +856,7 @@ def test_run_archive_pass_keeps_merge_results_when_their_retention_is_zero(tmp_p
 # --- archive footprint --------------------------------------------------
 
 
-def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
+async def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     folder = _folder(tmp_path)
     now = time.time()
     mine_a = _make_archive(folder, CLUSTER, now - 3 * DAY)
@@ -811,13 +864,13 @@ def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     extended = _make_archive(folder, f'{CLUSTER}-hot', now - 2 * DAY)
     extended.write_bytes(b'x' * 4096)
 
-    _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention_days=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 2
     assert archive_mod.recorder_archive_bytes._value.get() == mine_a.stat().st_size + mine_b.stat().st_size
 
 
-def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(tmp_path):
+async def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(tmp_path):
     folder = _folder(tmp_path)
     existing = _make_archive(folder, CLUSTER, time.time() - 2 * DAY)
     archive_mod.recorder_archive_bytes.set(0)
@@ -825,7 +878,7 @@ def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(
     holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
     assert holder.acquire()
     try:
-        _run(tmp_path, _make_config(retention_days=0))
+        await _run(tmp_path, _make_config(retention_days=0))
     finally:
         holder.release()
 
@@ -833,11 +886,11 @@ def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(
     assert archive_mod.recorder_archive_bytes._value.get() == existing.stat().st_size
 
 
-def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
+async def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
     archive_mod.recorder_archive_bytes.set(999)
     archive_mod.recorder_archive_files.set(9)
 
-    _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention_days=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 0
     assert archive_mod.recorder_archive_bytes._value.get() == 0
@@ -999,14 +1052,14 @@ async def test_start_stays_quiet_when_archiving_is_enabled(tmp_path):
     assert [e for e in cap if e['event'] == 'recorder_archiving_disabled'] == []
 
 
-def test_sealed_sources_are_archived_while_a_reader_holds_a_lock(tmp_path):
+async def test_sealed_sources_are_archived_while_a_reader_holds_a_lock(tmp_path):
     """Sources are read with immutable=1: a stray reader's lock does not stall the window."""
     folder = _folder(tmp_path)
     source = _make_db(folder, 'worker-1', _due_start(time.time()))
     reader = sqlite3.connect(source)
     reader.execute('BEGIN EXCLUSIVE')
     try:
-        _run(tmp_path)
+        await _run(tmp_path)
     finally:
         reader.rollback()
         reader.close()

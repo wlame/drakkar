@@ -15,6 +15,7 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
@@ -38,6 +39,15 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
 
 def _app(tmp_path, **overrides) -> DrakkarApp:
     return DrakkarApp(handler=KafkaOnlyHandler(), config=_config(tmp_path, **overrides), worker_id='w-1')
+
+
+def _install_registry_plugins(monkeypatch, factories: dict) -> None:
+    """Make ``factories`` the installed registry plugins; the other provider groups have none."""
+
+    def discover(group: str) -> dict:
+        return dict(factories) if group == plugins.ENTRY_POINT_GROUP else {}
+
+    monkeypatch.setattr(lookup, 'discover_plugin_factories', discover)
 
 
 # --- which provider runs ---
@@ -120,7 +130,7 @@ async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
         received['options'] = dict(options)
         return _Plugin([])
 
-    monkeypatch.setattr(plugins, 'discover_plugin_factories', lambda: {'example-plugin': factory})
+    _install_registry_plugins(monkeypatch, {'example-plugin': factory})
     app = _app(
         tmp_path, fleet={'registry': {'provider': 'example-plugin', 'plugin_options': {'address': 'consul:8500'}}}
     )
@@ -135,7 +145,7 @@ async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
 
 
 async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugins, 'discover_plugin_factories', dict)
+    _install_registry_plugins(monkeypatch, {})
     app = _app(tmp_path, fleet={'registry': {'provider': 'etcd'}})
 
     with pytest.raises(UnknownRegistryProviderError, match="'etcd'"):
@@ -242,7 +252,7 @@ def _runnable_app(tmp_path, monkeypatch, provider_factory) -> tuple[DrakkarApp, 
     source = StubSource('kafka')
     app.sources = [source]
     order: list[str] = []
-    monkeypatch.setattr(plugins, 'discover_plugin_factories', lambda: {'filesystem': provider_factory})
+    _install_registry_plugins(monkeypatch, {'filesystem': provider_factory})
     monkeypatch.setattr(app._sink_manager, 'connect_all', AsyncMock())
     monkeypatch.setattr(app._sink_manager, 'close_all', AsyncMock())
     monkeypatch.setattr(app, '_build_dlq', lambda: setattr(app, '_dlq_sink', None))

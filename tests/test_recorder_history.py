@@ -7,6 +7,7 @@ body and the epoch-to-text conversion for any implementation.
 import json
 import os
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 from drakkar.recorder.history import (
     META_SCHEMA,
     build_meta,
+    folder_server_now,
     history_dir,
     merged_dir,
     meta_path,
@@ -182,3 +184,13 @@ def test_history_dir_uses_the_sanitized_cluster(tmp_path, cluster, expected):
 
 def test_merged_dir(tmp_path):
     assert merged_dir(str(tmp_path)) == os.path.join(str(tmp_path), 'merged')
+
+
+def test_folder_server_now_leaves_no_marker(tmp_path):
+    before = time.time()
+
+    now = folder_server_now(str(tmp_path), '1111111111111111')
+
+    # A local temp folder: the file system's clock is this host's clock.
+    assert before - 1 <= now <= time.time() + 1
+    assert list(tmp_path.iterdir()) == []

@@ -15,16 +15,17 @@ Three ideas carry the design:
   never split, which is why an archive can carry events slightly past its
   own end — archives partition by file start time, not by event time.
 * **One archiver per cluster folder.** Every worker of the cluster runs the
-  pass; ``.archive.lock`` (:mod:`drakkar.recorder.archive_lock`) lets one
+  pass; the election (:mod:`drakkar.recorder.election`, by default the
+  ``.archive.lock`` file of :mod:`drakkar.recorder.archive_lock`) lets one
   of them work at a time. Every ``*.db`` in the folder is sealed, so the
   pass needs no in-use or settled check and reads sources with
   ``immutable=1``.
-* **Sources die last, and only by the lock holder.** Merge, compress,
+* **Sources die last, and only by the lease holder.** Merge, compress,
   fsync and rename all happen on dot-prefixed work files named with the
-  lock token. Right before publishing, the pass checks the lock still
-  holds its token; a pass that lost the lock publishes and deletes
-  nothing. Sealed files are deleted only after the archive is in place,
-  so any failure costs one tick and no data.
+  lease token. Right before publishing, the pass checks the election still
+  holds its lease; a pass that lost it publishes and deletes nothing.
+  Sealed files are deleted only after the archive is in place, so any
+  failure costs one tick and no data.
 
 Everything here is synchronous and does real file, SQLite and gzip work.
 Callers on the event loop MUST run :func:`run_archive_pass` in a thread —
@@ -52,10 +53,12 @@ import structlog
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import merge_databases
 from drakkar.metrics import recorder_archive_bytes, recorder_archive_failures, recorder_archive_files
-from drakkar.recorder.archive_lock import CLOCK_PREFIX, STALE_PREFIX, ArchiveLock
+from drakkar.recorder.archive_lock import STALE_PREFIX
 from drakkar.recorder.history import (
+    CLOCK_PREFIX,
     DEFAULT_CLUSTER,  # noqa: F401  (re-exported: archive names fall back to it)
     META_SUFFIX,
+    folder_server_now,
     history_dir,
     list_sealed,
     merged_dir,
@@ -66,6 +69,7 @@ from drakkar.recorder.sealing import INCOMING_SUFFIX
 
 if TYPE_CHECKING:
     from drakkar.config import HistoryArchiveConfig
+    from drakkar.recorder.election import ElectionLease
 
 logger = structlog.get_logger()
 
@@ -76,7 +80,7 @@ ARCHIVE_SUFFIX = '.db.gz'
 # keeping the data on disk for an operator to look at.
 UNREADABLE_SUFFIX = '.unreadable'
 
-# Work files of a pass, all dot-prefixed and named with the lock token.
+# Work files of a pass, all dot-prefixed and named with the lease token.
 _MERGE_TEMP_SUFFIX = '.merge.db'
 _COMPRESS_TEMP_SUFFIX = '.tmp'
 _PREVIOUS_TEMP_SUFFIX = '.previous.db'
@@ -115,7 +119,7 @@ class ArchiveCandidate:
 
 
 class ArchiveFencedError(RuntimeError):
-    """The pass lost the archive lock: another worker took it over."""
+    """The pass lost its election lease: another worker took it over, or the provider could not confirm it."""
 
 
 @dataclass(frozen=True)
@@ -279,16 +283,18 @@ def run_archive_pass(
     instance: str,
     archive: HistoryArchiveConfig,
     merged_retention_days: int,
+    lease: ElectionLease,
     stop: threading.Event | None = None,
 ) -> None:
     """Archive every due window of this cluster's history folder, then expire and prune.
 
     Blocking by nature (stat, SQLite merge, gzip) — run it in a thread,
-    never on the event loop. Every worker of the cluster calls it; the
-    archive lock lets one of them work at a time, and the others return
-    right after refreshing the footprint gauges. A pass that took the lock
-    and did not finish cleanly (a window failed, the lock was lost, an
-    unexpected error) counts in ``drakkar_recorder_archive_failures_total``.
+    never on the event loop: ``lease`` runs its provider calls on the loop
+    and waits for them. Every worker of the cluster calls it; the lease lets
+    one of them work at a time, and the others return right after refreshing
+    the footprint gauges. A pass that took the lease and did not finish
+    cleanly (a window failed, the lease was lost, an unexpected error)
+    counts in ``drakkar_recorder_archive_failures_total``.
 
     ``stop`` ends the pass after the window in progress: a worker that
     shuts down does not wait for a long backlog of windows. Expiry and
@@ -296,20 +302,20 @@ def run_archive_pass(
     """
     folder = history_dir(shared_dir, cluster)
     own_cluster = sanitize_cluster(cluster)
-    # Before the lock: the footprint is most worth reporting on the ticks
+    # Before the lease: the footprint is most worth reporting on the ticks
     # where another worker does the archiving.
     _observe_archive_footprint(folder, own_cluster)
     if not os.path.isdir(folder):
         return
-    lock = ArchiveLock(folder, worker=worker, instance=instance, stale_seconds=archive.lock_stale_seconds)
-    if not lock.acquire():
+    if not lease.acquire():
         return
     completed = False
     try:
         completed = _archive_locked(
             folder,
             own_cluster,
-            lock,
+            instance,
+            lease,
             archive,
             merged_dir(shared_dir),
             merged_retention_days,
@@ -319,13 +325,14 @@ def run_archive_pass(
         logger.warning(
             'recorder_archive_fenced',
             category='recorder',
+            provider=lease.provider_name,
             cluster=own_cluster,
             name=str(exc),
             detail='another worker took the archive lock over; this pass published and deleted nothing',
         )
     finally:
-        # Deletes the lock only while it still holds our token.
-        lock.release()
+        # Also ends the refresh thread; the provider frees only our own lease.
+        lease.release()
         if not completed:
             recorder_archive_failures.inc()
 
@@ -333,17 +340,18 @@ def run_archive_pass(
 def _archive_locked(
     folder: str,
     cluster: str,
-    lock: ArchiveLock,
+    instance: str,
+    lease: ElectionLease,
     archive: HistoryArchiveConfig,
     merged_folder: str,
     merged_retention_days: int,
     stop: threading.Event,
 ) -> bool:
-    """The pass body, run while holding the lock; False when a window failed."""
+    """The pass body, run while holding the lease; False when a window failed."""
     now = time.time()
     # Ages of files in the shared folder are measured on the file server's
-    # clock, like the lock's own age.
-    server_now = lock.server_now()
+    # clock, whichever provider holds the lease.
+    server_now = folder_server_now(folder, instance)
     _sweep(folder, cluster, server_now, archive.lock_stale_seconds)
     windows = assign_windows(
         list_sealed(folder),
@@ -357,7 +365,7 @@ def _archive_locked(
         # pass of any worker of the cluster takes them.
         if stop.is_set():
             return completed
-        completed = _archive_window(folder, cluster, window, lock) and completed
+        completed = _archive_window(folder, cluster, window, lease) and completed
     if stop.is_set():
         return completed
     if archive.retention_days > 0:
@@ -385,7 +393,7 @@ def _is_orphan_meta(folder: str, name: str) -> bool:
 def _sweep(folder: str, cluster: str, now: float, stale_seconds: int) -> None:
     """Delete work files and orphan meta files older than ``stale_seconds``.
 
-    Only reachable while holding the lock, and the age floor keeps
+    Only reachable while holding the lease, and the age floor keeps
     anything still being written out of reach: a sealing copy in progress
     keeps moving its mtime, and a fresh orphan meta file is a publish
     whose database rename is still to come.
@@ -411,16 +419,16 @@ def _sweep(folder: str, cluster: str, now: float, stale_seconds: int) -> None:
         )
 
 
-def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: ArchiveLock) -> bool:
+def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: ElectionLease) -> bool:
     """Merge, compress and publish one window, then delete its sources; False when it failed.
 
     Order is what makes this safe: everything lands on work files named
-    with the lock token, the rename publishes the archive atomically, and
+    with the lease token, the rename publishes the archive atomically, and
     only then are the sealed files removed. Any failure before the rename
     leaves every source untouched for the next tick. Right before the
-    rename (and before the deletions of the reclaim path) the lock must
-    still hold our token; otherwise :class:`ArchiveFencedError` stops the
-    whole pass with nothing published and nothing deleted.
+    rename (and before the deletions of the reclaim path) the lease must
+    still be held; otherwise :class:`ArchiveFencedError` stops the whole
+    pass with nothing published and nothing deleted.
 
     Two rules protect data that a naive "merge everything, delete
     everything" would lose:
@@ -440,7 +448,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: Arch
     """
     final_name = archive_file_name(cluster, window.start, window.end)
     final_path = os.path.join(folder, final_name)
-    prefix = os.path.join(folder, f'.{final_name}.{lock.token}')
+    prefix = os.path.join(folder, f'.{final_name}.{lease.token}')
     tmp_path = prefix + _COMPRESS_TEMP_SUFFIX
     merged_path = prefix + _MERGE_TEMP_SUFFIX
     previous_path = prefix + _PREVIOUS_TEMP_SUFFIX
@@ -462,7 +470,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: Arch
                 # The whole window is already inside the published archive.
                 # Nothing to rewrite — just finish the interrupted cleanup.
                 _remove_with_sidecars(previous_path)
-                _fence(lock, final_name)
+                _fence(lease, final_name)
                 _delete_sources(folder, sources)
                 logger.info(
                     'recorder_archive_sources_reclaimed',
@@ -491,7 +499,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: Arch
         secure_db_file(merged_path)
         secure_db_file(tmp_path)
         _compress(merged_path, tmp_path)
-        _fence(lock, final_name)
+        _fence(lease, final_name)
         os.rename(tmp_path, final_path)
     except ArchiveFencedError:
         _remove_work_files(merged_path, previous_path, tmp_path)
@@ -531,9 +539,9 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lock: Arch
     return True
 
 
-def _fence(lock: ArchiveLock, name: str) -> None:
-    """Stop the pass when the lock no longer holds our token (another worker took it over)."""
-    if not lock.is_ours():
+def _fence(lease: ElectionLease, name: str) -> None:
+    """Stop the pass when the election no longer confirms our lease (another worker took it over)."""
+    if not lease.is_held():
         raise ArchiveFencedError(name)
 
 

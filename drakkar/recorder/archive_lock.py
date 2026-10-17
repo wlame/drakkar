@@ -1,5 +1,7 @@
 """The archive lock: one archiver at a time per cluster history folder.
 
+This is the lock of the ``filesystem`` election provider
+(:class:`drakkar.recorder.election.FilesystemElection`).
 ``history/<cluster>/.archive.lock`` is created with an exclusive create, so
 exactly one worker of the cluster holds it. The holder refreshes the lock's
 mtime while its pass runs. A lock nobody refreshed for ``lock_stale_seconds``
@@ -8,12 +10,12 @@ wins), deletes it, and creates its own. Right before each publish the holder
 re-reads the lock and stops if the token is no longer its own (fencing), so
 a holder that stalled past the stale age publishes nothing.
 
-Ages are measured on the file server's clock: a freshly touched marker file
-``.clock.<instance>`` in the same folder gives "now", so no host's wall clock
-is compared with another's. The lock body bytes are a contract shared by
-every implementation (``tests/fixtures/history_meta.json``, key ``lock``).
+Ages are measured on the file server's clock
+(:func:`drakkar.recorder.history.folder_server_now`), so no host's wall
+clock is compared with another's. The lock body bytes are a contract shared
+by every implementation (``tests/fixtures/history_meta.json``, key ``lock``).
 
-All methods are synchronous: the archive pass runs in a thread.
+All methods are synchronous: callers on the event loop run them in a thread.
 """
 
 from __future__ import annotations
@@ -30,13 +32,14 @@ from typing import Any
 import structlog
 
 from drakkar.dbfiles import DB_FILE_MODE
-from drakkar.recorder.history import serialize_json
+from drakkar.recorder.history import folder_server_now, serialize_json
 from drakkar.timefmt import format_rfc3339_micro
 
 logger = structlog.get_logger()
 
 LOCK_NAME = '.archive.lock'
-CLOCK_PREFIX = '.clock.'
+# The election provider this lock implements: named in the lock body and the takeover log line.
+FILESYSTEM_PROVIDER = 'filesystem'
 STALE_PREFIX = '.archive.lock.stale.'
 DEFAULT_REFRESH_SECONDS = 60.0
 MAX_LOCK_BYTES = 4096
@@ -66,7 +69,16 @@ class ArchiveLock:
         stale_seconds: float,
         refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
         now: Callable[[], datetime] = _utc_now,
+        token: str | None = None,
+        auto_refresh: bool = True,
     ) -> None:
+        """Prepare the lock of ``folder``; nothing touches the folder before :meth:`acquire`.
+
+        ``token`` is the holder's token (16 hex characters are made when
+        ``None``). With ``auto_refresh`` a thread refreshes the lock every
+        ``refresh_seconds`` while it is held; without it the caller calls
+        :meth:`refresh` itself.
+        """
         self._folder = folder
         self._path = os.path.join(folder, LOCK_NAME)
         self._worker = worker
@@ -74,7 +86,8 @@ class ArchiveLock:
         self._stale_seconds = stale_seconds
         self._refresh_seconds = refresh_seconds
         self._now = now
-        self._token = secrets.token_hex(8)
+        self._token = token if token is not None else secrets.token_hex(8)
+        self._auto_refresh = auto_refresh
         self._stop_refreshing = threading.Event()
         self._refresher: threading.Thread | None = None
 
@@ -86,6 +99,8 @@ class ArchiveLock:
         """Take the lock; take over a stale one once. False when another archiver holds it."""
         if not self._create() and not (self._take_over_stale() and self._create()):
             return False
+        if not self._auto_refresh:
+            return True
         self._refresher = threading.Thread(target=self._refresh_loop, name='drakkar-archive-lock', daemon=True)
         self._refresher.start()
         return True
@@ -95,16 +110,17 @@ class ArchiveLock:
         body = self._read_body()
         return body is not None and body.get('token') == self._token
 
-    def refresh(self) -> None:
-        """Move the lock's mtime to now, while the lock is still ours."""
+    def refresh(self) -> bool:
+        """Move the lock's mtime to now, while the lock is still ours; False once it is not."""
         if not self.is_ours():
-            return
+            return False
         try:
             os.utime(self._path, None)
         except OSError:
             # A refresh is best effort: the fencing check before each publish
             # decides whether the pass may go on.
             pass
+        return True
 
     def stop_refreshing(self) -> None:
         """Stop the background refresh (used by release, and by tests that simulate a dead holder)."""
@@ -130,6 +146,7 @@ class ArchiveLock:
             {
                 'acquired_at': format_rfc3339_micro(self._now()),
                 'instance': self._instance,
+                'provider': FILESYSTEM_PROVIDER,
                 'token': self._token,
                 'worker': self._worker,
             }
@@ -178,6 +195,7 @@ class ArchiveLock:
         logger.warning(
             'recorder_archive_lock_taken_over',
             category='recorder',
+            provider=FILESYSTEM_PROVIDER,
             folder=self._folder,
             previous_worker=previous.get('worker'),
             previous_instance=previous.get('instance'),
@@ -212,23 +230,8 @@ class ArchiveLock:
             pass
 
     def server_now(self) -> float:
-        """The file server's current time: the mtime of a freshly touched marker file.
-
-        Ages of files in the folder (the lock, work files to sweep) are
-        measured against this, so no host's wall clock is compared with
-        another's.
-        """
-        marker = os.path.join(self._folder, f'{CLOCK_PREFIX}{self._instance}')
-        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, DB_FILE_MODE)
-        os.close(fd)
-        try:
-            os.utime(marker, None)
-            return os.lstat(marker).st_mtime
-        finally:
-            try:
-                os.unlink(marker)
-            except FileNotFoundError:
-                pass
+        """The file server's current time, read in the lock's folder; the takeover age checks use it."""
+        return folder_server_now(self._folder, self._instance)
 
     def _read_body(self) -> dict[str, Any] | None:
         try:

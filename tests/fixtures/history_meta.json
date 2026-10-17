@@ -40,10 +40,11 @@
   "lock": {
     "worker": "search-worker-3",
     "instance": "9c41e0b27fd34a1e",
+    "provider": "filesystem",
     "token": "5f0c1d2e3a4b6978",
     "acquired_at": "2026-10-14T02:00:00.125000Z"
   },
-  "lock_bytes": "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}",
+  "lock_bytes": "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"filesystem\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}",
   "epochs": [
     {
       "ts": 0.0,

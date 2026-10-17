@@ -1,11 +1,16 @@
-"""Registry provider lookup: built-ins plus ``drakkar.registry_providers`` entry points."""
+"""Registry provider lookup: built-ins plus ``drakkar.registry_providers`` entry points.
+
+The lookup itself lives in ``drakkar.providers.lookup``, shared by every
+provider-backed feature, so the tests replace the entry points it reads.
+"""
 
 import pytest
 from structlog.testing import capture_logs
 
-from drakkar.fleet import plugins
 from drakkar.fleet.plugins import ENTRY_POINT_GROUP, UnknownRegistryProviderError, resolve_provider_factory
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
+from drakkar.providers import lookup
+from drakkar.providers.lookup import UnknownProviderError
 
 
 class _EntryPoint:
@@ -36,7 +41,7 @@ def installed(monkeypatch):
             assert group == ENTRY_POINT_GROUP
             return list(entry_points)
 
-        monkeypatch.setattr(plugins, 'entry_points', fake_entry_points)
+        monkeypatch.setattr(lookup, 'entry_points', fake_entry_points)
 
     return install
 
@@ -93,7 +98,7 @@ def test_an_unreadable_entry_point_table_is_logged_and_builtins_still_resolve(mo
     def broken_entry_points(*, group: str):
         raise RuntimeError('metadata table unreadable')
 
-    monkeypatch.setattr(plugins, 'entry_points', broken_entry_points)
+    monkeypatch.setattr(lookup, 'entry_points', broken_entry_points)
 
     with capture_logs() as logs:
         factory = resolve_provider_factory('static')
@@ -111,3 +116,4 @@ def test_an_unknown_name_fails_and_lists_the_known_providers(installed):
     assert str(raised.value) == (
         "fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, static"
     )
+    assert isinstance(raised.value, UnknownProviderError)

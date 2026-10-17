@@ -7,70 +7,30 @@ A package adds a provider by declaring an entry point in the
     [project.entry-points."drakkar.registry_providers"]
     consul = "drakkar_consul:make_registry"
 
-and the operator selects it with ``fleet.registry.provider: consul``. A
-plugin wins over a built-in of the same name, so a package can replace
-``filesystem`` with its own variant. A plugin that fails to load is logged
-and skipped, exactly like a broken sink plugin; the worker then fails at
-startup only if the configured name is the one that is missing.
+and the operator selects it with ``fleet.registry.provider: consul``. The
+rules (a plugin wins over a built-in of the same name, a broken plugin is
+logged and skipped) are those of :mod:`drakkar.providers.lookup`, which every
+provider-backed feature shares.
 """
-
-from importlib.metadata import entry_points
-
-import structlog
 
 from drakkar.fleet.provider import RegistryFactory
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
-
-logger = structlog.get_logger()
+from drakkar.providers import lookup
+from drakkar.providers.lookup import UnknownProviderError
 
 # Public and stable: plugin packages name this group in their metadata.
 ENTRY_POINT_GROUP = 'drakkar.registry_providers'
 
+_CONFIG_PATH = 'fleet.registry.provider'
 
-class UnknownRegistryProviderError(ValueError):
+
+class UnknownRegistryProviderError(UnknownProviderError):
     """``fleet.registry.provider`` names neither a built-in nor an installed plugin."""
 
 
 def discover_plugin_factories() -> dict[str, RegistryFactory]:
-    """Load every installed provider plugin; broken ones are logged and left out."""
-    try:
-        installed = entry_points(group=ENTRY_POINT_GROUP)
-    except Exception as exc:
-        # A damaged install must not stop the worker: the built-ins still work.
-        logger.warning(
-            'fleet_registry_entry_point_scan_failed',
-            category='fleet',
-            group=ENTRY_POINT_GROUP,
-            error=str(exc),
-        )
-        return {}
-
-    factories: dict[str, RegistryFactory] = {}
-    for entry_point in installed:
-        try:
-            factory = entry_point.load()
-        except Exception as exc:
-            logger.warning(
-                'fleet_registry_entry_point_load_failed',
-                category='fleet',
-                group=ENTRY_POINT_GROUP,
-                name=entry_point.name,
-                value=getattr(entry_point, 'value', '<unknown>'),
-                error=str(exc),
-            )
-            continue
-        if not callable(factory):
-            logger.warning(
-                'fleet_registry_entry_point_invalid',
-                category='fleet',
-                group=ENTRY_POINT_GROUP,
-                name=entry_point.name,
-                value=getattr(entry_point, 'value', '<unknown>'),
-                error='the entry point must load a factory (options) -> provider',
-            )
-            continue
-        factories[entry_point.name] = factory
-    return factories
+    """Load every installed registry provider plugin; broken ones are logged and left out."""
+    return lookup.discover_plugin_factories(ENTRY_POINT_GROUP)
 
 
 def resolve_provider_factory(name: str) -> RegistryFactory:
@@ -80,10 +40,7 @@ def resolve_provider_factory(name: str) -> RegistryFactory:
         UnknownRegistryProviderError: no built-in or plugin has that name;
             the message lists the names that exist.
     """
-    factories = {**BUILTIN_PROVIDERS, **discover_plugin_factories()}
-    factory = factories.get(name)
-    if factory is None:
-        raise UnknownRegistryProviderError(
-            f"fleet.registry.provider '{name}' is not known; known providers: {', '.join(sorted(factories))}"
-        )
-    return factory
+    try:
+        return lookup.resolve_factory(ENTRY_POINT_GROUP, BUILTIN_PROVIDERS, name, config_path=_CONFIG_PATH)
+    except UnknownProviderError as exc:
+        raise UnknownRegistryProviderError(str(exc)) from None

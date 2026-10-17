@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import HistoryArchiveConfig, UIConfig
+from drakkar.config import HistoryArchiveConfig, ResilienceConfig, UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -60,7 +60,10 @@ from drakkar.metrics import (
     recorder_seal_failures,
     recorder_unsealed_files,
 )
+from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder.archive import run_archive_pass
+from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER
+from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
 from drakkar.recorder.helpers import (
     BUSY_TIMEOUT_MS,
     detect_worker_ip,
@@ -70,7 +73,7 @@ from drakkar.recorder.helpers import (
     open_reader,
     sanitize_env_value,
 )
-from drakkar.recorder.history import history_dir
+from drakkar.recorder.history import history_dir, sanitize_cluster
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -1298,6 +1301,7 @@ class EventRecorder(EventWriter):
         """
         if not self._archive.enabled or not self._storage_dir:
             return
+        lease = await self._filesystem_lease()
         await asyncio.to_thread(
             functools.partial(
                 run_archive_pass,
@@ -1307,8 +1311,34 @@ class EventRecorder(EventWriter):
                 instance=self._instance,
                 archive=self._archive,
                 merged_retention_days=self._merged_retention_days,
+                lease=lease,
                 stop=self._archive_stop,
             )
+        )
+
+    async def _filesystem_lease(self) -> ElectionLease:
+        """A lease on the ``filesystem`` election (the lock file in the history folder) for one pass."""
+        election = FilesystemElection()
+        await election.start(
+            ElectionContext(
+                worker=self._worker_name,
+                instance=self._instance,
+                cluster=self._cluster_name,
+                shared_dir=self._shared_dir,
+                logger=logger,
+                options={},
+            )
+        )
+        caller = ResilientCaller(
+            ResilienceConfig(), feature='election', provider=FILESYSTEM_PROVIDER, category='recorder'
+        )
+        return ElectionLease(
+            election,
+            caller,
+            asyncio.get_running_loop(),
+            scope=sanitize_cluster(self._cluster_name),
+            lease_seconds=self._archive.lock_stale_seconds,
+            provider_name=FILESYSTEM_PROVIDER,
         )
 
     async def _rotate(self) -> None:

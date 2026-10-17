@@ -159,6 +159,19 @@ async def test_a_transient_error_is_retried_with_doubling_capped_backoff(make_ca
     assert slept == [0.2, 0.3]
 
 
+@pytest.mark.parametrize(
+    ('overrides', 'expected'),
+    [
+        ({}, 3 * 1.0 + 0.2 + 0.3),
+        ({'retries': 0}, 1.0),
+        ({'retries': 3, 'backoff_seconds': 0.0, 'backoff_max_seconds': 0.0}, 4 * 1.0),
+    ],
+    ids=['capped-backoff', 'no-retries', 'no-backoff'],
+)
+def test_the_operation_bound_is_every_attempt_limit_plus_every_backoff(make_caller, overrides, expected):
+    assert make_caller(**overrides).operation_bound_seconds == pytest.approx(expected)
+
+
 async def test_a_non_transient_error_is_not_retried_and_counts_one_failure(make_caller, slept):
     caller = make_caller()
     call = ScriptedCall(ValueError('bad'))

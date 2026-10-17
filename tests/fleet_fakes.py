@@ -1,16 +1,22 @@
-"""In-process registry providers for the fleet tests.
+"""In-process registry and election providers for the fleet tests.
 
 ``MemoryRegistry`` stores cards in a dict shared by every provider built on
 the same :class:`MemoryStore`, with ages on a clock the test moves. It is a
 reference implementation of the provider interface and runs through the
 whole test kit, so the kit itself is tested against a provider that is not
 a built-in.
+
+``MemoryElection`` does the same for the election: leases in a dict shared
+through an :class:`ElectionStore`, expiring on a clock the test moves. It
+runs through the election test kit.
 """
 
+from collections import Counter
 from typing import Any
 
 from drakkar.fleet.card import sanitize_worker_name
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
+from drakkar.recorder.election import ElectionContext
 
 
 class MemoryStore:
@@ -70,3 +76,63 @@ class MemoryRegistry:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+class ElectionStore:
+    """Leases keyed by scope: the holding token, when the lease ends on the store clock, and its length."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.leases: dict[str, tuple[str, float, float]] = {}
+
+    def advance(self, seconds: float) -> None:
+        """Move the store clock forward; every stored lease gets closer to its end."""
+        self.now += seconds
+
+    def holder(self, scope: str) -> str | None:
+        """The token holding ``scope`` now, or ``None`` when it is free or its lease ran out."""
+        lease = self.leases.get(scope)
+        if lease is None or lease[1] <= self.now:
+            return None
+        return lease[0]
+
+
+class MemoryElection:
+    """An election provider whose leases live in an :class:`ElectionStore`; ``calls`` counts every method call."""
+
+    def __init__(self, store: ElectionStore) -> None:
+        self._store = store
+        self.calls: Counter[str] = Counter()
+        self.started_with: ElectionContext | None = None
+
+    async def start(self, ctx: ElectionContext) -> None:
+        self.calls['start'] += 1
+        self.started_with = ctx
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        self.calls['acquire'] += 1
+        holder = self._store.holder(scope)
+        if holder is not None and holder != token:
+            return False
+        self._store.leases[scope] = (token, self._store.now + lease_seconds, lease_seconds)
+        return True
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        self.calls['refresh'] += 1
+        if self._store.holder(scope) != token:
+            return False
+        lease_seconds = self._store.leases[scope][2]
+        self._store.leases[scope] = (token, self._store.now + lease_seconds, lease_seconds)
+        return True
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        self.calls['is_held'] += 1
+        return self._store.holder(scope) == token
+
+    async def release(self, scope: str, token: str) -> None:
+        self.calls['release'] += 1
+        if self._store.holder(scope) == token:
+            del self._store.leases[scope]
+
+    async def stop(self) -> None:
+        self.calls['stop'] += 1

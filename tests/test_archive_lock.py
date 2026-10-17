@@ -10,13 +10,18 @@ import json
 import os
 import re
 import stat
+import threading
 import time
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 from structlog.testing import capture_logs
 
 from drakkar.recorder import archive_lock
 from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
+
+FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'history_meta.json').read_text(encoding='utf-8'))
 
 STALE = 7200.0
 
@@ -47,6 +52,58 @@ def test_acquire_creates_an_owner_only_lock_with_its_body(tmp_path):
     lock.release()
 
 
+def test_the_body_names_the_provider(tmp_path):
+    expected = FIXTURE['lock']
+    lock = _lock(
+        tmp_path,
+        worker=expected['worker'],
+        instance=expected['instance'],
+        token=expected['token'],
+        auto_refresh=False,
+        now=lambda: datetime.fromisoformat(expected['acquired_at']),
+    )
+
+    assert lock.acquire() is True
+
+    raw = (tmp_path / LOCK_NAME).read_bytes()
+    assert json.loads(raw)['provider'] == 'filesystem'
+    assert raw == FIXTURE['lock_bytes'].encode('utf-8')
+    lock.release()
+
+
+def _refresh_threads() -> set[threading.Thread]:
+    return {thread for thread in threading.enumerate() if thread.name == 'drakkar-archive-lock'}
+
+
+def test_auto_refresh_false_starts_no_thread(tmp_path):
+    lock = _lock(tmp_path, auto_refresh=False, refresh_seconds=0.01)
+    before = _refresh_threads()
+
+    assert lock.acquire() is True
+
+    assert _refresh_threads() - before == set()
+    lock.release()
+
+
+def test_a_given_token_is_the_lock_token(tmp_path):
+    lock = _lock(tmp_path, token='0123456789abcdef', auto_refresh=False)
+
+    assert lock.acquire() is True
+
+    assert lock.token == '0123456789abcdef'
+    assert json.loads((tmp_path / LOCK_NAME).read_bytes())['token'] == '0123456789abcdef'
+    lock.release()
+
+
+def test_refresh_answers_whether_the_lock_is_still_ours(tmp_path):
+    lock = _lock(tmp_path, auto_refresh=False)
+    assert lock.acquire()
+
+    assert lock.refresh() is True
+    (tmp_path / LOCK_NAME).unlink()
+    assert lock.refresh() is False
+
+
 def test_a_second_archiver_is_refused_while_the_lock_is_fresh(tmp_path):
     first = _lock(tmp_path)
     second = _lock(tmp_path, worker='w-2', instance='2222222222222222')
@@ -72,18 +129,9 @@ def test_a_stale_lock_is_taken_over_once_and_logged(tmp_path):
     assert not dead.is_ours()
     (event,) = [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
     assert event['previous_worker'] == 'w-dead'
+    assert event['provider'] == 'filesystem'
     assert not [p for p in tmp_path.iterdir() if p.name.startswith('.archive.lock.stale.')]
     taker.release()
-
-
-def test_the_age_check_leaves_no_clock_marker(tmp_path):
-    first = _lock(tmp_path)
-    assert first.acquire()
-
-    _lock(tmp_path, worker='w-2', instance='2222222222222222').acquire()
-
-    assert sorted(p.name for p in tmp_path.iterdir()) == [LOCK_NAME]
-    first.release()
 
 
 def test_release_deletes_only_its_own_lock(tmp_path):

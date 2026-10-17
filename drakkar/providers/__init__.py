@@ -5,4 +5,7 @@ retries and a circuit breaker. It knows nothing about what the provider does.
 
 ``connections`` resolves the named connections to shared services and opens
 each one once, so every feature that names a connection shares its client.
+
+``lookup`` finds the factory of a configured provider name: a feature's
+built-in table plus the plugins installed in its entry-point group.
 """

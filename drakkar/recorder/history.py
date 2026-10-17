@@ -37,6 +37,10 @@ MAX_META_BYTES = 64 * 1024
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 
+# The age-check marker ``.clock.<instance>``: a file touched to read the file
+# server's clock, deleted right after.
+CLOCK_PREFIX = '.clock.'
+
 # Folder and archive-name prefix for an empty or missing cluster name.
 DEFAULT_CLUSTER = 'default'
 _UNSAFE_CLUSTER_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
@@ -91,6 +95,26 @@ def list_sealed(folder: str) -> list[str]:
 def meta_path(db_path: str) -> str:
     """The meta file of a sealed recorder file: ``<name>.db.meta.json``."""
     return db_path + META_SUFFIX
+
+
+def folder_server_now(folder: str, instance: str) -> float:
+    """The file server's current time: the mtime of a freshly touched marker file in ``folder``.
+
+    Ages of files in the folder (the archive lock, work files to sweep) are
+    measured against this, so no host's wall clock is compared with
+    another's. The marker ``.clock.<instance>`` is deleted before returning.
+    """
+    marker = os.path.join(folder, f'{CLOCK_PREFIX}{instance}')
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, DB_FILE_MODE)
+    os.close(fd)
+    try:
+        os.utime(marker, None)
+        return os.lstat(marker).st_mtime
+    finally:
+        try:
+            os.unlink(marker)
+        except FileNotFoundError:
+            pass
 
 
 def serialize_json(obj: dict[str, Any]) -> bytes:

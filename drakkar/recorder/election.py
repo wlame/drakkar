@@ -1,0 +1,289 @@
+"""The archive election: which worker of a cluster builds the archives.
+
+Every worker of a cluster runs the archive pass; an election provider lets one
+of them work at a time. A pass takes a lease on its *scope* (the sanitized
+cluster name) under a 16-hex *token* of its own, refreshes it while it works,
+checks it right before each publish (fencing), and releases it at the end. A
+holder that dies stops refreshing, and once ``lease_seconds`` pass another
+worker may take the scope over.
+
+The provider is asynchronous and runs on the worker's event loop; the archive
+pass is synchronous and runs in a thread. :class:`ElectionLease` joins the
+two: the thread calls it, and it runs every provider call on the loop through
+a :class:`~drakkar.providers.resilience.ResilientCaller`, waiting at most the
+call's bound. A hung provider therefore holds up the archive thread for a
+bounded time and never the loop.
+
+A third-party provider is a class with the six async methods of
+:class:`ElectionProvider` plus a factory ``(options) -> provider`` that its
+package exposes as an entry point of the ``drakkar.election_providers``
+group. ``drakkar.recorder.electiontest`` holds the checks a provider should
+pass.
+"""
+
+import asyncio
+import concurrent.futures
+import math
+import os
+import secrets
+import threading
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from drakkar.dbfiles import DB_DIR_MODE
+from drakkar.providers.connections import Connections
+from drakkar.providers.resilience import CallResult, ResilientCaller
+from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER, ArchiveLock
+from drakkar.recorder.history import history_dir
+
+# Public and stable: plugin packages name this group in their metadata.
+ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
+
+DEFAULT_REFRESH_SECONDS = 60.0
+REFRESH_THREAD_NAME = 'drakkar-election-refresh'
+
+# How much longer than a call's own bound the archive thread waits for it, so
+# the caller's own timeout, not the thread's wait, normally ends a slow call.
+BRIDGE_SLACK_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class ElectionContext:
+    """What a provider learns about the worker that runs it, at ``start``.
+
+    ``shared_dir`` is the worker's shared folder (``shared.dir``); the
+    ``filesystem`` provider keeps its locks in its history folders, others
+    ignore it. ``options`` is the provider's own settings mapping (for a
+    plugin, ``history.archive.election.plugin_options``). ``connections``
+    resolves the worker's named shared connections; it is ``None`` when the
+    election runs outside a worker, as in a test.
+    """
+
+    worker: str
+    instance: str
+    cluster: str
+    shared_dir: str
+    logger: Any
+    options: Mapping[str, Any]
+    connections: Connections | None = None
+
+
+class ElectionProvider(Protocol):
+    """Leases on scopes, one holder per scope. Every method may raise; the caller counts and logs the failure."""
+
+    async def start(self, ctx: ElectionContext) -> None:
+        """Prepare the provider, before any other method. A failed ``start`` is retried, so it must leave nothing behind."""
+        ...
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        """Take ``scope`` for ``token`` for ``lease_seconds``; False while another token holds a live lease on it.
+
+        An acquire by the token that already holds the scope answers True,
+        so a retried acquire whose first answer was lost does not lock the
+        holder out.
+        """
+        ...
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        """Extend the lease of ``token`` on ``scope``; False when ``token`` no longer holds it."""
+        ...
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        """True while ``token`` holds ``scope`` (the fencing check before each publish)."""
+        ...
+
+    async def release(self, scope: str, token: str) -> None:
+        """Free ``scope``, but only while ``token`` holds it."""
+        ...
+
+    async def stop(self) -> None:
+        """Release what ``start`` took. Called at most once, last; leases are released by their holders."""
+        ...
+
+
+ElectionFactory = Callable[[Mapping[str, Any]], ElectionProvider]
+
+
+class FilesystemElection:
+    """The ``filesystem`` provider: the lock file ``history/<scope>/.archive.lock`` in the shared folder.
+
+    One :class:`ArchiveLock` per scope, replaced when a call names another
+    token. Its takeover rule (rename aside, stale age on the file server's
+    clock) decides when a lease ran out. Every file call runs in a thread, so
+    a slow mount never blocks the event loop.
+
+    ``stale_seconds`` replaces the ``lease_seconds`` of :meth:`acquire` as the
+    age past which a lock is taken over.
+    """
+
+    def __init__(self, stale_seconds: float | None = None) -> None:
+        self._stale_seconds = stale_seconds
+        self._ctx: ElectionContext | None = None
+        self._locks: dict[str, ArchiveLock] = {}
+
+    async def start(self, ctx: ElectionContext) -> None:
+        """Remember the worker and its shared folder; nothing is opened."""
+        self._ctx = ctx
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        """Create the lock file, taking over a stale one; True again for the token that holds it."""
+        stale_seconds = lease_seconds if self._stale_seconds is None else self._stale_seconds
+        lock = self._new_lock(scope, token, stale_seconds)
+        self._locks[scope] = lock
+        return await asyncio.to_thread(_acquire_in_folder, lock, self._folder(scope))
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        """Move the lock file's mtime to now while it holds ``token``."""
+        return await asyncio.to_thread(self._lock(scope, token).refresh)
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        """True while the lock file holds ``token``."""
+        return await asyncio.to_thread(self._lock(scope, token).is_ours)
+
+    async def release(self, scope: str, token: str) -> None:
+        """Delete the lock file while it holds ``token``."""
+        await asyncio.to_thread(self._lock(scope, token).release)
+
+    async def stop(self) -> None:
+        """Nothing to release: each archive pass releases its own lease."""
+
+    def _context(self) -> ElectionContext:
+        if self._ctx is None:
+            raise RuntimeError('the filesystem election is not started')
+        return self._ctx
+
+    def _folder(self, scope: str) -> str:
+        return history_dir(self._context().shared_dir, scope)
+
+    def _new_lock(self, scope: str, token: str, stale_seconds: float) -> ArchiveLock:
+        ctx = self._context()
+        return ArchiveLock(
+            self._folder(scope),
+            worker=ctx.worker,
+            instance=ctx.instance,
+            stale_seconds=stale_seconds,
+            token=token,
+            auto_refresh=False,
+        )
+
+    def _lock(self, scope: str, token: str) -> ArchiveLock:
+        """The scope's lock for ``token``; a handle made here never takes anything over, only reads and deletes."""
+        lock = self._locks.get(scope)
+        if lock is None or lock.token != token:
+            lock = self._new_lock(scope, token, math.inf)
+            self._locks[scope] = lock
+        return lock
+
+
+def _acquire_in_folder(lock: ArchiveLock, folder: str) -> bool:
+    """Take ``lock``, creating its history folder first when it is missing."""
+    os.makedirs(folder, mode=DB_DIR_MODE, exist_ok=True)
+    # A timed-out attempt's thread may still have created the file with this
+    # token; the retry must not then lock its own holder out.
+    return lock.acquire() or lock.is_ours()
+
+
+BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {FILESYSTEM_PROVIDER: lambda options: FilesystemElection()}
+
+
+class ElectionLease:
+    """The archive thread's synchronous handle on one lease of one scope.
+
+    Every method blocks the calling thread and must never be called on the
+    event loop's own thread: it runs the provider call on ``loop`` through
+    ``caller`` and waits at most the caller's operation bound plus
+    :data:`BRIDGE_SLACK_SECONDS`. A call that does not finish in that time,
+    or does not succeed (``ok`` False), reads as not held.
+
+    While held, a daemon thread refreshes the lease every ``refresh_seconds``.
+    It ends on :meth:`release`, and on a refresh that does not answer True;
+    from then on :meth:`is_held` answers False without a provider call.
+    """
+
+    def __init__(
+        self,
+        provider: ElectionProvider,
+        caller: ResilientCaller,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        scope: str,
+        lease_seconds: float,
+        provider_name: str,
+        refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
+        token: str | None = None,
+    ) -> None:
+        self.token = token if token is not None else secrets.token_hex(8)
+        self.provider_name = provider_name
+        self._provider = provider
+        self._caller = caller
+        self._loop = loop
+        self._scope = scope
+        self._lease_seconds = lease_seconds
+        self._refresh_seconds = refresh_seconds
+        self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
+        self._stop_refreshing = threading.Event()
+        self._lost = threading.Event()
+        self._refresher: threading.Thread | None = None
+
+    def acquire(self) -> bool:
+        """Take the lease; on success start the refresh thread."""
+        result = self._run('acquire', lambda: self._provider.acquire(self._scope, self.token, self._lease_seconds))
+        if not _answered_true(result):
+            return False
+        self._refresher = threading.Thread(target=self._refresh_loop, name=REFRESH_THREAD_NAME, daemon=True)
+        self._refresher.start()
+        return True
+
+    def is_held(self) -> bool:
+        """True while the provider confirms the lease is still this pass's (the fencing check)."""
+        if self._lost.is_set():
+            return False
+        return _answered_true(self._run('is_held', lambda: self._provider.is_held(self._scope, self.token)))
+
+    def release(self) -> None:
+        """Stop the refresh thread, then release the lease at the provider."""
+        self._stop_refreshing.set()
+        if self._refresher is not None:
+            # A refresh in progress finishes within its own wait.
+            self._refresher.join(self._wait_seconds)
+            self._refresher = None
+        self._run('release', lambda: self._provider.release(self._scope, self.token))
+
+    def _refresh_loop(self) -> None:
+        # Event.wait returns True once release has been called.
+        while not self._stop_refreshing.wait(self._refresh_seconds):
+            if not _answered_true(self._run('refresh', lambda: self._provider.refresh(self._scope, self.token))):
+                self._lost.set()
+                return
+
+    def _run(self, op: str, make_call: Callable[[], Awaitable[Any]]) -> CallResult | None:
+        """Run one operation on the loop; ``None`` when the loop is closed or does not answer in time."""
+        if _running_loop() is self._loop:
+            # Waiting here would stop the loop from ever running the call.
+            raise RuntimeError('an election lease is called from a worker thread, never on its event loop')
+        operation = self._caller.call(op, make_call)
+        try:
+            future = asyncio.run_coroutine_threadsafe(operation, self._loop)
+        except RuntimeError:
+            # The loop is closed (the worker is shutting down).
+            operation.close()
+            return None
+        try:
+            return future.result(timeout=self._wait_seconds)
+        except TimeoutError:
+            future.cancel()
+            return None
+        except concurrent.futures.CancelledError:
+            return None
+
+
+def _answered_true(result: CallResult | None) -> bool:
+    return result is not None and result.ok and result.value is True
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
