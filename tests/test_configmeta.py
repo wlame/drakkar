@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, computed_field
 
 from drakkar.config import DrakkarConfig, KafkaConfig
 from drakkar.configmeta import (
@@ -26,6 +26,7 @@ from drakkar.configmeta import (
     _mkdocs_anchor,
     _to_jsonable,
     build_config_metadata,
+    dump_by_yaml_key,
     walk_model_fields,
 )
 from drakkar.models import MongoOp
@@ -472,3 +473,60 @@ def test_an_aliased_field_gets_its_yaml_key_in_the_path_and_the_env_name():
     entries = walk_model_fields(Section, path_prefix=['app'], group='app', env_prefix='MYAPP_', env_skip_segments=1)
 
     assert [(entry.path, entry.env) for entry in entries] == [('app.schema', 'MYAPP_SCHEMA')]
+
+
+# --- 5. The live dump is keyed like the paths ---------------------------------
+
+
+class _Inner(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    inner_name: str = Field(default='i', alias='inner')
+
+
+class _Keyed(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra='allow')
+
+    plain: str = Field(default='p', serialization_alias='plain_out')
+    both: str = Field(default='b', alias='in_key', serialization_alias='out_key')
+    secret: SecretStr = Field(default=SecretStr('s'), alias='secret_key')
+    nested: _Inner = Field(default_factory=_Inner)
+    by_name: dict[str, _Inner] = Field(default_factory=lambda: {'x': _Inner()})
+    in_list: list[_Inner] = Field(default_factory=lambda: [_Inner(), _Inner()])
+    free_form: dict[str, int] = Field(default_factory=lambda: {'k': 1})
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return 'computed'
+
+
+def test_the_dump_is_keyed_by_the_yaml_key_at_every_level():
+    dumped = dump_by_yaml_key(_Keyed(extra_key=7), mode='json')
+
+    assert dumped == {
+        'plain': 'p',
+        'in_key': 'b',
+        'secret_key': '**********',
+        'nested': {'inner': 'i'},
+        'by_name': {'x': {'inner': 'i'}},
+        'in_list': [{'inner': 'i'}, {'inner': 'i'}],
+        'free_form': {'k': 1},
+        'extra_key': 7,
+        'label': 'computed',
+    }
+
+
+def test_the_python_mode_dump_keeps_a_secret_string_for_the_caller_to_unwrap():
+    dumped = dump_by_yaml_key(_Keyed(), mode='python')
+
+    assert dumped['secret_key'] == SecretStr('s')
+
+
+def test_every_walked_path_of_a_model_is_found_in_its_dump():
+    paths = [entry.path for entry in walk_model_fields(_Keyed, path_prefix=[], group='x')]
+    dumped = dump_by_yaml_key(_Keyed(), mode='json')
+
+    assert paths == ['plain', 'in_key', 'secret_key', 'nested.inner', 'by_name.*.inner', 'in_list', 'free_form']
+    assert {path.split('.')[0] for path in paths} <= set(dumped)
+    assert dumped['by_name']['x']['inner'] == 'i'

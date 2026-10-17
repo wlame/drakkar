@@ -245,3 +245,75 @@ async def test_close_all_closes_each_client_once_and_logs_a_failing_closer(conne
 
 async def test_close_all_with_nothing_open_does_nothing(connections):
     await connections.close_all()
+
+
+async def test_acquire_after_close_all_raises_and_opens_nothing(connections, factory):
+    await connections.close_all()
+
+    with pytest.raises(RuntimeError, match='connections are closed'):
+        await connections.acquire('redis', 'main', factory.open, factory.close)
+
+    assert factory.opened_with == []
+
+
+async def test_an_open_that_finishes_after_close_all_is_closed_at_once(connections, factory):
+    factory.open_gate = asyncio.Event()
+    acquiring = asyncio.create_task(connections.acquire('redis', 'main', factory.open, factory.close))
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    await connections.close_all()
+    factory.open_gate.set()
+    with pytest.raises(RuntimeError, match='connections are closed'):
+        await acquiring
+
+    assert [client.label for client in factory.closed] == ['client-1']
+    await connections.close_all()
+    assert len(factory.closed) == 1
+
+
+async def test_a_waiter_behind_an_open_does_not_open_after_close_all(connections, factory):
+    factory.open_gate = asyncio.Event()
+    first = asyncio.create_task(connections.acquire('redis', 'main', factory.open, factory.close))
+    second = asyncio.create_task(connections.acquire('redis', 'main', factory.open, factory.close))
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    await connections.close_all()
+    factory.open_gate.set()
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert all(isinstance(outcome, RuntimeError) for outcome in outcomes)
+    assert len(factory.opened_with) == 1
+    assert len(factory.closed) == 1
+
+
+async def test_a_failing_closer_of_a_late_open_is_logged_and_the_acquire_still_raises(connections, factory):
+    factory.open_gate = asyncio.Event()
+    factory.close_errors['client-1'] = RuntimeError('boom')
+    acquiring = asyncio.create_task(connections.acquire('redis', 'main', factory.open, factory.close))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    await connections.close_all()
+
+    with capture_logs() as logs:
+        factory.open_gate.set()
+        with pytest.raises(RuntimeError, match='connections are closed'):
+            await acquiring
+
+    failures = [entry for entry in logs if entry['event'] == 'connection_close_failed']
+    assert [(entry['kind'], entry['name'], entry['error']) for entry in failures] == [('redis', 'main', 'boom')]
+
+
+async def test_a_cancelled_close_leaves_the_clients_not_yet_closed_for_a_second_call(connections, factory):
+    redis_main = await connections.acquire('redis', 'main', factory.open, factory.close)
+    postgres_main = await connections.acquire('postgres', 'main', factory.open, factory.close)
+    consul_main = await connections.acquire('consul', 'main', factory.open, factory.close)
+    factory.close_errors[postgres_main.label] = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await connections.close_all()
+    assert factory.closed == [consul_main, postgres_main]
+
+    await connections.close_all()
+    assert factory.closed == [consul_main, postgres_main, redis_main]

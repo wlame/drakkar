@@ -21,6 +21,8 @@ from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
+CLOSED_MESSAGE = 'connections are closed'
+
 
 class UnknownConnectionError(ValueError):
     """A feature named a connection that the ``connections`` config does not declare."""
@@ -35,7 +37,10 @@ class _OpenConnection:
 
 
 class Connections:
-    """The declared connections and the clients opened from them so far."""
+    """The declared connections and the clients opened from them so far.
+
+    After :meth:`close_all` the resolver is closed for good: :meth:`acquire` raises.
+    """
 
     def __init__(self, config: ConnectionsConfig) -> None:
         # Built from the model's fields, so a new service type needs no change here.
@@ -45,6 +50,7 @@ class Connections:
         # A dict keeps the order of opening, which close_all reverses.
         self._open: dict[tuple[str, str], _OpenConnection] = {}
         self._open_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._closed = False
 
     def settings(self, kind: str, name: str) -> BaseModel:
         """The declared settings of ``connections.<kind>.<name>``; raises :class:`UnknownConnectionError` if there are none."""
@@ -66,32 +72,54 @@ class Connections:
         raises is not remembered: the error goes to the caller, and the next call
         opens again. ``closer`` is kept for :meth:`close_all`; the one passed with
         the first successful open is the one used.
+
+        Raises :class:`RuntimeError` once :meth:`close_all` has run. An open that was
+        still in flight then is closed through its ``closer`` as soon as it finishes
+        and its caller gets the same error, so no client is left that nothing closes.
         """
         settings = self.settings(kind, name)
         key = (kind, name)
-        async with self._open_locks.setdefault(key, asyncio.Lock()):
+        lock = self._open_locks.get(key)
+        if lock is None:
+            lock = self._open_locks[key] = asyncio.Lock()
+        async with lock:
+            if self._closed:
+                raise RuntimeError(CLOSED_MESSAGE)
             already_open = self._open.get(key)
             if already_open is not None:
                 return already_open.client
             client = await opener(settings)
-            self._open[key] = _OpenConnection(client=client, closer=closer)
+            opened = _OpenConnection(client=client, closer=closer)
+            if self._closed:
+                await self._close_one(key, opened)
+                raise RuntimeError(CLOSED_MESSAGE)
+            self._open[key] = opened
             return client
 
     async def close_all(self) -> None:
         """Close every open client, the last opened first. A closer that raises is logged, never raised.
 
         Each client is dropped before its closer runs, so a second call closes nothing again.
+        A cancellation during a closer ends the call there: the client being closed is
+        dropped and the ones not yet closed stay open for a second call, so the caller
+        bounds the call with its own deadline.
         """
+        self._closed = True
         while self._open:
-            (kind, name), opened = self._open.popitem()
-            try:
-                await opened.closer(opened.client)
-            except Exception as exc:
-                await logger.awarning(
-                    'connection_close_failed',
-                    category='fleet',
-                    kind=kind,
-                    name=name,
-                    # A driver's error text can carry the connection URL with its password.
-                    error=redact_url(str(exc)) or type(exc).__name__,
-                )
+            key, opened = self._open.popitem()
+            await self._close_one(key, opened)
+
+    async def _close_one(self, key: tuple[str, str], opened: _OpenConnection) -> None:
+        """Run the closer of one client; an error is logged, not raised."""
+        try:
+            await opened.closer(opened.client)
+        except Exception as exc:
+            kind, name = key
+            await logger.awarning(
+                'connection_close_failed',
+                category='fleet',
+                kind=kind,
+                name=name,
+                # A driver's error text can carry the connection URL with its password.
+                error=redact_url(str(exc)) or type(exc).__name__,
+            )

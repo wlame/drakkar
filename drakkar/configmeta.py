@@ -198,6 +198,17 @@ def _is_basemodel(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, BaseModel)
 
 
+def _yaml_key(name: str, info: FieldInfo) -> str:
+    """The key an operator writes for a field: its alias when it has one, else its name.
+
+    A field cannot always carry the YAML key as its name (``schema`` would
+    shadow a ``BaseModel`` attribute), so it takes an alias. The walker's
+    paths and :func:`dump_by_yaml_key` both use this rule, which is what lets
+    a live value be found under the path of its metadata row.
+    """
+    return info.alias or name
+
+
 def _dict_of_model_value_type(annotation: Any) -> type[BaseModel] | None:
     """Return the value-model class if ``annotation`` is ``dict[str, SomeModel]``."""
     if get_origin(annotation) is dict:
@@ -405,10 +416,8 @@ def _walk(
     """
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation
-        # The path is the YAML key, which is the alias when a field has one
-        # (a field cannot be named ``schema``: it would shadow a BaseModel
-        # attribute). The env name is built from the path, so it follows.
-        full_path = [*path_segments, info.alias or name]
+        # The env name is built from the path, so it follows the YAML key.
+        full_path = [*path_segments, _yaml_key(name, info)]
 
         if _is_basemodel(annotation):
             _walk(annotation, full_path, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)
@@ -449,6 +458,42 @@ def walk_model_fields(
     out: list[ConfigFieldMeta] = []
     _walk(model_cls, path_prefix, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)
     return out
+
+
+def dump_by_yaml_key(model: BaseModel, *, mode: Literal['python', 'json']) -> dict[str, Any]:
+    """``model.model_dump(mode=mode)`` with every field keyed by its YAML key, at every level.
+
+    ``model_dump(by_alias=True)`` is not enough: it keys by the *serialization*
+    alias, which can differ from the key the walker puts in a path. Nested
+    models, dicts of models and lists of models are re-keyed too. A field
+    typed as a union is left as dumped.
+    """
+    return _rekey_model(type(model), model.model_dump(mode=mode))
+
+
+def _rekey_model(model_cls: type[BaseModel], dumped: dict[str, Any]) -> dict[str, Any]:
+    """Rename the keys of one dumped model; computed fields and extra keys have no field and keep their name."""
+    rekeyed: dict[str, Any] = {}
+    for name, value in dumped.items():
+        info = model_cls.model_fields.get(name)
+        if info is None:
+            rekeyed[name] = value
+        else:
+            rekeyed[_yaml_key(name, info)] = _rekey_value(info.annotation, value)
+    return rekeyed
+
+
+def _rekey_value(annotation: Any, value: Any) -> Any:
+    """Follow a dumped value down the field's type to the models inside it."""
+    if _is_basemodel(annotation):
+        return _rekey_model(annotation, value)
+    args = get_args(annotation)
+    origin = get_origin(annotation)
+    if origin is dict and len(args) == 2:
+        return {key: _rekey_value(args[1], item) for key, item in value.items()}
+    if origin is list and len(args) == 1:
+        return [_rekey_value(args[0], item) for item in value]
+    return value
 
 
 def build_config_metadata() -> ConfigMetadata:

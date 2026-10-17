@@ -418,6 +418,61 @@ class TestAliasedFields:
         assert entry['is_default'] is False
 
 
+class _KeyedSection(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_name: str = Field(default='s', alias='section')
+
+
+class _KeyedAppConfig(BaseModel):
+    """App config whose fields have a serialization alias, a validation alias, or both."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    only_serialized: str = Field(default='a', serialization_alias='only_serialized_out')
+    both_aliases: str = Field(default='b', alias='in_key', serialization_alias='out_key')
+    nested: _KeyedSection = Field(default_factory=_KeyedSection)
+    by_name: dict[str, _KeyedSection] = Field(default_factory=dict)
+
+
+class TestSerializationAliasFields:
+    async def test_every_row_of_an_app_config_is_present_under_its_yaml_key(self):
+        class KeyedHandler(BaseDrakkarHandler):
+            app_config_model = _KeyedAppConfig
+            app_env_prefix = 'MYAPP_'
+
+            async def arrange(self, messages, pending):
+                return []
+
+        handler = KeyedHandler()
+        handler._app_config = _KeyedAppConfig(
+            only_serialized='x',
+            both_aliases='y',
+            nested=_KeyedSection(section_name='n'),
+            by_name={'one': _KeyedSection(section_name='o')},
+        )
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
+
+        values = {
+            path: entries_by_path(body, path)[0]['value']
+            for path in ('app.only_serialized', 'app.in_key', 'app.nested.section', 'app.by_name.one.section')
+        }
+        assert values == {
+            'app.only_serialized': 'x',
+            'app.in_key': 'y',
+            'app.nested.section': 'n',
+            'app.by_name.one.section': 'o',
+        }
+        assert entries_by_path(body, 'app.in_key')[0]['env'] == 'MYAPP_IN_KEY'
+        assert {entry['path'] for entry in body['groups'][-1]['entries']} == {
+            'app.only_serialized',
+            'app.in_key',
+            'app.nested.section',
+            'app.by_name.*.section',
+            'app.by_name.one.section',
+        }
+
+
 # ---------------------------------------------------------------------------
 # Env passthrough
 # ---------------------------------------------------------------------------
