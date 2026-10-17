@@ -8,4 +8,7 @@ each one once, so every feature that names a connection shares its client.
 
 ``lookup`` finds the factory of a configured provider name: a feature's
 built-in table plus the plugins installed in its entry-point group.
+
+``thread`` runs one provider's blocking file calls on a daemon thread of its
+own, so a hung mount never holds a thread of the shared pool.
 """

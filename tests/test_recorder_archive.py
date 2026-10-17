@@ -587,6 +587,7 @@ async def test_a_fenced_pass_names_the_provider(tmp_path, monkeypatch):
 
     (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
     assert (fenced['provider'], fenced['reason']) == ('filesystem', 'taken_over')
+    assert fenced['detail'] == 'another worker took the archive lock over; this pass published and deleted nothing'
 
 
 async def test_a_pass_whose_lease_cannot_be_confirmed_is_fenced_as_unconfirmed(tmp_path, monkeypatch):
@@ -603,6 +604,9 @@ async def test_a_pass_whose_lease_cannot_be_confirmed_is_fenced_as_unconfirmed(t
 
     (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
     assert fenced['reason'] == 'unconfirmed'
+    assert fenced['detail'] == (
+        'the election provider could not confirm the lease; this pass published and deleted nothing'
+    )
     assert Path(source).exists()
     assert _archives(folder) == []
     assert not (folder / LOCK_NAME).exists()
@@ -966,19 +970,20 @@ async def test_the_default_lease_keeps_its_lock_in_the_clusters_history_folder(t
     rec = _make_recorder(tmp_path)
     seen: dict = {}
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: seen.update(kwargs))
+    lock = Path(history_dir(str(tmp_path / 'shared'), CLUSTER)) / LOCK_NAME
     try:
         await rec._archive_pass()
+        lease = seen['lease']
+
+        # Before the stop: a stopped filesystem election refuses every call.
+        assert await asyncio.to_thread(lease.acquire) is True
+        try:
+            body = json.loads(lock.read_bytes())
+            assert (body['worker'], body['instance'], body['token']) == ('worker-1', INSTANCE, lease.token)
+        finally:
+            await asyncio.to_thread(lease.release)
     finally:
         await rec.stop()
-    lease = seen['lease']
-    lock = Path(history_dir(str(tmp_path / 'shared'), CLUSTER)) / LOCK_NAME
-
-    assert await asyncio.to_thread(lease.acquire) is True
-    try:
-        body = json.loads(lock.read_bytes())
-        assert (body['worker'], body['instance'], body['token']) == ('worker-1', INSTANCE, lease.token)
-    finally:
-        await asyncio.to_thread(lease.release)
     assert not lock.exists()
 
 
@@ -1359,6 +1364,46 @@ async def test_a_pass_that_outlives_the_shutdown_time_is_left_and_the_provider_s
     assert election.calls['stop'] == 0
     assert election_calls('memory-slow-pass', 'stop', 'timeout') == timeouts_before + 1
     # The abandoned pass's thread must not outlive the test.
+    pass_future = rec._archive_pass_future
+    assert pass_future is not None
+    await wait_for(pass_future.done)
+
+
+async def test_the_stop_waits_for_a_pass_in_progress_at_most_the_grace_and_still_stops_the_election(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(core_mod, 'ELECTION_STOP_GRACE_SECONDS', 0.2)
+    election = MemoryElection(ElectionStore())
+    in_window = threading.Event()
+    window_may_end = threading.Event()
+
+    def stuck_pass(shared_dir, **kwargs) -> None:
+        in_window.set()
+        # A window that does not end when stop() asks, like a merge on a slow mount.
+        window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
+    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-stuck-pass')
+    await rec.start()
+    rec._start_archive_pass()
+    await wait_for(in_window.is_set)
+
+    try:
+        started = time.monotonic()
+        with capture_logs() as logs:
+            await rec.stop(timeout=WAIT_FOR_TIMEOUT_SECONDS)
+        stop_seconds = time.monotonic() - started
+    finally:
+        window_may_end.set()
+
+    # The shutdown time was long; the wait took only the grace.
+    assert stop_seconds < WAIT_FOR_TIMEOUT_SECONDS / 2
+    (abandoned,) = [entry for entry in logs if entry['event'] == 'recorder_archive_pass_abandoned']
+    assert abandoned['category'] == 'recorder'
+    assert 0.2 <= abandoned['waited_seconds'] < WAIT_FOR_TIMEOUT_SECONDS / 2
+    assert abandoned['detail'] == 'the pass is fenced at its next check and its lease expires on its own'
+    # The provider stop still made its attempt with the time that was left.
+    assert election.calls['stop'] == 1
     pass_future = rec._archive_pass_future
     assert pass_future is not None
     await wait_for(pass_future.done)

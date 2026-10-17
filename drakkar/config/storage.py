@@ -56,9 +56,10 @@ class ElectionConfig(BaseModel):
         default='filesystem',
         min_length=1,
         description=(
-            'Election provider: filesystem (a lock file in shared.dir), consul, redis or postgres '
-            '(a lock in that service), or the name of a provider plugin. Every worker of a cluster '
-            'must use the same provider.'
+            'Election provider: filesystem (a lock file in shared.dir) or the name of a provider '
+            'plugin. The names consul, redis and postgres are reserved for providers of later '
+            'releases; this release ships none of them. Every worker of a cluster must use the '
+            'same provider.'
         ),
     )
     connection: str = Field(

@@ -1132,7 +1132,7 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder) or the name of a provider plugin (entry-point group `drakkar.election_providers`). `consul`, `redis` and `postgres` are reserved names; see [Fleet registry](fleet.md#providers). Every worker of one cluster must use the same provider. |
 | `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
-| `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. YAML only. |
+| `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
 | `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
 
 ```yaml
@@ -1174,7 +1174,7 @@ provider plugin are on [Fleet registry](fleet.md).
 | `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of the `consul` provider, which this release does not ship; no provider reads it, and a plugin does not (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
 | `consul.service_name` | `str` | `drakkar` | non-empty | Setting of the `consul` provider, which this release does not ship; no provider reads it. The Consul service that lists the workers, used only with `mode: catalog`. |
 | `redis`, `postgres` | block | `{}` | | Reserved blocks of the `redis` and `postgres` providers, which this release does not ship. They have no keys. |
-| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. YAML only. |
+| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_FLEET__REGISTRY__PLUGIN_OPTIONS` itself fails the load. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
 

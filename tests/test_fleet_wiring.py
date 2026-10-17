@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import stat
+import threading
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -21,6 +22,7 @@ from drakkar.models import SourceMessage
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import UnknownProviderError
+from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext
 from drakkar.sources import kafka as kafka_source_module
 from tests.archive_helpers import CLUSTER, due_start, election_calls, history_folder, make_sealed_db
@@ -603,6 +605,38 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     assert election.calls == ['start']
     # No lease, no archive: the due window's source is still in the history folder.
     assert Path(due_source).exists()
+
+
+async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp_path, monkeypatch):
+    """The stop waits for an archive pass only for its grace, so the card withdraw after it still gets time."""
+    monkeypatch.setattr(core_mod, 'ELECTION_STOP_GRACE_SECONDS', 0.2)
+    provider = _RecordingRegistry()
+    _install_plugins(monkeypatch, registry={'recording': lambda _options: provider})
+    app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': {'provider': 'recording'}})
+    in_window = threading.Event()
+    window_may_end = threading.Event()
+
+    def stuck_pass(shared_dir, **kwargs) -> None:
+        in_window.set()
+        # A window that does not end when the stop asks, like a merge on a slow mount.
+        window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
+    run = asyncio.create_task(app._lifecycle._async_run())
+    try:
+        await wait_for(lambda: app.is_ready)
+        assert app._recorder is not None
+        app._recorder._start_archive_pass()
+        await wait_for(in_window.is_set)
+        # The drain budget (1 s) is longer than the grace and shorter than the stuck window.
+        with capture_logs() as logs:
+            app._lifecycle._handle_signal()
+            await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+    finally:
+        window_may_end.set()
+
+    assert [entry['event'] for entry in logs].count('recorder_archive_pass_abandoned') == 1
+    assert provider.withdrawn
 
 
 async def _wait_until(condition) -> None:

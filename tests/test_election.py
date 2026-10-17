@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ from drakkar.recorder.election import (
     FilesystemElection,
 )
 from drakkar.recorder.history import history_dir
-from tests.conftest import wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
 SCOPE = 'search-fleet'
@@ -216,6 +217,104 @@ def test_the_builtin_filesystem_factory_makes_a_filesystem_election():
     assert isinstance(BUILTIN_ELECTIONS['filesystem']({}), FilesystemElection)
 
 
+async def test_the_filesystem_election_runs_its_file_calls_on_its_own_thread(tmp_path, monkeypatch):
+    provider = await _started_filesystem(tmp_path, worker='search worker/3')
+    seen: list[str] = []
+    real_acquire = election_mod._acquire_in_folder
+
+    def recording_acquire(lock, folder) -> bool:
+        seen.append(threading.current_thread().name)
+        return real_acquire(lock, folder)
+
+    monkeypatch.setattr(election_mod, '_acquire_in_folder', recording_acquire)
+    try:
+        assert await provider.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS)
+        await provider.release(SCOPE, electiontest.TOKEN_A)
+    finally:
+        await provider.stop()
+
+    assert seen == ['drakkar-election-files-search_worker_3']
+
+
+async def test_a_hung_lock_file_call_holds_only_the_elections_own_thread(tmp_path, monkeypatch):
+    # Every other to_thread user of the worker (sinks, the HTTP source, handler
+    # code) shares the default executor; one thread there is the worst case.
+    one_thread = ThreadPoolExecutor(max_workers=1)
+    asyncio.get_running_loop().set_default_executor(one_thread)
+    provider = await _started_filesystem(tmp_path)
+    mount_answers = threading.Event()
+    real_open = os.open
+
+    def hanging_open(path, flags, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == LOCK_NAME:
+            mount_answers.wait(WAIT_FOR_TIMEOUT_SECONDS)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'open', hanging_open)
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(provider.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS), timeout=0.1)
+
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: 'answered'), timeout=1.0) == 'answered'
+    finally:
+        mount_answers.set()
+        await provider.stop()
+        one_thread.shutdown(wait=True)
+
+
+async def test_the_filesystem_election_keeps_one_thread_across_starts_and_ends_it_at_stop(tmp_path):
+    # A stop before any start has nothing to end.
+    await FilesystemElection().stop()
+
+    def file_threads() -> set[threading.Thread]:
+        return {thread for thread in threading.enumerate() if thread.name == 'drakkar-election-files-w-1'}
+
+    before = file_threads()
+    provider = await _started_filesystem(tmp_path)
+    # A start retried after a lost answer must not leave a second thread behind.
+    await provider.start(electiontest.make_context('w-1', shared_dir=str(tmp_path)))
+    (thread,) = file_threads() - before
+
+    await provider.stop()
+
+    await wait_for(lambda: not thread.is_alive())
+
+
+async def test_the_filesystem_election_refuses_calls_after_stop(tmp_path):
+    provider = await _started_filesystem(tmp_path)
+    await provider.stop()
+
+    with pytest.raises(RuntimeError, match='stopped'):
+        await provider.is_held(SCOPE, electiontest.TOKEN_A)
+
+
+async def test_a_lock_read_error_on_refresh_reads_as_unconfirmed(tmp_path, monkeypatch):
+    provider = await _started_filesystem(tmp_path)
+    lease = _lease(provider, _caller('filesystem-io-error', retries=0), refresh_seconds=0.01)
+    before = _refresh_threads()
+    assert await asyncio.to_thread(lease.acquire)
+    (refresher,) = _refresh_threads() - before
+    real_open = os.open
+    lock_path = os.path.join(history_dir(str(tmp_path), SCOPE), LOCK_NAME)
+
+    def open_with_io_error(path, flags, *args, **kwargs):
+        if os.fspath(path) == lock_path:
+            raise OSError(5, 'Input/output error', lock_path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'open', open_with_io_error)
+    try:
+        await wait_for(lambda: not refresher.is_alive())
+
+        assert lease.loss_reason == 'unconfirmed'
+    finally:
+        monkeypatch.undo()
+        await asyncio.to_thread(lease.release)
+        await provider.stop()
+    # Unconfirmed means it may still be held: the release deleted the lock.
+    assert not Path(lock_path).exists()
+
+
 # --- the lease ---
 
 
@@ -255,6 +354,34 @@ async def test_a_lease_refused_by_the_provider_starts_no_refresh_thread():
 
     assert _refresh_threads() - before == set()
     # A clear "no" takes nothing, so there is nothing to give back.
+    assert provider.calls['release'] == 0
+    assert store.holder(SCOPE) == 'f' * 16
+
+
+async def test_releasing_a_refused_lease_sends_no_release():
+    store = ElectionStore()
+    store.leases[SCOPE] = ('f' * 16, store.now + LEASE_SECONDS, LEASE_SECONDS)
+    provider = MemoryElection(store)
+    lease = _lease(provider, _caller('memory'))
+    assert await asyncio.to_thread(lease.acquire) is False
+
+    await asyncio.to_thread(lease.release)
+
+    assert provider.calls['release'] == 0
+    assert store.holder(SCOPE) == 'f' * 16
+
+
+async def test_releasing_a_lease_taken_over_by_another_holder_sends_no_release():
+    store = ElectionStore()
+    provider = MemoryElection(store)
+    lease = _lease(provider, _caller('memory'))
+    assert await asyncio.to_thread(lease.acquire)
+    store.leases[SCOPE] = ('f' * 16, store.now + LEASE_SECONDS, LEASE_SECONDS)
+    assert await asyncio.to_thread(lease.is_held) is False
+    assert lease.loss_reason == 'taken_over'
+
+    await asyncio.to_thread(lease.release)
+
     assert provider.calls['release'] == 0
     assert store.holder(SCOPE) == 'f' * 16
 
@@ -347,6 +474,8 @@ async def test_a_lease_whose_refresh_fails_is_lost_as_unconfirmed():
         assert lease.loss_reason == 'unconfirmed'
     finally:
         await asyncio.to_thread(lease.release)
+    # An unconfirmed lease may still be held, so it is given back.
+    assert provider.calls['release'] == 1
 
 
 async def test_a_lease_the_provider_no_longer_confirms_is_lost_as_taken_over():

@@ -92,8 +92,9 @@ class FleetRegistryConfig(BaseModel):
         min_length=1,
         description=(
             'Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), '
-            'consul, redis or postgres (cards in that service), none (no peers), or the name of a '
-            'provider plugin. Needs ui.enabled.'
+            'none (no peers), or the name of a provider plugin. The names consul, redis and postgres '
+            'are reserved for providers of later releases; this release ships none of them. '
+            'Needs ui.enabled.'
         ),
     )
     connection: str = Field(

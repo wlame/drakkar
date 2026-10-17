@@ -54,6 +54,7 @@ from drakkar.dbfiles import secure_db_file
 from drakkar.merge import merge_databases
 from drakkar.metrics import recorder_archive_bytes, recorder_archive_failures, recorder_archive_files
 from drakkar.recorder.archive_lock import STALE_PREFIX
+from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED
 from drakkar.recorder.history import (
     CLOCK_PREFIX,
     DEFAULT_CLUSTER,  # noqa: F401  (re-exported: archive names fall back to it)
@@ -116,6 +117,14 @@ class ArchiveCandidate:
     path: str
     start_ts: float
     window_start: float
+
+
+# The ``detail`` of ``recorder_archive_fenced`` for each ``reason``; the texts
+# are part of the log contract, shared by every implementation.
+FENCED_DETAILS: dict[str, str] = {
+    LOSS_TAKEN_OVER: 'another worker took the archive lock over; this pass published and deleted nothing',
+    LOSS_UNCONFIRMED: 'the election provider could not confirm the lease; this pass published and deleted nothing',
+}
 
 
 class ArchiveFencedError(RuntimeError):
@@ -337,7 +346,8 @@ def run_archive_pass(
             reason=exc.reason,
             cluster=own_cluster,
             name=exc.name,
-            detail='another worker took the archive lock over; this pass published and deleted nothing',
+            # A lease reads as not held only with a reason; the claim that says less is the fallback.
+            detail=FENCED_DETAILS.get(exc.reason or '', FENCED_DETAILS[LOSS_UNCONFIRMED]),
         )
     finally:
         # Also ends the refresh thread; the provider frees only our own lease.
@@ -549,7 +559,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
 
 
 def _fence(lease: ElectionLease, name: str) -> None:
-    """Stop the pass when the election no longer confirms our lease (another worker took it over)."""
+    """Stop the pass when the election no longer confirms our lease (taken over, or not confirmed)."""
     if not lease.is_held():
         raise ArchiveFencedError(name, lease.loss_reason)
 

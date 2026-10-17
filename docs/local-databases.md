@@ -684,7 +684,12 @@ history:
   is counted `not_started`) and the next pass tries the start again. While
   the circuit breaker is open, a pass skips the start until the cooldown has
   passed. At a clean stop the recorder lets the pass in progress end its
-  window, then stops the provider once, inside the shutdown time left.
+  window, then stops the provider once, inside the shutdown time left. It
+  waits for that pass at most 2 seconds of the time left, so the registry
+  withdraw and the connections close that come after it keep their share. A
+  pass that is still running then is left to end on its own and logged as
+  `recorder_archive_pass_abandoned` (fields `waited_seconds` and `detail`):
+  it is fenced at its next check, and its lease runs out.
 - **Bounded calls.** The archive pass runs in a thread of its own, and
   every provider call runs on the event loop under the
   [`resilience`](fleet.md#resilience) block of
@@ -710,8 +715,13 @@ deletes nothing and counts in `drakkar_recorder_archive_failures_total`.
 | `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. |
 | `unconfirmed` | The provider could not confirm the lease: the call failed or timed out, or the breaker was open. The lease may still be held. |
 
-Both reasons stop the pass the same way. The text in the `detail` field of
-the line always speaks of a takeover; read `reason` for the cause.
+Both reasons stop the pass the same way. The `detail` field of the line
+follows the reason:
+
+| `reason` | `detail` |
+|---|---|
+| `taken_over` | `another worker took the archive lock over; this pass published and deleted nothing` |
+| `unconfirmed` | `the election provider could not confirm the lease; this pass published and deleted nothing` |
 
 #### Writing an election provider
 

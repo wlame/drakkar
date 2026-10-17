@@ -20,6 +20,8 @@ All methods are synchronous: callers on the event loop run them in a thread.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import os
 import secrets
@@ -106,12 +108,21 @@ class ArchiveLock:
         return True
 
     def is_ours(self) -> bool:
-        """True while the lock file still holds this pass's token (the fencing check)."""
+        """True while the lock file still holds this pass's token (the fencing check).
+
+        False when the lock is gone or holds another token. A read that fails
+        for another reason (an I/O error on the mount) raises ``OSError``: it
+        says nothing about who holds the lock, so it must not read as a
+        takeover.
+        """
         body = self._read_body()
         return body is not None and body.get('token') == self._token
 
     def refresh(self) -> bool:
-        """Move the lock's mtime to now, while the lock is still ours; False once it is not."""
+        """Move the lock's mtime to now, while the lock is still ours; False once it is not.
+
+        Raises ``OSError`` when the lock cannot be read (see :meth:`is_ours`).
+        """
         if not self.is_ours():
             return False
         try:
@@ -139,7 +150,10 @@ class ArchiveLock:
     def _refresh_loop(self) -> None:
         # Event.wait returns True once stop_refreshing is called.
         while not self._stop_refreshing.wait(self._refresh_seconds):
-            self.refresh()
+            # Best effort, like the mtime move: the fencing check before each
+            # publish decides whether the pass may go on.
+            with contextlib.suppress(OSError):
+                self.refresh()
 
     def _create(self) -> bool:
         body = serialize_json(
@@ -175,7 +189,11 @@ class ArchiveLock:
         age = self.server_now() - info.st_mtime
         if age <= self._stale_seconds:
             return False
-        previous = self._read_body() or {}
+        try:
+            previous = self._read_body() or {}
+        except OSError:
+            # The body only names the previous holder in the log line below.
+            previous = {}
         aside = os.path.join(self._folder, STALE_PREFIX + self._token)
         try:
             _rename_aside(self._path, aside)
@@ -234,16 +252,24 @@ class ArchiveLock:
         return folder_server_now(self._folder, self._instance)
 
     def _read_body(self) -> dict[str, Any] | None:
+        """The lock body; ``None`` when there is no lock this protocol wrote. Other read errors raise ``OSError``.
+
+        ``None`` for a missing file, a symlink (the open refuses to follow
+        it), a file that is not regular, and a body that is not a JSON
+        object.
+        """
         try:
             fd = os.open(self._path, _READ_FLAGS)
-        except OSError:
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return None
+            raise
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return None
             raw = os.read(fd, MAX_LOCK_BYTES)
-        except OSError:
-            return None
         finally:
             os.close(fd)
         try:

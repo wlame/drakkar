@@ -147,6 +147,15 @@ FLUSH_BYTES_HIGH_WATER = 64 * 1024 * 1024
 # high-water mark above; everything else in a row is bounded and small.
 _HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
 
+# The longest the stop waits for an archive pass in progress before it stops
+# the election provider. The pass only has to finish its current provider
+# call to end; a pass that takes longer is abandoned, so the registry withdraw
+# and the connections close that follow the recorder keep their share of the
+# shutdown time.
+ELECTION_STOP_GRACE_SECONDS = 2.0
+# The ``detail`` of ``recorder_archive_pass_abandoned``; the text is part of the log contract.
+ARCHIVE_PASS_ABANDONED_DETAIL = 'the pass is fenced at its next check and its lease expires on its own'
+
 
 def _event_weight(event: dict) -> int:
     """Approximate payload size of one buffered event, in characters.
@@ -857,7 +866,9 @@ class EventRecorder(EventWriter):
         network mount cannot hold the stop past the deadline. A file that
         is not moved stays in ``storage.dir`` and the next start with the
         same worker name seals it. A started election provider is stopped
-        last, with one attempt inside the time left.
+        last, with one attempt inside the time left, after the archive pass in
+        progress; the wait for that pass takes at most
+        :data:`ELECTION_STOP_GRACE_SECONDS` of the time left.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         self._running = False
@@ -1448,20 +1459,30 @@ class EventRecorder(EventWriter):
         await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=_time_left(deadline))
 
     async def _wait_for_archive_pass(self, deadline: float | None) -> None:
-        """Wait, inside ``deadline``, for an archive pass still running in its thread.
+        """Wait for an archive pass still running in its thread, at most :data:`ELECTION_STOP_GRACE_SECONDS`.
 
         ``stop()`` has asked the pass to end after its current window; until
-        then it still calls the election provider. A pass that outlives the
-        deadline is left to finish on its own, and its lease runs out.
+        then it still calls the election provider. The wait also ends with
+        ``deadline``. A pass that outlives the wait is left to finish on its
+        own and logged as ``recorder_archive_pass_abandoned``: it is fenced at
+        its next check, and its lease runs out.
         """
         running = self._archive_pass_future
         if running is None or running.done():
             return
+        time_left = _time_left(deadline)
+        grace = ELECTION_STOP_GRACE_SECONDS if time_left is None else min(time_left, ELECTION_STOP_GRACE_SECONDS)
         waiting = asyncio.wrap_future(running)
-        done, _ = await asyncio.wait({waiting}, timeout=_time_left(deadline))
+        started = time.monotonic()
+        done, _ = await asyncio.wait({waiting}, timeout=grace)
         if not done:
-            # The deadline came first: the pass is left to finish on its own.
             waiting.cancel()
+            await logger.awarning(
+                'recorder_archive_pass_abandoned',
+                category='recorder',
+                waited_seconds=round(time.monotonic() - started, 3),
+                detail=ARCHIVE_PASS_ABANDONED_DETAIL,
+            )
             return
         if waiting.cancelled() or (exc := waiting.exception()) is None:
             return

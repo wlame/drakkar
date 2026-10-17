@@ -32,8 +32,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from drakkar.dbfiles import DB_DIR_MODE
+from drakkar.fleet.card import sanitize_worker_name
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
+from drakkar.providers.thread import ProviderThread
 from drakkar.recorder.archive_lock import DEFAULT_REFRESH_SECONDS, FILESYSTEM_PROVIDER, ArchiveLock
 from drakkar.recorder.history import history_dir
 
@@ -44,6 +46,8 @@ ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
 ELECTION_FEATURE = 'election'
 
 REFRESH_THREAD_NAME = 'drakkar-election-refresh'
+# The filesystem provider's file-call thread: this prefix plus the sanitized worker name.
+ELECTION_THREAD_PREFIX = 'drakkar-election-files-'
 
 # Why a lease is no longer held (``ElectionLease.loss_reason``): the provider
 # answered that another token holds the scope, or no call could confirm it.
@@ -117,8 +121,13 @@ class FilesystemElection:
 
     One :class:`ArchiveLock` per scope, replaced when a call names another
     token. Its takeover rule (rename aside, stale age on the file server's
-    clock) decides when a lease ran out. Every file call runs in a thread, so
-    a slow mount never blocks the event loop.
+    clock) decides when a lease ran out.
+
+    Every file call runs on the provider's own :class:`ProviderThread`, one at
+    a time, never on the shared ``asyncio.to_thread`` pool: a call stuck on a
+    hung mount holds only that thread, and the next call times out while it
+    waits for it. The event loop and every other ``to_thread`` user (sinks,
+    sources, handler code) keep their threads.
 
     ``stale_seconds`` replaces the ``lease_seconds`` of :meth:`acquire` as the
     age past which a lock is taken over.
@@ -128,32 +137,52 @@ class FilesystemElection:
         self._stale_seconds = stale_seconds
         self._ctx: ElectionContext | None = None
         self._locks: dict[str, ArchiveLock] = {}
+        self._runner: ProviderThread | None = None
+        self._stopped = False
 
     async def start(self, ctx: ElectionContext) -> None:
-        """Remember the worker and its shared folder; nothing is opened."""
+        """Remember the worker and its shared folder, and start the provider thread; no file is opened."""
         self._ctx = ctx
+        if self._runner is None:
+            self._runner = ProviderThread(name=f'{ELECTION_THREAD_PREFIX}{sanitize_worker_name(ctx.worker)}')
 
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
         """Create the lock file, taking over a stale one; True again for the token that holds it."""
         stale_seconds = lease_seconds if self._stale_seconds is None else self._stale_seconds
         lock = self._new_lock(scope, token, stale_seconds)
         self._locks[scope] = lock
-        return await asyncio.to_thread(_acquire_in_folder, lock, self._folder(scope))
+        folder = self._folder(scope)
+        return await self._run(lambda: _acquire_in_folder(lock, folder))
 
     async def refresh(self, scope: str, token: str) -> bool:
         """Move the lock file's mtime to now while it holds ``token``."""
-        return await asyncio.to_thread(self._lock(scope, token).refresh)
+        return await self._run(self._lock(scope, token).refresh)
 
     async def is_held(self, scope: str, token: str) -> bool:
         """True while the lock file holds ``token``."""
-        return await asyncio.to_thread(self._lock(scope, token).is_ours)
+        return await self._run(self._lock(scope, token).is_ours)
 
     async def release(self, scope: str, token: str) -> None:
         """Delete the lock file while it holds ``token``."""
-        await asyncio.to_thread(self._lock(scope, token).release)
+        await self._run(self._lock(scope, token).release)
 
     async def stop(self) -> None:
-        """Nothing to release: each archive pass releases its own lease."""
+        """Let the provider thread exit; no lease is released, each archive pass releases its own.
+
+        A call after the stop raises at once, so a pass that outlived the
+        stop is fenced at its next check instead of waiting for a thread
+        that is gone.
+        """
+        self._stopped = True
+        if self._runner is not None:
+            self._runner.stop()
+
+    async def _run(self, call: Callable[[], Any]) -> Any:
+        """Run one blocking file call on the provider thread."""
+        self._context()
+        if self._stopped or self._runner is None:
+            raise RuntimeError('the filesystem election is stopped')
+        return await self._runner.run(call)
 
     def _context(self) -> ElectionContext:
         if self._ctx is None:
@@ -231,6 +260,8 @@ class ElectionLease:
         self._refresh_seconds = refresh_seconds
         self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
         self._acquired_once = False
+        # True once the provider answered True to the acquire.
+        self._held = False
         self._stop_refreshing = threading.Event()
         self._lost = threading.Event()
         self._loss_reason: str | None = None
@@ -257,6 +288,7 @@ class ElectionLease:
             return False
         if result.value is not True:
             return False
+        self._held = True
         self._refresher = threading.Thread(target=self._refresh_loop, name=REFRESH_THREAD_NAME, daemon=True)
         self._refresher.start()
         return True
@@ -272,12 +304,21 @@ class ElectionLease:
         return False
 
     def release(self) -> None:
-        """Stop the refresh thread, then release the lease at the provider."""
+        """Stop the refresh thread, then release the lease at the provider while it may still be this pass's.
+
+        No release is sent when the provider answered clearly that the lease
+        is not this pass's: the acquire was refused, or a refresh or a check
+        found another holder (:data:`LOSS_TAKEN_OVER`). An unclear acquire
+        has already released at once. A lease lost as
+        :data:`LOSS_UNCONFIRMED` may still be held, so it is released.
+        """
         self._stop_refreshing.set()
         if self._refresher is not None:
             # A refresh in progress finishes within its own wait.
             self._refresher.join(self._wait_seconds)
             self._refresher = None
+        if not self._held or self._loss_reason == LOSS_TAKEN_OVER:
+            return
         self._run('release', lambda: self._provider.release(self.scope, self.token))
 
     def _refresh_loop(self) -> None:

@@ -625,6 +625,24 @@ async def test_the_failure_log_describes_errors_that_have_no_text_of_their_own(m
     assert [entry['error'] for entry in logs if entry['event'] == 'provider_call_failed'] == [expected_text]
 
 
+@pytest.mark.parametrize(
+    'failure',
+    [
+        ValueError('could not connect to postgresql://u:p@h/db?password=x'),
+        ExceptionGroup('group', [ValueError('could not connect to postgresql://u:p@h/db?password=x')]),
+    ],
+    ids=['plain', 'exception-group'],
+)
+async def test_the_failure_log_removes_credentials_from_the_error_text(make_caller, failure):
+    with capture_logs() as logs:
+        await make_caller(retries=0).call(OP, ScriptedCall(failure))
+
+    (error,) = [entry['error'] for entry in logs if entry['event'] == 'provider_call_failed']
+    assert error == 'could not connect to postgresql://***:***@h/db?password=***'
+    assert 'u:p@' not in error
+    assert 'password=x' not in error
+
+
 async def test_failures_log_once_a_minute_per_operation_with_the_suppressed_count(make_caller, clock, provider):
     caller = make_caller(breaker=BreakerConfig(failure_threshold=100))
     failing = ScriptedCall(ValueError('bad'))

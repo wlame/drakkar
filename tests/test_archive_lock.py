@@ -189,6 +189,86 @@ def test_an_unreadable_lock_body_is_not_ours(tmp_path, body):
     lock.release()
 
 
+def test_a_lock_planted_as_a_symlink_is_not_ours(tmp_path):
+    lock = _lock(tmp_path, auto_refresh=False)
+    assert lock.acquire()
+    target = tmp_path / 'elsewhere.lock'
+    (tmp_path / LOCK_NAME).rename(target)
+    (tmp_path / LOCK_NAME).symlink_to(target)
+
+    assert lock.is_ours() is False
+    assert lock.refresh() is False
+
+
+def _failing_lock_reads(monkeypatch, folder: Path) -> None:
+    """Make every read-only open of the lock file in ``folder`` fail with an I/O error, like a mount hiccup."""
+    real_open = os.open
+    lock_path = str(folder / LOCK_NAME)
+
+    def open_with_io_error(path, flags, *args, **kwargs):
+        if os.fspath(path) == lock_path and not flags & os.O_CREAT:
+            raise OSError(5, 'Input/output error', lock_path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'open', open_with_io_error)
+
+
+def test_refresh_raises_when_the_lock_cannot_be_read(tmp_path, monkeypatch):
+    # An I/O error says nothing about who holds the lock: it must not read
+    # as another holder (False), so the caller sees a failed call instead.
+    lock = _lock(tmp_path, auto_refresh=False)
+    assert lock.acquire()
+    _failing_lock_reads(monkeypatch, tmp_path)
+
+    with pytest.raises(OSError, match='Input/output error'):
+        lock.refresh()
+    with pytest.raises(OSError, match='Input/output error'):
+        lock.is_ours()
+
+
+def test_refresh_answers_false_for_another_token(tmp_path):
+    holder = _lock(tmp_path, token='aaaaaaaaaaaaaaaa', auto_refresh=False)
+    other = _lock(tmp_path, token='bbbbbbbbbbbbbbbb', auto_refresh=False)
+    assert holder.acquire()
+
+    assert other.refresh() is False
+    assert holder.refresh() is True
+    holder.release()
+
+
+def test_the_auto_refresh_thread_survives_a_lock_read_error(tmp_path, monkeypatch):
+    lock = _lock(tmp_path, refresh_seconds=0.01)
+    before = _refresh_threads()
+    assert lock.acquire()
+    (refresher,) = _refresh_threads() - before
+    _failing_lock_reads(monkeypatch, tmp_path)
+    # Several refresh rounds hit the error.
+    time.sleep(0.1)
+
+    assert refresher.is_alive()
+    monkeypatch.undo()
+    lock.release()
+    refresher.join(timeout=2)
+    assert not refresher.is_alive()
+
+
+def test_a_stale_lock_whose_body_cannot_be_read_is_still_taken_over(tmp_path, monkeypatch):
+    dead = _lock(tmp_path, worker='w-dead', instance='dddddddddddddddd', auto_refresh=False)
+    assert dead.acquire()
+    _age_lock(tmp_path, STALE + 60)
+    taker = _lock(tmp_path, worker='w-2', instance='2222222222222222', auto_refresh=False)
+    _failing_lock_reads(monkeypatch, tmp_path)
+
+    with capture_logs() as logs:
+        assert taker.acquire() is True
+
+    (event,) = [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
+    assert event['previous_worker'] is None
+    monkeypatch.undo()
+    assert taker.is_ours()
+    taker.release()
+
+
 # --- contested takeovers ---
 #
 # Each test steps in between the taker's age check and its rename (or its

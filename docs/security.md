@@ -193,7 +193,10 @@ declare and to any provider that uses them.
 - **Set them from the environment.** For example a Kubernetes Secret that
   becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`
   or `DK_CONNECTIONS__REDIS__MAIN__URL`. The YAML file is often a ConfigMap
-  or sits in version control, and neither is a place for a password.
+  or sits in version control, and neither is a place for a password. A
+  plugin's own secret in `plugin_options` comes from the environment one key
+  per variable, for example `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__TOKEN`
+  (the plugin gets the key `token` and the value as a string).
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
   to `key_prefix`, a Redis user limited to its `key_prefix`, a Postgres role
@@ -202,15 +205,17 @@ declare and to any provider that uses them.
   and declare a separate named entry for each feature that needs different
   rights.
 - **Operator views mask them.** The config reference shows a mask in place
-  of `token`, `url` and `dsn`. For `plugin_options` it masks every string
-  value at every depth: by key name (`password`, `token`, ...), and a secret-looking
-  parent key such as `credentials` or `auth` masks everything below it; a URL
-  loses its embedded credentials.
-- **Keep them out of error text.** A provider's error text goes into the log
-  line `provider_call_failed` as it is. A provider plugin must not put a
-  connection string or a token in the message of an exception. The worker
-  removes credentials from the error text of a connection that fails to
-  close (`connection_close_failed`).
+  of `token`, `url` and `dsn`. For `plugin_options` it masks at every depth
+  by key name (`password`, `token`, ...): every value under such a key is
+  masked, a string, a number or a boolean alike, and a secret-looking parent
+  key such as `credentials` or `auth` masks everything below it. Any other
+  string that is a URL loses its embedded credentials.
+- **Error text is redacted.** The worker removes credentials from a
+  provider's error text before it logs it (`provider_call_failed`,
+  `connections_close_failed`, `connection_close_failed`): `user:pass@` in a
+  URL and the value of a secret-looking query parameter (`?password=...`)
+  become `***`. Only URL-shaped credentials are found this way, so a provider
+  plugin must still not put a bare token in the message of an exception.
 
 ## Even inside the private network
 

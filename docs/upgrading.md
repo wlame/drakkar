@@ -322,7 +322,7 @@ are new. See [Fleet registry](fleet.md#metrics).
   connection name is `main`. A registry or election plugin with one of these
   names now fails the load, for example with
   `fleet.registry.connection 'main' is not defined under connections.consul`,
-  unless that entry exists. Declare `connections.<name>.<connection>` (for
+  unless that entry exists. Declare `connections.<provider>.<connection>` (for
   `consul` or `redis`, an empty entry such as `connections: {consul: {main: {}}}`
   is enough; `postgres` needs a `dsn`), or rename the plugin.
 - `start` can be called again after a failure (registry and election), so it

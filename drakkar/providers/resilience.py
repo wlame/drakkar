@@ -27,6 +27,7 @@ import structlog
 
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig
 from drakkar.metrics import provider_breaker_open, provider_call_duration, provider_calls
+from drakkar.utils import redact_url
 
 OUTCOME_OK = 'ok'
 OUTCOME_ERROR = 'error'
@@ -93,12 +94,18 @@ class RateLimitedLog:
 
 
 def describe_error(exc: BaseException) -> str:
-    """A log-friendly error text; a timeout's own text is empty, a task group's names only itself."""
+    """A log-friendly error text without credentials; a timeout's own text is empty, a group's names only itself.
+
+    A provider's error text often quotes the address it failed to reach, and
+    a DSN or URL may carry a password, so the text goes through
+    :func:`~drakkar.utils.redact_url` (``user:pass@`` and secret-looking
+    query parameters are masked).
+    """
     if isinstance(exc, BaseExceptionGroup):
         return '; '.join(describe_error(inner) for inner in exc.exceptions)
     if isinstance(exc, TimeoutError):
         return 'timed out'
-    return str(exc) or type(exc).__name__
+    return redact_url(str(exc)) or type(exc).__name__
 
 
 class _Admission(enum.Enum):

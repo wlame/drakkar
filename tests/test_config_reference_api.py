@@ -308,6 +308,34 @@ class TestMasking:
         for secret in ('nested-secret', 'below-a-secret-key', 'list-secret', 'bare-secret', 'key-secret'):
             assert secret not in text
 
+    async def test_numbers_and_booleans_under_a_secret_looking_plugin_option_key_are_masked(self):
+        """A secret written as a YAML number or boolean is still a secret; ``None`` and other keys keep their value."""
+        options = {
+            'token': 123456,
+            'enabled': True,
+            'auth': {'count': 0, 'strict': False},
+            'password': None,
+            'port': 6379,
+            'api_keys': [1234, 5678],
+        }
+        config = DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            fleet={'registry': {'plugin_options': options}},
+            history={'archive': {'election': {'plugin_options': options}}},
+        )
+        body = await get_config_reference(config)
+
+        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+            assert entries_by_path(body, path)[0]['value'] == {
+                'token': '***',
+                'enabled': True,
+                'auth': {'count': '***', 'strict': '***'},
+                'password': None,
+                'port': 6379,
+                'api_keys': ['***', '***'],
+            }
+        assert '123456' not in body_as_text(body)
+
     async def test_configured_kafka_sink_password_is_masked(self):
         from pydantic import SecretStr
 

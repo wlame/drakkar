@@ -55,6 +55,11 @@ if TYPE_CHECKING:
 # with its own placeholder, so this normalizes both cases to one contract).
 SECRET_MASK = '•' * 6  # '••••••'
 
+# The mask of a number or boolean under a secret-looking ``plugin_options``
+# key: the same text :func:`sanitize_env_value` gives a secret string there,
+# so every masked option leaf reads alike.
+OPTION_SECRET_MASK = '***'
+
 
 class ConfigReferenceEntry(BaseModel):
     """One config field, joined against the live worker's actual value."""
@@ -176,10 +181,12 @@ def _mask_plugin_options(values: Any) -> Any:
 
     A plugin validates its own options, so they may nest mappings and lists
     (``{'auth': {'password': ...}}``), and a token or a URL with a password
-    may sit under any key. Every string is passed to
-    :func:`sanitize_env_value` with the key that decides for it: the nearest
-    secret-looking key above it, so everything below ``credentials:`` is
-    masked, else the nearest key (that of its own entry or of its list).
+    may sit under any key. Every leaf is masked by the key that decides for
+    it: the nearest secret-looking key above it, so everything below
+    ``credentials:`` is masked, else the nearest key (that of its own entry
+    or of its list). A string goes to :func:`sanitize_env_value`; a number or
+    a boolean under a secret-looking key is masked too (``token: 123456`` is
+    still a secret); ``None`` stays ``None``.
     """
     if not isinstance(values, dict):
         return values
@@ -187,7 +194,7 @@ def _mask_plugin_options(values: Any) -> Any:
 
 
 def _mask_option_value(key: str, value: Any) -> Any:
-    """Mask one option value; ``key`` is the key that decides for the strings in it."""
+    """Mask one option value; ``key`` is the key that decides for the leaves in it."""
     if isinstance(value, str):
         return sanitize_env_value(key, value)
     if isinstance(value, dict):
@@ -196,7 +203,9 @@ def _mask_option_value(key: str, value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_mask_option_value(key, item) for item in value]
-    return value
+    if value is None or not is_secret_name(key):
+        return value
+    return OPTION_SECRET_MASK
 
 
 # Fields whose secret lives BELOW the leaf, so the metadata's ``secret``

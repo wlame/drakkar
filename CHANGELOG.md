@@ -26,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer prints the input of the section it rejected. The archive lock body
   has a new key, `provider`. A registry or election plugin named `consul`,
   `redis` or `postgres` now fails the config load unless the connection it
-  uses is declared under `connections.<name>`. Declare the connection, or
-  rename the plugin. See `docs/upgrading.md`.
+  uses is declared as `connections.<provider>.<connection>`. Declare the
+  connection, or rename the plugin. See `docs/upgrading.md`.
 
 ### Added
 
@@ -53,9 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `drakkar_provider_breaker_open`. New log events: `provider_started`,
   `provider_call_failed`, `provider_breaker_opened`,
   `provider_breaker_closed`, `fleet_registry_iteration_failed`,
-  `connections_close_timed_out`, `connections_close_failed` and
-  `connection_close_failed`. `recorder_archive_fenced` has the new fields
-  `provider` and `reason`. See `docs/fleet.md`, `docs/local-databases.md`
+  `connections_close_timed_out`, `connections_close_failed`,
+  `connection_close_failed` and `recorder_archive_pass_abandoned`.
+  `recorder_archive_fenced` has the new fields `provider` and `reason`, and
+  its `detail` text follows the reason. The `filesystem` election runs its
+  file calls on a thread of its own, not on the shared `to_thread` pool. At
+  stop, the recorder waits at most 2 seconds for an archive pass in
+  progress, so the card withdraw and the connections close keep their time.
+  A lock that cannot be read counts as `unconfirmed`, not as `taken_over`. A
+  pass whose lease another worker took over sends no `release`. The worker
+  removes credentials from a provider's error text before it logs it. The
+  config reference also masks numbers and booleans under a secret-looking
+  key of `plugin_options`. See `docs/fleet.md`, `docs/local-databases.md`
   and `docs/configuration.md`.
 
 ## [2.4.0] - 2026-10-15

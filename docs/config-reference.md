@@ -698,7 +698,8 @@ history:
         breaker:
           failure_threshold: 5     # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
           cooldown_seconds: 30.0   # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
-      plugin_options: {}           # passed unchanged to a provider plugin; values masked in the config reference. YAML only.
+      plugin_options: {}           # passed unchanged to a provider plugin; values masked in the config reference.
+                                   # env: one key per variable, DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>
   merged_retention_days: 32        # delete UI merge results older than this; 0 = never. env: DK_HISTORY__MERGED_RETENTION_DAYS
 ```
 
@@ -745,7 +746,8 @@ fleet:
       service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
     redis: {}                      # reserved for the redis provider (none shipped); no keys
     postgres: {}                   # reserved for the postgres provider (none shipped); no keys
-    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference. YAML only.
+    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
+                                   # env: one key per variable, DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS

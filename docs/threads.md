@@ -12,14 +12,20 @@ page is the map.
 |---|---|---|---|---|
 | **Event loop** (main thread) | all `async` framework + handler code: arrange, hooks, sinks, recorder, scheduling | exactly 1 — not configurable | held while running Python | no — cooperative |
 | **Executor subprocesses** | the tasks themselves (your binary) | `executor.max_executors` | separate processes: none | **yes** — real parallelism |
-| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call: handler blocking I/O, plus the framework's archive passes and database-stats scans | `io.max_threads` (0 = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
+| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call: handler blocking I/O, plus the framework's database-stats scans | `io.max_threads` (0 = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
 | **Offload pool** | `handler.offload(...)` — CPU-bound Python in hooks | `offload.max_threads` (0 = auto: `ceil(max_executors / 4)`, min 2) | held for pure Python; released only by numpy-style extensions | mostly no (GIL) |
 
 Plus service threads you never size: the runtime-health sampler (it must
 observe the loop from outside — [Runtime Health](runtime-health.md)), the
 debug UI server and webapp server (each on its own thread with its own
 loop, reaching main-loop state only through bounded dispatches), the
-Prometheus exporter, and one worker thread per aiosqlite connection.
+Prometheus exporter, and one worker thread per aiosqlite connection. The
+archive pass runs on a thread of its own (`drakkar-archive`), and the
+`filesystem` registry and election providers each run their file calls on a
+daemon thread of their own (`drakkar-fleet-<worker>`,
+`drakkar-election-files-<worker>`), one call at a time. None of them takes a
+thread from the blocking-I/O pool, so a hung network mount under
+`shared.dir` holds those threads only.
 
 ## Choosing the mechanism
 

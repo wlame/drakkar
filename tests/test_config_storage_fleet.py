@@ -5,8 +5,10 @@ import re
 import pytest
 
 from drakkar.config import (
+    CONNECTION_PROVIDERS,
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     CacheExchangeConfig,
+    ConnectionsConfig,
     ConsulRegistryConfig,
     DrakkarConfig,
     FleetRegistryConfig,
@@ -275,6 +277,11 @@ def test_election_plugin_provider_ignores_the_connection_name():
     config = _config(history={'archive': {'election': {'provider': 'my-plugin', 'connection': 'not-declared'}}})
 
     assert config.history.archive.election.connection == 'not-declared'
+
+
+def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():
+    # The cross-check reads connections.<provider> by the provider's name.
+    assert set(CONNECTION_PROVIDERS) == set(ConnectionsConfig.model_fields)
 
 
 def test_registry_names_a_connection_of_its_own_kind_only():
