@@ -279,6 +279,35 @@ class TestMasking:
             assert entries_by_path(body, path)[0]['value'] == env_value
         assert ':pw@' not in body_as_text(body)
 
+    async def test_nested_plugin_options_are_masked_at_every_depth(self):
+        """Plugin options are free-form, so a secret can sit in a nested mapping or in a list of mappings."""
+        options = {
+            'pool': {'password': 'nested-secret', 'user': 'svc', 'size': 4},
+            'credentials': {'value': 'below-a-secret-key'},
+            'servers': [{'url': 'redis://:list-secret@h1/0'}, 'redis://:bare-secret@h2/0'],
+            'api_keys': ['key-secret'],
+            'port': 6379,
+        }
+        config = DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            fleet={'registry': {'plugin_options': options}},
+            history={'archive': {'election': {'plugin_options': options}}},
+        )
+        body = await get_config_reference(config)
+
+        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+            assert entries_by_path(body, path)[0]['value'] == {
+                'pool': {'password': '***', 'user': 'svc', 'size': 4},
+                # Everything below a secret-looking key is masked, whatever its own key.
+                'credentials': {'value': '***'},
+                'servers': [{'url': 'redis://***:***@h1/0'}, 'redis://***:***@h2/0'],
+                'api_keys': ['***'],
+                'port': 6379,
+            }
+        text = body_as_text(body)
+        for secret in ('nested-secret', 'below-a-secret-key', 'list-secret', 'bare-secret', 'key-secret'):
+            assert secret not in text
+
     async def test_configured_kafka_sink_password_is_masked(self):
         from pydantic import SecretStr
 

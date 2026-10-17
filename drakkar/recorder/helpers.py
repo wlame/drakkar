@@ -180,6 +180,12 @@ _SECRET_ENV_PATTERNS = (
 )
 
 
+def is_secret_name(name: str) -> bool:
+    """True when ``name`` matches a common-secret pattern, case-insensitively."""
+    name_upper = name.upper()
+    return any(fnmatch.fnmatchcase(name_upper, p.upper()) for p in _SECRET_ENV_PATTERNS)
+
+
 def sanitize_env_value(name: str, value: str) -> str:
     """Return a safe-to-store version of an env var value.
 
@@ -187,8 +193,7 @@ def sanitize_env_value(name: str, value: str) -> str:
     other values, strips embedded credentials from URL-shaped strings
     (handles DSNs, HTTP-with-basic-auth, Kafka SASL_SSL, etc.).
     """
-    name_upper = name.upper()
-    if any(fnmatch.fnmatchcase(name_upper, p.upper()) for p in _SECRET_ENV_PATTERNS):
+    if is_secret_name(name):
         return '***' if value else ''
     return redact_url(value)
 

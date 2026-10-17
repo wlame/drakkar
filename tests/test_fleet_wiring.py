@@ -17,17 +17,16 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
-from drakkar.metrics import provider_calls
 from drakkar.models import SourceMessage
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import UnknownProviderError
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext
 from drakkar.sources import kafka as kafka_source_module
+from tests.archive_helpers import CLUSTER, due_start, election_calls, history_folder, make_sealed_db
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 from tests.test_lifecycle_sources import StubSource
-from tests.test_recorder_archive import CLUSTER, _due_start, _folder, _make_db
 from tests.test_sources_validation import KafkaOnlyHandler
 
 
@@ -561,28 +560,26 @@ def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[
     return app, consumers
 
 
-def _election_calls(provider: str, op: str, outcome: str) -> float:
-    return provider_calls.labels(feature='election', provider=provider, op=op, outcome=outcome)._value.get()
-
-
 MESSAGE_COUNT = 20
-# Messages that need no task commit in milliseconds; this is far above that
-# and far below any election time limit a worker could be waiting out.
-COMMIT_BUDGET_SECONDS = 5.0
+# The time limit of the hanging election ``start``. The commit budget below
+# is shorter, so a pipeline that waited for the start to time out would miss it.
+ELECTION_START_LIMIT_SECONDS = 3.0
+# Messages that need no task commit in milliseconds; this is far above that.
+COMMIT_BUDGET_SECONDS = 1.5
 
 
 async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypatch):
     """Core isolation: messages are processed and committed, and shutdown ends, while every election call hangs."""
     election = _BlockedElection()
     _install_plugins(monkeypatch, election={'blocked-election': lambda _options: election})
-    resilience = {'timeout_seconds': 0.5, 'retries': 0}
+    resilience = {'timeout_seconds': ELECTION_START_LIMIT_SECONDS, 'retries': 0}
     app, consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
         history={'archive': {'election': {'provider': 'blocked-election', 'resilience': resilience}}},
     )
-    due_source = _make_db(_folder(tmp_path), 'w-2', _due_start(time.time()))
-    timeouts_before = _election_calls('blocked-election', 'start', 'timeout')
+    due_source = make_sealed_db(history_folder(tmp_path), 'w-2', due_start(time.time()))
+    timeouts_before = election_calls('blocked-election', 'start', 'timeout')
 
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
@@ -597,7 +594,9 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
         ]
     )
     await wait_for(lambda: consumer.committed.get(0) == MESSAGE_COUNT, timeout=COMMIT_BUDGET_SECONDS)
-    await wait_for(lambda: _election_calls('blocked-election', 'start', 'timeout') >= timeouts_before + 1)
+    # The commits landed while the election start still hung.
+    assert election_calls('blocked-election', 'start', 'timeout') == timeouts_before
+    await wait_for(lambda: election_calls('blocked-election', 'start', 'timeout') >= timeouts_before + 1)
     app._lifecycle._handle_signal()
     await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 

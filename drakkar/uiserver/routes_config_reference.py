@@ -41,7 +41,7 @@ from drakkar.configmeta import (
     dump_by_yaml_key,
     walk_model_fields,
 )
-from drakkar.recorder.helpers import sanitize_env_value
+from drakkar.recorder.helpers import is_secret_name, sanitize_env_value
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -171,6 +171,34 @@ def _mask_env_dict(values: Any) -> Any:
     }
 
 
+def _mask_plugin_options(values: Any) -> Any:
+    """Mask a provider plugin's ``plugin_options`` at every depth, like ``executor.env``.
+
+    A plugin validates its own options, so they may nest mappings and lists
+    (``{'auth': {'password': ...}}``), and a token or a URL with a password
+    may sit under any key. Every string is passed to
+    :func:`sanitize_env_value` with the key that decides for it: the nearest
+    secret-looking key above it, so everything below ``credentials:`` is
+    masked, else the nearest key (that of its own entry or of its list).
+    """
+    if not isinstance(values, dict):
+        return values
+    return {name: _mask_option_value(str(name), value) for name, value in values.items()}
+
+
+def _mask_option_value(key: str, value: Any) -> Any:
+    """Mask one option value; ``key`` is the key that decides for the strings in it."""
+    if isinstance(value, str):
+        return sanitize_env_value(key, value)
+    if isinstance(value, dict):
+        return {
+            name: _mask_option_value(key if is_secret_name(key) else str(name), item) for name, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_option_value(key, item) for item in value]
+    return value
+
+
 # Fields whose secret lives BELOW the leaf, so the metadata's ``secret``
 # flag cannot express it and a dedicated masker has to. Keyed by the
 # metadata path, wildcards included — matched against ``field_meta.path``,
@@ -181,10 +209,8 @@ _DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
     'kafka.client_config': _mask_env_dict,
     'dlq.client_config': _mask_env_dict,
     'sinks.kafka.*.client_config': _mask_env_dict,
-    # A provider plugin validates its own options, so a token or a URL with
-    # a password may sit under any key.
-    'fleet.registry.plugin_options': _mask_env_dict,
-    'history.archive.election.plugin_options': _mask_env_dict,
+    'fleet.registry.plugin_options': _mask_plugin_options,
+    'history.archive.election.plugin_options': _mask_plugin_options,
 }
 
 

@@ -41,7 +41,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -159,6 +159,11 @@ def _event_weight(event: dict) -> int:
     return sum(len(value) for field in _HEAVY_EVENT_FIELDS if isinstance(value := event.get(field), str))
 
 
+def _time_left(deadline: float | None) -> float | None:
+    """Seconds until the monotonic ``deadline``, never below 0; ``None`` without one."""
+    return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+
 def _last_breath_flush_all() -> None:
     """The single atexit hook: salvage every still-live recorder's buffer."""
     for rec in list(_LIVE_RECORDERS):
@@ -252,6 +257,8 @@ class EventRecorder(EventWriter):
         self._connections = connections
         # True once a provider ``start`` succeeded; only then is it stopped.
         self._election_started = False
+        # Set by the first stop(): the provider is stopped, or counted as not started, once.
+        self._election_stop_done = False
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -308,6 +315,8 @@ class EventRecorder(EventWriter):
         # it waits on election calls and log writes that run there, and could
         # otherwise hold the last free thread they need.
         self._archive_executor: ThreadPoolExecutor | None = None
+        # The pass the executor runs or last ran, for stop() to wait on.
+        self._archive_pass_future: Future[None] | None = None
         # How long a leftover must be untouched before it is sealed; an
         # attribute so tests can shorten it.
         self._leftover_floor_seconds = LEFTOVER_FLOOR_SECONDS
@@ -869,8 +878,9 @@ class EventRecorder(EventWriter):
                 except asyncio.CancelledError:
                     pass
         if self._archive_executor is not None:
-            # Not waited for, like the cancelled job above: a pass in progress
-            # ends after its window, and its lease still needs this loop.
+            # Not waited for here: a pass in progress ends after its window and
+            # its lease still needs this loop. The election stop at the end
+            # waits for it, inside the shutdown time left.
             self._archive_executor.shutdown(wait=False)
             self._archive_executor = None
         # Drop any pending deferred start events and disarm the shared sweep.
@@ -916,7 +926,7 @@ class EventRecorder(EventWriter):
             if meta is not None:
                 await self._publish_until(path, meta, deadline)
         # Last: an archive pass still running in its thread releases its
-        # lease through the provider, so the provider stays up as long as it can.
+        # lease through the provider, so the provider stops after that pass.
         await self._stop_election(deadline)
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
@@ -1370,8 +1380,9 @@ class EventRecorder(EventWriter):
         )
         if self._archive_executor is None:
             self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
-        await asyncio.get_running_loop().run_in_executor(
-            self._archive_executor,
+        # Kept so stop() can wait for a pass that runs on in its thread after
+        # this job is cancelled, before it stops the provider the pass calls.
+        self._archive_pass_future = self._archive_executor.submit(
             functools.partial(
                 run_archive_pass,
                 self._shared_dir,
@@ -1381,8 +1392,9 @@ class EventRecorder(EventWriter):
                 merged_retention_days=self._merged_retention_days,
                 lease=lease,
                 stop=self._archive_stop,
-            ),
+            )
         )
+        await asyncio.wrap_future(self._archive_pass_future)
 
     def _archives(self) -> bool:
         """Whether archive passes run at all: archiving is on and there is a storage folder."""
@@ -1420,19 +1432,48 @@ class EventRecorder(EventWriter):
         return True
 
     async def _stop_election(self, deadline: float | None) -> None:
-        """Stop a started election provider with one attempt, inside ``deadline``; else count the stop as skipped.
+        """Stop the election provider once, after the archive pass in progress, with one attempt inside ``deadline``.
 
-        Without archive passes the election is not in use, and nothing is counted.
+        A provider that never started is counted as a skipped stop. Without
+        archive passes the election is not in use, and nothing is counted;
+        a second call counts nothing either.
         """
-        if not self._archives():
+        if self._election_stop_done or not self._archives():
             return
+        self._election_stop_done = True
+        await self._wait_for_archive_pass(deadline)
         if not self._election_started:
             self._election_caller.skip('stop', OUTCOME_NOT_STARTED)
             return
-        # Cleared first, so a second stop() never stops the provider again.
-        self._election_started = False
-        remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
-        await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=remaining)
+        await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=_time_left(deadline))
+
+    async def _wait_for_archive_pass(self, deadline: float | None) -> None:
+        """Wait, inside ``deadline``, for an archive pass still running in its thread.
+
+        ``stop()`` has asked the pass to end after its current window; until
+        then it still calls the election provider. A pass that outlives the
+        deadline is left to finish on its own, and its lease runs out.
+        """
+        running = self._archive_pass_future
+        if running is None or running.done():
+            return
+        waiting = asyncio.wrap_future(running)
+        done, _ = await asyncio.wait({waiting}, timeout=_time_left(deadline))
+        if not done:
+            # The deadline came first: the pass is left to finish on its own.
+            waiting.cancel()
+            return
+        if waiting.cancelled() or (exc := waiting.exception()) is None:
+            return
+        # The archive job was cancelled, so nothing else reports how the pass ended.
+        await logger.aerror(
+            'recorder_background_job_failed',
+            category='recorder',
+            job='archive',
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
     async def _rotate(self) -> None:
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.
@@ -1463,6 +1504,8 @@ class EventRecorder(EventWriter):
         # post-rotation file world-readable.
         secure_db_file(new_path)
         new_db = await open_connection(new_path)
+        new_reader: aiosqlite.Connection | None = None
+        swapped = False
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
             # Re-applied per connection: unlike journal_mode, synchronous is
@@ -1474,28 +1517,32 @@ class EventRecorder(EventWriter):
             # so a concurrent debug-UI read arriving mid-swap never lands on
             # a half-torn-down reader.
             new_reader = await open_reader(new_path)
+            # Atomic swap: once these lines execute, any concurrent flush or UI
+            # read sees the new, schema-ready connections. The flush lock makes
+            # a flush that already took the old writer finish before the swap,
+            # so nothing writes the old file after it is sealed.
+            async with self._flush_lock:
+                old_db = self._db
+                old_reader = self._reader_db
+                old_path = self._db_path
+                self._db = new_db
+                self._reader_db = new_reader
+                self._db_path = new_path
+                # Taken in the same step as the swap: the leftover scan must
+                # never pick the old file up while it is sealed here.
+                self._in_hand.add(old_path)
+                swapped = True
         except BaseException:
-            # Any failure, a cancelled rotation (stop()) included, closes the
-            # new writer: its thread is not a daemon and would hold the
+            # Any failure before the swap, a cancelled rotation (stop())
+            # included, also while it waits for the flush lock, closes the new
+            # connections: their threads are not daemons and would hold the
             # process open. self._db is still the previous, fully initialized
             # writer, so the worker stays usable.
-            await close_quietly(new_db)
+            if not swapped:
+                for connection in (new_reader, new_db):
+                    if connection is not None:
+                        await close_quietly(connection)
             raise
-
-        # Atomic swap: once these lines execute, any concurrent flush or UI
-        # read sees the new, schema-ready connections. The flush lock makes
-        # a flush that already took the old writer finish before the swap,
-        # so nothing writes the old file after it is sealed.
-        async with self._flush_lock:
-            old_db = self._db
-            old_reader = self._reader_db
-            old_path = self._db_path
-            self._db = new_db
-            self._reader_db = new_reader
-            self._db_path = new_path
-            # Taken in the same step as the swap: the leftover scan must
-            # never pick the old file up while it is sealed here.
-            self._in_hand.add(old_path)
         try:
             if self._drakkar_config:
                 await self.write_config(self._drakkar_config)

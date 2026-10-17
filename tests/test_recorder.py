@@ -11,6 +11,8 @@ import time
 import warnings
 import weakref
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -36,6 +38,7 @@ from drakkar.recorder import (
     format_dt,
     make_db_path,
 )
+from drakkar.recorder import core as core_mod
 from drakkar.recorder.fanout import WSSubscriber
 from drakkar.recorder.helpers import open_connection, open_reader
 from drakkar.recorder.writer import _byte_len, _capped_stdin
@@ -1069,18 +1072,28 @@ def _open_connection_threads() -> int:
     return sum('_connection_worker_thread' in thread.name for thread in threading.enumerate())
 
 
-def _hold_next_rotation(rec, monkeypatch, moment: str) -> tuple[threading.Event, threading.Event]:
-    """Make the next rotation wait at ``moment``; returns (set once it waits, set to let an open finish).
+@dataclass
+class _HeldRotation:
+    """A rotation made to wait: ``waiting`` is set once it waits; ``release`` lets it go on, if it can."""
+
+    waiting: threading.Event
+    release: Callable[[], None]
+
+
+def _hold_next_rotation(rec, monkeypatch, moment: str) -> _HeldRotation:
+    """Make the next rotation wait at ``moment``.
 
     At the two ``*_connect`` moments the open itself waits in its thread, as
-    on a slow disk, and finishes once released; at the others the rotation
-    waits on the loop until it is cancelled.
+    on a slow disk, and finishes once released. At ``swap_lock`` the flush
+    lock is taken right before the swap, as by a UI query's flush, and
+    released by ``release``. At the others the rotation waits on the loop
+    until it is cancelled.
     """
     waiting = threading.Event()
-    release = threading.Event()
     if moment in ('writer_connect', 'reader_connect'):
         real_connect = sqlite3.connect
         held = threading.Event()
+        let_go = threading.Event()
 
         def held_connect(database, *args, **kwargs):
             # The reader opens through a read-only URI, the writer through a plain path.
@@ -1088,11 +1101,25 @@ def _hold_next_rotation(rec, monkeypatch, moment: str) -> tuple[threading.Event,
             if not held.is_set() and is_reader == (moment == 'reader_connect'):
                 held.set()
                 waiting.set()
-                release.wait(WAIT_FOR_TIMEOUT_SECONDS)
+                let_go.wait(WAIT_FOR_TIMEOUT_SECONDS)
             return real_connect(database, *args, **kwargs)
 
         monkeypatch.setattr(sqlite3, 'connect', held_connect)
-        return waiting, release
+        return _HeldRotation(waiting, let_go.set)
+
+    if moment == 'swap_lock':
+        real_open_reader = core_mod.open_reader
+
+        async def open_reader_then_take_the_lock(path):
+            reader = await real_open_reader(path)
+            await rec._flush_lock.acquire()
+            # Set in the same loop step in which the rotation reaches the
+            # swap and waits for the lock.
+            waiting.set()
+            return reader
+
+        monkeypatch.setattr(core_mod, 'open_reader', open_reader_then_take_the_lock)
+        return _HeldRotation(waiting, rec._flush_lock.release)
 
     async def wait_until_cancelled(*args, **kwargs) -> None:
         waiting.set()
@@ -1104,23 +1131,23 @@ def _hold_next_rotation(rec, monkeypatch, moment: str) -> tuple[threading.Event,
         # After the swap: the config is written to the new file first.
         monkeypatch.setattr(rec, '_drakkar_config', MagicMock())
         monkeypatch.setattr(rec, 'write_config', wait_until_cancelled)
-    return waiting, release
+    return _HeldRotation(waiting, lambda: None)
 
 
-@pytest.mark.parametrize('moment', ['writer_connect', 'writer_setup', 'reader_connect', 'after_swap'])
+@pytest.mark.parametrize('moment', ['writer_connect', 'writer_setup', 'reader_connect', 'swap_lock', 'after_swap'])
 async def test_a_cancelled_rotation_leaves_no_connection_open(tmp_path, monkeypatch, unique_db_paths, moment):
     """``stop()`` cancels a rotation wherever it is; no connection, and so no thread, may outlive it."""
     rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
     await rec.start()
     open_before = _open_connection_threads()
-    waiting, release = _hold_next_rotation(rec, monkeypatch, moment)
+    held = _hold_next_rotation(rec, monkeypatch, moment)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always', ResourceWarning)
         rotation = asyncio.create_task(rec._rotate())
-        await wait_for(waiting.is_set)
+        await wait_for(held.waiting.is_set)
         rotation.cancel()
-        release.set()
+        held.release()
         with pytest.raises(asyncio.CancelledError):
             await rotation
         await wait_for(lambda: _open_connection_threads() == open_before, timeout=5)

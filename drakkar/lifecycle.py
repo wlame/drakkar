@@ -511,9 +511,12 @@ class AppLifecycle:
     def _archive_election(self) -> dict[str, Any]:
         """The recorder's election arguments: the configured provider, its caller, options and the connections.
 
-        Resolved only while archiving is on, since only the archive pass
-        uses the election; an unknown provider name then fails startup.
-        With archiving off the recorder keeps its default, which never runs.
+        Resolved whenever archiving is on, so an unknown provider name fails
+        startup. That includes memory-only mode (no ``storage.dir``), where no
+        archive pass runs: a typo in the name fails at once instead of on the
+        day a folder is added. With archiving off, or with the UI off (no
+        recorder), any name is accepted, as the registry accepts any name
+        while it is off. The recorder then keeps its default, which never runs.
         """
         app = self._app
         archive = app._config.history.archive
