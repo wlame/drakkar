@@ -347,17 +347,20 @@ async def test_a_deadline_shortens_a_later_attempt_and_skips_a_backoff_that_woul
     assert result.attempts == 2
 
 
-async def test_a_spent_deadline_starts_no_call_and_counts_no_failure(make_caller, provider):
+async def test_a_spent_deadline_makes_no_attempt_and_is_not_a_failure(make_caller, provider):
     caller = make_caller()
     call = ScriptedCall('v')
 
-    for _ in range(3):
-        result = await caller.call(OP, call, deadline_seconds=0.0)
+    with capture_logs() as logs:
+        for _ in range(3):
+            result = await caller.call(OP, call, deadline_seconds=0.0)
 
-    assert result == CallResult(ok=False, value=None, outcome='not_started', attempts=0)
+    assert result == CallResult(ok=False, value=None, outcome='timeout', attempts=0)
     assert call.calls == 0
     assert not caller.breaker_open
-    assert _calls(provider, OP, 'not_started') == 3.0
+    assert logs == []
+    assert _calls(provider, OP, 'timeout') == 3.0
+    assert _sample('drakkar_provider_call_duration_seconds_count', provider, op=OP) == 0.0
 
 
 # --- metrics ---
@@ -372,6 +375,19 @@ async def test_an_operation_counts_one_call_and_one_duration_however_many_attemp
     assert _sample('drakkar_provider_call_duration_seconds_count', provider, op=OP) == 1.0
     # The fake clock only moves during the two backoffs (0.2 s + 0.3 s): the duration spans the retries.
     assert _sample('drakkar_provider_call_duration_seconds_sum', provider, op=OP) == pytest.approx(0.5)
+
+
+async def test_a_skipped_operation_is_counted_but_adds_no_duration_sample(make_caller, provider):
+    caller = make_caller()
+    await _open_breaker(caller)
+    samples_before = _sample('drakkar_provider_call_duration_seconds_count', provider, op=OP)
+
+    skipped = await caller.call(OP, ScriptedCall('v'))
+
+    assert skipped.outcome == 'skipped_open'
+    assert samples_before == 2.0
+    assert _sample('drakkar_provider_call_duration_seconds_count', provider, op=OP) == samples_before
+    assert _calls(provider, OP, 'skipped_open') == 1.0
 
 
 def test_skip_counts_the_outcome_without_a_call(make_caller, provider):

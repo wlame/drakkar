@@ -673,7 +673,7 @@ fleet_peer_request_duration = Histogram(
 # with its retries. outcome: ok, error (a non-transient error, or transient
 # errors on every attempt), timeout (the last attempt timed out), skipped_open
 # (the circuit breaker was open, nothing was called) or not_started (the
-# provider is not started yet, or no time was left for a call).
+# provider is not started yet).
 # A retried operation can last several attempt timeouts, so the top buckets
 # reach past the single-call range.
 PROVIDER_CALL_DURATION_BUCKETS = (*FLEET_REGISTRY_DURATION_BUCKETS, 30)

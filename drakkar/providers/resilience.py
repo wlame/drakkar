@@ -173,7 +173,11 @@ class ResilientCaller:
         the config. ``deadline_seconds`` bounds the whole operation: every
         attempt's time limit is cut to the time left, and no retry starts, nor
         waits for its backoff, when that would pass the deadline. A deadline
-        that is already spent starts nothing (outcome ``not_started``).
+        that is already spent makes no attempt: outcome ``timeout`` with zero
+        attempts, no breaker failure and no log line.
+
+        An operation that made no attempt (a spent deadline, an open breaker)
+        is counted but has no duration to observe.
 
         Cancelling the task cancels the attempt, and the cancellation reaches
         the caller. A cancelled operation is neither counted nor held against
@@ -184,19 +188,18 @@ class ResilientCaller:
             raise ValueError(f'attempts must be >= 1, got {max_attempts}')
         started = self._now_monotonic()
         if deadline_seconds is not None and deadline_seconds <= 0:
-            return self._account(op, started, CallResult(ok=False, value=None, outcome=OUTCOME_NOT_STARTED, attempts=0))
+            return self._count_without_attempt(op, OUTCOME_TIMEOUT)
         admission = self._breaker.admit(started)
         if admission is _Admission.REFUSED:
-            return self._account(
-                op, started, CallResult(ok=False, value=None, outcome=OUTCOME_SKIPPED_OPEN, attempts=0)
-            )
+            return self._count_without_attempt(op, OUTCOME_SKIPPED_OPEN)
         deadline_at = None if deadline_seconds is None else started + deadline_seconds
         try:
             result, error = await self._run_attempts(make_call, max_attempts, deadline_at)
         finally:
             if admission is _Admission.PROBE:
                 self._breaker.end_probe()
-        self._account(op, started, result)
+        self._observe_duration(op, started)
+        self._count(op, result.outcome)
         if error is None:
             await self._record_success()
         else:
@@ -207,7 +210,7 @@ class ResilientCaller:
         """Count an operation the caller did not make (for example ``not_started``); no call, no duration."""
         if outcome not in OUTCOMES:
             raise ValueError(f'outcome must be one of {", ".join(OUTCOMES)}, got {outcome!r}')
-        provider_calls.labels(feature=self._feature, provider=self._provider, op=op, outcome=outcome).inc()
+        self._count(op, outcome)
 
     # --- attempts ---
 
@@ -247,13 +250,19 @@ class ResilientCaller:
 
     # --- metrics, breaker, logs ---
 
-    def _account(self, op: str, started: float, result: CallResult) -> CallResult:
-        """Count the operation and observe its duration, once each, whatever the number of attempts."""
+    def _count(self, op: str, outcome: str) -> None:
+        provider_calls.labels(feature=self._feature, provider=self._provider, op=op, outcome=outcome).inc()
+
+    def _observe_duration(self, op: str, started: float) -> None:
+        """One sample per operation that made an attempt, whatever the number of attempts."""
         provider_call_duration.labels(feature=self._feature, provider=self._provider, op=op).observe(
             self._now_monotonic() - started
         )
-        provider_calls.labels(feature=self._feature, provider=self._provider, op=op, outcome=result.outcome).inc()
-        return result
+
+    def _count_without_attempt(self, op: str, outcome: str) -> CallResult:
+        """Count an operation that made no attempt. A zero sample would pull the duration percentiles down."""
+        self._count(op, outcome)
+        return CallResult(ok=False, value=None, outcome=outcome, attempts=0)
 
     async def _record_success(self) -> None:
         if not self._breaker.record_success():
