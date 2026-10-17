@@ -41,9 +41,13 @@ class DrakkarConfig(BaseSettings):
     sink definitions, and operational configs (metrics, logging, debug).
     """
 
+    # A config error must not echo the input it rejected: pydantic prints a
+    # cut of the offending section, which can hold a password or token, and
+    # the error escapes ``DrakkarApp(...)`` to the operator's terminal and logs.
     model_config = SettingsConfigDict(
         env_prefix='DK_',
         env_nested_delimiter='__',
+        hide_input_in_errors=True,
     )
 
     @model_validator(mode='before')

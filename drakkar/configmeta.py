@@ -405,7 +405,10 @@ def _walk(
     """
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation
-        full_path = [*path_segments, name]
+        # The path is the YAML key, which is the alias when a field has one
+        # (a field cannot be named ``schema``: it would shadow a BaseModel
+        # attribute). The env name is built from the path, so it follows.
+        full_path = [*path_segments, info.alias or name]
 
         if _is_basemodel(annotation):
             _walk(annotation, full_path, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)

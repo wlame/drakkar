@@ -1,6 +1,7 @@
 """The ``connections`` section: defaults, env-created entries, shape rules, secret flags."""
 
 import os
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from drakkar.app import DrakkarApp
 from drakkar.config import (
     ConnectionsConfig,
     ConsulConnectionConfig,
@@ -18,6 +20,7 @@ from drakkar.config import (
     load_config,
 )
 from drakkar.configmeta import walk_model_fields
+from drakkar.handler import BaseDrakkarHandler
 
 BASE_YAML = {'sources': {'kafka': {'enabled': True}}, 'ui': {'release': {'enabled': False}}}
 
@@ -31,18 +34,32 @@ REDIS_PREFIX_MESSAGE = (
 SCHEMA_MESSAGE = "connections.postgres.{name}.schema '{value}' must be a lower-case identifier ([a-z_][a-z0-9_]*)"
 
 
+class PlainHandler(BaseDrakkarHandler):
+    """The smallest handler a ``DrakkarApp`` accepts."""
+
+    async def arrange(self, messages, pending):
+        return []
+
+
 @pytest.fixture
-def load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., DrakkarConfig]:
-    """A loader that goes through ``load_config`` like an operator's file, with only the given ``DK_*`` variables set."""
+def clean_environment(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """No ``DK_*`` variable set; the returned patcher sets the ones a test needs."""
     for name in list(os.environ):
         if name.startswith('DK_'):
             monkeypatch.delenv(name)
+    return monkeypatch
+
+
+@pytest.fixture
+def load(tmp_path: Path, clean_environment: pytest.MonkeyPatch) -> Callable[..., DrakkarConfig]:
+    """A loader that goes through ``load_config`` like an operator's file, with only the given ``DK_*`` variables set."""
 
     def _load(yaml_data: dict | None = None, env: dict[str, str] | None = None) -> DrakkarConfig:
         for name, value in (env or {}).items():
-            monkeypatch.setenv(name, value)
+            clean_environment.setenv(name, value)
         path = tmp_path / 'drakkar.yaml'
-        path.write_text(yaml.safe_dump(_deep_merge(BASE_YAML, yaml_data or {})), encoding='utf-8')
+        # Keys keep their order: where a secret sits in the file decides how much of it an error can echo.
+        path.write_text(yaml.safe_dump(_deep_merge(BASE_YAML, yaml_data or {}), sort_keys=False), encoding='utf-8')
         return load_config(path)
 
     return _load
@@ -220,3 +237,42 @@ def test_every_connection_field_has_a_description():
     for model in (ConsulConnectionConfig, RedisConnectionConfig, PostgresConnectionConfig):
         for name, info in model.model_fields.items():
             assert info.description, f'{model.__name__}.{name}'
+
+
+SECRET_DSN = 'postgresql://user:hunter2@host/db'
+
+
+@pytest.mark.parametrize(
+    'yaml_entry, env',
+    [
+        ({'dsn': SECRET_DSN, 'schema': 'Bad'}, {}),
+        ({'schema': 'Bad', 'dsn': SECRET_DSN}, {}),
+        ({'schema': 'Bad'}, {'DK_CONNECTIONS__POSTGRES__MAIN__DSN': SECRET_DSN}),
+    ],
+    ids=['dsn first', 'dsn last', 'dsn from the environment'],
+)
+def test_a_load_error_does_not_echo_the_dsn(load, yaml_entry, env):
+    with pytest.raises(ValidationError) as excinfo:
+        load({'connections': {'postgres': {'main': yaml_entry}}}, env=env)
+
+    text = str(excinfo.value)
+    assert SCHEMA_MESSAGE.format(name='main', value='Bad') in text
+    assert 'hunter2' not in text
+    assert 'input_value' not in text
+
+
+def test_the_startup_path_prints_no_dsn_for_an_invalid_connection(tmp_path, clean_environment):
+    # DrakkarApp(...) is where an operator's config is loaded; nothing catches the error there,
+    # so what Python prints for the escaping exception is what reaches the operator.
+    entry = {'schema': 'Bad', 'dsn': SECRET_DSN}
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(
+        yaml.safe_dump({**BASE_YAML, 'connections': {'postgres': {'main': entry}}}, sort_keys=False), encoding='utf-8'
+    )
+
+    with pytest.raises(ValidationError) as excinfo:
+        DrakkarApp(handler=PlainHandler(), config_path=path)
+
+    printed = ''.join(traceback.format_exception(excinfo.value))
+    assert SCHEMA_MESSAGE.format(name='main', value='Bad') in printed
+    assert 'hunter2' not in printed

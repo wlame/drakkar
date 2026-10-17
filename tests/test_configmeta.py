@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from drakkar.config import DrakkarConfig, KafkaConfig
 from drakkar.configmeta import (
@@ -26,6 +26,7 @@ from drakkar.configmeta import (
     _mkdocs_anchor,
     _to_jsonable,
     build_config_metadata,
+    walk_model_fields,
 )
 from drakkar.models import MongoOp
 
@@ -141,7 +142,9 @@ def _independent_leaf_paths(model_cls: type[BaseModel], prefix: str = '') -> set
         if not prefix and name in skipped_root_fields:
             continue
         annotation = info.annotation
-        full_path = f'{prefix}.{name}' if prefix else name
+        # The YAML key of a field is its alias when it has one.
+        key = info.alias or name
+        full_path = f'{prefix}.{key}' if prefix else key
 
         if _is_basemodel(annotation):
             paths |= _independent_leaf_paths(annotation, full_path)
@@ -441,3 +444,31 @@ def test_json_type_basemodel_leaf_is_object():
     recurse rather than becoming a leaf), but _json_type must still be
     correct if ever called on one directly."""
     assert _json_type(KafkaConfig) == 'object'
+
+
+# --- 4. A field with an alias is listed under its YAML key -------------------
+
+
+def test_the_postgres_connection_schema_is_listed_under_its_yaml_key():
+    paths = {entry.path for group in build_config_metadata().groups for entry in group.entries}
+
+    assert 'connections.postgres.*.schema' in paths
+    assert not any(path.endswith('schema_name') for path in paths)
+
+
+def test_the_committed_artifact_lists_the_yaml_key_not_the_attribute_name():
+    artifact = ARTIFACT_PATH.read_text()
+
+    assert '"path": "connections.postgres.*.schema"' in artifact
+    assert 'schema_name' not in artifact
+
+
+def test_an_aliased_field_gets_its_yaml_key_in_the_path_and_the_env_name():
+    class Section(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
+
+        schema_name: str = Field(default='drakkar', alias='schema')
+
+    entries = walk_model_fields(Section, path_prefix=['app'], group='app', env_prefix='MYAPP_', env_skip_segments=1)
+
+    assert [(entry.path, entry.env) for entry in entries] == [('app.schema', 'MYAPP_SCHEMA')]

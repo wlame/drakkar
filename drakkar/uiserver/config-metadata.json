@@ -2343,7 +2343,7 @@
           "group": "connections"
         },
         {
-          "path": "connections.postgres.*.schema_name",
+          "path": "connections.postgres.*.schema",
           "env": null,
           "description": "Schema that holds the tables a feature creates: a lower-case identifier.",
           "full_description": "Schema that holds the tables a feature creates: a lower-case identifier.",

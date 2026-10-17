@@ -16,9 +16,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from drakkar.config import DrakkarConfig, KafkaSinkConfig, PostgresSinkConfig, WebClientConfig
+from drakkar.config import (
+    DrakkarConfig,
+    KafkaSinkConfig,
+    PostgresConnectionConfig,
+    PostgresSinkConfig,
+    WebClientConfig,
+)
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_config_reference import SECRET_MASK
@@ -358,6 +364,58 @@ class TestDynamicExpansion:
             if e['path'].startswith('sinks.postgres.') and '*' not in e['path']
         ]
         assert concrete_postgres_entries == []
+
+
+# ---------------------------------------------------------------------------
+# Fields with an alias are reported under their YAML key
+# ---------------------------------------------------------------------------
+
+
+class TestAliasedFields:
+    async def test_the_live_schema_of_a_connection_is_answered_under_the_yaml_key(self):
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        config.connections.postgres['main'] = PostgresConnectionConfig(
+            dsn='postgresql://u:pw@h/db', schema_name='audit'
+        )
+        body = await get_config_reference(config)
+
+        entry = entries_by_path(body, 'connections.postgres.main.schema')[0]
+        assert entry['value'] == 'audit'
+        assert entry['default'] == 'drakkar'
+        assert entry['is_default'] is False
+        assert entry['env'] is None  # dynamic paths carry no env var
+        assert entries_by_path(body, 'connections.postgres.*.schema')[0]['value'] is None
+        assert not [e['path'] for e in all_entries(body) if 'schema_name' in e['path']]
+
+    async def test_the_secret_of_a_connection_is_still_masked(self):
+        config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        config.connections.postgres['main'] = PostgresConnectionConfig(dsn='postgresql://u:hunter2@h/db')
+        body = await get_config_reference(config)
+
+        assert entries_by_path(body, 'connections.postgres.main.dsn')[0]['value'] == SECRET_MASK
+        assert 'hunter2' not in str(body)
+
+    async def test_an_aliased_field_of_the_app_config_is_answered_under_its_yaml_key(self):
+        class AliasedAppConfig(BaseModel):
+            model_config = ConfigDict(populate_by_name=True)
+
+            schema_name: str = Field(default='drakkar', alias='schema')
+
+        class AliasedHandler(BaseDrakkarHandler):
+            app_config_model = AliasedAppConfig
+            app_env_prefix = 'MYAPP_'
+
+            async def arrange(self, messages, pending):
+                return []
+
+        handler = AliasedHandler()
+        handler._app_config = AliasedAppConfig(schema_name='audit')
+        body = await get_config_reference(DrakkarConfig(sources={'kafka': {'enabled': True}}), handler=handler)
+
+        entry = entries_by_path(body, 'app.schema')[0]
+        assert entry['value'] == 'audit'
+        assert entry['env'] == 'MYAPP_SCHEMA'
+        assert entry['is_default'] is False
 
 
 # ---------------------------------------------------------------------------

@@ -234,10 +234,10 @@ def _build_entries(field_meta: ConfigFieldMeta, config_dump: dict[str, Any]) -> 
 def build_config_reference(config_dump: dict[str, Any]) -> ConfigReferenceResponse:
     """Join the static metadata catalogue against one live config dump.
 
-    ``config_dump`` is ``DrakkarConfig.model_dump(mode='json')`` — dumped
-    once by the caller so every field in this pass sees a consistent
-    snapshot rather than each entry re-walking a live (mutable) config
-    object.
+    ``config_dump`` is ``DrakkarConfig.model_dump(mode='json', by_alias=True)``,
+    keyed by YAML key like the metadata paths, and dumped once by the caller
+    so every field in this pass sees a consistent snapshot rather than each
+    entry re-walking a live (mutable) config object.
     """
     groups = []
     for group_meta in build_config_metadata().groups:
@@ -283,7 +283,7 @@ def build_app_config_group(instance: BaseModel, env_prefix: str) -> ConfigRefere
     # BEFORE ``_build_entries`` masks both for the response. (A json-mode
     # dump would pre-mask live SecretStr values with pydantic's own
     # placeholder and break that comparison.)
-    live_dump = {'app': _to_jsonable(instance.model_dump(mode='python'))}
+    live_dump = {'app': _to_jsonable(instance.model_dump(mode='python', by_alias=True))}
     entries: list[ConfigReferenceEntry] = []
     for field_meta in field_metas:
         entries.extend(_build_entries(field_meta, live_dump))
@@ -311,7 +311,7 @@ def create_config_reference_router(deps: UIDeps) -> APIRouter:
         ``sources.http.clients`` is masked element-by-element (its ``token``
         field) since it has no per-element metadata path of its own.
         """
-        config_dump = deps.drakkar_app._config.model_dump(mode='json')
+        config_dump = deps.drakkar_app._config.model_dump(mode='json', by_alias=True)
         response = build_config_reference(config_dump)
         # Contract v1.17: one extra runtime group for the handler-declared
         # application config (docs/app-config.md). getattr-guarded because

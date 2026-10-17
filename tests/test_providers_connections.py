@@ -206,8 +206,19 @@ async def test_close_all_closes_each_client_with_the_closer_given_when_it_was_op
 
 @pytest.mark.parametrize(
     'error, logged_text',
-    [(RuntimeError('boom'), 'boom'), (TimeoutError(), 'TimeoutError')],
-    ids=['error with a message', 'error without a message'],
+    [
+        (RuntimeError('boom'), 'boom'),
+        (TimeoutError(), 'TimeoutError'),
+        (
+            ConnectionError('could not connect to postgresql://user:hunter2@host/db: refused'),
+            'could not connect to postgresql://***:***@host/db: refused',
+        ),
+        (
+            ConnectionError('dial postgresql://host/db?password=hunter2&sslmode=require failed'),
+            'dial postgresql://host/db?password=***&sslmode=require failed',
+        ),
+    ],
+    ids=['error with a message', 'error without a message', 'password in the authority', 'password in the query'],
 )
 async def test_close_all_closes_each_client_once_and_logs_a_failing_closer(connections, factory, error, logged_text):
     redis_main = await connections.acquire('redis', 'main', factory.open, factory.close)
@@ -229,6 +240,7 @@ async def test_close_all_closes_each_client_once_and_logs_a_failing_closer(conne
             'error': logged_text,
         }
     ]
+    assert 'hunter2' not in str(logs)
 
 
 async def test_close_all_with_nothing_open_does_nothing(connections):

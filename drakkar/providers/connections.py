@@ -17,6 +17,7 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config.connections import ConnectionsConfig
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -91,5 +92,6 @@ class Connections:
                     category='fleet',
                     kind=kind,
                     name=name,
-                    error=str(exc) or type(exc).__name__,
+                    # A driver's error text can carry the connection URL with its password.
+                    error=redact_url(str(exc)) or type(exc).__name__,
                 )
