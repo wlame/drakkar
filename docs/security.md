@@ -57,7 +57,7 @@ network access.
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
 | **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder and `merged/` are created with mode `0700`. |
 | **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, every `*.client_config` and the `plugin_options` of the provider plugins by key name; the flight recorder applies the same redaction before storing task env. |
-| **No input echo in config errors** | A load error of the framework config names the key and the rule but does not print the rejected value, so a wrong `connections` block cannot print a connection string. The model of your own `app:` section does not inherit this. |
+| **No input echo in config errors** | A load error of the framework config names the key and the rule but does not add the input of the section that failed, so a wrong `connections` block cannot print a connection string. The messages of the framework still quote a value that is not a secret, such as a schema name. The model of your own `app:` section does not inherit this. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
 
 ## What Drakkar does not provide
@@ -185,7 +185,10 @@ hides the answer from the page. No other path sends CORS headers.
 
 The `connections` section holds the address and the credentials of the
 shared services that providers use: the Consul ACL `token`, the Redis `url`
-(with its password) and the Postgres `dsn` (with user and password).
+(with its password) and the Postgres `dsn` (with user and password). This
+release ships no provider that reads these entries; a provider plugin can use
+them through `ctx.connections`. The advice below applies to the entries you
+declare and to any provider that uses them.
 
 - **Set them from the environment.** For example a Kubernetes Secret that
   becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`

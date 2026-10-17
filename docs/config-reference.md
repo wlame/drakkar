@@ -740,11 +740,11 @@ fleet:
       dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
     static:
       peers: []                    # [{name, cluster, url}]. YAML only.
-    consul:                        # settings of a consul provider
+    consul:                        # reserved for the consul provider; this release ships none, and a plugin does not read it
       mode: publish                # publish | catalog. env: DK_FLEET__REGISTRY__CONSUL__MODE
       service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
-    redis: {}                      # reserved for the redis provider; no keys
-    postgres: {}                   # reserved for the postgres provider; no keys
+    redis: {}                      # reserved for the redis provider (none shipped); no keys
+    postgres: {}                   # reserved for the postgres provider (none shipped); no keys
     plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference. YAML only.
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
@@ -760,7 +760,7 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials).
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). This release ships no provider that reads these entries; a provider plugin can use them through `ctx.connections`.
 
 ```yaml
 connections:

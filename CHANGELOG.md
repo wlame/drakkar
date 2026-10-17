@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `provider_entry_point_*`. `drakkar_fleet_registry_errors_total` now counts
   operations (retries are part of one operation) and loop iterations that
   raised, and its `op` label gains `start` and `stop`. A config error no
-  longer prints the input it rejected. The archive lock body has a new key,
-  `provider`. See `docs/upgrading.md`.
+  longer prints the input of the section it rejected. The archive lock body
+  has a new key, `provider`. A registry or election plugin named `consul`,
+  `redis` or `postgres` now fails the config load unless the connection it
+  uses is declared under `connections.<name>`. Declare the connection, or
+  rename the plugin. See `docs/upgrading.md`.
 
 ### Added
 
@@ -36,8 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operation probe it after a cooldown. The new `connections` section
   declares shared services by name (`consul`, `redis`, `postgres`; `main` is
   the default). A feature names an entry with `fleet.registry.connection` or
-  `history.archive.election.connection`. Secrets come from the environment
-  and are masked in the config reference. `history.archive.election.provider`
+  `history.archive.election.connection`. Set secrets from the environment.
+  The config reference masks them. `history.archive.election.provider`
   (default `filesystem`) selects which worker of a cluster archives. Plugins
   use the entry-point group `drakkar.election_providers`, and
   `drakkar.recorder.electiontest` holds the checks a provider should pass.

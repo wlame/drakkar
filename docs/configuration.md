@@ -95,9 +95,11 @@ The newest move is `fleet.registry.timeout_seconds`, now
 `fleet.registry.resilience.timeout_seconds` (env:
 `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`).
 
-A config error does not repeat the value it rejected. A bad `connections`
-block, for example, reports the key and the rule, never the connection
-string.
+A config error no longer carries the input of the section that failed (the
+cut of the config that the validation library adds to its message). A bad
+`connections` block, for example, reports the key and the rule, and does not
+print the connection string. The framework's own messages still quote a
+value that is not a secret, such as a schema name.
 
 ---
 
@@ -1169,9 +1171,9 @@ provider plugin are on [Fleet registry](fleet.md).
 | `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
 | `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
 | `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
-| `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of a `consul` provider. `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
-| `consul.service_name` | `str` | `drakkar` | non-empty | Setting of a `consul` provider: the Consul service that lists the workers. Used only with `mode: catalog`. |
-| `redis`, `postgres` | block | `{}` | | Reserved blocks of the `redis` and `postgres` providers. They have no keys. |
+| `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of the `consul` provider, which this release does not ship; no provider reads it, and a plugin does not (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
+| `consul.service_name` | `str` | `drakkar` | non-empty | Setting of the `consul` provider, which this release does not ship; no provider reads it. The Consul service that lists the workers, used only with `mode: catalog`. |
+| `redis`, `postgres` | block | `{}` | | Reserved blocks of the `redis` and `postgres` providers, which this release does not ship. They have no keys. |
 | `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. YAML only. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
@@ -1246,7 +1248,9 @@ prefix or schema from here, so they are written once and shared by every
 feature that names the connection. `connections` has one map per service
 type, and each map goes from a connection name that you choose to its
 settings. A feature that names no connection uses `main`. How features name
-and share a connection is on [Fleet registry](fleet.md#connections).
+and share a connection is on [Fleet registry](fleet.md#connections). This
+release ships no provider that reads these entries; a provider plugin can use
+them through `ctx.connections`.
 
 Which feature names which entry: `fleet.registry.connection` and
 `history.archive.election.connection`.
@@ -1301,8 +1305,9 @@ Write connection names in lower case: the environment path is lower-cased
 when it is read, so a name with capital letters cannot be set from a `DK_`
 variable. A wrong value fails the load with the path and the rule, for
 example `connections.postgres.main.schema 'Bad-Name' must be a lower-case
-identifier ([a-z_][a-z0-9_]*)`; the message does not repeat a secret. See
-[Security](security.md#provider-credentials).
+identifier ([a-z_][a-z0-9_]*)`. The message quotes that value, but it never
+prints the input of the whole section, so a connection string stays out of
+it. See [Security](security.md#provider-credentials).
 
 ---
 

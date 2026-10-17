@@ -1,19 +1,25 @@
-# Upgrading: storage, history and fleet settings
+# Upgrading: storage, history, fleet and provider settings
 
-This release moves the settings for files, archives, worker discovery and
-cache exchange into four new config sections: `storage`, `shared`,
-`history` and `fleet`. Some old keys moved, a few were removed. The old
-keys are not read any more: a config that still uses one **fails to load**
-with a message that lists every old key it found.
+This page has two guides, one for each move:
 
-Follow the steps below in order. Plan the upgrade **with all workers
-stopped**: a worker of this release does not read the files an older
-release wrote, and an older and a newer worker cannot run side by side.
+- **To release 2.4.0, from an older release** (steps 1 to 8 below). Release
+  2.4.0 moved the settings for files, archives, worker discovery and cache
+  exchange into four new config sections: `storage`, `shared`, `history` and
+  `fleet`. Some old keys moved, a few were removed. The old keys are not
+  read any more: a config that still uses one **fails to load** with a
+  message that lists every old key it found.
+- **From 2.4.0 to this release**
+  ([Upgrading from 2.4.0: provider settings](#from-2-4-0)). This release
+  puts the calls to a registry or election provider under shared rules and
+  adds the `connections` section. One key moved, one default changed, and
+  some log events were replaced.
 
-!!! note "Coming from release 2.4.0?"
-    Steps 1 to 8 describe the move to the `storage`, `shared`, `history` and
-    `fleet` sections, which 2.4.0 already has. Go to
-    [Upgrading from 2.4.0: provider settings](#from-2-4-0).
+Coming from 2.4.0, read only the second guide. Coming from an older release,
+do the first guide, then the second.
+
+Follow steps 1 to 8 in order. Plan the move to 2.4.0 **with all workers
+stopped**: a worker of 2.4.0 does not read the files an older release
+wrote, and an older and a newer worker cannot run side by side.
 
 ## 1. List the keys you use today
 
@@ -231,8 +237,16 @@ The calls from a worker to a registry provider and to an archive election
 provider now follow one set of rules: a time limit per attempt, retries, and
 a circuit breaker. The new `connections` section declares the shared
 services that providers use. One key moved, one default changed, and some
-log events were replaced. The card format is the same as in 2.4.0, and the
-archive lock is the same file with one more key in its body.
+log events were replaced.
+
+Between 2.4.0 and this release these formats did not change: the registry
+card, the sealed recorder file and its meta file, the cache exchange route,
+and the archive lock protocol. The archive lock body gains one key,
+`provider`, which a 2.4.0 worker ignores. A worker of one release can
+therefore read the cards, the sealed files and the lock that a worker of the
+other writes. Each worker applies its own settings, though: a worker that
+still has the 2.4.0 default of `offline_after_seconds` (30) and a worker with
+the new default (60) call the same peer offline at different times.
 
 ### 1. Move the registry timeout
 
@@ -283,9 +297,11 @@ are new. See [Fleet registry](fleet.md#metrics).
 
 ### 4. Know what else changed
 
-- **Config errors do not repeat the rejected value.** A load error names the
-  key and the rule, but no longer prints the offending input, so a wrong
-  `connections` block cannot print a connection string.
+- **Config errors do not print the input of the failed section.** A load
+  error names the key and the rule, but no longer adds a cut of the section
+  that failed, so a wrong `connections` block cannot print a connection
+  string. The messages of the framework itself still quote a value that is
+  not a secret, for example a schema name or an out-of-range number.
 - **The archive lock body has a `provider` key.** For the default election
   provider it is `"provider":"filesystem"`. A worker of 2.4.0 ignores the key.
 - **`recorder_archive_fenced` has two more fields,** `provider` and
@@ -298,9 +314,19 @@ are new. See [Fleet registry](fleet.md#metrics).
   `history.archive.election` and the `resilience` blocks have working
   defaults.
 
-### 5. If you wrote a registry provider plugin
+### 5. If you wrote a provider plugin
 
-- `start` can be called again after a failure, so it must leave nothing behind.
+- **A plugin named `consul`, `redis` or `postgres` needs a declared
+  connection.** The config load checks `fleet.registry.connection` and
+  `history.archive.election.connection` by provider name, and the default
+  connection name is `main`. A registry or election plugin with one of these
+  names now fails the load, for example with
+  `fleet.registry.connection 'main' is not defined under connections.consul`,
+  unless that entry exists. Declare `connections.<name>.<connection>` (for
+  `consul` or `redis`, an empty entry such as `connections: {consul: {main: {}}}`
+  is enough; `postgres` needs a `dsn`), or rename the plugin.
+- `start` can be called again after a failure (registry and election), so it
+  must leave nothing behind.
 - `stop` is not called when no `start` succeeded, while the breaker is open,
   or when the shutdown time is spent.
 - A `PeerCard` may carry `online`; leave it `None` if your service has no

@@ -56,15 +56,19 @@ cycle, without the mark check.
 
 The names `consul`, `redis` and `postgres` are reserved for providers that
 keep their data in a service reached through a [named
-connection](#connections). The config checks them: the connection they name
-must be declared. Their own settings sit in `fleet.registry.consul`
+connection](#connections). Their own settings sit in `fleet.registry.consul`
 (`mode`, `service_name`), `fleet.registry.redis` and
 `fleet.registry.postgres` (no keys); a plugin does not read these blocks, it
 gets `plugin_options`. This release ships no provider with one of these
-names. A worker starts with such a name only when a plugin of that name is
-installed. Otherwise startup fails (with the UI on, which the registry needs)
-with a message that lists the providers that exist, for example
-`fleet.registry.provider 'consul' is not known; known providers: filesystem, none, static`.
+names. Two checks apply to such a name, in this order:
+
+1. The config load checks that the connection the name uses is declared.
+   Without `connections.consul.main`, for example, the load fails with
+   `fleet.registry.connection 'main' is not defined under connections.consul`.
+2. A worker starts with the name only when a plugin of that name is
+   installed. Otherwise startup fails (with the UI on, which the registry
+   needs) with a message that lists the providers that exist, for example
+   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, static`.
 
 ### `filesystem`
 
@@ -258,7 +262,9 @@ its card that are present; see the UI contract for the full row shape.
 
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
-once, under `connections.<service>.<name>`, and a feature names the entry:
+once, under `connections.<service>.<name>`, and a feature names the entry.
+This release ships no provider that reads these entries; a provider plugin can
+use them (see [Writing a provider](#writing-a-provider)).
 
 ```yaml
 connections:
@@ -277,8 +283,10 @@ fleet:
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `history.archive.election.connection` name
   an entry. The `consul`, `redis` and `postgres` providers read it.
-  `filesystem`, `static`, `none` and plugins ignore it. A provider of those
-  three names needs its connection declared; otherwise the load fails with
+  `filesystem`, `static` and `none` ignore it, and so does a plugin with any
+  other name. The config load checks the key by provider name, so a provider
+  named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
+  connection declared; otherwise the load fails with
   `fleet.registry.connection 'main' is not defined under connections.consul`.
 - Features that name the same connection share one client. The first
   feature that needs it opens it; nothing opens at startup.
@@ -321,8 +329,11 @@ registry publishes the next card only after the previous publish ended, so
 keep the longest operation well below `offline_after_seconds`.
 
 **Breaker.** It counts failed operations, not attempts: an operation fails
-when its last attempt fails. After `failure_threshold` failed operations in
-a row the breaker opens. While it is open, operations are skipped without a
+when its last attempt fails. One breaker serves all operations of a feature.
+Failed operations of any mix (for the registry `start`, `publish`, `list`,
+`withdraw` and `stop`) count toward the same `failure_threshold`, a success of
+any of them resets the count, and an open breaker skips all of them. After
+`failure_threshold` failed operations in a row the breaker opens. While it is open, operations are skipped without a
 call. After `cooldown_seconds` the next operation is a probe, and the others
 stay skipped until it ends. A probe that succeeds closes the breaker. A
 probe that fails opens it again with a fresh cooldown. An operation that
@@ -460,9 +471,11 @@ built-in name, so a package can replace `filesystem`. A plugin named
 the connection that `fleet.registry.connection` names must be declared.
 
 A plugin that fails to load is logged and skipped
-(`provider_entry_point_load_failed`; the other two events of this family are
-`provider_entry_point_scan_failed` and `provider_entry_point_invalid`; the
-field `group` names `drakkar.registry_providers`). Startup then fails only
+(`provider_entry_point_load_failed`, with the fields `group`, `name`, `value`
+and `error`; the other two events of this family are
+`provider_entry_point_scan_failed`, with `group` and `error`, and
+`provider_entry_point_invalid`; the field `group` names
+`drakkar.registry_providers`). Startup then fails only
 if the configured name is the missing one, with a message that lists the
 providers that exist.
 
@@ -586,7 +599,7 @@ also counted by the three provider metrics:
 | `fleet_card_invalid` | warning | A card was skipped; once per file name (a file that is unreadable, not a plain file, too large or not a JSON object) or per worker (field rules). |
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
 | `fleet_duplicate_worker_name` | warning | Another live process publishes this worker's name; once per instance. |
-| `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid` | warning | A provider plugin could not be found or loaded (fields `group`, `name`, `value`, `error`). `group` is `drakkar.registry_providers` or `drakkar.election_providers`. |
+| `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid` | warning | A provider plugin could not be found or loaded. `scan_failed` has the fields `group` and `error`; `load_failed` and `invalid` add `name` and `value`. `group` is `drakkar.registry_providers` or `drakkar.election_providers`. |
 | `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
 | `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
 | `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |
