@@ -595,7 +595,7 @@ failed.
 | Return value           | Behavior                                           |
 |------------------------|----------------------------------------------------|
 | `DeliveryAction.DLQ`   | Write to [dead letter queue](sinks.md#dead-letter-queue) (default) |
-| `DeliveryAction.RETRY` | Re-deliver the whole group (up to `max_retries` from config) |
+| `DeliveryAction.RETRY` | Re-deliver the whole group (up to 3 attempts; fixed, not `executor.max_retries`) |
 | `DeliveryAction.SKIP`  | Drop the payloads, continue                        |
 
 `RETRY` re-delivers the **entire** payload group, including any payload the
@@ -760,8 +760,11 @@ worker crash — Kafka will redeliver from the last committed offset.
 
 Commits are attempted at three points:
 
-1. **After each window completes** — when the last task in a window
-   finishes and all sink deliveries succeed.
+1. **As messages settle** — when a message's tasks finish and its sink
+   deliveries succeed, its offset becomes committable. Commits are batched
+   per partition: the commit is sent at once when the watermark has
+   advanced by 300 offsets, otherwise 0.5 s after the first advance that
+   was not yet committed. A message does not wait for the rest of its window.
 2. **On partition revocation** — pending offsets are drained (up to
    `executor.drain_timeout_seconds`). **Only if drain completes
    cleanly** is the highest committable offset committed before the
@@ -772,8 +775,9 @@ Commits are attempted at three points:
 3. **On shutdown** — same drain-then-commit-if-clean behavior as
    revocation.
 
-Commits are per-partition and asynchronous. They do not block the
-processing loop.
+Commits are per-partition. Each commit is awaited until the broker
+confirms it (`commit(asynchronous=False)`), but the wait does not block the
+event loop, so the processing loop keeps running.
 
 ---
 

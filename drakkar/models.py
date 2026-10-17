@@ -1244,7 +1244,7 @@ class DeliveryAction(StrEnum):
     """Actions the on_delivery_error hook can return for sink delivery failures.
 
     DLQ: Write the failed payloads to the dead letter queue (default).
-    RETRY: Retry delivery (up to max_retries from config).
+    RETRY: Retry delivery (up to 3 attempts; not configurable).
     SKIP: Drop the payloads and continue processing.
     """
 

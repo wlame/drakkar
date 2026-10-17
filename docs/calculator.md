@@ -163,11 +163,12 @@ function drakkarCalc() {
 
   // build YAML
   var y = '';
-  y += 'kafka:\n';
-  y += '  max_poll_records: ' + pollRecords + '\n';
-  y += '  session_timeout_ms: ' + sessionTimeout + '\n';
-  y += '  heartbeat_interval_ms: ' + heartbeatInterval + '\n';
-  y += '  max_poll_interval_ms: ' + maxPollInterval + '\n';
+  y += 'sources:\n';
+  y += '  kafka:\n';
+  y += '    max_poll_records: ' + pollRecords + '\n';
+  y += '    session_timeout_ms: ' + sessionTimeout + '\n';
+  y += '    heartbeat_interval_ms: ' + heartbeatInterval + '\n';
+  y += '    max_poll_interval_ms: ' + maxPollInterval + '\n';
   y += '\nexecutor:\n';
   y += '  max_executors: ' + maxWorkers + '\n';
   y += '  window_size: ' + windowSize + '\n';

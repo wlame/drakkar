@@ -524,7 +524,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
         Return:
             DeliveryAction.DLQ (default) — write to dead letter queue
-            DeliveryAction.RETRY — retry delivery (up to max_retries)
+            DeliveryAction.RETRY — retry delivery (up to 3 attempts)
             DeliveryAction.SKIP — drop the payloads, continue
         """
         return DeliveryAction.DLQ
@@ -658,7 +658,8 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
                 ...heavy nested loops...
 
         The function runs on a small shared thread pool
-        (``offload.max_threads`` in config, default 2). This does NOT make
+        (``offload.max_threads`` in config; the default 0 sizes it as
+        ``ceil(executor.max_executors / 4)``, minimum 2). This does NOT make
         the computation faster — under the GIL pure-Python work is
         serialized regardless of the thread it runs on — but the event
         loop stays responsive while it runs, which is the difference

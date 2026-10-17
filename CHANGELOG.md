@@ -67,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key of `plugin_options`. See `docs/fleet.md`, `docs/local-databases.md`
   and `docs/configuration.md`.
 
+### Fixed
+
+- **Documentation matches the code.** The HTTP source path, the commit
+  rules (per message, batched), the Kafka keys under `sources.kafka.*` in the
+  tuning examples and in the calculator output, the fixed limit of 3 for
+  sink delivery retries, the Dashboard tables that replaced the
+  `/partitions` and `/sinks` pages, the offload pool default, the throughput
+  windows (1, 5 and 30 s) and the Kubernetes UI-bundle comment.
+
 ## [2.4.0] - 2026-10-15
 
 ### Breaking

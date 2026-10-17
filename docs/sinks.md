@@ -14,7 +14,7 @@ supports multiple named instances (e.g., two separate Kafka topics or three Post
 | `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Every configured sink's `connect()` runs concurrently (`asyncio.gather`), so cold-start latency is bounded by the slowest sink, not the sum. If any fails, the worker crashes immediately. |
 | `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)`, then dispatches one `deliver()` call per group **in parallel** via `asyncio.gather`. One slow or failing sink does not block others. Each group owns its own retry / DLQ / circuit-breaker state. |
 | [Circuit breaker](#circuit-breaker) | Before each `deliver()` call | If the sink's breaker is open, `deliver()` is skipped and the batch routes straight to the DLQ. |
-| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to `executor.max_retries` times. |
+| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to 3 times (a fixed limit, not configurable). |
 | Offset commit | After **all** sinks confirm delivery for a window | Kafka offsets are committed only when every payload from the window has been successfully delivered (or routed to DLQ/skipped). No partial commits. |
 | `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
 
@@ -331,7 +331,7 @@ Your hook returns a `DeliveryAction`:
 | Action | Behavior |
 |--------|----------|
 | `DeliveryAction.DLQ` | Write the failed payloads to the dead letter queue (default) |
-| `DeliveryAction.RETRY` | Re-deliver **the whole group**, up to `executor.max_retries` attempts — at-least-once, see below |
+| `DeliveryAction.RETRY` | Re-deliver **the whole group**, up to 3 attempts (a fixed limit; `executor.max_retries` applies only to task retries) — at-least-once, see below |
 | `DeliveryAction.SKIP` | Drop the payloads and continue processing |
 
 If `RETRY` is returned but retries are exhausted, the framework falls through to DLQ.

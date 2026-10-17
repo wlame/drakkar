@@ -505,16 +505,16 @@ The landing page with a high-level overview of worker health:
 - **Custom links** -- configurable via `ui.custom_links` with template variables (`{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`).
 - **Prometheus graph links** -- when `ui.prometheus_url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus_cluster_label` is set.
 
-#### `/partitions` -- Partition Overview
+The two tables below the tiles hold the per-partition and per-sink detail. There are no separate `/partitions` or `/sinks` pages.
 
-Per-partition stats table:
+**All Partitions** table, one row per partition the recorder has seen:
 
 - Queue size (messages waiting)
 - Pending offsets (uncommitted)
 - Consumer lag (from Kafka high watermark)
 - Committed offset and high watermark
+- Last consumed and last committed time
 - Consumed, completed, and failed event counts
-- Live/dead status indicator
 
 Lag is the high watermark minus the committed offset. The committed offset
 comes from the broker. If the broker does not report one for a partition, the
@@ -524,18 +524,13 @@ lag counts from where the consumer starts to read under `auto.offset.reset`:
 the low watermark for `earliest` (the default), the high watermark for
 `latest`. The dashboard's total lag is the sum of these per-partition values.
 
-#### `/partitions/{id}` -- Partition Detail
+**Sinks** table, one row per configured sink, with live delivery statistics:
 
-Paginated event browser for a single partition. Shows all recorded events (consumed, arranged, task_started, task_completed, task_failed, committed) in reverse chronological order with 50 events per page.
-
-#### `/sinks` -- Sink Delivery Stats
-
-Overview of all configured sinks with live delivery statistics:
-
+- Sink type and name
 - Delivered count and payload count
 - Error count and retry count
 - Last delivery timestamp and duration
-- Last error message and timestamp
+- Last error message
 - Links to external sink UIs (when `ui_url` is configured on a sink)
 
 #### `/live` -- Live Pipeline View

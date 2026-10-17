@@ -564,7 +564,9 @@ class SinkManager:
                 on_message_complete(), or on_window_complete().
             on_delivery_error: Handler callback for delivery failures.
             partition_id: Source partition (for DLQ metadata).
-            max_retries: Max delivery retry attempts before falling through to DLQ.
+            max_retries: Max delivery retry attempts before falling through to DLQ. Callers
+                do not pass it, so the delivery limit is this default (3); it is not
+                ``executor.max_retries``, which governs task retries.
         """
         groups: dict[tuple[str, str], list[BaseModel]] = defaultdict(list)
 

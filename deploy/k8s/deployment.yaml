@@ -113,9 +113,9 @@ spec:
           #     that caches under $HOME has nowhere to write. That is not
           #     just your handler binary or its libraries: Drakkar's own
           #     drakkar-ui bundle cache defaults to ~/.cache/drakkar/ui, so
-          #     with no writable HOME the worker silently falls back to the
-          #     built-in Jinja pages instead of the richer UI bundle. Set
-          #     HOME=/tmp under env: below if either side needs it.
+          #     with no writable HOME the worker cannot store a bundle, so the
+          #     pages answer 503 (there is no built-in fallback; the API stays
+          #     up). Set HOME=/tmp under env: below if either side needs it.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

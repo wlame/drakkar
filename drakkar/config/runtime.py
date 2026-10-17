@@ -173,7 +173,7 @@ class ThroughputConfig(BaseModel):
     value correlates with the task's computational hardness — file size, a
     computed score, any unit. The framework then derives per-task ``speed``
     (cost / duration) and sliding-window ``throughput`` aggregates (1, 5,
-    30, 60, 300 s), surfaced in task events, the recent-tasks API, a
+    30 s), surfaced in task events, the recent-tasks API, a
     per-second WebSocket frame, Prometheus, and worker_state snapshots.
 
     Purely observational: nothing schedules or prioritizes on cost.

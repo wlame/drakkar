@@ -465,8 +465,9 @@ executor:
   backpressure_high_multiplier: 16
   backpressure_low_multiplier: 4
 
-kafka:
-  max_poll_records: 500        # pull more messages per poll cycle
+sources:
+  kafka:
+    max_poll_records: 500        # pull more messages per poll cycle
 
 ui:
   ws_min_duration_ms: 100      # hide fast tasks from live UI
@@ -494,8 +495,9 @@ executor:
   window_size: 20
   task_timeout_seconds: 300
 
-kafka:
-  max_poll_records: 100
+sources:
+  kafka:
+    max_poll_records: 100
 
 ui:
   ws_min_duration_ms: 0        # show all tasks in live UI
@@ -521,10 +523,11 @@ executor:
   backpressure_high_multiplier: 8
   backpressure_low_multiplier: 2
 
-kafka:
-  max_poll_records: 20         # don't over-fetch -- each message = 10s of work
-  session_timeout_ms: 60000    # longer session timeout to avoid rebalance during slow processing
-  max_poll_interval_ms: 600000 # 10 min between polls -- tasks may run long
+sources:
+  kafka:
+    max_poll_records: 20         # don't over-fetch -- each message = 10s of work
+    session_timeout_ms: 60000    # longer session timeout to avoid rebalance during slow processing
+    max_poll_interval_ms: 600000 # 10 min between polls -- tasks may run long
 
 ui:
   ws_min_duration_ms: 0        # show everything in live UI

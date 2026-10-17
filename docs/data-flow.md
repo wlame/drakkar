@@ -158,9 +158,11 @@ If no messages were returned by the poll, the loop sleeps for **50ms** (`asyncio
 
 A request that arrives on the HTTP source does not pass through Phases 1
 and 2. The webapp runner synthesises one virtual `SourceMessage` with
-`partition = -1` and a monotone per-worker offset, then hands it to the
-same window and fan-out machinery the Kafka path uses, so Phase 3 onward
-is identical. The synthetic partition keeps HTTP work out of the partition
+`partition = -1` and a monotone per-worker offset. It does not use the
+window or the partition processor. It calls `arrange_http_request()`, runs
+the tasks it returns through the executor pool directly (all tasks of the
+request at the same time), and delivers the result to the sinks itself.
+The synthetic partition keeps HTTP work out of the partition
 trackers in the recorder and the operator UI. There are no offsets to
 commit, so Phase 9 does not apply either: the result goes back in the HTTP
 response, and to the sinks when `sources.http.sinks_enabled` is true. See
@@ -586,7 +588,7 @@ A retry loop with `attempt` starting at 0:
 
 **on_delivery_error returns one of three actions**:
 
-   - **`DeliveryAction.RETRY`** (and `attempt < max_retries`, default max_retries: `3`):
+   - **`DeliveryAction.RETRY`** (and `attempt < 3`; the delivery retry limit is fixed at 3 and is not `executor.max_retries`):
      - `sink_delivery_retries` counter incremented.
      - Logs a warning.
      - Continues the retry loop (immediate retry, no backoff).
@@ -615,7 +617,7 @@ A retry loop with `attempt` starting at 0:
      - `sink_dlq_messages` Prometheus counter incremented.
      - Breaks from the retry loop.
 
-   - **Retries exhausted** (RETRY action but `attempt >= max_retries`):
+   - **Retries exhausted** (RETRY action but `attempt >= 3`):
      - Falls through to the DLQ/break path. Logs a warning.
      - Breaks from the retry loop.
 
@@ -642,7 +644,7 @@ This watermark design ensures that Kafka offsets are only committed when ALL pre
 
 Offset commits are attempted at these points:
 
-1. **After every `on_message_complete`** — the most common trigger; fires once per source message as each settles.
+1. **After every `on_message_complete`** — the most common trigger; the watermark may advance once per source message as each settles. The commit is batched: it is sent at once when the watermark has advanced by 300 offsets, otherwise 0.5 s after the first advance that was not yet committed.
 2. **On idle iterations** (no messages received for 1 second) — catches any lagging commits.
 3. **When arrange returns no tasks** — offsets are immediately committable after the empty-arrange `on_message_complete` calls.
 4. **During shutdown** — final commit for each partition.

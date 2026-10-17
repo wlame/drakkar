@@ -357,15 +357,11 @@ Partition tiles with queue depth and lag, executor pool utilization bar,
 event counters, Prometheus graph links (click any metric card).
 Custom links configured via `custom_links` in config.
 
-### Partitions (`/partitions`)
+### Partitions and sinks tables (on `/`)
 
-Per-partition breakdown: queue size, pending offsets, committed offset,
-consumer lag. Click a partition for its event history.
-
-### Sinks (`/sinks`)
-
-Per-sink delivery stats: delivered count, error count, retry count,
-last delivery time and duration.
+The Dashboard also holds the per-partition table (queue size, pending
+offsets, committed offset, consumer lag) and the per-sink table (delivered
+count, error count, retry count, last delivery time and duration).
 
 ### Live Pipeline (`/live`)
 
@@ -467,7 +463,7 @@ task counts and partition counts, so you can watch rebalancing happen.
 
 - Partition reassignment in `/history` (filter by `assigned`/`revoked` events)
 - Pool utilization spike on surviving worker in `/live`
-- Consumer lag changes in `/partitions`
+- Consumer lag changes in the partitions table on `/`
 
 The script does not stop at "watch it happen". When the outage sequence
 finishes it runs the delivery verification below and **exits non-zero if
