@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages. Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, election and connections). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "sources": {
       "kafka": {
@@ -87,10 +87,15 @@
             "cycle_deadline_seconds": null
           },
           "db_dir": "/cache"
+        },
+        "fleet": {
+          "registry": {
+            "timeout_seconds": 5
+          }
         }
       },
       "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file"
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
     },
     {
       "name": "env_only_old_key",
@@ -101,6 +106,26 @@
         "DK_CACHE__DB_DIR": "/cache"
       },
       "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.archive_enabled -> history.archive.enabled\n  cache.db_dir: removed, the cache file lives in storage.dir"
+    },
+    {
+      "name": "registry_timeout_moved",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "timeout_seconds": 5
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
+    },
+    {
+      "name": "registry_timeout_moved_env",
+      "yaml": {},
+      "env": {
+        "DK_FLEET__REGISTRY__TIMEOUT_SECONDS": "5"
+      },
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
     }
   ],
   "summary": [
@@ -200,6 +225,41 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=none cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "election_consul",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "consul"
+            }
+          }
+        },
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "election_filesystem_is_silent",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "filesystem"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "memory_only_with_explicit_registry_dir",
@@ -319,7 +379,8 @@
       "yaml": {
         "fleet": {
           "registry": {
-            "heartbeat_seconds": 20
+            "heartbeat_seconds": 20,
+            "offline_after_seconds": 30
           }
         }
       },
@@ -330,7 +391,8 @@
       "yaml": {
         "fleet": {
           "registry": {
-            "prune_after_seconds": 10
+            "prune_after_seconds": 10,
+            "offline_after_seconds": 30
           }
         }
       },
@@ -528,11 +590,13 @@
       "yaml": {
         "fleet": {
           "registry": {
-            "timeout_seconds": 0
+            "resilience": {
+              "timeout_seconds": 0
+            }
           }
         }
       },
-      "path": "fleet.registry.timeout_seconds"
+      "path": "fleet.registry.resilience.timeout_seconds"
     },
     {
       "name": "empty_provider",
@@ -614,6 +678,146 @@
         }
       },
       "path": "fleet.registry.static.peers"
+    },
+    {
+      "name": "offline_below_floor",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "offline_after_seconds": 5,
+            "heartbeat_seconds": 1
+          }
+        }
+      },
+      "message": "fleet.registry.offline_after_seconds (5) must be >= 10"
+    },
+    {
+      "name": "registry_connection_missing",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "redis"
+          }
+        }
+      },
+      "message": "fleet.registry.connection 'main' is not defined under connections.redis"
+    },
+    {
+      "name": "election_connection_missing",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "redis"
+            }
+          }
+        }
+      },
+      "message": "history.archive.election.connection 'main' is not defined under connections.redis"
+    },
+    {
+      "name": "consul_lock_stale_too_long",
+      "yaml": {
+        "history": {
+          "archive": {
+            "lock_stale_seconds": 90000,
+            "election": {
+              "provider": "consul"
+            }
+          }
+        },
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "message": "history.archive.lock_stale_seconds (90000) must be <= 86400 when history.archive.election.provider is consul"
+    },
+    {
+      "name": "registry_resilience_backoff_max_below_base",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "resilience": {
+              "backoff_seconds": 2,
+              "backoff_max_seconds": 1
+            }
+          }
+        }
+      },
+      "message": "fleet.registry.resilience.backoff_max_seconds (1) must be >= fleet.registry.resilience.backoff_seconds (2)"
+    },
+    {
+      "name": "election_resilience_backoff_max_below_base",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "resilience": {
+                "backoff_seconds": 2,
+                "backoff_max_seconds": 1
+              }
+            }
+          }
+        }
+      },
+      "message": "history.archive.election.resilience.backoff_max_seconds (1) must be >= history.archive.election.resilience.backoff_seconds (2)"
+    },
+    {
+      "name": "postgres_pool_max_below_min",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar",
+              "pool_min": 4,
+              "pool_max": 2
+            }
+          }
+        }
+      },
+      "message": "connections.postgres.main.pool_max (2) must be >= connections.postgres.main.pool_min (4)"
+    },
+    {
+      "name": "redis_prefix_invalid",
+      "yaml": {
+        "connections": {
+          "redis": {
+            "main": {
+              "key_prefix": "bad prefix"
+            }
+          }
+        }
+      },
+      "message": "connections.redis.main.key_prefix 'bad prefix' may only contain letters, digits, '_', ':', '.' and '-'"
+    },
+    {
+      "name": "consul_prefix_invalid",
+      "yaml": {
+        "connections": {
+          "consul": {
+            "main": {
+              "key_prefix": "/drakkar"
+            }
+          }
+        }
+      },
+      "message": "connections.consul.main.key_prefix '/drakkar' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/'"
+    },
+    {
+      "name": "schema_invalid",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar",
+              "schema": "Drakkar"
+            }
+          }
+        }
+      },
+      "message": "connections.postgres.main.schema 'Drakkar' must be a lower-case identifier ([a-z_][a-z0-9_]*)"
     }
   ]
 }

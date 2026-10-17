@@ -119,8 +119,10 @@ async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
         received['options'] = dict(options)
         return _Plugin([])
 
-    monkeypatch.setattr(plugins, 'discover_plugin_factories', lambda: {'consul': factory})
-    app = _app(tmp_path, fleet={'registry': {'provider': 'consul', 'plugin_options': {'address': 'consul:8500'}}})
+    monkeypatch.setattr(plugins, 'discover_plugin_factories', lambda: {'example-plugin': factory})
+    app = _app(
+        tmp_path, fleet={'registry': {'provider': 'example-plugin', 'plugin_options': {'address': 'consul:8500'}}}
+    )
 
     await app._lifecycle._start_fleet()
     await wait_for(lambda: 'ctx' in received)
@@ -341,7 +343,7 @@ class _BlockedRegistry:
 async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypatch):
     """Core isolation: the sources start and run, and shutdown ends, while every registry call hangs."""
     app, source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _BlockedRegistry())
-    app._config.fleet.registry.timeout_seconds = 0.05
+    app._config.fleet.registry.resilience.timeout_seconds = 0.05
 
     run = asyncio.create_task(app._lifecycle._async_run())
     await asyncio.wait_for(_wait_until(lambda: app.is_ready), timeout=WAIT_FOR_TIMEOUT_SECONDS)

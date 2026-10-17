@@ -8,7 +8,7 @@ Two background loops, both started by :meth:`FleetRegistry.start`:
   The first refresh waits for the first publish attempt, because a file
   folder learns the server clock from its own write.
 
-Every provider call runs under ``timeout_seconds``. A failed call keeps the
+Every provider call runs under ``resilience.timeout_seconds``. A failed call keeps the
 last snapshot, counts an error, and logs at most once a minute per
 operation. Nothing in the message pipeline awaits this service: it serves
 the workers list and the cache exchange, and both read the snapshot.
@@ -206,7 +206,7 @@ class FleetRegistry:
                 )
         await self._call('withdraw', lambda: self._provider.withdraw(self._identity.worker, self._identity.instance))
         try:
-            await asyncio.wait_for(self._provider.stop(), timeout=self._config.timeout_seconds)
+            await asyncio.wait_for(self._provider.stop(), timeout=self._config.resilience.timeout_seconds)
         except Exception as exc:
             await self._logger.awarning(
                 'fleet_registry_stop_failed',
@@ -233,7 +233,7 @@ class FleetRegistry:
             options=self._provider_options,
         )
         try:
-            await asyncio.wait_for(self._provider.start(ctx), timeout=self._config.timeout_seconds)
+            await asyncio.wait_for(self._provider.start(ctx), timeout=self._config.resilience.timeout_seconds)
         except Exception as exc:
             await self._logger.aerror(
                 'fleet_registry_start_failed',
@@ -335,7 +335,7 @@ class FleetRegistry:
         """Run one provider call under the timeout: ``(True, result)`` or ``(False, None)`` after counting it."""
         started = time.perf_counter()
         try:
-            result = await asyncio.wait_for(make_call(), timeout=self._config.timeout_seconds)
+            result = await asyncio.wait_for(make_call(), timeout=self._config.resilience.timeout_seconds)
         except Exception as exc:
             fleet_registry_duration.labels(op=op).observe(time.perf_counter() - started)
             fleet_registry_errors.labels(op=op).inc()
@@ -356,7 +356,7 @@ class FleetRegistry:
             category='fleet',
             provider=self._provider_name,
             error=_describe(exc),
-            timeout_seconds=self._config.timeout_seconds,
+            timeout_seconds=self._config.resilience.timeout_seconds,
             suppressed=self._suppressed_failures.pop(op, 0),
         )
 

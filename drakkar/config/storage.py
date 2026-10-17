@@ -7,13 +7,20 @@ how sealed recorder files become daily archives and how long archives and
 merge results are kept.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
+
+from drakkar.config.resilience import ResilienceConfig, validate_resilience
 
 # Archives are the only recorder artifact nothing else reclaims, so the
 # default has to be a horizon rather than "forever": a worker left alone
 # on its defaults must not be able to fill the disk it runs on. 30 days
 # keeps a month of history queryable.
 DEFAULT_ARCHIVE_RETENTION_DAYS = 30
+
+# A Consul session lives at most a day, and the lock lease is the session TTL.
+CONSUL_MAX_LOCK_STALE_SECONDS = 86_400
 
 
 class StorageConfig(BaseModel):
@@ -40,6 +47,42 @@ class SharedConfig(BaseModel):
             'same folder as storage.dir, which is right for workers on one host.'
         ),
     )
+
+
+class ElectionConfig(BaseModel):
+    """Which provider decides the one worker of a cluster that builds the archives."""
+
+    provider: str = Field(
+        default='filesystem',
+        min_length=1,
+        description=(
+            'Election provider: filesystem (a lock file in shared.dir), consul, redis or postgres '
+            '(a lock in that service), or the name of a provider plugin. Every worker of a cluster '
+            'must use the same provider.'
+        ),
+    )
+    connection: str = Field(
+        default='main',
+        min_length=1,
+        description=(
+            'Name of the entry under connections.<provider> that the consul, redis and postgres '
+            'providers use. The other providers ignore it.'
+        ),
+    )
+    resilience: ResilienceConfig = Field(
+        default_factory=ResilienceConfig,
+        description='Time limit, retries and circuit breaker for the calls to the election provider.',
+    )
+    plugin_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description='Options passed unchanged to a provider plugin, which validates them itself.',
+    )
+
+    @model_validator(mode='after')
+    def _validate_resilience(self) -> 'ElectionConfig':
+        """Check the rules of the resilience block that span fields, naming it by its YAML path."""
+        validate_resilience('history.archive.election.resilience', self.resilience)
+        return self
 
 
 class HistoryArchiveConfig(BaseModel):
@@ -80,8 +123,13 @@ class HistoryArchiveConfig(BaseModel):
         ge=1,
         description=(
             'An archive lock or archive work file older than this many seconds belongs to a dead '
-            'archiver: the lock is taken over and the work file is removed.'
+            'archiver: the lock is taken over and the work file is removed. It is the lease length '
+            f'of every election provider; with consul it must be <= {CONSUL_MAX_LOCK_STALE_SECONDS}.'
         ),
+    )
+    election: ElectionConfig = Field(
+        default_factory=ElectionConfig,
+        description='How the one archiving worker of a cluster is chosen.',
     )
 
     @model_validator(mode='after')

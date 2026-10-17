@@ -18,10 +18,14 @@ from drakkar.config.connections import (
     RedisConnectionConfig,
 )
 from drakkar.config.fleet import (
+    CONNECTION_PROVIDERS,
     CacheExchangeConfig,
+    ConsulRegistryConfig,
     FilesystemRegistryConfig,
     FleetConfig,
     FleetRegistryConfig,
+    PostgresRegistryConfig,
+    RedisRegistryConfig,
     StaticPeerConfig,
     StaticRegistryConfig,
 )
@@ -52,6 +56,7 @@ from drakkar.config.sinks import (
 from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
 from drakkar.config.storage import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
+    ElectionConfig,
     HistoryArchiveConfig,
     HistoryConfig,
     SharedConfig,
@@ -82,6 +87,7 @@ from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
 __all__ = [
     'BUILTIN_LINK_BASES',
+    'CONNECTION_PROVIDERS',
     'DEFAULT_ARCHIVE_RETENTION_DAYS',
     'TIMELINE_COLOR_NAMES',
     'TIMELINE_NUMERIC_FIELDS',
@@ -93,10 +99,12 @@ __all__ = [
     'CircuitBreakerConfig',
     'ConnectionsConfig',
     'ConsulConnectionConfig',
+    'ConsulRegistryConfig',
     'DLQConfig',
     'DocsAnchor',
     'DocsAnchorMatch',
     'DrakkarConfig',
+    'ElectionConfig',
     'ExecutorConfig',
     'FileSinkConfig',
     'FilesystemRegistryConfig',
@@ -115,8 +123,10 @@ __all__ = [
     'MongoStatementConfig',
     'OffloadConfig',
     'PostgresConnectionConfig',
+    'PostgresRegistryConfig',
     'PostgresSinkConfig',
     'RedisConnectionConfig',
+    'RedisRegistryConfig',
     'RedisSinkConfig',
     'ResilienceConfig',
     'RuntimeHealthConfig',

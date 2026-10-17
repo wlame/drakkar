@@ -532,7 +532,7 @@ class AppLifecycle:
             )
             return
         if registry.provider == 'filesystem' and registry.filesystem.dir:
-            await self._prepare_explicit_registry_folder(registry.filesystem.dir, registry.timeout_seconds)
+            await self._prepare_explicit_registry_folder(registry.filesystem.dir, registry.resilience.timeout_seconds)
         options = registry_provider_options(config)
         provider = resolve_provider_factory(registry.provider)(options)
         app._fleet = FleetRegistry(

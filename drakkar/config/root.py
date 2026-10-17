@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig
-from drakkar.config.fleet import FleetConfig
+from drakkar.config.fleet import CONNECTION_PROVIDERS, FleetConfig
 from drakkar.config.kafka import KafkaConfig
 from drakkar.config.moved_keys import find_moved_keys, moved_keys_message
 from drakkar.config.runtime import (
@@ -29,7 +29,7 @@ from drakkar.config.runtime import (
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
-from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
+from drakkar.config.storage import CONSUL_MAX_LOCK_STALE_SECONDS, HistoryConfig, SharedConfig, StorageConfig
 from drakkar.config.ui import UIConfig
 from drakkar.config.webapp import WebAppConfig
 
@@ -176,6 +176,35 @@ class DrakkarConfig(BaseSettings):
             )
         return self
 
+    @model_validator(mode='after')
+    def _validate_registry_connection(self) -> 'DrakkarConfig':
+        """A registry provider that uses a connection needs that connection declared."""
+        registry = self.fleet.registry
+        _require_declared_connection(
+            'fleet.registry.connection', registry.provider, registry.connection, self.connections
+        )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_election_connection(self) -> 'DrakkarConfig':
+        """An election provider that uses a connection needs that connection declared."""
+        election = self.history.archive.election
+        _require_declared_connection(
+            'history.archive.election.connection', election.provider, election.connection, self.connections
+        )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_consul_lock_lease(self) -> 'DrakkarConfig':
+        """The lock lease is a Consul session TTL, which Consul caps at one day."""
+        archive = self.history.archive
+        if archive.election.provider == 'consul' and archive.lock_stale_seconds > CONSUL_MAX_LOCK_STALE_SECONDS:
+            raise ValueError(
+                f'history.archive.lock_stale_seconds ({archive.lock_stale_seconds}) must be <= '
+                f'{CONSUL_MAX_LOCK_STALE_SECONDS} when history.archive.election.provider is consul'
+            )
+        return self
+
     @property
     def resolved_shared_dir(self) -> str:
         """The folder every worker of the fleet sees: ``shared.dir``, else ``storage.dir``."""
@@ -203,6 +232,16 @@ class DrakkarConfig(BaseSettings):
         if not self.ui.enabled or (provider == 'filesystem' and not self.resolved_registry_dir):
             return 'off'
         return provider
+
+    @property
+    def election_summary(self) -> str:
+        """The summary token of the archive election provider, with its leading space.
+
+        Empty for ``filesystem``, so a worker on the default provider prints
+        the same summary line as before the election was configurable.
+        """
+        provider = self.history.archive.election.provider
+        return '' if provider == 'filesystem' else f' election={provider}'
 
     @property
     def dlq_enabled(self) -> bool:
@@ -233,7 +272,7 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
         (kafka, then http). The ``ui`` token reports the UI server state;
@@ -241,8 +280,9 @@ class DrakkarConfig(BaseSettings):
         (they never affect pipeline behavior). ``storage`` is the own-files
         folder (``mem`` for memory-only), ``shared`` appears only when the
         shared folder differs from it, and ``fleet`` names the registry the
-        worker runs (see :attr:`fleet_summary`). The exact bytes are
-        contractual.
+        worker runs (see :attr:`fleet_summary`). ``election`` follows it
+        only when the archive election provider is not ``filesystem`` (see
+        :attr:`election_summary`). The exact bytes are contractual.
         """
         identity = worker_id or '?'
         if cluster_name:
@@ -311,12 +351,27 @@ class DrakkarConfig(BaseSettings):
             f' storage={storage_part}'
             f'{shared_token}'
             f' fleet={self.fleet_summary}'
+            f'{self.election_summary}'
             f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'
             f' sinks=[{sinks_str}]'
             f' log={self.logging.level}'
         )
+
+
+def _require_declared_connection(path: str, provider: str, name: str, connections: ConnectionsConfig) -> None:
+    """Fail when ``provider`` uses a named connection and ``connections`` does not declare ``name``.
+
+    ``path`` is the config path of the ``connection`` key, for the message. A plugin
+    provider and the providers without a service ignore the key, so they are not checked.
+    """
+    if provider not in CONNECTION_PROVIDERS:
+        return
+    # The provider names are the field names of ConnectionsConfig.
+    declared: dict[str, Any] = getattr(connections, provider)
+    if name not in declared:
+        raise ValueError(f"{path} '{name}' is not defined under connections.{provider}")
 
 
 def load_config(config_path: str | Path | None = None) -> DrakkarConfig:

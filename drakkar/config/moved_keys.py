@@ -57,6 +57,10 @@ MOVED_CONFIG_KEYS: tuple[MovedKey, ...] = (
         f'ui.recorder.dbstats_warm_interval_seconds: {_STATS_REMOVED}',
     ),
     MovedKey('ui.recorder.dbstats_inline_scan_limit', f'ui.recorder.dbstats_inline_scan_limit: {_STATS_REMOVED}'),
+    MovedKey(
+        'fleet.registry.timeout_seconds',
+        'fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds',
+    ),
 )
 
 MOVED_KEYS_HEADER = (

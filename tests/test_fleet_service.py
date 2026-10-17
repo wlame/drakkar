@@ -12,7 +12,7 @@ import pytest
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
-from drakkar.config import FleetRegistryConfig
+from drakkar.config import FleetRegistryConfig, ResilienceConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.service import FleetRegistry
@@ -30,14 +30,14 @@ OWN = WorkerIdentity(
 )
 
 
-def _config(**overrides) -> FleetRegistryConfig:
+def _config(timeout_seconds: float = 1.0, **overrides) -> FleetRegistryConfig:
     values = {
         'provider': 'memory',
         'heartbeat_seconds': 3600,
         'refresh_seconds': 3600,
         'offline_after_seconds': 30,
         'prune_after_seconds': 86_400,
-        'timeout_seconds': 1.0,
+        'resilience': ResilienceConfig(timeout_seconds=timeout_seconds),
     }
     values.update(overrides)
     return FleetRegistryConfig.model_construct(**values)

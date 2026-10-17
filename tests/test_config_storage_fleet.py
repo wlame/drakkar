@@ -7,6 +7,7 @@ import pytest
 from drakkar.config import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     CacheExchangeConfig,
+    ConsulRegistryConfig,
     DrakkarConfig,
     FleetRegistryConfig,
     HistoryArchiveConfig,
@@ -58,12 +59,44 @@ def test_fleet_registry_defaults():
     assert registry.provider == 'filesystem'
     assert registry.heartbeat_seconds == 10
     assert registry.refresh_seconds == 15
-    assert registry.offline_after_seconds == 30
+    assert registry.connection == 'main'
+    assert registry.offline_after_seconds == 60
     assert registry.prune_after_seconds == 86400
-    assert registry.timeout_seconds == 5.0
+    assert registry.resilience.timeout_seconds == 5.0
     assert registry.filesystem.dir == ''
     assert registry.static.peers == []
+    assert registry.consul.mode == 'publish'
+    assert registry.consul.service_name == 'drakkar'
     assert registry.plugin_options == {}
+
+
+def test_the_old_offline_default_still_loads_with_the_default_heartbeat():
+    assert FleetRegistryConfig(offline_after_seconds=30).heartbeat_seconds == 10
+
+
+def test_timeout_seconds_is_no_longer_a_registry_field():
+    assert 'timeout_seconds' not in FleetRegistryConfig.model_fields
+
+
+def test_offline_after_seconds_of_zero_fails_at_the_field():
+    with pytest.raises(ValueError, match='offline_after_seconds'):
+        FleetRegistryConfig(offline_after_seconds=0)
+
+
+def test_consul_registry_service_name_must_not_be_empty():
+    with pytest.raises(ValueError, match='service_name'):
+        ConsulRegistryConfig(service_name='')
+
+
+def test_election_defaults():
+    election = HistoryArchiveConfig().election
+
+    assert (election.provider, election.connection, election.resilience.retries, election.plugin_options) == (
+        'filesystem',
+        'main',
+        2,
+        {},
+    )
 
 
 def test_cache_exchange_defaults():
@@ -141,6 +174,11 @@ def test_direct_construction_rejects_a_moved_key():
         _config(ui={'recorder': {'db_dir': '/data'}})
 
 
+def test_the_registry_timeout_key_is_the_last_moved_key():
+    assert MOVED_CONFIG_KEYS[-1].path == 'fleet.registry.timeout_seconds'
+    assert MOVED_CONFIG_KEYS[-1].line == ('fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds')
+
+
 # --- derived values ------------------------------------------------------
 
 
@@ -185,12 +223,97 @@ def test_resolved_registry_dir(storage_dir, registry_dir, expected):
         ({'storage': {'dir': ''}}, 'off'),
         ({'storage': {'dir': ''}, 'fleet': {'registry': {'provider': 'static'}}}, 'static'),
         ({'fleet': {'registry': {'provider': 'none'}}}, 'none'),
-        ({'fleet': {'registry': {'provider': 'consul'}}}, 'consul'),
+        ({'fleet': {'registry': {'provider': 'consul'}}, 'connections': {'consul': {'main': {}}}}, 'consul'),
         ({'ui': {'enabled': False}, 'fleet': {'registry': {'provider': 'static'}}}, 'off'),
     ],
 )
 def test_fleet_summary(sections, expected):
     assert _config(**sections).fleet_summary == expected
+
+
+@pytest.mark.parametrize(
+    ('provider', 'expected'),
+    [('filesystem', ''), ('consul', ' election=consul'), ('my-plugin', ' election=my-plugin')],
+)
+def test_election_summary_is_silent_for_the_filesystem_provider(provider, expected):
+    config = _config(
+        history={'archive': {'election': {'provider': provider}}},
+        connections={'consul': {'main': {}}},
+    )
+
+    assert config.election_summary == expected
+
+
+# --- connections named by the features --------------------------------------
+
+
+@pytest.mark.parametrize('provider', ['consul', 'redis', 'postgres'])
+def test_registry_and_election_load_when_the_named_connection_is_declared(provider):
+    connections = {
+        'consul': {'cluster-a': {}},
+        'redis': {'cluster-a': {}},
+        'postgres': {'cluster-a': {'dsn': 'postgresql://db.example/drakkar'}},
+    }
+
+    config = _config(
+        fleet={'registry': {'provider': provider, 'connection': 'cluster-a'}},
+        history={'archive': {'election': {'provider': provider, 'connection': 'cluster-a'}}},
+        connections=connections,
+    )
+
+    assert config.fleet.registry.connection == 'cluster-a'
+
+
+@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'my-plugin'])
+def test_providers_that_use_no_connection_ignore_the_connection_name(provider):
+    config = _config(fleet={'registry': {'provider': provider, 'connection': 'not-declared'}})
+
+    assert config.fleet.registry.connection == 'not-declared'
+
+
+def test_election_plugin_provider_ignores_the_connection_name():
+    config = _config(history={'archive': {'election': {'provider': 'my-plugin', 'connection': 'not-declared'}}})
+
+    assert config.history.archive.election.connection == 'not-declared'
+
+
+def test_registry_names_a_connection_of_its_own_kind_only():
+    with pytest.raises(
+        ValueError, match=re.escape("fleet.registry.connection 'main' is not defined under connections.consul")
+    ):
+        _config(fleet={'registry': {'provider': 'consul'}}, connections={'redis': {'main': {}}})
+
+
+def test_consul_lock_stale_seconds_at_the_session_limit_loads():
+    config = _config(
+        history={'archive': {'lock_stale_seconds': 86_400, 'election': {'provider': 'consul'}}},
+        connections={'consul': {'main': {}}},
+    )
+
+    assert config.history.archive.lock_stale_seconds == 86_400
+
+
+@pytest.mark.parametrize('provider', ['filesystem', 'redis', 'postgres'])
+def test_lock_stale_seconds_over_the_consul_limit_loads_for_other_providers(provider):
+    config = _config(
+        history={'archive': {'lock_stale_seconds': 90_000, 'election': {'provider': provider}}},
+        connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
+    )
+
+    assert config.history.archive.lock_stale_seconds == 90_000
+
+
+def test_resilience_blocks_load_from_env_names(monkeypatch):
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
+    monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS', '2.5')
+    monkeypatch.setenv('DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__RETRIES', '0')
+    monkeypatch.delenv('DK_CONFIG', raising=False)
+
+    config = load_config(None)
+
+    assert config.fleet.registry.resilience.timeout_seconds == 2.5
+    assert config.history.archive.election.resilience.retries == 0
 
 
 # --- env names -----------------------------------------------------------
