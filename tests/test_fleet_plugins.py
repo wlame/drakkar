@@ -79,7 +79,7 @@ def test_a_plugin_that_fails_to_load_is_logged_and_skipped(installed):
         factory = resolve_provider_factory('consul')
 
     assert factory is _consul_factory
-    failures = [entry for entry in logs if entry['event'] == 'fleet_registry_entry_point_load_failed']
+    failures = [entry for entry in logs if entry['event'] == 'provider_entry_point_load_failed']
     assert len(failures) == 1
     assert failures[0]['name'] == 'broken'
     assert 'consul_api' in failures[0]['error']
@@ -91,7 +91,7 @@ def test_a_plugin_that_is_not_callable_is_logged_and_skipped(installed):
     with capture_logs() as logs, pytest.raises(UnknownRegistryProviderError):
         resolve_provider_factory('consul')
 
-    assert [entry['name'] for entry in logs if entry['event'] == 'fleet_registry_entry_point_invalid'] == ['consul']
+    assert [entry['name'] for entry in logs if entry['event'] == 'provider_entry_point_invalid'] == ['consul']
 
 
 def test_an_unreadable_entry_point_table_is_logged_and_builtins_still_resolve(monkeypatch):
@@ -104,7 +104,7 @@ def test_an_unreadable_entry_point_table_is_logged_and_builtins_still_resolve(mo
         factory = resolve_provider_factory('static')
 
     assert factory is BUILTIN_PROVIDERS['static']
-    assert [entry['event'] for entry in logs] == ['fleet_registry_entry_point_scan_failed']
+    assert [entry['event'] for entry in logs] == ['provider_entry_point_scan_failed']
 
 
 def test_an_unknown_name_fails_and_lists_the_known_providers(installed):

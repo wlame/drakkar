@@ -119,7 +119,16 @@ class ArchiveCandidate:
 
 
 class ArchiveFencedError(RuntimeError):
-    """The pass lost its election lease: another worker took it over, or the provider could not confirm it."""
+    """The pass lost its election lease: another worker took it over, or the provider could not confirm it.
+
+    ``name`` is the archive the pass was about to publish; ``reason`` is the
+    lease's :attr:`~drakkar.recorder.election.ElectionLease.loss_reason`.
+    """
+
+    def __init__(self, name: str, reason: str | None) -> None:
+        super().__init__(name)
+        self.name = name
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -279,7 +288,6 @@ def run_archive_pass(
     shared_dir: str,
     *,
     cluster: str,
-    worker: str,
     instance: str,
     archive: HistoryArchiveConfig,
     merged_retention_days: int,
@@ -326,8 +334,9 @@ def run_archive_pass(
             'recorder_archive_fenced',
             category='recorder',
             provider=lease.provider_name,
+            reason=exc.reason,
             cluster=own_cluster,
-            name=str(exc),
+            name=exc.name,
             detail='another worker took the archive lock over; this pass published and deleted nothing',
         )
     finally:
@@ -542,7 +551,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
 def _fence(lease: ElectionLease, name: str) -> None:
     """Stop the pass when the election no longer confirms our lease (another worker took it over)."""
     if not lease.is_held():
-        raise ArchiveFencedError(name)
+        raise ArchiveFencedError(name, lease.loss_reason)
 
 
 def _remove_work_files(*paths: str) -> None:

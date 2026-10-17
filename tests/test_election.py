@@ -1,4 +1,4 @@
-"""The archive election: the provider kit, the filesystem provider, the archive thread's lease, the lookup.
+"""The archive election: the provider kit, the filesystem provider and the archive thread's lease.
 
 The kit runs over the built-in filesystem provider (leases age by setting the
 lock files' mtime back) and over an in-memory provider on a fake clock. The
@@ -21,15 +21,12 @@ import pytest
 from prometheus_client import REGISTRY
 
 from drakkar.config.resilience import ResilienceConfig
-from drakkar.providers import lookup
-from drakkar.providers.lookup import UnknownProviderError, resolve_factory
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder import electiontest
 from drakkar.recorder.archive_lock import LOCK_NAME
 from drakkar.recorder.election import (
     BUILTIN_ELECTIONS,
-    ELECTION_ENTRY_POINT_GROUP,
     ElectionContext,
     ElectionLease,
     FilesystemElection,
@@ -127,6 +124,24 @@ class _EveryoneHolds(MemoryElection):
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
         self._store.leases[scope] = (token, self._store.now + lease_seconds, lease_seconds)
         return True
+
+
+class _ForgetfulElection(MemoryElection):
+    """A broken provider: an acquire is refused while anyone holds the scope, its own holder included."""
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        if self._store.holder(scope) is not None:
+            return False
+        return await super().acquire(scope, token, lease_seconds)
+
+
+async def test_the_kit_fails_a_provider_whose_acquire_locks_its_own_holder_out():
+    store = ElectionStore()
+
+    with pytest.raises(AssertionError, match='the holding token could not acquire its scope again'):
+        await electiontest.check_acquire_is_idempotent_for_the_holder(
+            lambda: _ForgetfulElection(store), store.advance, LEASE_SECONDS
+        )
 
 
 async def test_the_kit_fails_a_provider_that_lets_two_holders_in():
@@ -232,12 +247,48 @@ async def test_the_lease_holds_and_releases_through_the_provider():
 async def test_a_lease_refused_by_the_provider_starts_no_refresh_thread():
     store = ElectionStore()
     store.leases[SCOPE] = ('f' * 16, store.now + LEASE_SECONDS, LEASE_SECONDS)
-    lease = _lease(MemoryElection(store), _caller('memory'))
+    provider = MemoryElection(store)
+    lease = _lease(provider, _caller('memory'))
     before = _refresh_threads()
 
     assert await asyncio.to_thread(lease.acquire) is False
 
     assert _refresh_threads() - before == set()
+    # A clear "no" takes nothing, so there is nothing to give back.
+    assert provider.calls['release'] == 0
+    assert store.holder(SCOPE) == 'f' * 16
+
+
+async def test_a_lease_serves_one_pass():
+    lease = _lease(MemoryElection(ElectionStore()), _caller('memory'))
+    assert await asyncio.to_thread(lease.acquire)
+    try:
+        with pytest.raises(RuntimeError, match='serves one pass'):
+            await asyncio.to_thread(lease.acquire)
+    finally:
+        await asyncio.to_thread(lease.release)
+
+    with pytest.raises(RuntimeError, match='serves one pass'):
+        await asyncio.to_thread(lease.acquire)
+
+
+class _LostAnswerElection(MemoryElection):
+    """Every acquire takes the lease and then fails, like an attempt whose answer was lost on a slow mount."""
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        await super().acquire(scope, token, lease_seconds)
+        raise ConnectionError('the answer was lost')
+
+
+async def test_an_acquire_with_an_unclear_outcome_releases_what_it_may_have_taken():
+    store = ElectionStore()
+    provider = _LostAnswerElection(store)
+    lease = _lease(provider, _caller('lost-answer'))
+
+    assert await asyncio.to_thread(lease.acquire) is False
+
+    assert provider.calls['release'] == 1
+    assert store.holder(SCOPE) is None
 
 
 async def test_the_lease_refresh_thread_ends_on_release():
@@ -269,6 +320,62 @@ async def test_the_lease_refresh_thread_ends_when_refresh_answers_false():
         assert provider.calls['refresh'] >= 1
         assert await asyncio.to_thread(lease.is_held) is False
         assert provider.calls['is_held'] == 0
+        assert lease.loss_reason == 'taken_over'
+    finally:
+        await asyncio.to_thread(lease.release)
+
+
+class _RejectingRefreshElection(MemoryElection):
+    """A provider whose refresh fails with an error that is not retried."""
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        self.calls['refresh'] += 1
+        raise ValueError('refresh rejected')
+
+
+async def test_a_lease_whose_refresh_fails_is_lost_as_unconfirmed():
+    provider = _RejectingRefreshElection(ElectionStore())
+    lease = _lease(provider, _caller('rejecting-refresh'), refresh_seconds=0.01)
+    before = _refresh_threads()
+    assert await asyncio.to_thread(lease.acquire)
+    try:
+        (refresher,) = _refresh_threads() - before
+        await wait_for(lambda: not refresher.is_alive())
+
+        assert await asyncio.to_thread(lease.is_held) is False
+        assert provider.calls['is_held'] == 0
+        assert lease.loss_reason == 'unconfirmed'
+    finally:
+        await asyncio.to_thread(lease.release)
+
+
+async def test_a_lease_the_provider_no_longer_confirms_is_lost_as_taken_over():
+    store = ElectionStore()
+    lease = _lease(MemoryElection(store), _caller('memory'))
+    assert await asyncio.to_thread(lease.acquire)
+    try:
+        assert lease.loss_reason is None
+        store.leases[SCOPE] = ('f' * 16, store.now + LEASE_SECONDS, LEASE_SECONDS)
+
+        assert await asyncio.to_thread(lease.is_held) is False
+        assert lease.loss_reason == 'taken_over'
+    finally:
+        await asyncio.to_thread(lease.release)
+
+
+class _UncheckableElection(MemoryElection):
+    """A provider whose fencing check fails with an error that is not retried."""
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        raise ValueError('no answer')
+
+
+async def test_a_lease_whose_check_fails_is_lost_as_unconfirmed():
+    lease = _lease(_UncheckableElection(ElectionStore()), _caller('uncheckable'))
+    assert await asyncio.to_thread(lease.acquire)
+    try:
+        assert await asyncio.to_thread(lease.is_held) is False
+        assert lease.loss_reason == 'unconfirmed'
     finally:
         await asyncio.to_thread(lease.release)
 
@@ -311,6 +418,8 @@ async def test_a_lease_call_that_fails_reads_as_not_held():
     assert provider.attempts == 1 + ResilienceConfig().retries
     assert _calls('unreachable', 'acquire', 'error') == errors_before + 1
     assert _refresh_threads() - threads_before == set()
+    # An unclear outcome: the lease gives back whatever the provider may have taken.
+    assert provider.calls['release'] == 1
 
 
 async def test_a_lease_call_on_the_loop_thread_is_refused():
@@ -349,9 +458,18 @@ def _loop_in_thread() -> Iterator[asyncio.AbstractEventLoop]:
     try:
         yield loop
     finally:
+        # Like asyncio.run: cancel and await what is left, so no abandoned call is destroyed unrun.
+        asyncio.run_coroutine_threadsafe(_cancel_the_other_tasks(), loop).result(timeout=5)
         loop.call_soon_threadsafe(loop.stop)
         runner.join()
         loop.close()
+
+
+async def _cancel_the_other_tasks() -> None:
+    others = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    for task in others:
+        task.cancel()
+    await asyncio.gather(*others, return_exceptions=True)
 
 
 def _single_attempt_lease(provider, loop: asyncio.AbstractEventLoop, timeout_seconds: float) -> ElectionLease:
@@ -412,32 +530,3 @@ def test_a_lease_call_cancelled_on_the_loop_reads_as_not_held():
         finally:
             canceller.join()
     assert provider.entered.is_set()
-
-
-# --- the lookup ---
-
-
-@pytest.fixture
-def no_election_plugins(monkeypatch):
-    monkeypatch.setattr(lookup, 'entry_points', lambda *, group: [])
-
-
-def test_resolve_factory_finds_the_builtin_election(no_election_plugins):
-    factory = resolve_factory(
-        ELECTION_ENTRY_POINT_GROUP, BUILTIN_ELECTIONS, 'filesystem', config_path='history.archive.election.provider'
-    )
-
-    assert factory is BUILTIN_ELECTIONS['filesystem']
-
-
-def test_resolve_factory_names_the_election_path(no_election_plugins):
-    with pytest.raises(UnknownProviderError) as raised:
-        resolve_factory(
-            ELECTION_ENTRY_POINT_GROUP, BUILTIN_ELECTIONS, 'nope', config_path='history.archive.election.provider'
-        )
-
-    assert str(raised.value) == "history.archive.election.provider 'nope' is not known; known providers: filesystem"
-
-
-def test_the_election_entry_point_group_name():
-    assert ELECTION_ENTRY_POINT_GROUP == 'drakkar.election_providers'

@@ -196,6 +196,28 @@ async def check_scopes_are_independent(make_provider: ElectionMaker, advance: Ad
     _expect(second_holds_b is True, 'releasing one scope freed another')
 
 
+async def check_acquire_is_idempotent_for_the_holder(
+    make_provider: ElectionMaker, advance: Advance, lease_seconds: float
+) -> None:
+    """An acquire by the token that holds the scope answers True and keeps it; other tokens stay refused.
+
+    A retried acquire whose first answer was lost must not lock its own holder out.
+    """
+    async with (
+        _running(make_provider, 'kit-holder', INSTANCE_A) as holder,
+        _running(make_provider, 'kit-other', INSTANCE_B) as other,
+    ):
+        took = await holder.acquire(SCOPE_A, TOKEN_A, lease_seconds)
+        took_again = await holder.acquire(SCOPE_A, TOKEN_A, lease_seconds)
+        other_took = await other.acquire(SCOPE_A, TOKEN_B, lease_seconds)
+        still_held = await holder.is_held(SCOPE_A, TOKEN_A)
+        await holder.release(SCOPE_A, TOKEN_A)
+    _expect(took is True, f'the first acquire of a free scope answered {took!r}')
+    _expect(took_again is True, f'the holding token could not acquire its scope again (answer {took_again!r})')
+    _expect(other_took is False, f'another token acquired a held scope (answer {other_took!r})')
+    _expect(still_held is True, f'a second acquire by the holder lost the lease ({still_held!r})')
+
+
 ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]], ...] = (
     check_one_holder_at_a_time,
     check_refresh_keeps_the_lease,
@@ -203,4 +225,5 @@ ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]
     check_a_taken_over_holder_is_fenced,
     check_release_only_by_the_holder,
     check_scopes_are_independent,
+    check_acquire_is_idempotent_for_the_holder,
 )

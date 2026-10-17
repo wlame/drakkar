@@ -30,15 +30,15 @@ class UnknownProviderError(ValueError):
 def discover_plugin_factories(group: str) -> dict[str, Any]:
     """Load every installed provider plugin of ``group``; broken ones are logged and left out.
 
-    The log events keep the names the registry lookup has always used; the
-    ``group`` field tells the features apart.
+    The log events are the same for every feature; their ``group`` field
+    names the feature's entry-point group.
     """
     try:
         installed = entry_points(group=group)
     except Exception as exc:
         # A damaged install must not stop the worker: the built-ins still work.
         logger.warning(
-            'fleet_registry_entry_point_scan_failed',
+            'provider_entry_point_scan_failed',
             category='fleet',
             group=group,
             error=str(exc),
@@ -51,7 +51,7 @@ def discover_plugin_factories(group: str) -> dict[str, Any]:
             factory = entry_point.load()
         except Exception as exc:
             logger.warning(
-                'fleet_registry_entry_point_load_failed',
+                'provider_entry_point_load_failed',
                 category='fleet',
                 group=group,
                 name=entry_point.name,
@@ -61,7 +61,7 @@ def discover_plugin_factories(group: str) -> dict[str, Any]:
             continue
         if not callable(factory):
             logger.warning(
-                'fleet_registry_entry_point_invalid',
+                'provider_entry_point_invalid',
                 category='fleet',
                 group=group,
                 name=entry_point.name,

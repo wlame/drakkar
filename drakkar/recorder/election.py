@@ -34,14 +34,18 @@ from typing import Any, Protocol
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
-from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER, ArchiveLock
+from drakkar.recorder.archive_lock import DEFAULT_REFRESH_SECONDS, FILESYSTEM_PROVIDER, ArchiveLock
 from drakkar.recorder.history import history_dir
 
 # Public and stable: plugin packages name this group in their metadata.
 ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
 
-DEFAULT_REFRESH_SECONDS = 60.0
 REFRESH_THREAD_NAME = 'drakkar-election-refresh'
+
+# Why a lease is no longer held (``ElectionLease.loss_reason``): the provider
+# answered that another token holds the scope, or no call could confirm it.
+LOSS_TAKEN_OVER = 'taken_over'
+LOSS_UNCONFIRMED = 'unconfirmed'
 
 # How much longer than a call's own bound the archive thread waits for it, so
 # the caller's own timeout, not the thread's wait, normally ends a slow call.
@@ -188,7 +192,7 @@ BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {FILESYSTEM_PROVIDER: lambda opt
 
 
 class ElectionLease:
-    """The archive thread's synchronous handle on one lease of one scope.
+    """The archive thread's synchronous handle on one lease of one scope; one lease serves one pass.
 
     Every method blocks the calling thread and must never be called on the
     event loop's own thread: it runs the provider call on ``loop`` through
@@ -199,6 +203,7 @@ class ElectionLease:
     While held, a daemon thread refreshes the lease every ``refresh_seconds``.
     It ends on :meth:`release`, and on a refresh that does not answer True;
     from then on :meth:`is_held` answers False without a provider call.
+    :attr:`loss_reason` says why a lease reads as not held.
     """
 
     def __init__(
@@ -215,21 +220,39 @@ class ElectionLease:
     ) -> None:
         self.token = token if token is not None else secrets.token_hex(8)
         self.provider_name = provider_name
+        self.scope = scope
+        self.lease_seconds = lease_seconds
         self._provider = provider
         self._caller = caller
         self._loop = loop
-        self._scope = scope
-        self._lease_seconds = lease_seconds
         self._refresh_seconds = refresh_seconds
         self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
+        self._acquired_once = False
         self._stop_refreshing = threading.Event()
         self._lost = threading.Event()
+        self._loss_reason: str | None = None
         self._refresher: threading.Thread | None = None
 
+    @property
+    def loss_reason(self) -> str | None:
+        """Why the last check read as not held: :data:`LOSS_TAKEN_OVER` or :data:`LOSS_UNCONFIRMED`; ``None`` before."""
+        return self._loss_reason
+
     def acquire(self) -> bool:
-        """Take the lease; on success start the refresh thread."""
-        result = self._run('acquire', lambda: self._provider.acquire(self._scope, self.token, self._lease_seconds))
-        if not _answered_true(result):
+        """Take the lease; on success start the refresh thread. A second call raises ``RuntimeError``.
+
+        When the outcome is unclear (the call failed or did not answer in
+        time), the provider may still have taken the lease, so the lease is
+        released at once rather than left without a refresh until it expires.
+        """
+        if self._acquired_once:
+            raise RuntimeError('an election lease serves one pass; make a new one for the next pass')
+        self._acquired_once = True
+        result = self._run('acquire', lambda: self._provider.acquire(self.scope, self.token, self.lease_seconds))
+        if result is None or not result.ok:
+            self._run('release', lambda: self._provider.release(self.scope, self.token))
+            return False
+        if result.value is not True:
             return False
         self._refresher = threading.Thread(target=self._refresh_loop, name=REFRESH_THREAD_NAME, daemon=True)
         self._refresher.start()
@@ -239,7 +262,11 @@ class ElectionLease:
         """True while the provider confirms the lease is still this pass's (the fencing check)."""
         if self._lost.is_set():
             return False
-        return _answered_true(self._run('is_held', lambda: self._provider.is_held(self._scope, self.token)))
+        reason = _loss_reason(self._run('is_held', lambda: self._provider.is_held(self.scope, self.token)))
+        if reason is None:
+            return True
+        self._loss_reason = reason
+        return False
 
     def release(self) -> None:
         """Stop the refresh thread, then release the lease at the provider."""
@@ -248,12 +275,15 @@ class ElectionLease:
             # A refresh in progress finishes within its own wait.
             self._refresher.join(self._wait_seconds)
             self._refresher = None
-        self._run('release', lambda: self._provider.release(self._scope, self.token))
+        self._run('release', lambda: self._provider.release(self.scope, self.token))
 
     def _refresh_loop(self) -> None:
         # Event.wait returns True once release has been called.
         while not self._stop_refreshing.wait(self._refresh_seconds):
-            if not _answered_true(self._run('refresh', lambda: self._provider.refresh(self._scope, self.token))):
+            reason = _loss_reason(self._run('refresh', lambda: self._provider.refresh(self.scope, self.token)))
+            if reason is not None:
+                # The reason is written before the event, so a reader that sees the event sees it too.
+                self._loss_reason = reason
                 self._lost.set()
                 return
 
@@ -278,8 +308,11 @@ class ElectionLease:
             return None
 
 
-def _answered_true(result: CallResult | None) -> bool:
-    return result is not None and result.ok and result.value is True
+def _loss_reason(result: CallResult | None) -> str | None:
+    """``None`` when the provider confirmed the lease, else why it reads as not held."""
+    if result is None or not result.ok:
+        return LOSS_UNCONFIRMED
+    return None if result.value is True else LOSS_TAKEN_OVER
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:

@@ -41,6 +41,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Coroutine
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -264,6 +265,10 @@ class EventRecorder(EventWriter):
         # the pass itself runs on in its thread, so it checks this between
         # windows and ends early instead of holding the process exit.
         self._archive_stop = threading.Event()
+        # The pass gets a thread of its own, not one of the default executor:
+        # it waits on election calls and log writes that run there, and could
+        # otherwise hold the last free thread they need.
+        self._archive_executor: ThreadPoolExecutor | None = None
         # How long a leftover must be untouched before it is sealed; an
         # attribute so tests can shorten it.
         self._leftover_floor_seconds = LEFTOVER_FLOOR_SECONDS
@@ -823,6 +828,11 @@ class EventRecorder(EventWriter):
                     await task
                 except asyncio.CancelledError:
                     pass
+        if self._archive_executor is not None:
+            # Not waited for, like the cancelled job above: a pass in progress
+            # ends after its window, and its lease still needs this loop.
+            self._archive_executor.shutdown(wait=False)
+            self._archive_executor = None
         # Drop any pending deferred start events and disarm the shared sweep.
         self._fanout.close()
 
@@ -1295,25 +1305,27 @@ class EventRecorder(EventWriter):
         """Archive due windows of this cluster's history folder, in a thread.
 
         The whole pass — listing, SQLite merges, gzip — is blocking work
-        measured in seconds, so it goes to a thread; the event loop only
-        sees this await, and the rotation loop starts it as a background
-        job so it never waits for it either.
+        measured in seconds, so it goes to the recorder's own archive thread;
+        the event loop only sees this await, and the rotation loop starts it
+        as a background job so it never waits for it either.
         """
         if not self._archive.enabled or not self._storage_dir:
             return
         lease = await self._filesystem_lease()
-        await asyncio.to_thread(
+        if self._archive_executor is None:
+            self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
+        await asyncio.get_running_loop().run_in_executor(
+            self._archive_executor,
             functools.partial(
                 run_archive_pass,
                 self._shared_dir,
                 cluster=self._cluster_name,
-                worker=self._worker_name,
                 instance=self._instance,
                 archive=self._archive,
                 merged_retention_days=self._merged_retention_days,
                 lease=lease,
                 stop=self._archive_stop,
-            )
+            ),
         )
 
     async def _filesystem_lease(self) -> ElectionLease:

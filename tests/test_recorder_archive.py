@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,7 +39,7 @@ from drakkar.recorder.archive import (
 from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
 from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
 from drakkar.recorder.history import history_dir, meta_path, sanitize_cluster, write_meta
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
 
 HOUR = 3600.0
 DAY = 24 * HOUR
@@ -47,7 +48,13 @@ OTHER_CLUSTER = 'index-fleet'
 INSTANCE = '1111111111111111'
 
 
-async def make_lease(tmp_path, cluster: str = CLUSTER, *, worker: str = 'worker-1') -> ElectionLease:
+async def make_lease(
+    tmp_path,
+    cluster: str = CLUSTER,
+    *,
+    worker: str = 'worker-1',
+    lease_seconds: float = HistoryArchiveConfig().lock_stale_seconds,
+) -> ElectionLease:
     """A lease on the filesystem election of ``cluster``, its calls run on the test's event loop."""
     election = FilesystemElection()
     await election.start(
@@ -66,7 +73,7 @@ async def make_lease(tmp_path, cluster: str = CLUSTER, *, worker: str = 'worker-
         caller,
         asyncio.get_running_loop(),
         scope=sanitize_cluster(cluster),
-        lease_seconds=HistoryArchiveConfig().lock_stale_seconds,
+        lease_seconds=lease_seconds,
         provider_name='filesystem',
     )
 
@@ -266,16 +273,17 @@ def _due_start(now: float, *, days_back: int = 3) -> float:
 
 async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None):
     """Run one pass in a thread, as the recorder does, so its lease can call the provider on this loop."""
+    archive = cfg or _make_config()
+    lease = await make_lease(tmp_path, cluster, worker=worker, lease_seconds=archive.lock_stale_seconds)
     await asyncio.to_thread(
         functools.partial(
             run_archive_pass,
             str(tmp_path / 'shared'),
             cluster=cluster,
-            worker=worker,
             instance=INSTANCE,
-            archive=cfg or _make_config(),
+            archive=archive,
             merged_retention_days=merged_retention_days,
-            lease=await make_lease(tmp_path, cluster, worker=worker),
+            lease=lease,
             stop=stop,
         )
     )
@@ -609,7 +617,26 @@ async def test_a_fenced_pass_names_the_provider(tmp_path, monkeypatch):
         await _run(tmp_path)
 
     (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
-    assert fenced['provider'] == 'filesystem'
+    assert (fenced['provider'], fenced['reason']) == ('filesystem', 'taken_over')
+
+
+async def test_a_pass_whose_lease_cannot_be_confirmed_is_fenced_as_unconfirmed(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
+
+    async def no_answer(self, scope: str, token: str) -> bool:
+        raise ValueError('the election gave no answer')
+
+    monkeypatch.setattr(FilesystemElection, 'is_held', no_answer)
+
+    with capture_logs() as cap:
+        await _run(tmp_path)
+
+    (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
+    assert fenced['reason'] == 'unconfirmed'
+    assert Path(source).exists()
+    assert _archives(folder) == []
+    assert not (folder / LOCK_NAME).exists()
 
 
 async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
@@ -941,7 +968,8 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> 
 
 
 async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_path, monkeypatch):
-    rec = _make_recorder(tmp_path)
+    archive = HistoryArchiveConfig(lock_stale_seconds=900)
+    rec = _make_recorder(tmp_path, archive=archive)
     seen: dict = {}
 
     def spy(shared_dir, **kwargs) -> None:
@@ -949,13 +977,57 @@ async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_pat
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
 
-    await rec._archive_pass()
+    try:
+        await rec._archive_pass()
+    finally:
+        await rec.stop()
 
     assert seen['shared_dir'] == str(tmp_path / 'shared')
-    assert (seen['cluster'], seen['worker'], seen['instance']) == (CLUSTER, 'worker-1', INSTANCE)
+    assert (seen['cluster'], seen['instance']) == (CLUSTER, INSTANCE)
     assert seen['archive'] is rec._archive
     assert seen['merged_retention_days'] == 7
     assert seen['thread'] != threading.current_thread().ident
+    lease = seen['lease']
+    assert (lease.scope, lease.lease_seconds, lease.provider_name) == (sanitize_cluster(CLUSTER), 900, 'filesystem')
+
+
+async def test_the_default_lease_keeps_its_lock_in_the_clusters_history_folder(tmp_path, monkeypatch):
+    rec = _make_recorder(tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: seen.update(kwargs))
+    try:
+        await rec._archive_pass()
+    finally:
+        await rec.stop()
+    lease = seen['lease']
+    lock = Path(history_dir(str(tmp_path / 'shared'), CLUSTER)) / LOCK_NAME
+
+    assert await asyncio.to_thread(lease.acquire) is True
+    try:
+        body = json.loads(lock.read_bytes())
+        assert (body['worker'], body['instance'], body['token']) == ('worker-1', INSTANCE, lease.token)
+    finally:
+        await asyncio.to_thread(lease.release)
+    assert not lock.exists()
+
+
+async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_path):
+    # The pass waits on provider calls and log writes that run in the default
+    # executor; with one worker there, the pass must not be sitting in it.
+    folder = _folder(tmp_path)
+    source = _make_db(folder, 'worker-1', _due_start(time.time()))
+    one_thread = ThreadPoolExecutor(max_workers=1)
+    asyncio.get_running_loop().set_default_executor(one_thread)
+    rec = _make_recorder(tmp_path)
+    try:
+        await asyncio.wait_for(rec._archive_pass(), timeout=WAIT_FOR_TIMEOUT_SECONDS)
+    finally:
+        await rec.stop()
+        one_thread.shutdown(wait=True)
+
+    assert len(_archives(folder)) == 1
+    assert not Path(source).exists()
+    assert not (folder / LOCK_NAME).exists()
 
 
 @pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
@@ -971,7 +1043,10 @@ async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
 
-    await rec._archive_pass()
+    try:
+        await rec._archive_pass()
+    finally:
+        await rec.stop()
 
     assert calls == 0
 

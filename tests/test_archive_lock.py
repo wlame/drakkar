@@ -240,7 +240,8 @@ def test_a_fresh_lock_moved_aside_by_a_racing_taker_is_put_back(tmp_path, monkey
 
 def test_a_put_back_that_loses_to_a_third_creator_fences_the_holder(tmp_path, monkeypatch):
     _stale_dead_lock(tmp_path)
-    holder = _lock(tmp_path, worker='w-2', instance='2222222222222222')
+    # The holder ends fenced and never releases, so it gets no refresh thread to leak.
+    holder = _lock(tmp_path, worker='w-2', instance='2222222222222222', auto_refresh=False)
     taker = _lock(tmp_path, worker='w-3', instance='3333333333333333')
     third = _lock(tmp_path, worker='w-4', instance='4444444444444444')
     real_rename = archive_lock._rename_aside
