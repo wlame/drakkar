@@ -13,7 +13,7 @@ from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig
-from drakkar.providers.resilience import CallResult, ResilientCaller
+from drakkar.providers.resilience import CallResult, RateLimitedLog, ResilientCaller
 
 FEATURE = 'registry'
 OP = 'publish'
@@ -434,18 +434,49 @@ async def test_a_success_between_failures_resets_the_failure_count(make_caller):
     assert not caller.breaker_open
 
 
-async def test_breaker_transitions_are_logged_without_throttling(make_caller, clock):
+async def test_breaker_transitions_are_logged_without_throttling_and_a_failed_probe_is_no_transition(
+    make_caller, clock, provider
+):
     caller = make_caller()
 
     with capture_logs() as logs:
         await _open_breaker(caller)
         clock.advance(10.0)
         await caller.call(OP, ScriptedCall(ValueError('bad')))
+        gauge_after_failed_probe = _breaker_gauge(provider)
         clock.advance(10.0)
         await caller.call(OP, ScriptedCall('v'))
 
     events = [entry['event'] for entry in logs if entry['event'].startswith('provider_breaker')]
-    assert events == ['provider_breaker_opened', 'provider_breaker_opened', 'provider_breaker_closed']
+    assert events == ['provider_breaker_opened', 'provider_breaker_closed']
+    assert gauge_after_failed_probe == 1.0
+
+
+async def test_the_rate_limited_log_holds_back_lines_per_key_and_counts_them(clock):
+    lines: list[tuple[str, dict]] = []
+
+    async def log(event: str, **fields: object) -> None:
+        lines.append((event, fields))
+
+    rate_limited = RateLimitedLog(clock)
+
+    await rate_limited.emit('publish', log, 'event_a', field=1)
+    await rate_limited.emit('publish', log, 'event_a', field=2)
+    await rate_limited.emit('list', log, 'event_a', field=3)
+    clock.advance(59.0)
+    await rate_limited.emit('publish', log, 'event_a', field=4)
+    clock.advance(1.0)
+    await rate_limited.emit('publish', log, 'event_a', field=5)
+    await rate_limited.emit('publish', log, 'event_a', field=6)
+    clock.advance(60.0)
+    await rate_limited.emit('publish', log, 'event_a', field=7)
+
+    assert lines == [
+        ('event_a', {'field': 1, 'suppressed': 0}),
+        ('event_a', {'field': 3, 'suppressed': 0}),
+        ('event_a', {'field': 5, 'suppressed': 2}),
+        ('event_a', {'field': 7, 'suppressed': 1}),
+    ]
 
 
 # --- deadlines ---

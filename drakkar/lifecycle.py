@@ -69,7 +69,6 @@ from drakkar.metrics import (
 )
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.providers.connections import Connections
-from drakkar.providers.resilience import describe_error
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.recorder.history import history_dir
@@ -1148,16 +1147,19 @@ class AppLifecycle:
             # The shared connections close once every provider that uses them
             # has stopped, inside the shutdown time that is left. A closer
             # still running when that runs out is cut off, and its client
-            # goes with the process.
+            # goes with the process. ``close_all`` logs a closer that raises
+            # and never raises itself, so running out of time is the one
+            # failure left here.
             if app._connections is not None:
+                close_seconds = max(deadline - time.monotonic(), 0.0)
                 try:
-                    async with asyncio.timeout(max(deadline - time.monotonic(), 0.0)):
+                    async with asyncio.timeout(close_seconds):
                         await app._connections.close_all()
-                except Exception as exc:
+                except TimeoutError:
                     await log.awarning(
-                        'connections_close_failed',
+                        'connections_close_timed_out',
                         category='fleet',
-                        error=describe_error(exc),
+                        timeout_seconds=round(close_seconds, 3),
                     )
 
             if app._ui_server:

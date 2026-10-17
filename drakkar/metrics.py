@@ -636,7 +636,7 @@ fleet_peers = Gauge(
 )
 fleet_registry_errors = Counter(
     'drakkar_fleet_registry_errors_total',
-    'Registry provider calls that failed or timed out.',
+    'Registry operations that failed or timed out, and loop iterations that raised.',
     ['op'],
 )
 fleet_registry_duration = Histogram(

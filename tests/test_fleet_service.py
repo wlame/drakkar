@@ -393,6 +393,7 @@ async def test_online_from_the_provider_overrides_the_age_rule(age, online, expe
     (view,) = service.peer_views()
 
     assert view.online is expected
+    assert (view.last_seen_ts is None) == (age is None)
 
 
 async def test_the_peers_gauge_follows_the_providers_online_verdict():
@@ -607,6 +608,16 @@ async def test_an_open_breaker_holds_start_back_until_the_cooldown_then_the_prob
     assert provider.calls == [('publish', 'running')]
 
 
+async def test_the_snapshot_age_grows_from_the_service_start_while_the_provider_has_not_started():
+    clock = _Clock()
+    service = _service(_StartsWhenAllowed(MemoryStore()), clock)
+    clock.advance(42)
+
+    await service._publish_tick('starting')
+
+    assert _sample('drakkar_fleet_registry_snapshot_age_seconds') == pytest.approx(42)
+
+
 async def test_nothing_is_listed_before_the_provider_starts():
     provider = _StartsWhenAllowed(MemoryStore())
     service = _service(provider, heartbeat_seconds=0.01, refresh_seconds=0.01, resilience=_never_opening_breaker())
@@ -709,8 +720,22 @@ async def test_loop_iteration_failures_log_once_a_minute_per_loop():
         await service._publish_tick('running')
 
     failures = [entry for entry in logs if entry['event'] == 'fleet_registry_iteration_failed']
-    assert len(failures) == 2
+    assert [entry['suppressed'] for entry in failures] == [0, 1]
     assert _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'}) == errors_before + 3
+
+
+async def test_a_publish_iteration_that_keeps_raising_does_not_stop_the_refresh_loop():
+    def features() -> dict:
+        raise ValueError('features supplier broke')
+
+    provider = _Recording(MemoryStore())
+    service = _service(provider, features=features, heartbeat_seconds=0.01, refresh_seconds=0.01)
+
+    await service.start()
+    await wait_for(lambda: provider.calls.count(('list',)) >= 3)
+    await service.stop()
+
+    assert [call for call in provider.calls if call[0] == 'publish'] == []
 
 
 # --- stopping inside a deadline ---
@@ -724,14 +749,18 @@ async def test_stop_skips_withdraw_at_once_while_the_breaker_is_open():
     service = _service(provider, resilience=resilience)
     await service.start()
     await wait_for(lambda: service._caller.breaker_open)
-    skipped_before = _calls('withdraw', 'skipped_open')
+    skipped_before = (_calls('withdraw', 'skipped_open'), _calls('stop', 'skipped_open'))
 
     started = time.monotonic()
     await service.stop(deadline_seconds=5)
 
     assert time.monotonic() - started < 0.5
-    assert _calls('withdraw', 'skipped_open') == skipped_before + 1
+    assert (_calls('withdraw', 'skipped_open'), _calls('stop', 'skipped_open')) == (
+        skipped_before[0] + 1,
+        skipped_before[1] + 1,
+    )
     assert provider.withdrawn == 0
+    assert provider.stopped is False
 
 
 async def test_stop_makes_one_withdraw_attempt_inside_the_deadline():

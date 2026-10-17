@@ -474,6 +474,8 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
 
     recorder = AsyncMock()
     cache_engine = AsyncMock()
+    # ``features`` is a plain method on the real engine; the registry reads it at every publish.
+    cache_engine.features = MagicMock(return_value={})
     app._recorder = recorder
     app._cache_engine = cache_engine
 

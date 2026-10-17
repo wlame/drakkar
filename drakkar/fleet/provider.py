@@ -68,9 +68,11 @@ class RegistryProvider(Protocol):
     async def start(self, ctx: RegistryContext) -> None:
         """Prepare the provider, before any other method.
 
-        A ``start`` that raises is called again at the next heartbeat, until
-        one succeeds, so a failed ``start`` must leave nothing behind that a
-        second call would trip over.
+        A ``start`` that raises or times out is called again until one
+        succeeds: at the next heartbeat, at once when the worker's state
+        changes, and once per breaker cooldown while the breaker is open. A
+        failed ``start`` must therefore leave nothing behind that a second
+        call would trip over.
         """
         ...
 
@@ -87,7 +89,15 @@ class RegistryProvider(Protocol):
         ...
 
     async def stop(self) -> None:
-        """Release what ``start`` took. Called once, last; never when no ``start`` succeeded."""
+        """Release what ``start`` took. Called at most once, last.
+
+        It is not called when no ``start`` succeeded, while the breaker is
+        open, or when the shutdown time is spent. A ``start`` that the
+        worker's shutdown cancels mid-attempt counts as not succeeded, so
+        whatever it had half-opened is never released here. Open clients
+        lazily on first use, or make sure a missing ``stop`` leaks nothing
+        that outlives the process.
+        """
         ...
 
 

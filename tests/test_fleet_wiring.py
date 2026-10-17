@@ -340,8 +340,8 @@ async def test_a_connection_close_that_outlasts_the_drain_time_is_cut_off_and_lo
         app._lifecycle._handle_signal()
         await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
-    (failure,) = [entry for entry in logs if entry['event'] == 'connections_close_failed']
-    assert failure['error'] == 'timed out'
+    (timed_out,) = [entry for entry in logs if entry['event'] == 'connections_close_timed_out']
+    assert 0 <= timed_out['timeout_seconds'] <= 0.2
     assert 'ui_server.stop' in order
 
 

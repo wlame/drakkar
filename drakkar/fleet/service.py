@@ -43,9 +43,9 @@ from drakkar.metrics import (
 )
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import (
-    FAILURE_LOG_INTERVAL_SECONDS,
     OUTCOME_NOT_STARTED,
     CallResult,
+    RateLimitedLog,
     ResilientCaller,
     describe_error,
 )
@@ -156,7 +156,7 @@ class FleetRegistry:
         self._first_publish_done = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._snapshot = FleetSnapshot()
-        self._iteration_failure_logged_at: dict[str, float] = {}
+        self._iteration_failure_log = RateLimitedLog(now_monotonic)
         self._reported_card_workers: set[str] = set()
         self._duplicate_instances: set[str] = set()
         self._started = False
@@ -190,8 +190,10 @@ class FleetRegistry:
             heartbeat_seconds=self._config.heartbeat_seconds,
             refresh_seconds=self._config.refresh_seconds,
         )
-        # The first publish sends the state current now, even if the worker
-        # moves on before that publish runs: every state reaches the card.
+        # The first publish tick gets the state current now, even if the
+        # worker moves on before that tick runs. Once the provider has
+        # started, every state reaches the card; a state that passes while
+        # the provider still fails to start is never published.
         self._task = asyncio.create_task(self._run(first_state=self._state), name='fleet-registry')
 
     def set_state(self, state: str) -> None:
@@ -305,6 +307,8 @@ class FleetRegistry:
                 await self._publish_once(state)
             else:
                 self._caller.skip('publish', OUTCOME_NOT_STARTED)
+                # No refresh runs before the start: the workers list is as old as the service.
+                fleet_registry_snapshot_age.set(self._now_monotonic() - self._created_at)
         except Exception as exc:
             await self._report_iteration_failure('publish', exc)
 
@@ -429,12 +433,9 @@ class FleetRegistry:
     async def _report_iteration_failure(self, loop: str, exc: Exception) -> None:
         """Count a loop iteration that raised; log it at most once a minute per loop."""
         fleet_registry_errors.labels(op=LOOP_OPS[loop]).inc()
-        now = self._now_monotonic()
-        last_logged = self._iteration_failure_logged_at.get(loop)
-        if last_logged is not None and now - last_logged < FAILURE_LOG_INTERVAL_SECONDS:
-            return
-        self._iteration_failure_logged_at[loop] = now
-        await self._logger.aerror(
+        await self._iteration_failure_log.emit(
+            loop,
+            self._logger.aerror,
             'fleet_registry_iteration_failed',
             category='fleet',
             loop=loop,

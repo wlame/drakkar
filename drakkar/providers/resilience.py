@@ -64,6 +64,34 @@ class CallResult:
     attempts: int
 
 
+class RateLimitedLog:
+    """Lets at most one log line per key out per interval; the next line says how many it held back.
+
+    The held-back count goes out as the ``suppressed`` field (0 when none
+    were). Every time read comes from the injected ``now_monotonic``.
+    """
+
+    def __init__(
+        self,
+        now_monotonic: Callable[[], float],
+        interval_seconds: float = FAILURE_LOG_INTERVAL_SECONDS,
+    ) -> None:
+        self._now_monotonic = now_monotonic
+        self._interval_seconds = interval_seconds
+        self._last_emitted: dict[str, float] = {}
+        self._held_back: dict[str, int] = {}
+
+    async def emit(self, key: str, log: Callable[..., Awaitable[Any]], event: str, **fields: Any) -> None:
+        """Await ``log(event, **fields, suppressed=<held back>)``, unless a line for ``key`` went out within the interval."""
+        now = self._now_monotonic()
+        last_emitted = self._last_emitted.get(key)
+        if last_emitted is not None and now - last_emitted < self._interval_seconds:
+            self._held_back[key] = self._held_back.get(key, 0) + 1
+            return
+        self._last_emitted[key] = now
+        await log(event, **fields, suppressed=self._held_back.pop(key, 0))
+
+
 def describe_error(exc: BaseException) -> str:
     """A log-friendly error text; a timeout's own text is empty, a task group's names only itself."""
     if isinstance(exc, BaseExceptionGroup):
@@ -120,14 +148,17 @@ class _Breaker:
         return was_open
 
     def record_failure(self, now: float, admission: _Admission) -> bool:
-        """Count a failed operation; True when it opened the breaker, or reopened it after a failed probe."""
+        """Count a failed operation; True only when it opened a closed breaker.
+
+        A failed probe starts a fresh cooldown and returns False: the breaker
+        never closed, so there is no new transition to report.
+        """
         if self._opened_at is not None:
             # Only the probe decides an open breaker: a late failure of an operation that
             # started before it opened must not push the cooldown further out.
-            is_probe = admission is _Admission.PROBE
-            if is_probe:
+            if admission is _Admission.PROBE:
                 self._opened_at = now
-            return is_probe
+            return False
         self._consecutive_failures += 1
         if self._consecutive_failures < self._config.failure_threshold:
             return False
@@ -160,8 +191,7 @@ class ResilientCaller:
         self._now_monotonic = now_monotonic
         self._sleep = sleep
         self._breaker = _Breaker(config.breaker)
-        self._last_failure_log: dict[str, float] = {}
-        self._suppressed_failures: dict[str, int] = {}
+        self._failure_log = RateLimitedLog(now_monotonic)
         self._breaker_gauge = provider_breaker_open.labels(feature=feature, provider=provider)
         self._breaker_gauge.set(0)
 
@@ -313,13 +343,9 @@ class ResilientCaller:
 
     async def _log_failure(self, op: str, result: CallResult, error: Exception) -> None:
         """Log a failed operation, at most once per interval per operation, with how many it stands for."""
-        now = self._now_monotonic()
-        last_logged = self._last_failure_log.get(op)
-        if last_logged is not None and now - last_logged < FAILURE_LOG_INTERVAL_SECONDS:
-            self._suppressed_failures[op] = self._suppressed_failures.get(op, 0) + 1
-            return
-        self._last_failure_log[op] = now
-        await self._logger.awarning(
+        await self._failure_log.emit(
+            op,
+            self._logger.awarning,
             'provider_call_failed',
             category=self._category,
             feature=self._feature,
@@ -327,5 +353,4 @@ class ResilientCaller:
             op=op,
             error=describe_error(error),
             attempts=result.attempts,
-            suppressed=self._suppressed_failures.pop(op, 0),
         )
