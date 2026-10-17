@@ -114,6 +114,6 @@ def test_an_unknown_name_fails_and_lists_the_known_providers(installed):
         resolve_provider_factory('etcd')
 
     assert str(raised.value) == (
-        "fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, static"
+        "fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, postgres, static"
     )
     assert isinstance(raised.value, UnknownProviderError)

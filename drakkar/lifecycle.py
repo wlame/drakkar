@@ -107,6 +107,10 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
         },
         'static': lambda: {'peers': [peer.model_dump() for peer in registry.static.peers]},
         'none': dict,
+        'postgres': lambda: {
+            'connection': registry.connection,
+            'prune_after_seconds': registry.prune_after_seconds,
+        },
     }
     build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
     return build()

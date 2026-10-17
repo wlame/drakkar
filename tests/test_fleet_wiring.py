@@ -18,6 +18,7 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.lifecycle import registry_provider_options
 from drakkar.models import SourceMessage
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
@@ -157,6 +158,16 @@ async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
     assert received['options'] == {'address': 'consul:8500'}
     assert received['ctx'].options == {'address': 'consul:8500'}
     assert received['ctx'].worker == 'w-1'
+
+
+def test_registry_provider_options_for_postgres_names_the_connection_and_prune(tmp_path):
+    config = _config(
+        tmp_path,
+        connections={'postgres': {'main': {'dsn': 'postgresql://user:secret@db/x'}}},
+        fleet={'registry': {'provider': 'postgres'}},
+    )
+
+    assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
 
 
 async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):

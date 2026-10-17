@@ -164,7 +164,7 @@ async def test_static_registry_hands_out_copies():
 
 
 def test_builtin_provider_table_names():
-    assert sorted(BUILTIN_PROVIDERS) == ['filesystem', 'none', 'static']
+    assert sorted(BUILTIN_PROVIDERS) == ['filesystem', 'none', 'postgres', 'static']
 
 
 def test_builtin_factories_build_their_providers(tmp_path):
