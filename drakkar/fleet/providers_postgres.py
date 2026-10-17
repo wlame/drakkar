@@ -1,12 +1,12 @@
 """The ``postgres`` registry provider: worker cards as rows of a Postgres table."""
 
-import hashlib
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import structlog
 
-from drakkar.config.connections import PostgresConnectionConfig
+from drakkar.config.connections import SCHEMA_RE, PostgresConnectionConfig
 from drakkar.fleet.card import decode_card, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.providers.postgres import (
@@ -21,7 +21,8 @@ from drakkar.providers.postgres import (
 from drakkar.providers.thread import PROVIDER_STOPPED
 
 NO_CONNECTIONS_MESSAGE = 'the postgres registry needs the worker connections'
-DEFAULT_SCHEMA = 'drakkar'
+# The schema of a connection entry that names none, so a preset pool gets the same default.
+DEFAULT_SCHEMA: str = PostgresConnectionConfig.model_fields['schema_name'].default
 
 
 class PostgresRegistry:
@@ -38,7 +39,9 @@ class PostgresRegistry:
     open: the worker closes the shared connections after every provider has
     stopped. ``pool`` presets a pool and skips the connections; ``schema``
     and ``manage_schema`` apply only to such a preset pool, since otherwise
-    they come from the connection entry.
+    they come from the connection entry. ``schema`` must be a lower-case
+    identifier, as the connection entry's is, because it is put into the
+    statement texts unquoted.
     """
 
     def __init__(
@@ -52,6 +55,8 @@ class PostgresRegistry:
         schema: str = DEFAULT_SCHEMA,
         manage_schema: bool = True,
     ) -> None:
+        if not re.fullmatch(SCHEMA_RE, schema):
+            raise ValueError(f"schema '{schema}' must be a lower-case identifier ([a-z_][a-z0-9_]*)")
         self._connection = connection
         self._prune_after = float(prune_after_seconds)
         self._open_pool = open_pool
@@ -61,9 +66,10 @@ class PostgresRegistry:
         self._preset_manage_schema = manage_schema
         # The pool and the statements rendered for its schema, set once a start succeeded.
         self._ready: tuple[Any, dict[str, str]] | None = None
-        # Digests of the card texts already logged as undecodable: a bad row
-        # is logged once, not at every refresh, and a large one is not kept.
-        self._reported_cards: set[bytes] = set()
+        # Workers whose card was logged as undecodable. Cut down to the
+        # workers of each listing, so it never outgrows the table, and a
+        # worker pruned and back with a bad card is logged again.
+        self._reported_workers: set[str] = set()
         self._logger: Any = structlog.get_logger()
         self._stopped = False
 
@@ -83,28 +89,32 @@ class PostgresRegistry:
         self._ready = (pool, statements_for(schema))
 
     async def publish(self, card: dict[str, Any]) -> None:
+        """Upsert ``card`` as its canonical bytes under its worker name, stamped with the server's ``now()``."""
         pool, statements = self._started()
         text = serialize_card(card).decode('utf-8')
         async with borrow(pool) as conn:
             await conn.execute(statements['publish'], card['worker'], card['instance'], card['cluster'], text)
 
     async def list(self) -> PeerCardList:
+        """Delete the cards older than the prune age, then return every other card with its age."""
         pool, statements = self._started()
         async with borrow(pool) as conn:
             await conn.execute(statements['list_prune'], self._prune_after)
             rows = await conn.fetch(statements['list_select'])
+        self._reported_workers &= {row[0] for row in rows}
         listed: PeerCardList = []
         for row in rows:
-            text, age = row[0], row[1]
+            worker, text, age = row[0], row[1], row[2]
             card, reason = decode_card(text.encode('utf-8'))
             if card is None:
-                await self._report_invalid_card(text, reason)
+                await self._report_invalid_card(worker, reason)
                 continue
             # max(0, ...): the server's clock may step back between a write and a read.
             listed.append(PeerCard(card=card, age_seconds=max(0.0, float(age)), online=None))
         return listed
 
     async def withdraw(self, worker: str, instance: str) -> None:
+        """Delete the card of ``worker`` while it still holds ``instance``."""
         pool, statements = self._started()
         async with borrow(pool) as conn:
             await conn.execute(statements['withdraw'], worker, instance)
@@ -131,17 +141,12 @@ class PostgresRegistry:
             raise RuntimeError('PostgresRegistry used before start()')
         return self._ready
 
-    async def _report_invalid_card(self, text: str, reason: str) -> None:
-        """Log a card that does not decode, once per distinct text.
-
-        The selected row carries no worker column, and the card's own worker
-        field is what failed to decode, so ``worker`` is empty.
-        """
-        digest = hashlib.sha256(text.encode('utf-8')).digest()
-        if digest in self._reported_cards:
+    async def _report_invalid_card(self, worker: str, reason: str) -> None:
+        """Log a card that does not decode, once per worker name while that name stays listed."""
+        if worker in self._reported_workers:
             return
-        self._reported_cards.add(digest)
-        await self._logger.awarning('fleet_card_invalid', category='fleet', worker='', reason=reason)
+        self._reported_workers.add(worker)
+        await self._logger.awarning('fleet_card_invalid', category='fleet', worker=worker, reason=reason)
 
 
 def postgres_registry_factory(options: Mapping[str, Any]) -> PostgresRegistry:

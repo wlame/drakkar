@@ -27,7 +27,13 @@ from drakkar.fleet.providers_postgres import PostgresRegistry, postgres_registry
 from drakkar.fleet.service import FleetRegistry
 from drakkar.providers import postgres
 from drakkar.providers.connections import Connections
-from drakkar.providers.postgres import ddl_for, missing_table_message, statements_for
+from drakkar.providers.postgres import (
+    ARCHIVE_LOCKS_TABLE,
+    FLEET_WORKERS_TABLE,
+    ddl_for,
+    missing_table_message,
+    statements_for,
+)
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
 from tests.pg_fake import FakePostgres, WorkerRow
@@ -155,21 +161,51 @@ async def test_list_decodes_a_non_ascii_worker_name_byte_for_byte(fake):
     assert fake.workers['wörker-ü'].card == serialize_card(card).decode('utf-8')
 
 
+def _bad_row(fake: FakePostgres, card: str = 'not json') -> WorkerRow:
+    return WorkerRow(instance=INSTANCE, cluster='c', card=card, heartbeat_at=fake.now)
+
+
+def _invalid_card_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in logs if entry['event'] == 'fleet_card_invalid']
+
+
 async def test_list_skips_an_undecodable_card_and_logs_once(fake):
     provider = await _started(fake)
     await provider.publish(_card('w-1'))
-    fake.workers['w-bad'] = WorkerRow(instance=INSTANCE, cluster='c', card='not json', heartbeat_at=fake.now)
+    fake.workers['w-bad'] = _bad_row(fake)
 
     with capture_logs() as logs:
         first = await provider.list()
+        fake.workers['w-bad'] = _bad_row(fake, card='[]')
         second = await provider.list()
 
     assert [entry.card['worker'] for entry in first] == ['w-1']
     assert [entry.card['worker'] for entry in second] == ['w-1']
-    invalid = [entry for entry in logs if entry['event'] == 'fleet_card_invalid']
-    assert invalid == [
-        {'event': 'fleet_card_invalid', 'category': 'fleet', 'worker': '', 'reason': 'not_json', 'log_level': 'warning'}
+    assert _invalid_card_logs(logs) == [
+        {
+            'event': 'fleet_card_invalid',
+            'category': 'fleet',
+            'worker': 'w-bad',
+            'reason': 'not_json',
+            'log_level': 'warning',
+        }
     ]
+
+
+async def test_list_logs_a_bad_card_again_after_its_worker_was_pruned(fake):
+    provider = await _started(fake)
+    fake.workers['w-bad'] = _bad_row(fake)
+
+    with capture_logs() as logs:
+        await provider.list()
+        fake.advance(PRUNE_AFTER + 1)
+        await provider.list()
+        fake.workers['w-bad'] = _bad_row(fake)
+        fake.calls.clear()
+        await provider.list()
+
+    assert [entry['worker'] for entry in _invalid_card_logs(logs)] == ['w-bad', 'w-bad']
+    assert fake.calls[-1] == (statements_for('drakkar')['list_select'], ())
 
 
 async def test_list_age_comes_from_the_server_clock(fake):
@@ -205,13 +241,18 @@ async def test_withdraw_sends_the_pinned_delete(fake):
 # --- Start ---
 
 
+def _managed_start_calls() -> list[tuple[str, tuple[Any, ...]]]:
+    """What a start with ``manage_schema`` sends: the lock and the DDL in one transaction."""
+    calls: list[tuple[str, tuple[Any, ...]]] = [('BEGIN', ()), (statements_for('drakkar')['ddl_lock'], ('drakkar',))]
+    calls += [(sql, ()) for sql in ddl_for('drakkar')]
+    calls.append(('COMMIT', ()))
+    return calls
+
+
 async def test_start_runs_the_ddl_when_manage_schema_is_true(fake):
     await _started(fake)
 
-    expected = [('BEGIN', ()), (statements_for('drakkar')['ddl_lock'], ('drakkar',))]
-    expected += [(sql, ()) for sql in ddl_for('drakkar')]
-    expected.append(('COMMIT', ()))
-    assert fake.calls == expected
+    assert fake.calls == _managed_start_calls()
 
 
 async def test_start_checks_the_table_when_manage_schema_is_false(fake):
@@ -229,14 +270,37 @@ async def test_start_with_a_missing_table_raises_the_pinned_message():
     assert str(raised.value) == missing_table_message('drakkar', 'fleet_workers', 'main')
 
 
+async def test_start_with_only_the_lock_table_raises_for_the_workers_table():
+    fake = FakePostgres()
+    fake.tables = {ARCHIVE_LOCKS_TABLE}
+
+    with pytest.raises(RuntimeError) as raised:
+        await _started(fake, manage_schema=False)
+
+    assert str(raised.value) == missing_table_message('drakkar', 'fleet_workers', 'main')
+
+
 async def test_start_with_a_missing_table_creates_it_when_manage_schema_is_true():
     fake = FakePostgres(tables_exist=False)
     provider = await _started(fake)
 
     await provider.publish(_card())
 
-    assert fake.tables_exist
+    assert fake.tables == {FLEET_WORKERS_TABLE, ARCHIVE_LOCKS_TABLE}
     assert list(fake.workers) == ['w-1']
+
+
+@pytest.mark.parametrize('schema', ['Bad-Name', '', '1st', 'ops fleet'])
+def test_a_preset_schema_that_is_not_a_lower_case_identifier_is_refused(fake, schema):
+    with pytest.raises(ValueError, match=r'must be a lower-case identifier \(\[a-z_\]\[a-z0-9_\]\*\)'):
+        _provider(fake, schema=schema)
+
+
+async def test_a_preset_pool_defaults_to_the_schema_of_a_connection_entry(fake):
+    await _started(fake)
+
+    assert PostgresConnectionConfig(dsn=DSN).schema_name == 'drakkar'
+    assert fake.calls[1] == (statements_for('drakkar')['ddl_lock'], ('drakkar',))
 
 
 async def test_start_without_connections_raises():
@@ -284,8 +348,10 @@ async def test_start_retried_after_a_failed_ddl_runs_the_ddl_again(fake):
     await provider.start(_context())
     await provider.publish(_card())
 
-    assert ('ROLLBACK', ()) in fake.calls
-    assert fake.calls[-2] == ('COMMIT', ())
+    rolled_back_at = fake.calls.index(('ROLLBACK', ()))
+    assert fake.calls[: rolled_back_at + 1] == [_managed_start_calls()[0], _managed_start_calls()[1], ('ROLLBACK', ())]
+    assert fake.calls[rolled_back_at + 1 : -1] == _managed_start_calls()
+    assert fake.calls[-1][0] == statements_for('drakkar')['publish']
     assert list(fake.workers) == ['w-1']
 
 
@@ -356,7 +422,7 @@ async def test_a_connection_error_is_raised_transient(fake):
 
 async def test_an_undefined_table_error_is_raised_as_is(fake):
     provider = await _started(fake)
-    fake.tables_exist = False
+    fake.tables = set()
 
     with pytest.raises(asyncpg.exceptions.UndefinedTableError):
         await provider.list()

@@ -59,7 +59,8 @@ STATEMENT_TEMPLATES: dict[str, str] = {
     ),
     'list_prune': 'DELETE FROM {schema}.fleet_workers WHERE heartbeat_at < now() - make_interval(secs => $1)',
     'list_select': (
-        'SELECT card, EXTRACT(EPOCH FROM now() - heartbeat_at)::float8 FROM {schema}.fleet_workers ORDER BY worker'
+        'SELECT worker, card, EXTRACT(EPOCH FROM now() - heartbeat_at)::float8 '
+        'FROM {schema}.fleet_workers ORDER BY worker'
     ),
     'withdraw': 'DELETE FROM {schema}.fleet_workers WHERE worker = $1 AND instance = $2',
     'acquire_select': (

@@ -55,11 +55,17 @@ class FakePostgres:
     test inject an asyncpg error. ``calls`` records every statement, in
     order, with ``('BEGIN', ())``, ``('COMMIT', ())`` and ``('ROLLBACK', ())``
     around a transaction.
+
+    ``tables`` holds the names of the tables that exist (both, or none with
+    ``tables_exist=False``); a test may set it to one of them. ``check_table``
+    answers per table and each ``CREATE TABLE`` adds its own.
     """
 
     def __init__(self, schema: str = 'drakkar', *, tables_exist: bool = True) -> None:
         self.schema = schema
-        self.tables_exist = tables_exist
+        self.tables: set[str] = {FLEET_WORKERS_TABLE, ARCHIVE_LOCKS_TABLE} if tables_exist else set()
+        # Set by FakeConnection.transaction while its block runs.
+        self.in_transaction = False
         self.now = 1_000.0
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.workers: dict[str, WorkerRow] = {}
@@ -70,12 +76,12 @@ class FakePostgres:
         ddl = ddl_for(schema)
         self._handlers: dict[str, Handler] = {
             statements['check_table']: self._check_table,
-            statements['ddl_lock']: lambda _args: ([(None,)], 'SELECT 1'),
+            statements['ddl_lock']: self._ddl_lock,
             ddl[0]: lambda _args: ([], 'CREATE SCHEMA'),
-            ddl[1]: self._create_table,
+            ddl[1]: self._create_table(FLEET_WORKERS_TABLE),
             ddl[2]: lambda _args: ([], 'CREATE INDEX'),
             ddl[3]: lambda _args: ([], 'CREATE INDEX'),
-            ddl[4]: self._create_table,
+            ddl[4]: self._create_table(ARCHIVE_LOCKS_TABLE),
             statements['publish']: self._on_tables(self._publish, FLEET_WORKERS_TABLE),
             statements['list_prune']: self._on_tables(self._list_prune, FLEET_WORKERS_TABLE),
             statements['list_select']: self._on_tables(self._list_select, FLEET_WORKERS_TABLE),
@@ -108,33 +114,42 @@ class FakePostgres:
             raise AssertionError(f'statement not in the fixture: {sql}')
         return handler(args)
 
-    def snapshot(self) -> tuple[dict[str, WorkerRow], dict[str, LockRow], bool]:
+    def snapshot(self) -> tuple[dict[str, WorkerRow], dict[str, LockRow], set[str]]:
         """The table contents, for a transaction to put back on rollback (rows are immutable)."""
-        return dict(self.workers), dict(self.locks), self.tables_exist
+        return dict(self.workers), dict(self.locks), set(self.tables)
 
-    def restore(self, saved: tuple[dict[str, WorkerRow], dict[str, LockRow], bool]) -> None:
+    def restore(self, saved: tuple[dict[str, WorkerRow], dict[str, LockRow], set[str]]) -> None:
         """Put back the table contents a :meth:`snapshot` took."""
-        self.workers, self.locks, self.tables_exist = dict(saved[0]), dict(saved[1]), saved[2]
+        self.workers, self.locks, self.tables = dict(saved[0]), dict(saved[1]), set(saved[2])
 
     # --- the statements ---
 
     def _on_tables(self, handler: Handler, table: str) -> Handler:
-        """A statement on the tables fails as Postgres does while they do not exist."""
+        """A statement on ``table`` fails as Postgres does while that table does not exist."""
 
         def guarded(args: tuple[Any, ...]) -> Result:
-            if not self.tables_exist:
+            if table not in self.tables:
                 raise asyncpg.exceptions.UndefinedTableError(f'relation "{self.schema}.{table}" does not exist')
             return handler(args)
 
         return guarded
 
     def _check_table(self, args: tuple[Any, ...]) -> Result:
-        known = {f'{self.schema}.{FLEET_WORKERS_TABLE}', f'{self.schema}.{ARCHIVE_LOCKS_TABLE}'}
-        return [(self.tables_exist and args[0] in known,)], 'SELECT 1'
+        existing = {f'{self.schema}.{table}' for table in self.tables}
+        return [(args[0] in existing,)], 'SELECT 1'
 
-    def _create_table(self, _args: tuple[Any, ...]) -> Result:
-        self.tables_exist = True
-        return [], 'CREATE TABLE'
+    def _ddl_lock(self, _args: tuple[Any, ...]) -> Result:
+        # pg_advisory_xact_lock holds only until the transaction ends; outside one it protects nothing.
+        if not self.in_transaction:
+            raise AssertionError('ddl_lock ran outside a transaction')
+        return [(None,)], 'SELECT 1'
+
+    def _create_table(self, table: str) -> Handler:
+        def create(_args: tuple[Any, ...]) -> Result:
+            self.tables.add(table)
+            return [], 'CREATE TABLE'
+
+        return create
 
     def _publish(self, args: tuple[Any, ...]) -> Result:
         worker, instance, cluster, card = args
@@ -150,7 +165,7 @@ class FakePostgres:
         return [], f'DELETE {len(stale)}'
 
     def _list_select(self, _args: tuple[Any, ...]) -> Result:
-        rows = [(row.card, self.now - row.heartbeat_at) for _worker, row in sorted(self.workers.items())]
+        rows = [(worker, row.card, self.now - row.heartbeat_at) for worker, row in sorted(self.workers.items())]
         return rows, f'SELECT {len(rows)}'
 
     def _withdraw(self, args: tuple[Any, ...]) -> Result:
@@ -234,10 +249,13 @@ class FakeConnection:
         """Record the transaction; an exception rolls the tables back and is raised again."""
         self._server.calls.append(('BEGIN', ()))
         saved = self._server.snapshot()
+        self._server.in_transaction = True
         try:
             yield
         except BaseException:
             self._server.restore(saved)
             self._server.calls.append(('ROLLBACK', ()))
             raise
+        finally:
+            self._server.in_transaction = False
         self._server.calls.append(('COMMIT', ()))
