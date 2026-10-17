@@ -668,6 +668,32 @@ fleet_peer_request_duration = Histogram(
     buckets=FLEET_REGISTRY_DURATION_BUCKETS,
 )
 
+# --- Provider operations ---
+# One operation is one logical call of a feature (publish, list, acquire, ...)
+# with its retries. outcome: ok, error (a non-transient error, or transient
+# errors on every attempt), timeout (the last attempt timed out), skipped_open
+# (the circuit breaker was open, nothing was called) or not_started (the
+# provider is not started yet, or no time was left for a call).
+# A retried operation can last several attempt timeouts, so the top buckets
+# reach past the single-call range.
+PROVIDER_CALL_DURATION_BUCKETS = (*FLEET_REGISTRY_DURATION_BUCKETS, 30)
+provider_calls = Counter(
+    'drakkar_provider_calls_total',
+    'Provider operations by feature, provider, operation and outcome.',
+    ['feature', 'provider', 'op', 'outcome'],
+)
+provider_call_duration = Histogram(
+    'drakkar_provider_call_duration_seconds',
+    'Duration of one provider operation, retries included.',
+    ['feature', 'provider', 'op'],
+    buckets=PROVIDER_CALL_DURATION_BUCKETS,
+)
+provider_breaker_open = Gauge(
+    'drakkar_provider_breaker_open',
+    "1 while the provider's circuit breaker is open.",
+    ['feature', 'provider'],
+)
+
 
 def cache_gauge_snapshot() -> dict[str, int]:
     """Return the current integer values of all four cache gauges.

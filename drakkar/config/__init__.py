@@ -20,6 +20,7 @@ from drakkar.config.fleet import (
     StaticRegistryConfig,
 )
 from drakkar.config.kafka import KafkaConfig
+from drakkar.config.resilience import ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
 from drakkar.config.runtime import (
     ExecutorConfig,
@@ -106,6 +107,7 @@ __all__ = [
     'OffloadConfig',
     'PostgresSinkConfig',
     'RedisSinkConfig',
+    'ResilienceConfig',
     'RuntimeHealthConfig',
     'SharedConfig',
     'SinksConfig',
@@ -131,4 +133,5 @@ __all__ = [
     '_deep_merge',
     '_parse_env_overrides',
     'load_config',
+    'validate_resilience',
 ]
