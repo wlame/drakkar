@@ -187,10 +187,11 @@ The `connections` section holds the address and the credentials of the
 shared services that providers use: the Consul ACL `token`, the Redis `url`
 (with its password) and the Postgres `dsn` (with user and password). The
 `postgres` registry and election providers read `connections.postgres.<name>`:
-they open one pool with the `dsn` and use the `schema`. This release ships no
-provider that reads the Consul and Redis entries; a provider plugin can use
-any entry through `ctx.connections`. The advice below applies to the entries
-you declare and to any provider that uses them.
+they open one pool with the `dsn` and use the `schema`. The `redis` providers
+read `connections.redis.<name>`: they open one client with the `url` and use
+the `key_prefix`. This release ships no provider that reads the Consul entries;
+a provider plugin can use any entry through `ctx.connections`. The advice
+below applies to the entries you declare and to any provider that uses them.
 
 - **Set them from the environment.** For example a Kubernetes Secret that
   becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`
@@ -225,6 +226,33 @@ you declare and to any provider that uses them.
   `archive_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the archive lease, so protect the
   schema like the card folder of the `filesystem` provider.
+- **Give the Redis user the rights it needs and no more.** The `redis`
+  providers send `EVAL`, `GET` and `PING`, and their scripts call `GET`,
+  `SET`, `DEL`, `ZADD`, `ZRANGE`, `ZREM`, `PEXPIRE` and `TIME`. The client
+  also sends its connection commands when it connects. Create a user of its
+  own for the fleet, with the rights
+  `~<prefix>* +@read +@write +@scripting +@connection +time`, where
+  `<prefix>` is the `key_prefix` of the connection. With the default prefix:
+
+  ```text
+  ACL SETUSER drakkar-fleet on '>change-me' '~drakkar:*' +@read +@write +@scripting +@connection +time
+  ACL SETUSER default off
+  ```
+
+  The first line makes the user. Its password goes into the `url` of the
+  connection, for example
+  `redis://drakkar-fleet:change-me@redis.internal:6379/3`, which you set from
+  the environment (`DK_CONNECTIONS__REDIS__MAIN__URL`). The second line
+  switches the `default` user off, so that nobody connects without a
+  password; run it only when no other client of the server uses that user.
+  Use `rediss://` in the URL for TLS. Give the fleet a **database number of
+  its own** (the path of the URL, for example `/3`). The key pattern limits
+  the user to the prefix, but a database of its own also keeps other data out
+  of reach and out of the way of the providers. With an empty `key_prefix`
+  the pattern is `~*`, and the database is the only boundary. A user with
+  these rights can publish and delete worker cards and take the archive
+  lease, so protect the database like the card folder of the `filesystem`
+  provider.
 - **Operator views mask them.** The config reference shows a mask in place
   of `token`, `url` and `dsn`. For `plugin_options` it masks at every depth
   by key name (`password`, `token`, ...): every value under such a key is

@@ -101,6 +101,74 @@ More: [Fleet registry: postgres](fleet.md#postgres),
 [The election provider](local-databases.md#the-election-provider),
 [Security: provider credentials](security.md#provider-credentials).
 
+## A shared folder plus a shared Redis
+
+This layout fits a deployment that already runs Redis. The workers keep their
+sealed history in a shared folder, as with the defaults. They find each other,
+and choose the one worker that builds the archives of a cluster, through keys
+in Redis instead of files in the folder. Both choices use the same
+`connections.redis.main` entry and so share one client.
+
+```yaml
+storage:
+  dir: /var/lib/drakkar
+shared:
+  dir: /mnt/drakkar-shared
+
+connections:
+  redis:
+    main:
+      key_prefix: "drakkar:"
+
+fleet:
+  registry:
+    provider: redis
+    connection: main
+
+history:
+  archive:
+    election:
+      provider: redis
+      connection: main
+```
+
+Set the URL in the environment of every worker, not in the YAML file. The
+database number is the path of the URL:
+
+```bash
+DK_CONNECTIONS__REDIS__MAIN__URL='redis://drakkar-fleet:...@redis.internal:6379/3'
+```
+
+What to check:
+
+- Every worker of the fleet uses the same registry provider, and the same
+  server, database number and `key_prefix`. Every worker of one cluster uses
+  the same election provider. Workers on different providers or different
+  databases do not see each other's cards or leases.
+- The registry needs `ui.enabled: true`.
+- The shared folder still holds the sealed recorder files and the archives.
+  Only the cards and the archive lease move to Redis.
+- Use a **database number of its own** for the fleet and a Redis user of its
+  own, with the rights `~drakkar:* +@read +@write +@scripting +@connection
+  +time` (the pattern follows `key_prefix`) and the `default` user off where no
+  other client needs it. The user needs no other right. A complete `ACL SETUSER`
+  line is in [Security](security.md#provider-credentials).
+- The server is Redis 5.0 or later, standalone or a primary behind a fixed
+  address. Redis Cluster is not supported. Use `rediss://` in the URL for TLS.
+  A URL with query options (`?...`) is refused when the provider starts.
+- A Redis server that restarts without its data loses the cards and the
+  leases. The workers publish their cards again at the next heartbeat. A pass
+  that held the lease finds it gone at its next check, stops without
+  publishing, and the next pass takes the scope.
+- During a Redis outage the pipeline keeps running. The workers list keeps its
+  last snapshot, an archive pass stops without publishing, and both providers
+  recover when the server is back. Watch `drakkar_provider_breaker_open` and
+  `drakkar_provider_calls_total` (see [Observability](observability.md)).
+
+More: [Fleet registry: redis](fleet.md#redis),
+[The redis election provider](local-databases.md#the-redis-election-provider),
+[Security: provider credentials](security.md#provider-credentials).
+
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the

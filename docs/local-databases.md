@@ -653,8 +653,8 @@ history:
   archive:
     lock_stale_seconds: 7200     # the lease length, for every provider
     election:
-      provider: filesystem       # the default: the archive lock above; or postgres, or a plugin name
-      # connection: main         # read by the postgres provider (consul and redis are reserved)
+      provider: filesystem       # the default: the archive lock above; or postgres, redis, or a plugin name
+      # connection: main         # read by the postgres and redis providers (consul is reserved)
       # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
       # plugin_options: {}       # passed unchanged to a provider plugin
 ```
@@ -667,22 +667,24 @@ history:
   seconds. A holder that died stops refreshing, and once the lease length has
   passed another worker may take the scope over. With a `consul` provider
   the value may not exceed 86400.
-- **Providers.** `filesystem` and `postgres` are built in. Other providers
-  are plugins of the entry-point group `drakkar.election_providers`, in the
-  same way as for the [fleet registry](fleet.md#writing-a-provider). The names
-  `consul` and `redis` are reserved for providers of later releases that keep
+- **Providers.** `filesystem`, `postgres` and `redis` are built in. Other
+  providers are plugins of the entry-point group `drakkar.election_providers`,
+  in the same way as for the [fleet registry](fleet.md#writing-a-provider).
+  The name `consul` is reserved for a provider of a later release that keeps
   the lease in a service reached through a [named
-  connection](fleet.md#connections); this release ships neither, and a plugin
-  of either name (or of the name `postgres`) is checked like the provider of
-  that name (its connection must be declared). An unknown name fails startup
-  with a message that lists the providers that exist, for example
-  `history.archive.election.provider 'consul' is not known; known providers: filesystem, postgres`.
+  connection](fleet.md#connections); this release does not ship it, and a
+  plugin of that name (or of the name `postgres` or `redis`) is checked like
+  the provider of that name (its connection must be declared). An unknown
+  name fails startup with a message that lists the providers that exist, for
+  example
+  `history.archive.election.provider 'consul' is not known; known providers: filesystem, postgres, redis`.
   The name is checked whenever `history.archive.enabled` is true and the UI
   is on, also with `storage.dir: ''`. With archiving off, any name is
   accepted.
 - **Start and stop.** The provider starts at the first archive pass, not at
   worker start (so with the `postgres` provider the tables are first checked
-  or created then). When the start fails, that pass ends at once (its `acquire`
+  or created then, and with the `redis` provider the server is first sent a
+  `PING` then). When the start fails, that pass ends at once (its `acquire`
   is counted `not_started`) and the next pass tries the start again. While
   the circuit breaker is open, a pass skips the start until the cooldown has
   passed. At a clean stop the recorder lets the pass in progress end its
@@ -769,6 +771,73 @@ The connection string comes from the environment:
   without publishing or deleting. Its row stays until the lease length has
   passed, as for any holder that stops refreshing, and then another pass
   takes it over.
+
+#### The `redis` election provider {#the-redis-election-provider}
+
+The lease is a key of the Redis database that the connection named by
+`history.archive.election.connection` points at. It fits a deployment that
+already runs Redis. The sealed history folder (`shared.dir`) is still a shared
+folder; only the choice of the archiving worker moves to Redis.
+
+```yaml
+shared:
+  dir: /mnt/drakkar-shared
+connections:
+  redis:
+    main:
+      key_prefix: "drakkar:"
+history:
+  archive:
+    lock_stale_seconds: 7200
+    election:
+      provider: redis
+      connection: main
+```
+
+The URL comes from the environment: `DK_CONNECTIONS__REDIS__MAIN__URL`. The
+server, the database number and the `key_prefix` must be the same on every
+worker of the cluster. The requirements for the server, the URL and the Redis
+user are the same as for the registry; see [Fleet registry:
+redis](fleet.md#redis) and [Security](security.md#provider-credentials).
+
+- **One key per scope.** The key is `<key_prefix>archive-locks:<scope>`, for
+  example `drakkar:archive-locks:main`. Its value is the lock body, in the same
+  encoding as the `filesystem` lock:
+
+  ```json
+  {"acquired_at":"2026-10-14T02:00:00.125000Z","instance":"9c41e0b27fd34a1e","provider":"redis","token":"5f0c1d2e3a4b6978","worker":"search-worker-3"}
+  ```
+
+  `acquired_at` comes from the clock of the worker that took the lease and is
+  for information only.
+- **The lease is the time to live of the key.** It is
+  `history.archive.lock_stale_seconds`. The Redis server judges it: the lease
+  is alive while the key exists, and Redis deletes the key when the time to
+  live ends. No worker's wall clock is compared with another's.
+- **Acquire.** One script. It sets the body together with the time to live
+  when the key is absent. For the token that already holds the key it moves
+  the time to live and keeps the body, so `acquired_at` stays at its first
+  value. For any other token it changes nothing, and the pass gets `False` and
+  skips the tick.
+- **Refresh and release.** `refresh` moves the time to live of the key to the
+  lease length, and `release` deletes the key, each only while the body holds
+  the caller's token. The check runs on the server inside the script. A holder
+  that was taken over cannot extend or free the new holder's lease. `is_held`
+  (the fencing check) reads the key and is true only while the body holds the
+  token.
+- **Takeover.** A lease that ran out is a key that Redis has deleted, so the
+  next pass finds a free scope. There is no previous holder to read, and the
+  `redis` provider writes no `recorder_archive_lock_taken_over` line. Only the
+  `filesystem` and `postgres` providers write it. A fenced pass logs
+  `recorder_archive_fenced` as described below.
+- **An outage** is handled as for the registry: connection errors and the
+  server replies `BUSY`, `LOADING`, `MASTERDOWN` and `TRYAGAIN` are retried
+  under `history.archive.election.resilience`, and the breaker opens after
+  `failure_threshold` failed operations. Any other reply, such as `WRONGPASS`
+  or `NOPERM`, is final. A lease that cannot be confirmed counts as lost (see
+  above), so a pass during an outage stops without publishing or deleting. Its
+  key stays until the lease length has passed, as for any holder that stops
+  refreshing, and then another pass takes the scope.
 
 #### Fencing
 

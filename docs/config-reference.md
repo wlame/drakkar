@@ -684,13 +684,14 @@ history:
                                    # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
     lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver; also the
                                    # lease length of every election provider (<= 86400 with provider consul);
-                                   # with postgres it is judged on the database server's clock.
+                                   # with postgres and redis it is judged on the server's clock.
                                    # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
     election:                      # which worker of a cluster builds the archives; see "Resilience block" below
-      provider: filesystem         # filesystem | postgres | <plugin name> (consul and redis are reserved names).
-                                   # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>.
+      provider: filesystem         # filesystem | postgres | redis | <plugin name> (consul is a reserved name).
+                                   # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>;
+                                   # redis keeps it in one key per cluster on the server of connections.redis.<connection>.
                                    # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
-      connection: main             # entry of connections.<provider>; read by postgres (consul and redis are reserved).
+      connection: main             # entry of connections.<provider>; read by postgres and redis (consul is reserved).
                                    # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
       resilience:                  # same keys and defaults as fleet.registry.resilience
         timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
@@ -718,10 +719,11 @@ How workers find each other and exchange cache rows. Peers pull `cluster`/`globa
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | postgres | <plugin name> (consul and redis are reserved names);
-                                   # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>.
+    provider: filesystem           # filesystem | static | none | postgres | redis | <plugin name> (consul is a reserved name);
+                                   # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>;
+                                   # redis keeps them in keys of connections.redis.<connection>, with an index of the workers.
                                    # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
-    connection: main               # entry of connections.<provider>; read by postgres (consul and redis are reserved).
+    connection: main               # entry of connections.<provider>; read by postgres and redis (consul is reserved).
                                    # env: DK_FLEET__REGISTRY__CONNECTION
     heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
     refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
@@ -747,7 +749,7 @@ fleet:
     consul:                        # reserved for the consul provider of a later release; none shipped, and a plugin does not read it
       mode: publish                # publish | catalog. env: DK_FLEET__REGISTRY__CONSUL__MODE
       service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
-    redis: {}                      # reserved for the redis provider of a later release (none shipped); no keys
+    redis: {}                      # block of the redis provider; no keys (address, credentials and key prefix come from the connection)
     postgres: {}                   # block of the postgres provider; no keys (schema and pool come from the connection)
     plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
                                    # env: one key per variable, DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>
@@ -765,7 +767,7 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`; this release ships no provider that reads the Consul and Redis entries, but a provider plugin can use any entry through `ctx.connections`.
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, and the `redis` ones read `connections.redis.<name>`; this release ships no provider that reads the Consul entries, but a provider plugin can use any entry through `ctx.connections`.
 
 ```yaml
 connections:
@@ -778,7 +780,8 @@ connections:
                                        #   env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
   redis:
     main:
-      url: redis://localhost:6379/0    # a secret. env: DK_CONNECTIONS__REDIS__MAIN__URL
+      url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...).
+                                       #   env: DK_CONNECTIONS__REDIS__MAIN__URL
       key_prefix: 'drakkar:'           # letters, digits, _ : . -; may be empty. env: DK_CONNECTIONS__REDIS__MAIN__KEY_PREFIX
   postgres:
     main:

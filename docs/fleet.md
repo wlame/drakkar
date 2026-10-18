@@ -47,6 +47,7 @@ Each feature has its own `connection`, [`resilience`](#resilience) block and
 | `filesystem` (default) | one JSON file per worker in a shared folder | from the file times on the file server |
 | `static` | nowhere: a fixed peer list in the config | unknown |
 | `postgres` | one row per worker in the table `fleet_workers` of a Postgres schema | from the database server's clock (`heartbeat_at` against `now()`) |
+| `redis` | one key per worker plus an index of workers, under the key prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
 | `none` | nowhere: no peers | — |
 | a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock, or its own verdict |
 
@@ -55,24 +56,24 @@ exchange pulls nothing. `static` cards come from the config and carry no
 `features` object, so the cache exchange pulls every `static` peer each
 cycle, without the mark check.
 
-`postgres` is built in; see [`postgres`](#postgres). The names `consul` and
-`redis` are reserved for providers of later releases that keep their data in a
-service reached through a [named connection](#connections). Their own
-settings sit in `fleet.registry.consul` (`mode`, `service_name`) and
-`fleet.registry.redis` (no keys); a plugin does not read these blocks, it
-gets `plugin_options`. This release ships no provider with either of these
-two names. Two checks apply to a name that uses a connection (`consul`,
-`redis` and `postgres`), in this order:
+`postgres` and `redis` are built in; see [`postgres`](#postgres) and
+[`redis`](#redis). The name `consul` is reserved for a provider of a later
+release that keeps its data in a service reached through a [named
+connection](#connections). Its own settings sit in `fleet.registry.consul`
+(`mode`, `service_name`); a plugin does not read this block, it gets
+`plugin_options`. This release ships no provider with the name `consul`.
+Two checks apply to a name that uses a connection (`consul`, `redis` and
+`postgres`), in this order:
 
 1. The config load checks that the connection the name uses is declared.
    Without `connections.consul.main`, for example, the load fails with
    `fleet.registry.connection 'main' is not defined under connections.consul`.
 2. A worker starts with the name only when a provider of that name exists.
-   For `postgres` it does. For `consul` and `redis` a plugin of that name
+   For `postgres` and `redis` it does. For `consul` a plugin of that name
    must be installed. Otherwise startup fails (with the UI on, which the
    registry needs) with a message that lists the providers that exist, for
    example
-   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, postgres, static`.
+   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, postgres, redis, static`.
 
 ### `filesystem`
 
@@ -281,6 +282,124 @@ wait for any of this. When the server is back, the next probe operation
 closes the breaker and the registry recovers without a restart; nothing
 needs to be reset, because the pool opens new connections by itself.
 
+### `redis`
+
+One key per worker and one index of the workers, in a Redis database that
+every worker of the fleet can reach. It fits a deployment that already runs
+Redis and has no shared folder for the cards.
+
+```yaml
+connections:
+  redis:
+    main:
+      key_prefix: "drakkar:"     # the default; every key starts with it
+      # url: set from the environment, see below
+fleet:
+  registry:
+    provider: redis
+    connection: main             # the default
+```
+
+Set the URL in the environment, not in the YAML file:
+
+```bash
+export DK_CONNECTIONS__REDIS__MAIN__URL='redis://drakkar-fleet:...@redis.internal:6379/3'
+```
+
+Without it the entry uses `redis://localhost:6379/0`. The registry needs the
+UI server (`ui.enabled: true`), as with every provider. Every worker of the
+fleet uses the same provider and the same server, database number and
+`key_prefix`; workers on different stores do not see each other.
+
+What it keeps and does:
+
+- **The keys.** With the default prefix, `drakkar:fleet:workers:<worker>` is
+  the card of one worker: its canonical bytes as text, the same bytes the
+  `filesystem` provider writes to a file. `drakkar:fleet:workers` is the
+  index: a sorted set with one member per worker, scored by the time of the
+  Redis server at that worker's last publish. In `<worker>` and in the
+  index member, characters of the worker name outside `[a-zA-Z0-9_-]` become
+  `_`.
+- **Publish.** One script per heartbeat and per state change. It stores the
+  card with a time to live of `prune_after_seconds`, adds the worker to the
+  index with the server's `TIME` as its score, and gives the index the same
+  time to live.
+- **List.** One script, so a database full of other keys costs nothing
+  extra. It reads the server's `TIME`, reads the index, fetches each card,
+  and removes the index members whose card key has expired. The age of a card
+  is the server's time now minus the stored time of its last publish, floored
+  at 0.
+- **Pruning.** Redis deletes a card when its time to live ends, so the card
+  of a dead worker leaves the list `prune_after_seconds` after its last
+  publish. The index gets the time to live of the last publish too. When no
+  worker publishes for that long, the index goes as well, and cards that are
+  still alive at that moment are not listed until their workers publish
+  again. A live worker comes back at its next heartbeat.
+- **Liveness.** The provider gives no `online` verdict. The
+  [liveness rule](#liveness) applies: a peer is online while its age is at
+  most `offline_after_seconds`. No worker's wall clock enters an age, and the
+  `prune_after_seconds` of the reading worker does not either, so workers with
+  different `prune_after_seconds` values can share one server.
+- **Duplicate names.** The card key comes from the sanitized worker name, so
+  two processes with one name overwrite each other's card: the last writer
+  wins. Names that differ only in characters outside `[a-zA-Z0-9_-]` share
+  one card too. A worker that lists the other instance's card while it is
+  live by the age rule logs `fleet_duplicate_worker_name` (see [Duplicate
+  worker names](#duplicate-worker-names)).
+- **Withdraw.** At a clean stop the worker deletes its card and its index
+  entry, but only while the card still holds this process's `instance`.
+- **A card that does not decode** is skipped with `fleet_card_invalid` and
+  the reason, once for that worker name while the name stays listed. The
+  other cards are still listed.
+- **Start.** The provider sends `PING`, so `provider_started` means that the
+  server answered.
+
+The address, the database number and the credentials come from the `url` of
+the connection, and the key prefix from its `key_prefix`:
+`connections.redis.<connection>` (see
+[Configuration](configuration.md#connections)). `fleet.registry.redis` exists
+and has no keys. The client is created once, at the first provider start, and
+the registry and the archive election share it when they name the same
+connection. The worker closes it at shutdown, after both providers have
+stopped (see [Connections](#connections)).
+
+**The URL.** `redis://` is plain TCP and `rediss://` is TLS. The database
+number is the path, for example `/3`. A URL with query options (`?...`) is
+refused when the provider starts, with
+`redis connection: the url cannot carry query options`. A URL that does not
+parse fails the start with `redis connection: the url cannot be parsed`.
+Neither message quotes the URL. The registry tries the start again at the
+next heartbeat, like any failed start.
+
+**The server.** Redis 5.0 or later, standalone or a primary behind a fixed
+address. A script reads `TIME` and then writes, which Redis allows from
+version 5.0 on. Redis Cluster is not supported, because the scripts touch
+keys that are not all named in `KEYS`.
+
+**The Redis user.** A user of its own needs these rights and no more, on the
+keys that start with the prefix: `~<prefix>* +@read +@write +@scripting
++@connection +time`. See [Security](security.md#provider-credentials) for a
+complete `ACL SETUSER` line. Use a database number of its own for the fleet,
+so no other data is within reach of this user and none is in the way of the
+provider.
+
+**During an outage.** The client does not retry on its own; the
+[`resilience`](#resilience) block of the registry is the only retry and the
+only time limit. A connect gives up after 5 seconds, and a read or a write
+ends at `timeout_seconds` of the block. A connection that is refused or lost,
+a timeout, and the server replies `BUSY` (a script is running), `LOADING`
+(the data set is loading), `MASTERDOWN` and `TRYAGAIN` are transient errors,
+and they are retried. Any other reply is final: a wrong password
+(`WRONGPASS`), a missing ACL right (`NOPERM`) and `ERR ...` end the operation
+at once, and each counts as a failed operation for the breaker. When
+operations keep failing, the breaker opens after `failure_threshold` failed
+operations and the provider is skipped until the cooldown has passed. The
+workers list keeps its last snapshot, and
+`drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not
+wait for any of this. When the server is back, the next probe operation
+closes the breaker and the registry recovers without a restart; nothing
+needs to be reset, because the client opens new connections by itself.
+
 ## The card
 
 A card is a JSON object, at most 4096 bytes:
@@ -374,7 +493,9 @@ age is that estimate minus the card's modification time. Two consequences:
 
 The `postgres` provider needs no such sample. The database server computes
 the age of each row (`now() - heartbeat_at`) in the query that lists the
-rows, so every listed card has an age.
+rows, so every listed card has an age. The `redis` provider needs none
+either: the script that lists the cards reads the Redis server's `TIME`, and
+the age is that time minus the server's `TIME` at the card's last publish.
 
 Each refresh (every `refresh_seconds`, default 15) keeps the age of every
 card at the moment it was listed. The workers list adds the time since that
@@ -396,9 +517,9 @@ its card that are present; see the UI contract for the full row shape.
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
-This release ships the `postgres` providers, which read
-`connections.postgres.<name>`; the entries for Consul and Redis are
-reserved, and a provider plugin can use any entry (see [Writing a
+This release ships the `postgres` and `redis` providers, which read
+`connections.postgres.<name>` and `connections.redis.<name>`; the entry for
+Consul is reserved, and a provider plugin can use any entry (see [Writing a
 provider](#writing-a-provider)).
 
 ```yaml
@@ -415,15 +536,16 @@ fleet:
     connection: fleet_database             # default: main
 ```
 
-Each entry also needs its `dsn`, set from the environment, for example
-`DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
-`DK_CONNECTIONS__POSTGRES__FLEET_DATABASE__DSN`.
+Each `postgres` entry also needs its `dsn`, set from the environment, for
+example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
+`DK_CONNECTIONS__POSTGRES__FLEET_DATABASE__DSN`. A `redis` entry has its
+`url` the same way, for example `DK_CONNECTIONS__REDIS__MAIN__URL`.
 
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `history.archive.election.connection` name
-  an entry. The `postgres` provider reads it; the names `consul` and
-  `redis` are reserved. `filesystem`, `static` and `none` ignore it, and so does
+  an entry. The `postgres` and `redis` providers read it; the name `consul`
+  is reserved. `filesystem`, `static` and `none` ignore it, and so does
   a plugin with any other name. The config load checks the key by provider name, so a provider
   named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
   connection declared; otherwise the load fails with
@@ -467,7 +589,11 @@ error ends the operation at once. The `postgres` providers raise
 `TransientError` for a Postgres error whose SQLSTATE begins with `08`
 (connection exception), `53` (insufficient resources) or `57` (operator
 intervention, for example a server restart), and for `40001` (serialization
-failure) and `40P01` (deadlock). With the defaults one operation takes at
+failure) and `40P01` (deadlock). The `redis` providers raise
+`TransientError` for a lost or refused connection and for the server replies
+`BUSY`, `LOADING`, `MASTERDOWN` and `TRYAGAIN`; a client timeout counts as a
+timeout. Every other reply, such as `WRONGPASS`, `NOPERM` or `ERR ...`, ends
+the operation at once. With the defaults one operation takes at
 most 3 × 5 s plus the waits of 0.2 s and 0.4 s, which is 15.6 s. The
 registry publishes the next card only after the previous publish ended, so
 keep the longest operation well below `offline_after_seconds`.
@@ -541,6 +667,10 @@ offline once the card is older than `offline_after_seconds`.
   connection to the pool that is already in progress when the limit comes
   still waits for the server. It holds one pool connection until the server
   answers, and the pool gets the connection back then.
+- The `redis` provider awaits its commands on the event loop. The client has
+  no read limit of its own: the time limit of an attempt ends a command that
+  does not answer, so a paused server holds up only that attempt. A connect
+  gives up after 5 seconds.
 - A provider that fails to start is retried; see [Resilience](#resilience).
 - An iteration of a registry loop can raise outside a provider call, for
   example in the card builder or in the `features` supplier. The iteration
@@ -761,8 +891,8 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), or a plugin name. `consul` and `redis` are [reserved](#providers). |
-| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` provider uses. The names `consul` and `redis` are reserved. |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), or a plugin name. `consul` is [reserved](#providers). |
+| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` and `redis` providers use. The name `consul` is reserved. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
 | `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. |
@@ -772,8 +902,9 @@ also counted by the three provider metrics:
 | `fleet.registry.static.peers` | `[]` | The `static` peer list: `name`, `cluster`, `url`. |
 | `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of a `consul` provider. |
 | `fleet.registry.postgres` | `{}` | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
+| `fleet.registry.redis` | `{}` | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
 | `fleet.registry.plugin_options` | `{}` | Options for a provider plugin. |
-| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `postgres` providers read `connections.postgres.*`. See [Connections](#connections). |
+| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
 `DK_FLEET__REGISTRY__PROVIDER=static`. The full table with constraints is in
