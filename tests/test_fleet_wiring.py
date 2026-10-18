@@ -18,7 +18,7 @@ from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
-from drakkar.lifecycle import registry_provider_options
+from drakkar.lifecycle import election_provider_options, registry_provider_options
 from drakkar.models import SourceMessage
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
@@ -179,6 +179,29 @@ def test_registry_provider_options_for_redis_names_the_connection_and_prune(tmp_
     )
 
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
+
+
+def test_election_provider_options_for_redis_names_the_connection(tmp_path):
+    config = _config(
+        tmp_path,
+        connections={'redis': {'locks': {'url': 'redis://user:secret@cache:6379/0'}}},
+        history={
+            'archive': {'election': {'provider': 'redis', 'connection': 'locks', 'plugin_options': {'unused': 1}}}
+        },
+    )
+
+    assert election_provider_options(config) == {'connection': 'locks'}
+
+
+def test_election_provider_options_for_a_plugin_name_are_its_plugin_options(tmp_path):
+    config = _config(
+        tmp_path,
+        history={
+            'archive': {'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}}
+        },
+    )
+
+    assert election_provider_options(config) == {'address': 'consul:8500'}
 
 
 def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):

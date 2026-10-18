@@ -130,6 +130,7 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     builders = {
         'filesystem': dict,
         'postgres': lambda: {'connection': election.connection},
+        'redis': lambda: {'connection': election.connection},
     }
     build = builders.get(election.provider, lambda: dict(election.plugin_options))
     return build()
