@@ -14,7 +14,7 @@ the config loads, so a plain replace is safe.
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import asyncpg
@@ -164,6 +164,8 @@ async def borrow(pool: Any) -> AsyncIterator[Any]:
     before the pool takes it back. The pool's release otherwise waits, shielded
     from cancellation, for the server to confirm the cancel of the running
     query; a server that does not answer would hold the call past its limit.
+    The server is not asked to cancel the statement, so it runs to its end
+    there; the statements of the providers are small, so that is harmless.
     ``pool`` is typed ``Any`` so a test can hand in a fake that has ``acquire()``.
     """
     try:
@@ -171,7 +173,10 @@ async def borrow(pool: Any) -> AsyncIterator[Any]:
             try:
                 yield conn
             except asyncio.CancelledError:
-                conn.terminate()
+                # The pool proxy raises InterfaceError once the connection is
+                # detached; the cancel must still leave as it came.
+                with suppress(asyncpg.InterfaceError):
+                    conn.terminate()
                 raise
     except asyncpg.PostgresError as exc:
         classified = classify(exc)
@@ -184,9 +189,11 @@ async def borrow(pool: Any) -> AsyncIterator[Any]:
 async def borrow_transaction(pool: Any) -> AsyncIterator[Any]:
     """Borrow a connection as :func:`borrow` does and run the block in one transaction.
 
-    Commits after the block and rolls back on an error. A cancelled block sends
-    no ``ROLLBACK``: that would wait for the server, and :func:`borrow` closes
-    the connection instead, which ends the transaction on the server.
+    Commits after the block and rolls back on an error. A rollback that fails
+    (the connection is gone) does not hide the error of the block, which
+    leaves as it came. A cancelled block sends no ``ROLLBACK``: that would
+    wait for the server, and :func:`borrow` closes the connection instead,
+    which ends the transaction on the server.
     """
     async with borrow(pool) as conn:
         transaction = conn.transaction()
@@ -196,7 +203,11 @@ async def borrow_transaction(pool: Any) -> AsyncIterator[Any]:
         except asyncio.CancelledError:
             raise
         except BaseException:
-            await transaction.rollback()
+            # The block's error is the one to report; a connection that broke
+            # in the block also breaks the rollback, and the server ends the
+            # transaction when the connection closes.
+            with suppress(Exception):
+                await transaction.rollback()
             raise
         await transaction.commit()
 

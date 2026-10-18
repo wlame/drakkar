@@ -3,11 +3,14 @@
 # Scenario: one worker loses the network and gets it back.
 #
 # Disconnects worker-3 from the compose network for 90 s, then proves that:
-#   - after 30 s worker-1 lists worker-3 with the expected liveness:
-#       postgres   - online: false (worker-3 cannot reach the database, so
-#                    its card ages on the database clock),
-#       filesystem - online: true (the card goes through the shared folder,
-#                    which a network cut does not touch),
+#   - worker-1 lists worker-3 with the expected liveness:
+#       postgres   - online: false within 30 s (worker-3 cannot reach the
+#                    database, so its card ages on the database clock). The
+#                    check waits for the verdict instead of reading it at
+#                    30 s: a card 30 s old is deleted (prune_after_seconds),
+#                    and the peer would then be absent, not offline,
+#       filesystem - online: true after 30 s (the card goes through the
+#                    shared folder, which a network cut does not touch),
 #   - worker-3's own completed counter (read inside its container) is not
 #     lower than before the cut,
 #   - within 20 s of the reconnect worker-1 lists worker-3 online,
@@ -34,12 +37,6 @@ RECONNECT_LIMIT_SECONDS=20
 # it; the completed counter is in the answer either way.
 DASHBOARD_READ_SECONDS=15
 
-if [ "$HARNESS_PROVIDER" = postgres ]; then
-    expected_while_cut=false
-else
-    expected_while_cut=true
-fi
-
 # The completed-task counter of the cut worker, read inside its container
 # because its published ports are gone while it is disconnected.
 completed_inside() {
@@ -56,7 +53,7 @@ network=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$
 # unresolvable for the other workers.
 alias_args=()
 while IFS= read -r alias_name; do
-    [ -n "$alias_name" ] && alias_args+=(--alias "$alias_name")
+    [ -n "$alias_name" ] && alias_args+=(--alias="$alias_name")
 done < <(docker inspect -f "{{range (index .NetworkSettings.Networks \"${network}\").Aliases}}{{.}}{{\"\\n\"}}{{end}}" "$container")
 
 peer_online_is "$WORKER_1_UI_PORT" "$CUT_WORKER" true || fail "worker-1 does not list ${CUT_WORKER} online before the cut"
@@ -78,11 +75,18 @@ docker network disconnect "$network" "$container"
 is_cut=true
 cut_at=$SECONDS
 
-sleep_until_elapsed "$cut_at" "$OFFLINE_CHECK_SECONDS"
-online_while_cut=$(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online)
-[ "$online_while_cut" = "$expected_while_cut" ] \
-    || fail "after ${OFFLINE_CHECK_SECONDS}s worker-1 lists ${CUT_WORKER} with online ${online_while_cut}, expected ${expected_while_cut}"
-ok "after ${OFFLINE_CHECK_SECONDS}s worker-1 lists ${CUT_WORKER} with online ${online_while_cut}"
+if [ "$HARNESS_PROVIDER" = postgres ]; then
+    wait_until "$OFFLINE_CHECK_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$CUT_WORKER" false \
+        || fail "worker-1 does not list ${CUT_WORKER} offline within ${OFFLINE_CHECK_SECONDS}s of the cut (online: $(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online))"
+    liveness_while_cut="online false after ${WAITED}s of the cut"
+else
+    sleep_until_elapsed "$cut_at" "$OFFLINE_CHECK_SECONDS"
+    online_while_cut=$(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online)
+    [ "$online_while_cut" = true ] \
+        || fail "after ${OFFLINE_CHECK_SECONDS}s worker-1 lists ${CUT_WORKER} with online ${online_while_cut}, expected true"
+    liveness_while_cut="online true after ${OFFLINE_CHECK_SECONDS}s of the cut"
+fi
+ok "worker-1 lists ${CUT_WORKER} ${liveness_while_cut}"
 
 completed_during=$(completed_inside) || fail "the completed counter of ${CUT_WORKER} could not be read during the cut"
 [ "$completed_during" -ge "$completed_before" ] \
@@ -103,4 +107,4 @@ after=$(restart_snapshot "${MAIN_WORKERS[@]}")
 [ "$before" = "$after" ] || fail "a worker restarted during the cut: before [${before}] after [${after}]"
 ok "no worker restarted"
 
-pass "online ${online_while_cut} after ${OFFLINE_CHECK_SECONDS}s of the cut, completed ${completed_before} -> ${completed_during}, online ${online_after}s after the reconnect, no restart"
+pass "${liveness_while_cut}, completed ${completed_before} -> ${completed_during}, online ${online_after}s after the reconnect, no restart"

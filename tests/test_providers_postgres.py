@@ -43,8 +43,9 @@ FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json
 class FakeTransaction:
     """Records the transaction boundaries among the calls of its connection."""
 
-    def __init__(self, calls: list[tuple[str, tuple[Any, ...]]]) -> None:
+    def __init__(self, calls: list[tuple[str, tuple[Any, ...]]], rollback_error: Exception | None = None) -> None:
         self._calls = calls
+        self._rollback_error = rollback_error
 
     async def start(self) -> None:
         self._calls.append(('BEGIN', ()))
@@ -54,19 +55,31 @@ class FakeTransaction:
 
     async def rollback(self) -> None:
         self._calls.append(('ROLLBACK', ()))
+        if self._rollback_error is not None:
+            raise self._rollback_error
 
 
 class FakeConnection:
     """Records every call as ``(sql, args)`` and answers ``fetchval`` with a fixed value."""
 
-    def __init__(self, fetchval_answer: Any = True, fail_on_execute: Exception | None = None) -> None:
+    def __init__(
+        self,
+        fetchval_answer: Any = True,
+        fail_on_execute: Exception | None = None,
+        terminate_error: Exception | None = None,
+        rollback_error: Exception | None = None,
+    ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.terminated = False
         self._fail_on_execute = fail_on_execute
         self._fetchval_answer = fetchval_answer
+        self._terminate_error = terminate_error
+        self._rollback_error = rollback_error
 
     def terminate(self) -> None:
         self.terminated = True
+        if self._terminate_error is not None:
+            raise self._terminate_error
 
     async def execute(self, sql: str, *args: Any) -> str:
         self.calls.append((sql, args))
@@ -75,7 +88,7 @@ class FakeConnection:
         return 'OK'
 
     def transaction(self) -> FakeTransaction:
-        return FakeTransaction(self.calls)
+        return FakeTransaction(self.calls, self._rollback_error)
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
         self.calls.append((sql, args))
@@ -239,6 +252,17 @@ async def test_borrow_terminates_the_connection_when_the_block_is_cancelled():
     assert pool.conn.terminated is True
 
 
+async def test_borrow_keeps_the_cancel_when_the_connection_is_already_detached():
+    # asyncpg's pool proxy raises InterfaceError on a detached connection.
+    pool = FakePool(FakeConnection(terminate_error=asyncpg.exceptions.InterfaceError('detached')))
+
+    with pytest.raises(asyncio.CancelledError):
+        async with borrow(pool):
+            raise asyncio.CancelledError
+
+    assert pool.conn.terminated is True
+
+
 class ReleaseWaitsForServerPool(FakePool):
     """A pool whose release of a cancelled connection waits for a server that never answers, unless it was closed."""
 
@@ -291,6 +315,18 @@ async def test_borrow_transaction_rolls_back_on_an_error():
 
     assert conn.calls == [('BEGIN', ()), ('ROLLBACK', ())]
     assert conn.terminated is False
+
+
+async def test_borrow_transaction_reports_the_block_error_when_the_rollback_fails():
+    lost = asyncpg.exceptions.ConnectionDoesNotExistError('lost in the block')
+    conn = FakeConnection(rollback_error=asyncpg.exceptions.InterfaceError('connection is closed'))
+
+    with pytest.raises(TransientError) as caught:
+        async with borrow_transaction(FakePool(conn)):
+            raise lost
+
+    assert caught.value.__cause__ is lost
+    assert conn.calls == [('BEGIN', ()), ('ROLLBACK', ())]
 
 
 async def test_borrow_transaction_sends_no_rollback_when_cancelled():

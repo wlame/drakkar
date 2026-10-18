@@ -47,6 +47,7 @@ check_clean() {
 step "Scenario: secrets stay out of the config API, the logs and the metrics"
 
 for port in "${UI_PORTS[@]}"; do
+    # curl's long options take no `=`, so they keep the space form here.
     reference=$(curl -sf --connect-timeout 2 --max-time 10 "http://localhost:${port}/api/v1/config-reference") \
         || fail "the config reference on port ${port} could not be read"
     grep -qF -- "$CONNECTION_DSN_PATH" <<<"$reference" \

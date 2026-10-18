@@ -65,6 +65,7 @@ not_applicable() {
 
 # The /api/v1/workers answer of the worker whose UI is on host port $1.
 workers_json() {
+    # curl's long options take no `=`, so they keep the space form here.
     curl -sf --connect-timeout 2 --max-time 3 "http://localhost:$1/api/v1/workers"
 }
 
@@ -147,8 +148,9 @@ restart_snapshot() {
 
 # Run a command until it succeeds or the time is up:
 #   wait_until <seconds> <command> [args...]
-# Returns 0 as soon as the command succeeds, 1 when <seconds> pass without
-# a success. Sets WAITED to the seconds it waited.
+# Returns 0 as soon as the command succeeds within <seconds>, 1 when
+# <seconds> pass without a success, also when the try that succeeded ended
+# after <seconds>. Sets WAITED to the seconds it waited.
 wait_until() {
     local limit=$1
     shift
@@ -156,6 +158,10 @@ wait_until() {
     while true; do
         if "$@"; then
             WAITED=$((SECONDS - started))
+            # A slow try that succeeds after the limit is still too late.
+            if [ "$WAITED" -gt "$limit" ]; then
+                return 1
+            fi
             return 0
         fi
         if [ $((SECONDS - started)) -ge "$limit" ]; then

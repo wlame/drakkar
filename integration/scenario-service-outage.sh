@@ -3,12 +3,15 @@
 # Scenario: the registry's database goes away and comes back.
 #
 # Pauses the postgres-fleet container for 90 s while the main cluster runs
-# with the postgres provider, then proves that:
+# with the postgres provider, twice: a pause after a recovery must behave
+# like the first one, because a cancelled query can leave state behind that
+# only a second outage shows. Each pause proves that:
 #   - worker-1's registry breaker opens within 40 s
 #     (drakkar_provider_breaker_open{feature="registry",provider="postgres"} 1),
 #   - within 60 s of the unpause the breaker is closed again and worker-1
 #     lists worker-2 and worker-3 online,
-#   - no worker container restarted,
+#   - no worker container restarted.
+# Then it proves that:
 #   - every request still reached the sinks (just verify-delivery, after the
 #     producer printed PRODUCER_DONE and the consumer group's lag is 0; the
 #     producer keeps running after PRODUCER_DONE, so its exit is not the
@@ -101,36 +104,49 @@ drained() {
     [ "$lag" = 0 ]
 }
 
-step "Scenario: service outage (${DATABASE_SERVICE} paused for ${OUTAGE_SECONDS}s)"
+# One outage: pause the database, see the breaker open, unpause, see the
+# breaker close and the peers online, and check that no worker restarted.
+# Appends "<opened>s/<recovered>s" for the verdict to OUTAGE_TIMINGS.
+#   pause_and_recover <outage number>
+OUTAGE_TIMINGS=""
+pause_and_recover() {
+    local outage=$1 before after paused_at opened_after recovered_after
 
-breaker_is 0 || fail "the registry breaker is not closed before the outage (value: $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"))"
-peers_online || fail "worker-1 does not list worker-2 and worker-3 online before the outage"
-before=$(restart_snapshot "${MAIN_WORKERS[@]}")
-ok "breaker closed, worker-2 and worker-3 online"
+    breaker_is 0 || fail "outage ${outage}: the registry breaker is not closed before the pause (value: $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"))"
+    peers_online || fail "outage ${outage}: worker-1 does not list worker-2 and worker-3 online before the pause"
+    before=$(restart_snapshot "${MAIN_WORKERS[@]}")
+    ok "outage ${outage}: breaker closed, worker-2 and worker-3 online"
 
-log "pausing ${DATABASE_SERVICE}"
-"${COMPOSE[@]}" pause "$DATABASE_SERVICE"
-is_paused=true
-paused_at=$SECONDS
+    log "outage ${outage}: pausing ${DATABASE_SERVICE}"
+    "${COMPOSE[@]}" pause "$DATABASE_SERVICE"
+    is_paused=true
+    paused_at=$SECONDS
 
-wait_until "$BREAKER_OPEN_LIMIT_SECONDS" breaker_is 1 \
-    || fail "the registry breaker did not open within ${BREAKER_OPEN_LIMIT_SECONDS}s (value: $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"))"
-breaker_opened_after=$WAITED
-ok "registry breaker open after ${breaker_opened_after}s"
+    wait_until "$BREAKER_OPEN_LIMIT_SECONDS" breaker_is 1 \
+        || fail "outage ${outage}: the registry breaker did not open within ${BREAKER_OPEN_LIMIT_SECONDS}s (value: $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"))"
+    opened_after=$WAITED
+    ok "outage ${outage}: registry breaker open after ${opened_after}s"
 
-sleep_until_elapsed "$paused_at" "$OUTAGE_SECONDS"
-log "unpausing ${DATABASE_SERVICE} after $((SECONDS - paused_at))s"
-"${COMPOSE[@]}" unpause "$DATABASE_SERVICE"
-is_paused=false
+    sleep_until_elapsed "$paused_at" "$OUTAGE_SECONDS"
+    log "outage ${outage}: unpausing ${DATABASE_SERVICE} after $((SECONDS - paused_at))s"
+    "${COMPOSE[@]}" unpause "$DATABASE_SERVICE"
+    is_paused=false
 
-wait_until "$RECOVERY_LIMIT_SECONDS" recovered \
-    || fail "no recovery within ${RECOVERY_LIMIT_SECONDS}s: breaker $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"), worker-2 online $(peer_field "$WORKER_1_UI_PORT" worker-2 online), worker-3 online $(peer_field "$WORKER_1_UI_PORT" worker-3 online)"
-recovered_after=$WAITED
-ok "breaker closed and worker-2, worker-3 online ${recovered_after}s after the unpause"
+    wait_until "$RECOVERY_LIMIT_SECONDS" recovered \
+        || fail "outage ${outage}: no recovery within ${RECOVERY_LIMIT_SECONDS}s: breaker $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"), worker-2 online $(peer_field "$WORKER_1_UI_PORT" worker-2 online), worker-3 online $(peer_field "$WORKER_1_UI_PORT" worker-3 online)"
+    recovered_after=$WAITED
+    ok "outage ${outage}: breaker closed and worker-2, worker-3 online ${recovered_after}s after the unpause"
 
-after=$(restart_snapshot "${MAIN_WORKERS[@]}")
-[ "$before" = "$after" ] || fail "a worker restarted during the outage: before [${before}] after [${after}]"
-ok "no worker restarted"
+    after=$(restart_snapshot "${MAIN_WORKERS[@]}")
+    [ "$before" = "$after" ] || fail "outage ${outage}: a worker restarted: before [${before}] after [${after}]"
+    ok "outage ${outage}: no worker restarted"
+    OUTAGE_TIMINGS="${OUTAGE_TIMINGS}${OUTAGE_TIMINGS:+, }outage ${outage} breaker open after ${opened_after}s and recovered ${recovered_after}s after the unpause"
+}
+
+step "Scenario: service outage (${DATABASE_SERVICE} paused twice for ${OUTAGE_SECONDS}s)"
+
+pause_and_recover 1
+pause_and_recover 2
 
 log "waiting for the producer to print PRODUCER_DONE"
 wait_until "$PRODUCER_DONE_LIMIT_SECONDS" producer_done \
@@ -149,4 +165,4 @@ log "verifying delivery of ${TOTAL_MESSAGES} requests"
 (cd "$REPO_DIR" && just verify-delivery "$TOTAL_MESSAGES") || fail "just verify-delivery failed"
 ok "verify-delivery passed"
 
-pass "breaker open after ${breaker_opened_after}s, closed and peers online ${recovered_after}s after the unpause, no restart, drained ${drained_after}s after PRODUCER_DONE, delivery verified"
+pass "${OUTAGE_TIMINGS}, no restart, drained ${drained_after}s after PRODUCER_DONE, delivery verified"
