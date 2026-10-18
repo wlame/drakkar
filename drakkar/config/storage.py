@@ -56,9 +56,10 @@ class ElectionConfig(BaseModel):
         default='filesystem',
         min_length=1,
         description=(
-            'Election provider: filesystem (a lock file in shared.dir) or the name of a provider '
-            'plugin. The names consul, redis and postgres are reserved for providers of later '
-            'releases; this release ships none of them. Every worker of a cluster must use the '
+            'Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table '
+            'of the database named by history.archive.election.connection), or the name of a '
+            'provider plugin. The names consul and redis are reserved for providers of later '
+            'releases; this release ships neither. Every worker of a cluster must use the '
             'same provider.'
         ),
     )
@@ -66,8 +67,8 @@ class ElectionConfig(BaseModel):
         default='main',
         min_length=1,
         description=(
-            'Name of the entry under connections.<provider> that the consul, redis and postgres '
-            'providers use. The other providers ignore it.'
+            'Name of the entry under connections.<provider> that the postgres provider uses, and '
+            'that the consul and redis providers will use. The other providers ignore it.'
         ),
     )
     resilience: ResilienceConfig = Field(

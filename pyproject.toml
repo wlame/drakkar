@@ -39,6 +39,8 @@ dependencies = [
 # Cache-management CLI for the decoupled drakkar-ui bundle; mirrors the Go
 # backend's cmd/drakkar-ui (same subcommands, flags, output, exit codes).
 drakkar-ui = "drakkar.uihost.cli:main"
+# Prints the DDL of the tables the postgres providers keep, for a schema the worker may not create.
+drakkar-schema = "drakkar.schema:main"
 
 # `perf` is the only published extra: an extra is something a CONSUMER of the
 # library can opt into, and orjson is exactly that (a faster JSON encoder for

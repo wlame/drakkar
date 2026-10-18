@@ -2101,8 +2101,8 @@
         {
           "path": "history.archive.election.provider",
           "env": "DK_HISTORY__ARCHIVE__ELECTION__PROVIDER",
-          "description": "Election provider: filesystem (a lock file in shared.dir) or the name of a provider plugin.",
-          "full_description": "Election provider: filesystem (a lock file in shared.dir) or the name of a provider plugin. The names consul, redis and postgres are reserved for providers of later releases; this release ships none of them. Every worker of a cluster must use the same provider.",
+          "description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by history.archive.election.connection), or the name of a provider plugin.",
+          "full_description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by history.archive.election.connection), or the name of a provider plugin. The names consul and redis are reserved for providers of later releases; this release ships neither. Every worker of a cluster must use the same provider.",
           "type": "string",
           "default": "filesystem",
           "secret": false,
@@ -2111,8 +2111,8 @@
         {
           "path": "history.archive.election.connection",
           "env": "DK_HISTORY__ARCHIVE__ELECTION__CONNECTION",
-          "description": "Name of the entry under connections.<provider> that the consul, redis and postgres providers use.",
-          "full_description": "Name of the entry under connections.<provider> that the consul, redis and postgres providers use. The other providers ignore it.",
+          "description": "Name of the entry under connections.<provider> that the postgres provider uses, and that the consul and redis providers will use.",
+          "full_description": "Name of the entry under connections.<provider> that the postgres provider uses, and that the consul and redis providers will use. The other providers ignore it.",
           "type": "string",
           "default": "main",
           "secret": false,
@@ -2208,8 +2208,8 @@
         {
           "path": "fleet.registry.provider",
           "env": "DK_FLEET__REGISTRY__PROVIDER",
-          "description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), or the name of a provider plugin.",
-          "full_description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), or the name of a provider plugin. The names consul, redis and postgres are reserved for providers of later releases; this release ships none of them. Needs ui.enabled.",
+          "description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), postgres (cards in a table of the database named by fleet.registry.connection), or the name of a provider plugin.",
+          "full_description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), postgres (cards in a table of the database named by fleet.registry.connection), or the name of a provider plugin. The names consul and redis are reserved for providers of later releases; this release ships neither. Needs ui.enabled.",
           "type": "string",
           "default": "filesystem",
           "secret": false,
@@ -2218,8 +2218,8 @@
         {
           "path": "fleet.registry.connection",
           "env": "DK_FLEET__REGISTRY__CONNECTION",
-          "description": "Name of the entry under connections.<provider> that the consul, redis and postgres providers use.",
-          "full_description": "Name of the entry under connections.<provider> that the consul, redis and postgres providers use. The other providers ignore it.",
+          "description": "Name of the entry under connections.<provider> that the postgres provider uses, and that the consul and redis providers will use.",
+          "full_description": "Name of the entry under connections.<provider> that the postgres provider uses, and that the consul and redis providers will use. The other providers ignore it.",
           "type": "string",
           "default": "main",
           "secret": false,

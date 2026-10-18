@@ -45,10 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use the entry-point group `drakkar.election_providers`, and
   `drakkar.recorder.electiontest` holds the checks a provider should pass.
   A registry provider can give its own `online` verdict (`PeerCard.online`);
-  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The names `consul`,
-  `redis` and `postgres` are reserved, and the release ships no provider with
-  these names. The summary line shows ` election=<provider>` when the
-  election provider is not `filesystem`. New metrics:
+  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The names `consul`
+  and `redis` are reserved, and the release ships no provider with these
+  names. The summary line shows ` election=<provider>` when the election
+  provider is not `filesystem`. New metrics:
   `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`
   and `drakkar_provider_breaker_open`. New log events: `provider_started`,
   `provider_call_failed`, `provider_breaker_opened`,
@@ -72,6 +72,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the URL stays. The config reference also masks numbers and booleans
   under a secret-looking key of `plugin_options`. See `docs/fleet.md`,
   `docs/local-databases.md` and `docs/configuration.md`.
+- **Postgres providers.** `fleet.registry.provider: postgres` keeps the
+  worker cards in the table `fleet_workers`, and
+  `history.archive.election.provider: postgres` keeps the archive lease in
+  `archive_locks`. Both use the schema of the connection that the `connection`
+  key of the feature names (`connections.postgres.<name>`). A worker creates
+  the schema and the tables when the provider starts if `manage_schema` is
+  true. If it is false, run `drakkar-schema postgres --schema=<name>` first
+  (also `python -m drakkar.schema`). It prints the DDL for an operator to
+  run. The database server's clock decides the age of a card and the length
+  of a lease. Connection-class errors are retried under the `resilience`
+  block of the feature.
 
 ### Fixed
 
