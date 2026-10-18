@@ -21,6 +21,79 @@ This page covers operational topics that apply when running Drakkar in a
 production environment: Kubernetes probes, rolling restarts, and the
 interaction between the UI server and cluster health checks.
 
+## A shared folder plus a shared Postgres
+
+This layout fits a deployment that already runs Postgres. The workers keep
+their sealed history in a shared folder, as with the defaults. They find each
+other, and choose the one worker that builds the archives of a cluster,
+through tables in Postgres instead of files in the folder. Both choices use
+the same `connections.postgres.main` entry and so share one pool.
+
+```yaml
+storage:
+  dir: /var/lib/drakkar
+shared:
+  dir: /mnt/drakkar-shared
+
+connections:
+  postgres:
+    main:
+      schema: drakkar
+      manage_schema: true
+      pool_min: 1
+      pool_max: 4
+
+fleet:
+  registry:
+    provider: postgres
+    connection: main
+
+history:
+  archive:
+    election:
+      provider: postgres
+      connection: main
+```
+
+Set the connection string in the environment of every worker, for example
+from a Kubernetes Secret, not in the YAML file:
+
+```bash
+DK_CONNECTIONS__POSTGRES__MAIN__DSN='postgresql://drakkar:...@db.internal/drakkar'
+```
+
+What to check:
+
+- Every worker of the fleet uses the same registry provider and database.
+  Every worker of one cluster uses the same election provider. Workers on
+  different providers do not see each other's cards or leases.
+- The registry needs `ui.enabled: true`.
+- The shared folder still holds the sealed recorder files and the archives.
+  Only the cards and the archive lease move to Postgres.
+- `manage_schema: true` lets the first worker that starts create the schema
+  and both tables. Workers that start together take turns through an advisory
+  lock.
+- With an operator-managed schema, set `manage_schema: false` and create the
+  objects once with a role that has DDL rights:
+
+  ```bash
+  drakkar-schema postgres --schema=drakkar | psql "$ADMIN_DSN"
+  ```
+
+  The worker role then needs `USAGE` on the schema and `SELECT`, `INSERT`,
+  `UPDATE` and `DELETE` on `fleet_workers` and `archive_locks` only. A worker
+  that finds a table missing fails the provider's start with a message that
+  names this command and tries again at the next heartbeat (registry) or the
+  next archive pass (election).
+- During a database outage the pipeline keeps running. The workers list
+  keeps its last snapshot, an archive pass stops without publishing, and both
+  providers recover when the server is back. Watch `drakkar_provider_breaker_open`
+  and `drakkar_provider_calls_total` (see [Observability](observability.md)).
+
+More: [Fleet registry: postgres](fleet.md#postgres),
+[The election provider](local-databases.md#the-election-provider),
+[Security: provider credentials](security.md#provider-credentials).
+
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the

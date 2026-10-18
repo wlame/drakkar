@@ -1129,8 +1129,8 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
 | `archive.lock_stale_seconds` | `int` | `7200` | >= 1; at most `86400` when `archive.election.provider` is `consul` | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. It is also the lease length of every [election provider](local-databases.md#the-election-provider). |
-| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder) or the name of a provider plugin (entry-point group `drakkar.election_providers`). `consul`, `redis` and `postgres` are reserved names; see [Fleet registry](fleet.md#providers). Every worker of one cluster must use the same provider. |
-| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
+| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder), `postgres` (a row in a table of the database named by `archive.election.connection`; see [The election provider](local-databases.md#the-postgres-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). `consul` and `redis` are reserved names for later releases; see [Fleet registry](fleet.md#providers). Every worker of one cluster must use the same provider. |
+| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres` provider uses, and that the `consul` and `redis` providers will use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
 | `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
 | `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
@@ -1162,8 +1162,8 @@ provider plugin are on [Fleet registry](fleet.md).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), or the name of a provider plugin. `consul`, `redis` and `postgres` are reserved names; see [Fleet registry](fleet.md#providers). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
-| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), or the name of a provider plugin. `consul` and `redis` are reserved names for later releases; see [Fleet registry](fleet.md#providers). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres` provider uses, and that the `consul` and `redis` providers will use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
 | `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
 | `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. |
@@ -1173,7 +1173,8 @@ provider plugin are on [Fleet registry](fleet.md).
 | `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
 | `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of the `consul` provider, which this release does not ship; no provider reads it, and a plugin does not (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
 | `consul.service_name` | `str` | `drakkar` | non-empty | Setting of the `consul` provider, which this release does not ship; no provider reads it. The Consul service that lists the workers, used only with `mode: catalog`. |
-| `redis`, `postgres` | block | `{}` | | Reserved blocks of the `redis` and `postgres` providers, which this release does not ship. They have no keys. |
+| `redis` | block | `{}` | | Reserved block of the `redis` provider, which this release does not ship. It has no keys. |
+| `postgres` | block | `{}` | | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 | `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_FLEET__REGISTRY__PLUGIN_OPTIONS` itself fails the load. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
@@ -1249,8 +1250,10 @@ feature that names the connection. `connections` has one map per service
 type, and each map goes from a connection name that you choose to its
 settings. A feature that names no connection uses `main`. How features name
 and share a connection is on [Fleet registry](fleet.md#connections). This
-release ships no provider that reads these entries; a provider plugin can use
-them through `ctx.connections`.
+release ships the `postgres` registry and election providers, which read
+`connections.postgres.<name>`; it ships no provider that reads the Consul and
+Redis entries, but a provider plugin can use any entry through
+`ctx.connections`.
 
 Which feature names which entry: `fleet.registry.connection` and
 `history.archive.election.connection`.
@@ -1277,9 +1280,9 @@ Which feature names which entry: `fleet.registry.connection` and
 |-------|------|---------|-------------|-------------|
 | `dsn` | `str` | required | | asyncpg-compatible connection string, typically with user and password. **Secret.** |
 | `schema` | `str` | `drakkar` | lower-case identifier, `[a-z_][a-z0-9_]*` | Schema that holds the tables a feature creates. |
-| `manage_schema` | `bool` | `true` | | Create the schema and the tables when they are missing. Off, they must already exist. |
+| `manage_schema` | `bool` | `true` | | Create the schema and the tables at the first successful start of a provider that uses the connection. Off, they must already exist: create them with `drakkar-schema postgres --schema=<name>`, which prints the DDL; a provider whose table is missing then fails its start with a message that names the command. |
 | `pool_min` | `int` | `1` | >= 1 | Minimum connections in the pool. |
-| `pool_max` | `int` | `4` | >= 1, and >= `pool_min` | Maximum connections in the pool. |
+| `pool_max` | `int` | `4` | >= 1, and >= `pool_min` | Maximum connections in the pool. The registry and the election share one pool when they name the same connection. |
 
 ```yaml
 connections:

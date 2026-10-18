@@ -683,12 +683,14 @@ history:
     retention_days: 30             # delete archives older than this; 0 = keep forever. Must cover
                                    # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
     lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver; also the
-                                   # lease length of every election provider (<= 86400 with provider consul).
+                                   # lease length of every election provider (<= 86400 with provider consul);
+                                   # with postgres it is judged on the database server's clock.
                                    # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
     election:                      # which worker of a cluster builds the archives; see "Resilience block" below
-      provider: filesystem         # filesystem | <plugin name> (consul, redis, postgres are reserved names).
+      provider: filesystem         # filesystem | postgres | <plugin name> (consul and redis are reserved names).
+                                   # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>.
                                    # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
-      connection: main             # entry of connections.<provider>; read by consul, redis, postgres only.
+      connection: main             # entry of connections.<provider>; read by postgres (and later by consul and redis).
                                    # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
       resilience:                  # same keys and defaults as fleet.registry.resilience
         timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
@@ -716,9 +718,10 @@ How workers find each other and exchange cache rows. Peers pull `cluster`/`globa
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | <plugin name> (consul, redis, postgres are reserved names);
+    provider: filesystem           # filesystem | static | none | postgres | <plugin name> (consul and redis are reserved names);
+                                   # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>.
                                    # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
-    connection: main               # entry of connections.<provider>; read by consul, redis, postgres only.
+    connection: main               # entry of connections.<provider>; read by postgres (and later by consul and redis).
                                    # env: DK_FLEET__REGISTRY__CONNECTION
     heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
     refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
@@ -741,11 +744,11 @@ fleet:
       dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
     static:
       peers: []                    # [{name, cluster, url}]. YAML only.
-    consul:                        # reserved for the consul provider; this release ships none, and a plugin does not read it
+    consul:                        # reserved for the consul provider of a later release; none shipped, and a plugin does not read it
       mode: publish                # publish | catalog. env: DK_FLEET__REGISTRY__CONSUL__MODE
       service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
-    redis: {}                      # reserved for the redis provider (none shipped); no keys
-    postgres: {}                   # reserved for the postgres provider (none shipped); no keys
+    redis: {}                      # reserved for the redis provider of a later release (none shipped); no keys
+    postgres: {}                   # block of the postgres provider; no keys (schema and pool come from the connection)
     plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
                                    # env: one key per variable, DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>
   cache_exchange:
@@ -762,7 +765,7 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). This release ships no provider that reads these entries; a provider plugin can use them through `ctx.connections`.
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`; this release ships no provider that reads the Consul and Redis entries, but a provider plugin can use any entry through `ctx.connections`.
 
 ```yaml
 connections:
@@ -781,9 +784,12 @@ connections:
     main:
       dsn: postgresql://user:password@host/db  # required; a secret. env: DK_CONNECTIONS__POSTGRES__MAIN__DSN
       schema: drakkar                  # lower-case identifier. env: DK_CONNECTIONS__POSTGRES__MAIN__SCHEMA
-      manage_schema: true              # create the schema and tables when missing. env: DK_CONNECTIONS__POSTGRES__MAIN__MANAGE_SCHEMA
+      manage_schema: true              # create the schema and tables at the first provider start. false: they must exist;
+                                       #   create them with `drakkar-schema postgres --schema=<name>`.
+                                       #   env: DK_CONNECTIONS__POSTGRES__MAIN__MANAGE_SCHEMA
       pool_min: 1                      # env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MIN
-      pool_max: 4                      # must be >= pool_min. env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MAX
+      pool_max: 4                      # must be >= pool_min. One pool serves the registry and the election.
+                                       #   env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MAX
 ```
 
 ---

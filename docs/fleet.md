@@ -46,6 +46,7 @@ Each feature has its own `connection`, [`resilience`](#resilience) block and
 |---|---|---|
 | `filesystem` (default) | one JSON file per worker in a shared folder | from the file times on the file server |
 | `static` | nowhere: a fixed peer list in the config | unknown |
+| `postgres` | one row per worker in the table `fleet_workers` of a Postgres schema | from the database server's clock (`heartbeat_at` against `now()`) |
 | `none` | nowhere: no peers | — |
 | a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock, or its own verdict |
 
@@ -54,21 +55,24 @@ exchange pulls nothing. `static` cards come from the config and carry no
 `features` object, so the cache exchange pulls every `static` peer each
 cycle, without the mark check.
 
-The names `consul`, `redis` and `postgres` are reserved for providers that
-keep their data in a service reached through a [named
-connection](#connections). Their own settings sit in `fleet.registry.consul`
-(`mode`, `service_name`), `fleet.registry.redis` and
-`fleet.registry.postgres` (no keys); a plugin does not read these blocks, it
-gets `plugin_options`. This release ships no provider with one of these
-names. Two checks apply to such a name, in this order:
+`postgres` is built in; see [`postgres`](#postgres). The names `consul` and
+`redis` are reserved for providers of later releases that keep their data in a
+service reached through a [named connection](#connections). Their own
+settings sit in `fleet.registry.consul` (`mode`, `service_name`) and
+`fleet.registry.redis` (no keys); a plugin does not read these blocks, it
+gets `plugin_options`. This release ships no provider with either of these
+two names. Two checks apply to a name that uses a connection (`consul`,
+`redis` and `postgres`), in this order:
 
 1. The config load checks that the connection the name uses is declared.
    Without `connections.consul.main`, for example, the load fails with
    `fleet.registry.connection 'main' is not defined under connections.consul`.
-2. A worker starts with the name only when a plugin of that name is
-   installed. Otherwise startup fails (with the UI on, which the registry
-   needs) with a message that lists the providers that exist, for example
-   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, static`.
+2. A worker starts with the name only when a provider of that name exists.
+   For `postgres` it does. For `consul` and `redis` a plugin of that name
+   must be installed. Otherwise startup fails (with the UI on, which the
+   registry needs) with a message that lists the providers that exist, for
+   example
+   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, postgres, static`.
 
 ### `filesystem`
 
@@ -151,6 +155,125 @@ fleet:
 The worker publishes nothing. Its peers are always listed, and their
 liveness is **unknown**: the workers list shows them as neither online nor
 offline.
+
+### `postgres`
+
+One row per worker, in a Postgres database that every worker of the fleet
+can reach. It fits a deployment that already runs Postgres and has no
+shared folder for the cards.
+
+```yaml
+connections:
+  postgres:
+    main:
+      schema: drakkar            # the schema that holds the tables
+      manage_schema: true        # create the schema and the tables when missing
+      # dsn: set from the environment, see below
+fleet:
+  registry:
+    provider: postgres
+    connection: main             # the default
+```
+
+Set the connection string in the environment, not in the YAML file:
+
+```bash
+export DK_CONNECTIONS__POSTGRES__MAIN__DSN='postgresql://drakkar:...@db.internal/drakkar'
+```
+
+The registry needs the UI server (`ui.enabled: true`), as with every
+provider. Every worker of the fleet uses the same provider and the same
+database, schema and `connection`; workers on different stores do not see
+each other.
+
+What it keeps and does:
+
+- **The table.** `<schema>.fleet_workers` has one row per worker name:
+  `worker` (the primary key), `instance`, `cluster`, `card` (the card's
+  canonical bytes as text, the same bytes the `filesystem` provider writes
+  to a file) and `heartbeat_at`. Two indexes serve the cluster and the
+  heartbeat columns.
+- **Publish.** One upsert per heartbeat and per state change. It writes the
+  card and sets `heartbeat_at = now()`, with `now()` taken by the database
+  server.
+- **List.** First it deletes the rows whose `heartbeat_at` is older than
+  `prune_after_seconds`, then it reads every row with its age. Both steps
+  use the server's `now()`, so a worker that lists also prunes. The age is
+  `now() - heartbeat_at`, computed by the server in the same query.
+- **Liveness.** The provider gives no `online` verdict. The
+  [liveness rule](#liveness) applies: a peer is online while its age is at
+  most `offline_after_seconds`. No worker's wall clock enters an age, so
+  clock skew between worker hosts, or between a worker and the database, does
+  not matter.
+- **Duplicate names.** The worker name is the primary key, so two processes
+  with one name overwrite each other's row: the last writer wins. A worker
+  that lists the other instance's row while it is live by the age rule logs
+  `fleet_duplicate_worker_name` (see [Duplicate worker names](#duplicate-worker-names)).
+- **Withdraw.** At a clean stop the worker deletes its row, but only while
+  the row still holds this process's `instance`.
+- **A row that does not decode** is skipped with `fleet_card_invalid` and
+  the reason, once for that worker name while the name stays listed. The
+  other rows are still listed.
+
+The schema and the pool come from the connection, which is
+`connections.postgres.<connection>` (`schema`, `manage_schema`, `pool_min`,
+`pool_max`; see [Configuration](configuration.md#connections)).
+`fleet.registry.postgres` exists and has no keys. The pool is opened once,
+at the first provider start, and the registry and the archive election share
+it when they name the same connection. The worker closes it at shutdown,
+after both providers have stopped (see [Connections](#connections)).
+
+**The schema.** At the first successful `start` of the provider:
+
+- With `manage_schema: true` (the default), the worker takes an advisory
+  lock on the schema name and runs five `CREATE ... IF NOT EXISTS`
+  statements in one transaction: the schema, `fleet_workers` with its two
+  indexes, and `archive_locks`. The lock makes workers that start together
+  take turns, so they do not race on the DDL. Whichever provider starts
+  first creates both tables.
+- With `manage_schema: false`, the worker only checks that the table it
+  needs exists. When the table is missing, `start` fails with
+  `table drakkar.fleet_workers does not exist and connections.postgres.main.manage_schema is false; create it with: drakkar-schema postgres --schema=drakkar`
+  (with your schema and connection names), and the registry tries the start
+  again at the next heartbeat, like any failed start. The check covers
+  only the table of the provider that starts; the other provider checks
+  its own.
+
+`drakkar-schema postgres --schema=<name>` prints the DDL as plain SQL on
+stdout, for an operator to run with a role that has the rights the worker
+role does not. It also runs as `python -m drakkar.schema postgres --schema=<name>`:
+
+```bash
+drakkar-schema postgres --schema=drakkar | psql "$ADMIN_DSN"
+```
+
+It prints the same five statements for both providers, each ending in `;`.
+The schema name is a lower-case identifier, `[a-z_][a-z0-9_]*`. A usage
+error (a wrong feature name, a missing or invalid `--schema`) exits with
+code 2, writes the reason and the usage to stderr and nothing to stdout.
+`drakkar-schema --help` prints the usage and exits with 0.
+
+**The database role.**
+
+- With `manage_schema: true`, the worker runs the DDL at every first start,
+  so its role must be allowed to create the schema and the tables (the
+  simplest case is a role that owns the schema).
+- With `manage_schema: false`, the role needs `USAGE` on the schema and
+  `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the tables it uses
+  (`fleet_workers`; `archive_locks` for the election). It needs no right to
+  create anything, so an operator creates the objects once with
+  `drakkar-schema`. See [Security](security.md#provider-credentials).
+
+**During an outage.** A connection that is refused or lost, a server that
+restarts and a transaction that must be run again are transient errors. They
+are retried under `fleet.registry.resilience` (see [Resilience](#resilience)).
+When operations keep failing, the breaker opens after `failure_threshold`
+failed operations and the provider is skipped until the cooldown has passed.
+The workers list keeps its last snapshot, and
+`drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not
+wait for any of this. When the server is back, the next probe operation
+closes the breaker and the registry recovers without a restart; nothing
+needs to be reset, because the pool opens new connections by itself.
 
 ## The card
 
@@ -243,6 +366,10 @@ age is that estimate minus the card's modification time. Two consequences:
   every peer with an unknown age: the workers list shows them as neither
   online nor offline until the first publish succeeds.
 
+The `postgres` provider needs no such sample. The database server computes
+the age of each row (`now() - heartbeat_at`) in the query that lists the
+rows, so every listed card has an age.
+
 Each refresh (every `refresh_seconds`, default 15) keeps the age of every
 card at the moment it was listed. The workers list adds the time since that
 refresh, so a peer never looks younger because a refresh is slow or failed.
@@ -263,28 +390,35 @@ its card that are present; see the UI contract for the full row shape.
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
-This release ships no provider that reads these entries; a provider plugin can
-use them (see [Writing a provider](#writing-a-provider)).
+This release ships the `postgres` providers, which read
+`connections.postgres.<name>`; the entries for Consul and Redis are for
+later providers and for provider plugins (see [Writing a
+provider](#writing-a-provider)).
 
 ```yaml
 connections:
-  consul:
+  postgres:
     main:                                  # used when a feature names no connection
-      address: http://consul.internal:8500
-      key_prefix: drakkar
-    other-dc:
-      address: http://consul.dc2.internal:8500
+      schema: drakkar
+    fleet_database:
+      schema: drakkar_fleet
+      manage_schema: false
 fleet:
   registry:
-    connection: other-dc                   # default: main
+    provider: postgres
+    connection: fleet_database             # default: main
 ```
+
+Each entry also needs its `dsn`, set from the environment, for example
+`DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
+`DK_CONNECTIONS__POSTGRES__FLEET_DATABASE__DSN`.
 
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `history.archive.election.connection` name
-  an entry. The `consul`, `redis` and `postgres` providers read it.
-  `filesystem`, `static` and `none` ignore it, and so does a plugin with any
-  other name. The config load checks the key by provider name, so a provider
+  an entry. The `postgres` provider reads it, and so will the `consul` and
+  `redis` providers. `filesystem`, `static` and `none` ignore it, and so does
+  a plugin with any other name. The config load checks the key by provider name, so a provider
   named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
   connection declared; otherwise the load fails with
   `fleet.registry.connection 'main' is not defined under connections.consul`.
@@ -323,7 +457,11 @@ Both have the same keys:
 **Retries.** A transient error is a timeout, an `OSError` (a refused or
 reset connection, for example), or a `drakkar.providers.resilience.TransientError`
 that the provider raises on purpose. Only these are retried. Any other
-error ends the operation at once. With the defaults one operation takes at
+error ends the operation at once. The `postgres` providers raise
+`TransientError` for a Postgres error whose SQLSTATE begins with `08`
+(connection exception), `53` (insufficient resources) or `57` (operator
+intervention, for example a server restart), and for `40001` (serialization
+failure) and `40P01` (deadlock). With the defaults one operation takes at
 most 3 × 5 s plus the waits of 0.2 s and 0.4 s, which is 15.6 s. The
 registry publishes the next card only after the previous publish ended, so
 keep the longest operation well below `offline_after_seconds`.
@@ -391,6 +529,9 @@ offline once the card is older than `offline_after_seconds`.
 - The filesystem provider runs its file calls on its own thread. A call
   stuck on an unresponsive network mount holds only that thread: the next
   attempts time out, and the rest of the worker does not notice.
+- The `postgres` provider awaits its queries on the event loop. The time
+  limit of an attempt cancels a query that does not answer, so a stuck
+  database holds up only that attempt.
 - A provider that fails to start is retried; see [Resilience](#resilience).
 - An iteration of a registry loop can raise outside a provider call, for
   example in the card builder or in the `features` supplier. The iteration
@@ -467,7 +608,7 @@ fleet:
 it. The config reference masks its values (see
 [Security](security.md#provider-credentials)). A plugin name wins over a
 built-in name, so a package can replace `filesystem`. A plugin named
-`consul`, `redis` or `postgres` is checked like the built-in of that name:
+`consul`, `redis` or `postgres` is checked like the provider of that name:
 the connection that `fleet.registry.connection` names must be declared.
 
 A plugin that fails to load is logged and skipped
@@ -611,8 +752,8 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, or a plugin name. `consul`, `redis` and `postgres` are [reserved](#providers). |
-| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `consul`, `redis` and `postgres` providers use. |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), or a plugin name. `consul` and `redis` are [reserved](#providers). |
+| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` provider uses, and that the `consul` and `redis` providers will use. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
 | `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. |
@@ -621,8 +762,9 @@ also counted by the three provider metrics:
 | `fleet.registry.filesystem.dir` | `""` | Card folder; empty means `<shared.dir>/fleet`. |
 | `fleet.registry.static.peers` | `[]` | The `static` peer list: `name`, `cluster`, `url`. |
 | `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of a `consul` provider. |
+| `fleet.registry.postgres` | `{}` | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 | `fleet.registry.plugin_options` | `{}` | Options for a provider plugin. |
-| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; see [Connections](#connections). |
+| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `postgres` providers read `connections.postgres.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
 `DK_FLEET__REGISTRY__PROVIDER=static`. The full table with constraints is in

@@ -234,6 +234,7 @@ The provider log events:
 | `provider_breaker_opened` | warning | A breaker opened (once per opening; a failed probe does not log it again). |
 | `provider_breaker_closed` | info | A probe succeeded and the breaker closed. |
 | `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call. At most once a minute per loop, with `suppressed`. |
+| `recorder_archive_lock_taken_over` | warning | A worker took over the archive lease of a dead archiver. Fields: `provider` (`filesystem` or `postgres`), `previous_worker`, `previous_instance`, `age_seconds`, and the place of the lease: `folder` for `filesystem`, `scope` (the sanitized cluster name) for `postgres`. |
 
 #### Webapp
 
@@ -825,7 +826,8 @@ byte-level spec. The short version:
   create `history/<cluster>/.archive.lock` with an exclusive create; one
   wins, and the others skip the tick and lose nothing. A lock older than
   `history.archive.lock_stale_seconds` (default 7200) belongs to a dead
-  archiver and is taken over (`recorder_archive_lock_taken_over`); a fresh
+  archiver and is taken over (`recorder_archive_lock_taken_over`, with the
+  field `provider`: `filesystem`, or `postgres` with the field `scope`); a fresh
   lock that two racing takers moved aside is put back, and
   `recorder_archive_lock_put_back_failed` reports when a third worker's
   lock came first. Ages are measured on the file server's clock. Right before it publishes, the
@@ -834,7 +836,8 @@ byte-level spec. The short version:
   with the fields `provider` and `reason`: `taken_over`, or `unconfirmed`
   when the election provider could not confirm the lease). This is the
   default `filesystem` election provider; `history.archive.election` selects
-  another one, and every worker of a cluster must use the same.
+  another one (`postgres` is built in), and every worker of a cluster must use
+  the same.
   See [Local Databases — The election provider](local-databases.md#the-election-provider).
 - **Sources die last.** A sealed file is deleted only once its archive is
   durably on disk. A file the merge cannot read is renamed to

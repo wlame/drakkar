@@ -185,10 +185,12 @@ hides the answer from the page. No other path sends CORS headers.
 
 The `connections` section holds the address and the credentials of the
 shared services that providers use: the Consul ACL `token`, the Redis `url`
-(with its password) and the Postgres `dsn` (with user and password). This
-release ships no provider that reads these entries; a provider plugin can use
-them through `ctx.connections`. The advice below applies to the entries you
-declare and to any provider that uses them.
+(with its password) and the Postgres `dsn` (with user and password). The
+`postgres` registry and election providers read `connections.postgres.<name>`:
+they open one pool with the `dsn` and use the `schema`. This release ships no
+provider that reads the Consul and Redis entries; a provider plugin can use
+any entry through `ctx.connections`. The advice below applies to the entries
+you declare and to any provider that uses them.
 
 - **Set them from the environment.** For example a Kubernetes Secret that
   becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`
@@ -204,6 +206,17 @@ declare and to any provider that uses them.
   uses tables that already exist). Do not reuse the credentials of a sink,
   and declare a separate named entry for each feature that needs different
   rights.
+- **Give the Postgres role the rights it needs and no more.** With
+  `manage_schema: true` the worker runs `CREATE ... IF NOT EXISTS` for the
+  schema and the tables at the first start of a provider, so the role must be
+  allowed to create them. For a role without DDL rights, set
+  `manage_schema: false` and let an operator create the objects once with
+  `drakkar-schema postgres --schema=<name>`, which prints the DDL as plain
+  SQL. The worker role then needs `USAGE` on the schema and `SELECT`,
+  `INSERT`, `UPDATE` and `DELETE` on `fleet_workers` (registry) and
+  `archive_locks` (election), and nothing else. A role with these rights can
+  publish and delete worker cards and take the archive lease, so protect the
+  schema like the card folder of the `filesystem` provider.
 - **Operator views mask them.** The config reference shows a mask in place
   of `token`, `url` and `dsn`. For `plugin_options` it masks at every depth
   by key name (`password`, `token`, ...): every value under such a key is

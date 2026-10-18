@@ -653,8 +653,8 @@ history:
   archive:
     lock_stale_seconds: 7200     # the lease length, for every provider
     election:
-      provider: filesystem       # the default: the archive lock above; or a plugin name
-      # connection: main         # read by the consul, redis and postgres providers
+      provider: filesystem       # the default: the archive lock above; or postgres, or a plugin name
+      # connection: main         # read by the postgres provider (and later by consul and redis)
       # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
       # plugin_options: {}       # passed unchanged to a provider plugin
 ```
@@ -667,20 +667,22 @@ history:
   seconds. A holder that died stops refreshing, and once the lease length has
   passed another worker may take the scope over. With a `consul` provider
   the value may not exceed 86400.
-- **Providers.** `filesystem` is built in. Other providers are plugins of the
-  entry-point group `drakkar.election_providers`, in the same way as for the
-  [fleet registry](fleet.md#writing-a-provider). The names `consul`, `redis`
-  and `postgres` are reserved for providers that keep the lease in a service
-  reached through a [named connection](fleet.md#connections); this release
-  ships none of them, and a plugin of that name is checked like the
-  built-in (its connection must be declared). An unknown name fails startup
+- **Providers.** `filesystem` and `postgres` are built in. Other providers
+  are plugins of the entry-point group `drakkar.election_providers`, in the
+  same way as for the [fleet registry](fleet.md#writing-a-provider). The names
+  `consul` and `redis` are reserved for providers of later releases that keep
+  the lease in a service reached through a [named
+  connection](fleet.md#connections); this release ships neither, and a plugin
+  of either name (or of the name `postgres`) is checked like the provider of
+  that name (its connection must be declared). An unknown name fails startup
   with a message that lists the providers that exist, for example
-  `history.archive.election.provider 'consul' is not known; known providers: filesystem`.
+  `history.archive.election.provider 'consul' is not known; known providers: filesystem, postgres`.
   The name is checked whenever `history.archive.enabled` is true and the UI
   is on, also with `storage.dir: ''`. With archiving off, any name is
   accepted.
 - **Start and stop.** The provider starts at the first archive pass, not at
-  worker start. When the start fails, that pass ends at once (its `acquire`
+  worker start (so with the `postgres` provider the tables are first checked
+  or created then). When the start fails, that pass ends at once (its `acquire`
   is counted `not_started`) and the next pass tries the start again. While
   the circuit breaker is open, a pass skips the start until the cooldown has
   passed. At a clean stop the recorder lets the pass in progress end its
@@ -706,6 +708,67 @@ history:
   times out or is skipped by the open breaker reads as "not held". A refresh
   that does not answer `True` ends the refreshing, and every later check of
   that pass answers "not held" without a provider call.
+
+#### The `postgres` election provider {#the-postgres-election-provider}
+
+The lease is a row of `<schema>.archive_locks`, in the schema of the
+connection that `history.archive.election.connection` names. It fits a
+deployment that already runs Postgres. The sealed history folder
+(`shared.dir`) is still a shared folder; only the choice of the archiving
+worker moves to the database.
+
+```yaml
+shared:
+  dir: /mnt/drakkar-shared
+connections:
+  postgres:
+    main:
+      schema: drakkar
+history:
+  archive:
+    lock_stale_seconds: 7200
+    election:
+      provider: postgres
+      connection: main
+```
+
+The connection string comes from the environment:
+`DK_CONNECTIONS__POSTGRES__MAIN__DSN`.
+
+- **One row per scope.** `archive_locks` has the columns `cluster` (the
+  scope, and the primary key), `token`, `worker`, `instance`, `acquired_at`
+  and `refreshed_at`.
+- **Acquire.** One transaction reads the row of the scope `FOR UPDATE` and
+  then upserts it. The upsert writes only when the row is free, holds the
+  token of this pass, or has a `refreshed_at` older than
+  `history.archive.lock_stale_seconds` on the database server's `now()`. So
+  the lease length is judged on the server's clock, and no worker's wall
+  clock is compared with another's. A pass that takes a free scope or its own
+  token gets the lease; any other pass gets `False` and skips the tick.
+- **Refresh and release.** `refresh` moves `refreshed_at` to the server's
+  `now()`, and `release` deletes the row, each only while the row holds the
+  caller's token. A holder that was taken over cannot extend or free the new
+  holder's lease. `is_held` (the fencing check) is true only while the row
+  holds the token.
+- **Takeover.** When the upsert replaces another token's row, the worker logs
+  `recorder_archive_lock_taken_over` with `provider` set to `postgres`, and
+  the fields `scope`, `previous_worker`, `previous_instance` and
+  `age_seconds` (the age of the lease that ran out, on the server's clock).
+  A fenced pass logs `recorder_archive_fenced` as described below.
+- **The schema.** `manage_schema: true` creates the schema and both tables at
+  the provider's first successful start, in one transaction behind an
+  advisory lock. With `manage_schema: false` the start checks the table
+  `archive_locks` and, when it is missing, fails with a message that names
+  `drakkar-schema postgres --schema=<name>`; the next archive pass tries the
+  start again. The command prints the DDL for an operator to run; see
+  [Fleet registry: postgres](fleet.md#postgres).
+- **An outage** is handled as for the registry: transient Postgres errors
+  are retried under `history.archive.election.resilience`, and the breaker
+  opens after `failure_threshold` failed operations. A lease that cannot be
+  confirmed counts as lost (see above), so a pass during an outage stops
+  without publishing or deleting. Its row stays until the lease length has
+  passed, as for any holder that stops refreshing, and then another pass
+  takes it over.
 
 #### Fencing
 
