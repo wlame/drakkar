@@ -10,6 +10,7 @@ from drakkar.config.connections import SCHEMA_RE, PostgresConnectionConfig
 from drakkar.fleet.card import decode_card, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.providers.postgres import (
+    DEFAULT_SCHEMA,
     FLEET_WORKERS_TABLE,
     POSTGRES_PROVIDER,
     borrow,
@@ -21,8 +22,6 @@ from drakkar.providers.postgres import (
 from drakkar.providers.thread import PROVIDER_STOPPED
 
 NO_CONNECTIONS_MESSAGE = 'the postgres registry needs the worker connections'
-# The schema of a connection entry that names none, so a preset pool gets the same default.
-DEFAULT_SCHEMA: str = PostgresConnectionConfig.model_fields['schema_name'].default
 
 
 class PostgresRegistry:

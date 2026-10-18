@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from drakkar.config.connections import SCHEMA_RE, PostgresConnectionConfig
-from drakkar.fleet.providers_postgres import DEFAULT_SCHEMA
 from drakkar.providers.postgres import (
     ARCHIVE_LOCKS_TABLE,
+    DEFAULT_SCHEMA,
     POSTGRES_PROVIDER,
     borrow,
     close_pool,

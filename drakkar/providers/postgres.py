@@ -25,6 +25,8 @@ POSTGRES_PROVIDER = 'postgres'
 SCHEMA_PLACEHOLDER = '{schema}'
 FLEET_WORKERS_TABLE = 'fleet_workers'
 ARCHIVE_LOCKS_TABLE = 'archive_locks'
+# The schema of a connection entry that names none, so a preset pool gets the same default.
+DEFAULT_SCHEMA: str = PostgresConnectionConfig.model_fields['schema_name'].default
 
 # Run in this order: the schema first, then each table with its indexes.
 DDL_TEMPLATES: tuple[str, ...] = (
