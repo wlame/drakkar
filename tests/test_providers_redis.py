@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -43,6 +44,7 @@ from drakkar.providers.redis import (
     SCOPE_PLACEHOLDER,
     SCRIPTS,
     TRANSIENT_REPLY_CODES,
+    URL_QUERY_MESSAGE,
     WORKER_PLACEHOLDER,
     classify,
     close_client,
@@ -115,6 +117,15 @@ def test_transient_codes_and_messages_match_the_fixture():
     assert list(TRANSIENT_REPLY_CODES) == FIXTURE['transient_reply_codes']
     assert FIXTURE['connect_timeout_seconds'] == CONNECT_TIMEOUT_SECONDS
     assert FIXTURE['messages']['bad_url'] == BAD_URL_MESSAGE
+    assert FIXTURE['messages']['url_query'] == URL_QUERY_MESSAGE
+
+
+def test_redis_floor_is_the_release_that_sets_status_code():
+    # classify reads RedisError.status_code, which redis-py sets from 7.2 on; older
+    # releases strip the reply code from the message and keep no copy of it.
+    pyproject = tomllib.loads((Path(__file__).parent.parent / 'pyproject.toml').read_text())
+
+    assert 'redis>=7.2' in pyproject['project']['dependencies']
 
 
 def test_provider_name_and_default_prefix_follow_the_connection_config():
@@ -278,12 +289,18 @@ async def test_open_client_disables_client_retries_and_bounds_only_the_connect()
     await close_client(client)
 
 
-@pytest.mark.parametrize('url', ['redis://u:secret@h:notaport/0', 'http://x'])
-async def test_open_client_with_a_bad_url_raises_the_fixed_text(url):
-    with pytest.raises(ValueError) as info:
-        await open_client(RedisConnectionConfig(url=url))
+@pytest.mark.parametrize('case', FIXTURE['url_cases'], ids=lambda c: c['url'])
+async def test_open_client_follows_the_pinned_url_cases(case):
+    settings = RedisConnectionConfig(url=case['url'])
 
-    assert str(info.value) == BAD_URL_MESSAGE
+    if case['error'] is None:
+        # Nothing connects until the first command, so a good URL opens without a server.
+        await close_client(await open_client(settings))
+        return
+    with pytest.raises(ValueError) as info:
+        await open_client(settings)
+
+    assert str(info.value) == FIXTURE['messages'][case['error']]
     assert 'secret' not in str(info.value)
     assert info.value.__cause__ is None
 
@@ -371,9 +388,14 @@ async def test_withdraw_script_deletes_only_for_the_matching_instance(server):
 
 def lock_body(token: str) -> str:
     """The lock body of a holder, as the election writes it."""
-    return serialize_json(
-        {'acquired_at': 'now', 'instance': 'i-1', 'provider': REDIS_PROVIDER, 'token': token}
-    ).decode()
+    body = {
+        'acquired_at': 'now',
+        'instance': 'i-1',
+        'provider': REDIS_PROVIDER,
+        'token': token,
+        'worker': 'w-1',
+    }
+    return serialize_json(body).decode()
 
 
 async def acquire(client, token: str, lease_ms: int = LEASE_MS) -> int:

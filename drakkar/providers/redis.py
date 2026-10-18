@@ -25,6 +25,10 @@ limit, and a server that stops answering ends the call at that limit. Only the
 connect is bounded by the client, at the fixed ``CONNECT_TIMEOUT_SECONDS``, so
 a dial gives up at the same point for any implementation, whatever default its
 client library has.
+
+The URL of a connection cannot carry query options (``?...``): the client
+applies them after its own settings, and the options of a URL are not the same
+for every implementation, so one URL could behave differently in each.
 """
 
 import json
@@ -143,6 +147,8 @@ RESP_PROTOCOL = 2
 
 # Parse errors of the client can quote the URL, and a piece of a password is a leak.
 BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
+# The client applies the options of a URL query after its own settings, so a query could undo them.
+URL_QUERY_MESSAGE = 'redis connection: the url cannot carry query options'
 
 
 def key(name: str, *, prefix: str, worker: str = '', scope: str = '') -> str:
@@ -241,13 +247,19 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
     protocol is pinned to RESP2, because the library's default is RESP3, which
     opens every connection with ``HELLO`` (a command that Redis before 6.0 does
     not have), and because every reply then has the shape the scripts and the
-    tests expect. A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``
-    with no cause, because the client's own message can quote the URL.
+    tests expect. A URL with a ``?`` is refused with ``URL_QUERY_MESSAGE`` before
+    it is parsed: the client applies the options of a URL query after its own
+    settings, so a query such as ``socket_timeout`` would undo the ones set here.
+    A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``. Both errors
+    have no cause and quote nothing, because the client's own message can quote
+    the URL.
     """
     from redis.asyncio import Redis
     from redis.asyncio.retry import Retry
     from redis.backoff import NoBackoff
 
+    if '?' in settings.url:
+        raise ValueError(URL_QUERY_MESSAGE) from None
     try:
         return Redis.from_url(
             settings.url,
@@ -266,7 +278,10 @@ async def close_client(client: Any) -> None:
 
 
 async def run(client: Any, *argv: str) -> Any:
-    """Send one command and return its reply; a transient error leaves as ``TransientError``.
+    """Send one command and return its reply.
+
+    A transient error leaves as ``TransientError`` and a client timeout as the
+    built-in ``TimeoutError``; any other error leaves as it came (see :func:`classify`).
 
     Every argument is a ``str``, the counts and the milliseconds included, so
     the command on the wire equals the pinned one exactly.

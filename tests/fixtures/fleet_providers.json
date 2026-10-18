@@ -53,7 +53,17 @@
     },
     "transient_reply_codes": ["BUSY", "LOADING", "MASTERDOWN", "TRYAGAIN"],
     "connect_timeout_seconds": 5.0,
-    "messages": {"bad_url": "redis connection: the url cannot be parsed"},
+    "messages": {
+      "bad_url": "redis connection: the url cannot be parsed",
+      "url_query": "redis connection: the url cannot carry query options"
+    },
+    "url_cases": [
+      {"url": "redis://h:6379/0?socket_timeout=3", "error": "url_query"},
+      {"url": "redis://u:p@h:notaport/0?x=1", "error": "url_query"},
+      {"url": "redis://u:secret@h:notaport/0", "error": "bad_url"},
+      {"url": "http://x", "error": "bad_url"},
+      {"url": "rediss://u:secret@h:6380/1", "error": null}
+    ],
     "key_examples": [
       {"name": "registry_index", "prefix": "drakkar:", "worker": "", "scope": "", "key": "drakkar:fleet:workers"},
       {"name": "registry_card", "prefix": "", "worker": "w_rker-1", "scope": "", "key": "fleet:workers:w_rker-1"},
