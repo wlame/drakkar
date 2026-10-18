@@ -259,7 +259,11 @@ code 2, writes the reason and the usage to stderr and nothing to stdout.
   also when the objects already exist. The role needs `CREATE` on the
   database (`CREATE SCHEMA IF NOT EXISTS` checks it even when the schema
   exists) and `CREATE` on the schema (for the tables and the indexes). Owning
-  the schema is not enough.
+  the schema is not enough. The role must also own the table
+  `fleet_workers`: its two `CREATE INDEX IF NOT EXISTS` statements check
+  ownership before they skip an index that exists. The simplest case is to
+  let the worker role create the objects. For tables that another role
+  created, set `manage_schema: false`. `archive_locks` needs no ownership.
 - With `manage_schema: false`, the role needs `USAGE` on the schema and
   `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the tables it uses
   (`fleet_workers`; `archive_locks` for the election). It needs no right to
@@ -532,8 +536,11 @@ offline once the card is older than `offline_after_seconds`.
   stuck on an unresponsive network mount holds only that thread: the next
   attempts time out, and the rest of the worker does not notice.
 - The `postgres` provider awaits its queries on the event loop. The time
-  limit of an attempt cancels a query that does not answer, so a stuck
-  database holds up only that attempt.
+  limit of an attempt cancels a query that does not answer and closes its
+  connection, so a stuck query holds up only that attempt. A release of the
+  connection to the pool that is already in progress when the limit comes
+  still waits for the server. It holds one pool connection until the server
+  answers, and the pool gets the connection back then.
 - A provider that fails to start is retried; see [Resilience](#resilience).
 - An iteration of a registry loop can raise outside a provider call, for
   example in the card builder or in the `features` supplier. The iteration

@@ -212,6 +212,11 @@ you declare and to any provider that uses them.
   already exist. The role then needs `CREATE` on the database (`CREATE SCHEMA
   IF NOT EXISTS` checks it even when the schema exists) and `CREATE` on the
   schema (for the tables and the indexes); owning the schema is not enough.
+  The role must also own the table `fleet_workers`: its two `CREATE INDEX
+  IF NOT EXISTS` statements check ownership before they skip an index that
+  exists. The simplest case is to let the worker role create the objects;
+  `archive_locks` needs no ownership. For tables that another role created,
+  set `manage_schema: false`.
   For a role without these rights, set `manage_schema: false` and let an
   operator run `drakkar-schema postgres --schema=<name>` once, as a role that
   has the DDL rights; it prints the DDL as plain SQL. The worker role then

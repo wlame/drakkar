@@ -75,7 +75,11 @@ What to check:
   lock. Every worker repeats the idempotent DDL at its first provider start,
   also when the objects exist, so the role of every worker needs `CREATE` on
   the database (for `CREATE SCHEMA IF NOT EXISTS`) and `CREATE` on the schema
-  (for the tables and the indexes).
+  (for the tables and the indexes). The role must also own the table
+  `fleet_workers`, because its two `CREATE INDEX IF NOT EXISTS` statements
+  check ownership before they skip an index that exists. The simplest case is
+  to let the worker role create the objects. For tables that another role
+  created, set `manage_schema: false`. `archive_locks` needs no ownership.
 - With an operator-managed schema, set `manage_schema: false` and run the
   command once, as a role that has the DDL rights:
 

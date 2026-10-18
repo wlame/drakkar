@@ -36,8 +36,8 @@ dependencies = [
 ]
 
 [project.scripts]
-# Cache-management CLI for the decoupled drakkar-ui bundle; mirrors the Go
-# backend's cmd/drakkar-ui (same subcommands, flags, output, exit codes).
+# Cache-management CLI for the decoupled drakkar-ui bundle. Its subcommands,
+# flags, output and exit codes are a contract that every implementation shares.
 drakkar-ui = "drakkar.uihost.cli:main"
 # Prints the DDL of the tables the postgres providers keep, for a schema the worker may not create.
 drakkar-schema = "drakkar.schema:main"

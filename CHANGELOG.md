@@ -82,9 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (also `python -m drakkar.schema`). It prints the DDL for an operator to
   run. The database server's clock decides the age of a card and the length
   of a lease. Connection-class errors are retried under the `resilience`
-  block of the feature. A call that reaches its time limit closes its
-  connection, so a database server that stops answering cannot hold a call
-  past the limit.
+  block of the feature. A call whose query reaches the time limit closes its
+  connection, so a query on a database server that stops answering does not
+  hold the call past the limit. A release of the connection to the pool that
+  is already in progress when the limit comes still waits for the server. It
+  holds one pool connection until the server answers, and the pool gets the
+  connection back then.
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
   and archive election on a separate Postgres service, `postgres-fleet`.
