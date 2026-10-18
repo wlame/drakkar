@@ -44,6 +44,11 @@ class StubSource:
     def is_ready(self) -> bool:
         return self._ready
 
+    @property
+    def has_run(self) -> bool:
+        """True once the lifecycle has called ``run``."""
+        return 'run' in self.calls
+
     def signal_stop(self) -> None:
         self.calls.append('signal_stop')
         self._ready = False
@@ -105,19 +110,38 @@ READY_DEADLINE_SECONDS = 10.0
 READY_POLL_SECONDS = 0.01
 
 
-async def _wait_ready(app: DrakkarApp) -> None:
-    """Poll until the app is ready; a slow start on a loaded machine gets ``READY_DEADLINE_SECONDS``."""
+async def _wait_until(condition, description: str) -> None:
+    """Poll ``condition``; a slow start on a loaded machine gets ``READY_DEADLINE_SECONDS``."""
     deadline = time.monotonic() + READY_DEADLINE_SECONDS
-    while not app.is_ready and time.monotonic() < deadline:
+    while not condition() and time.monotonic() < deadline:
         await asyncio.sleep(READY_POLL_SECONDS)
-    assert app.is_ready, f'the app was not ready within {READY_DEADLINE_SECONDS} seconds'
+    assert condition(), f'{description} within {READY_DEADLINE_SECONDS} seconds'
+
+
+async def _wait_ready(app: DrakkarApp) -> None:
+    """Poll until the app is ready."""
+    await _wait_until(lambda: app.is_ready, 'the app was not ready')
+
+
+async def _wait_running(app: DrakkarApp, *sources: StubSource) -> None:
+    """Poll until the app is ready and every source is inside ``run``.
+
+    Readiness turns true as soon as each ``start`` returns, but ``run`` is
+    called later, after more awaits (async log calls hop to a thread). On a
+    loaded machine a poll can land in that gap, so a test that asserts on
+    ``run`` waits for it explicitly.
+    """
+    await _wait_until(
+        lambda: app.is_ready and all(source.has_run for source in sources),
+        'the app was not ready with every source running',
+    )
 
 
 async def test_sources_started_in_order_and_worker_ready(monkeypatch):
     a, b = StubSource('a'), StubSource('b')
     app = _app(monkeypatch, a, b)
     run = asyncio.create_task(app._lifecycle._async_run())
-    await _wait_ready(app)
+    await _wait_running(app, a, b)
     assert app.is_ready is True
     assert a.calls[:3] == ['bind', 'start', 'run']
     assert b.calls[:3] == ['bind', 'start', 'run']

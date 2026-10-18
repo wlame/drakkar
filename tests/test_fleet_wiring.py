@@ -526,7 +526,9 @@ async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypa
     app._config.fleet.registry.resilience.timeout_seconds = 0.05
 
     run = asyncio.create_task(app._lifecycle._async_run())
-    await asyncio.wait_for(_wait_until(lambda: app.is_ready), timeout=WAIT_FOR_TIMEOUT_SECONDS)
+    # Readiness comes before the lifecycle calls ``run``; wait for both, or
+    # the signal can land in between on a loaded machine.
+    await asyncio.wait_for(_wait_until(lambda: app.is_ready and source.has_run), timeout=WAIT_FOR_TIMEOUT_SECONDS)
     app._lifecycle._handle_signal()
     await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
