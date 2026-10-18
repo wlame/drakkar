@@ -50,8 +50,8 @@ PRODUCER_DONE_LIMIT_SECONDS=2700
 CONSUMER_GROUP=drakkar-integration
 SOURCE_TOPIC=search-requests
 # The flood phase sends every id again, and the main cluster works the
-# backlog off for up to an hour after the producer is done.
-DRAIN_LIMIT_SECONDS=5400
+# backlog off for an hour or more after the producer is done.
+DRAIN_LIMIT_SECONDS=7200
 DRAIN_POLL_SECONDS=30
 
 is_paused=false
