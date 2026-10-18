@@ -53,10 +53,11 @@ def fake_client(server: fakeredis.FakeServer) -> fakeredis.FakeAsyncRedis:
     own connections and share the data through the server. Replies are bytes,
     as the clients of ``drakkar.providers.redis.open_client`` give them.
 
-    The protocol is set to 2 on purpose. A real server runs every script in
-    RESP2 whatever the client speaks, and a client that sends no ``HELLO`` is
-    in RESP2; ``fakeredis`` instead takes an unset protocol for RESP3 inside a
-    script, where ``ZRANGE ... WITHSCORES`` answers pairs instead of a flat list.
+    The protocol is 2 because ``open_client`` pins RESP2 and the fake must speak
+    what the providers speak. The client library's default is RESP3, and
+    ``fakeredis`` follows the client: inside a script it then answers
+    ``ZRANGE ... WITHSCORES`` as pairs, where a real server (scripts always run
+    in RESP2) gives a flat list.
     """
     return fakeredis.FakeAsyncRedis(server=server, protocol=2)
 

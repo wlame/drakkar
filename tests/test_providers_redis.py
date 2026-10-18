@@ -267,11 +267,14 @@ def test_classify_leaves_other_errors_alone(exc):
 async def test_open_client_disables_client_retries_and_bounds_only_the_connect():
     client = await open_client(RedisConnectionConfig(url='redis://u:secret@h:6379/0'))
 
-    kwargs = client.connection_pool.connection_kwargs
-    assert kwargs['retry'].get_retries() == 0
-    assert kwargs['socket_connect_timeout'] == CONNECT_TIMEOUT_SECONDS
-    assert kwargs.get('socket_timeout') is None
-    # Nothing was sent, so the host 'h' was never looked up and closing needs no server.
+    # Look at a connection the pool builds, not at the keyword arguments: an argument
+    # that is missing falls back to the library's default (a read limit, RESP3).
+    # Making the connection opens no socket, so the host 'h' is never looked up.
+    connection = client.connection_pool.make_connection()
+    assert connection.retry.get_retries() == 0
+    assert connection.socket_connect_timeout == CONNECT_TIMEOUT_SECONDS
+    assert connection.socket_timeout is None
+    assert connection.protocol == 2
     await close_client(client)
 
 

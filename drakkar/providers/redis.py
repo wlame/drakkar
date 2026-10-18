@@ -139,6 +139,7 @@ SCRIPTS: dict[str, str] = {
 TRANSIENT_REPLY_CODES = ('BUSY', 'LOADING', 'MASTERDOWN', 'TRYAGAIN')
 
 CONNECT_TIMEOUT_SECONDS = 5.0
+RESP_PROTOCOL = 2
 
 # Parse errors of the client can quote the URL, and a piece of a password is a leak.
 BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
@@ -234,8 +235,13 @@ def classify(exc: Exception) -> Exception:
 async def open_client(settings: RedisConnectionConfig) -> Any:
     """Return the client of a connection entry; nothing is connected until the first command.
 
-    Client retries are off and only the connect has a time limit (see the module
-    docstring). A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``
+    Client retries are off, reads and writes have no time limit of their own and
+    only the connect has one (see the module docstring). The read limit is set to
+    ``None`` on purpose: the client library's default is a few seconds. The
+    protocol is pinned to RESP2, because the library's default is RESP3, which
+    opens every connection with ``HELLO`` (a command that Redis before 6.0 does
+    not have), and because every reply then has the shape the scripts and the
+    tests expect. A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``
     with no cause, because the client's own message can quote the URL.
     """
     from redis.asyncio import Redis
@@ -247,6 +253,8 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
             settings.url,
             retry=Retry(NoBackoff(), 0),
             socket_connect_timeout=CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=None,
+            protocol=RESP_PROTOCOL,
         )
     except ValueError:
         raise ValueError(BAD_URL_MESSAGE) from None
