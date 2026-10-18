@@ -1,6 +1,7 @@
 """Lifecycle orchestration of input sources, with stub sources."""
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -100,11 +101,16 @@ def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
     return app
 
 
+READY_DEADLINE_SECONDS = 10.0
+READY_POLL_SECONDS = 0.01
+
+
 async def _wait_ready(app: DrakkarApp) -> None:
-    for _ in range(200):
-        if app.is_ready:
-            return
-        await asyncio.sleep(0.01)
+    """Poll until the app is ready; a slow start on a loaded machine gets ``READY_DEADLINE_SECONDS``."""
+    deadline = time.monotonic() + READY_DEADLINE_SECONDS
+    while not app.is_ready and time.monotonic() < deadline:
+        await asyncio.sleep(READY_POLL_SECONDS)
+    assert app.is_ready, f'the app was not ready within {READY_DEADLINE_SECONDS} seconds'
 
 
 async def test_sources_started_in_order_and_worker_ready(monkeypatch):
