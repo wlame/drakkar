@@ -80,6 +80,8 @@ class RankHandler(dk.BaseDrakkarHandler[KafkaIn, KafkaOut, RankRequest, RankResp
                 task_id=dk.make_task_id('rank'),
                 args=['--query', req.query, '--top-k', str(req.top_k)],
                 metadata={'request_id': req.request_id},
+                # Required field; an HTTP request has no Kafka offset.
+                source_offsets=[],
             )
         ]
 
@@ -217,6 +219,10 @@ The framework auto-stamps every returned task with `origin='http'`,
 `http_request_id` returned). Operators see those columns in the recorder
 and the operator UI -- no need to set them by hand.
 
+`source_offsets` is required on every `ExecutorTask`, and an HTTP request
+has no Kafka offset, so pass `source_offsets=[]`. A task without the field
+fails validation in the hook and the request answers 500.
+
 ```python
 async def arrange_http_request(self, req: RankRequest, pending) -> list[dk.ExecutorTask]:
     return [
@@ -225,6 +231,7 @@ async def arrange_http_request(self, req: RankRequest, pending) -> list[dk.Execu
             args=['--query', req.query, '--top-k', str(req.top_k)],
             metadata={'request_id': req.request_id},
             labels={'kind': 'http', 'query': req.query[:32]},
+            source_offsets=[],
         )
     ]
 ```

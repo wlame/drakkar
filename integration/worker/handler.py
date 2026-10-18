@@ -1258,6 +1258,9 @@ class RipgrepHandler(
                         'pattern': pattern,
                         'file': HTTP_FILE_PATH,
                     },
+                    # An HTTP request has no Kafka offset to track; the
+                    # field is required, so it is passed empty explicitly.
+                    source_offsets=[],
                 ),
             )
         return tasks

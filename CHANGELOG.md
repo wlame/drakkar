@@ -104,6 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sink delivery retries, the Dashboard tables that replaced the
   `/partitions` and `/sinks` pages, the offload pool default, the throughput
   windows (1, 5 and 30 s) and the Kubernetes UI-bundle comment.
+- **`arrange_http_request` examples pass `source_offsets=[]`.** The field is
+  required, and the examples in `docs/webapp.md` left it out, so a handler
+  built from them answered every HTTP request with 500. The integration
+  harness worker had the same fault.
 
 ## [2.4.0] - 2026-10-15
 

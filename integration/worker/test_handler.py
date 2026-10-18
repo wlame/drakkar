@@ -12,9 +12,9 @@ behaviour so any implementation of it stays provably identical.
 from pathlib import Path
 
 import pytest
-from handler import RipgrepHandler, _human_file_size, _scan_target_module
+from handler import HTTP_PATTERNS, RipgrepHandler, _human_file_size, _scan_target_module
 from http_handler import MIRRORED_RESULTS_SINK, HttpSearchHandler
-from models import SearchRequest, SearchResponse
+from models import RankRequest, SearchRequest, SearchResponse
 
 import drakkar as dk
 from drakkar.config import load_config
@@ -129,6 +129,20 @@ async def test_http_search_handler_arranges_like_ripgrep() -> None:
     assert tasks[0].metadata['request_id'] == 'req-000001'
     assert tasks[0].metadata['pattern'] == 'import'
     assert tasks[0].metadata['file_path'] == '/project/drakkar'
+
+
+async def test_ripgrep_handler_arrange_http_request_builds_tasks_without_kafka_offsets() -> None:
+    """worker-1's own HTTP hook (the one the load generator drives) must build
+    valid tasks. ExecutorTask requires source_offsets; an HTTP request has no
+    Kafka offset, so the hook passes an empty list rather than omitting it."""
+    handler = RipgrepHandler()
+    req = RankRequest(request_id='load-000001', score=3)
+
+    tasks = await handler.arrange_http_request(req, _empty_pending())
+
+    assert len(tasks) == len(HTTP_PATTERNS)
+    assert all(task.source_offsets == [] for task in tasks)
+    assert {task.metadata['request_id'] for task in tasks} == {'load-000001'}
 
 
 async def test_http_search_handler_fans_out_over_patterns_and_file_paths() -> None:
