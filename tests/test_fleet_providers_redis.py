@@ -254,7 +254,8 @@ async def test_ages_ignore_the_readers_prune_value(clock, server):
     clock.advance(20)
     (entry,) = await reader.list()
 
-    # The spec layout would read 0 or about 82800 here: prune_after minus the writer's remaining TTL.
+    # An age taken from the TTL (the reader's prune_after_seconds minus the writer's remaining TTL)
+    # would read 0 or about 82800 here.
     assert entry.age_seconds == pytest.approx(20.0, abs=0.001)
 
 
