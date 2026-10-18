@@ -256,8 +256,10 @@ code 2, writes the reason and the usage to stderr and nothing to stdout.
 **The database role.**
 
 - With `manage_schema: true`, the worker runs the DDL at every first start,
-  so its role must be allowed to create the schema and the tables (the
-  simplest case is a role that owns the schema).
+  also when the objects already exist. The role needs `CREATE` on the
+  database (`CREATE SCHEMA IF NOT EXISTS` checks it even when the schema
+  exists) and `CREATE` on the schema (for the tables and the indexes). Owning
+  the schema is not enough.
 - With `manage_schema: false`, the role needs `USAGE` on the schema and
   `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the tables it uses
   (`fleet_workers`; `archive_locks` for the election). It needs no right to
@@ -391,8 +393,8 @@ A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
 This release ships the `postgres` providers, which read
-`connections.postgres.<name>`; the entries for Consul and Redis are for
-later providers and for provider plugins (see [Writing a
+`connections.postgres.<name>`; the entries for Consul and Redis are
+reserved, and a provider plugin can use any entry (see [Writing a
 provider](#writing-a-provider)).
 
 ```yaml
@@ -416,8 +418,8 @@ Each entry also needs its `dsn`, set from the environment, for example
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `history.archive.election.connection` name
-  an entry. The `postgres` provider reads it, and so will the `consul` and
-  `redis` providers. `filesystem`, `static` and `none` ignore it, and so does
+  an entry. The `postgres` provider reads it; the names `consul` and
+  `redis` are reserved. `filesystem`, `static` and `none` ignore it, and so does
   a plugin with any other name. The config load checks the key by provider name, so a provider
   named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
   connection declared; otherwise the load fails with
@@ -753,7 +755,7 @@ also counted by the three provider metrics:
 | Key | Default | Meaning |
 |---|---|---|
 | `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), or a plugin name. `consul` and `redis` are [reserved](#providers). |
-| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` provider uses, and that the `consul` and `redis` providers will use. |
+| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` provider uses. The names `consul` and `redis` are reserved. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
 | `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. |

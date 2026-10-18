@@ -690,7 +690,7 @@ history:
       provider: filesystem         # filesystem | postgres | <plugin name> (consul and redis are reserved names).
                                    # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>.
                                    # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
-      connection: main             # entry of connections.<provider>; read by postgres (and later by consul and redis).
+      connection: main             # entry of connections.<provider>; read by postgres (consul and redis are reserved).
                                    # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
       resilience:                  # same keys and defaults as fleet.registry.resilience
         timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
@@ -721,7 +721,7 @@ fleet:
     provider: filesystem           # filesystem | static | none | postgres | <plugin name> (consul and redis are reserved names);
                                    # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>.
                                    # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
-    connection: main               # entry of connections.<provider>; read by postgres (and later by consul and redis).
+    connection: main               # entry of connections.<provider>; read by postgres (consul and redis are reserved).
                                    # env: DK_FLEET__REGISTRY__CONNECTION
     heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
     refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS

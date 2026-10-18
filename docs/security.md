@@ -202,17 +202,20 @@ you declare and to any provider that uses them.
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
   to `key_prefix`, a Redis user limited to its `key_prefix`, a Postgres role
-  that owns only the `schema` (with `manage_schema: false`, a role that only
+  limited to its `schema` (with `manage_schema: false`, a role that only
   uses tables that already exist). Do not reuse the credentials of a sink,
   and declare a separate named entry for each feature that needs different
   rights.
 - **Give the Postgres role the rights it needs and no more.** With
   `manage_schema: true` the worker runs `CREATE ... IF NOT EXISTS` for the
-  schema and the tables at the first start of a provider, so the role must be
-  allowed to create them. For a role without DDL rights, set
-  `manage_schema: false` and let an operator create the objects once with
-  `drakkar-schema postgres --schema=<name>`, which prints the DDL as plain
-  SQL. The worker role then needs `USAGE` on the schema and `SELECT`,
+  schema and the tables at the first start of a provider, also when they
+  already exist. The role then needs `CREATE` on the database (`CREATE SCHEMA
+  IF NOT EXISTS` checks it even when the schema exists) and `CREATE` on the
+  schema (for the tables and the indexes); owning the schema is not enough.
+  For a role without these rights, set `manage_schema: false` and let an
+  operator run `drakkar-schema postgres --schema=<name>` once, as a role that
+  has the DDL rights; it prints the DDL as plain SQL. The worker role then
+  needs `USAGE` on the schema and `SELECT`,
   `INSERT`, `UPDATE` and `DELETE` on `fleet_workers` (registry) and
   `archive_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the archive lease, so protect the

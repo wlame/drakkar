@@ -654,7 +654,7 @@ history:
     lock_stale_seconds: 7200     # the lease length, for every provider
     election:
       provider: filesystem       # the default: the archive lock above; or postgres, or a plugin name
-      # connection: main         # read by the postgres provider (and later by consul and redis)
+      # connection: main         # read by the postgres provider (consul and redis are reserved)
       # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
       # plugin_options: {}       # passed unchanged to a provider plugin
 ```

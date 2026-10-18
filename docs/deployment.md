@@ -72,9 +72,12 @@ What to check:
   Only the cards and the archive lease move to Postgres.
 - `manage_schema: true` lets the first worker that starts create the schema
   and both tables. Workers that start together take turns through an advisory
-  lock.
-- With an operator-managed schema, set `manage_schema: false` and create the
-  objects once with a role that has DDL rights:
+  lock. Every worker repeats the idempotent DDL at its first provider start,
+  also when the objects exist, so the role of every worker needs `CREATE` on
+  the database (for `CREATE SCHEMA IF NOT EXISTS`) and `CREATE` on the schema
+  (for the tables and the indexes).
+- With an operator-managed schema, set `manage_schema: false` and run the
+  command once, as a role that has the DDL rights:
 
   ```bash
   drakkar-schema postgres --schema=drakkar | psql "$ADMIN_DSN"
