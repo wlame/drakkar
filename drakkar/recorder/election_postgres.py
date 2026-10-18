@@ -12,6 +12,7 @@ from drakkar.providers.postgres import (
     DEFAULT_SCHEMA,
     POSTGRES_PROVIDER,
     borrow,
+    borrow_transaction,
     close_pool,
     ensure_tables,
     open_pool,
@@ -97,7 +98,7 @@ class PostgresElection:
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
         """Take ``scope`` for ``token``; True for a free scope, an expired lease, or the token that holds it."""
         pool, statements = self._started()
-        async with borrow(pool) as conn, conn.transaction():
+        async with borrow_transaction(pool) as conn:
             # FOR UPDATE holds the row until the upsert below decides, so the
             # holder it names is the one the upsert replaced.
             previous = await conn.fetchrow(statements['acquire_select'], scope)

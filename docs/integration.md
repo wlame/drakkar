@@ -16,8 +16,8 @@ cd integration
 docker-compose up --build -d
 ```
 
-This starts 19 services, including six workers in three clusters. (A
-twentieth, `load_generator_tenant_a`, is gated behind the `tenant` Compose
+This starts 20 services, including six workers in three clusters. (A
+twenty-first, `load_generator_tenant_a`, is gated behind the `tenant` Compose
 profile.) First run pulls images and builds workers (~2 minutes).
 Subsequent runs start in seconds.
 
@@ -37,6 +37,7 @@ docker-compose down -v
 |---------|------|-------------|
 | **Kafka** | 9092 | Single-node KRaft broker (no Zookeeper) |
 | **PostgreSQL** | 5432 | `drakkar` database with `search_results` table |
+| **PostgreSQL (fleet)** | 5434 | `drakkar_fleet` database: the main cluster's worker registry and archive election when the harness runs with the `postgres` provider |
 | **MongoDB** | 27017 | Document archive |
 | **Redis** | 6379 | Cached search summaries (1h TTL) |
 | **Webhook** | 9000 | HTTP echo server for webhook sink |
@@ -425,11 +426,36 @@ Browse topics in the [Kafka UI](http://localhost:8088).
 ## Worker Autodiscovery
 
 All workers write to `/shared` (mounted as a volume). Each worker
-publishes its card to the [fleet registry](fleet.md) folder in that
-volume and reads the cards of the others, so the
-[operator UI](observability.md#operator-ui) lists every worker. Use the
-worker dropdown in the top-right nav to switch between workers without
-remembering ports.
+publishes its card to the [fleet registry](fleet.md) and reads the cards
+of the others, so the [operator UI](observability.md#operator-ui) lists
+every worker. Use the worker dropdown in the top-right nav to switch
+between workers without remembering ports.
+
+The fast workers and the HTTP worker always keep their cards in the
+registry folder in `/shared`. The main cluster (`worker-1`..`worker-3`)
+takes its registry and archive-election provider from the argument of
+`just integration-up`:
+
+```bash
+just integration-up                      # filesystem: cards in /shared
+just integration-up provider=postgres    # postgres: cards in the postgres-fleet database
+```
+
+The argument sets `HARNESS_PROVIDER`, which `docker-compose.yml` passes to
+the three workers as `DK_FLEET__REGISTRY__PROVIDER` and
+`DK_HISTORY__ARCHIVE__ELECTION__PROVIDER`. With `postgres`, both use the
+[connection](fleet.md#connections) `connections.postgres.main`: its DSN in
+`drakkar.yaml` has no password, and `docker-compose.yml` supplies the
+full DSN through `DK_CONNECTIONS__POSTGRES__MAIN__DSN`. The worker
+creates the `drakkar` schema and its tables in `drakkar_fleet` on first
+use.
+
+The main cluster's registry timings are short, so that the scenarios
+below finish in minutes: a card is published every 2 s and read every
+3 s, a worker whose card is 10 s old is offline, and a card 30 s old is
+deleted. Each call to the provider has 2 s and one retry, and three
+failed operations open the [circuit breaker](fleet.md#resilience) for
+10 s. The archive election uses the same resilience block.
 
 ---
 
@@ -469,6 +495,37 @@ The script does not stop at "watch it happen". When the outage sequence
 finishes it runs the delivery verification below and **exits non-zero if
 anything was lost, duplicated past the cap, or reordered** -- so a chaos run
 is a pass/fail gate, not an invitation to read three dashboards.
+
+---
+
+## Provider outage scenarios
+
+Four scripts check how the main cluster's registry behaves when its
+provider, the network or a worker fails. Start the harness with a
+provider, wait until the workers are healthy, then run the scenarios with
+the same provider:
+
+```bash
+just integration-up provider=postgres
+just integration-scenarios provider=postgres
+just integration-down
+```
+
+`just integration-scenarios` runs the four scripts in the order below and
+stops at the first failure. Each script prints one `VERDICT` line and
+exits 0 on a pass (or when it does not apply to the provider) and 1 on a
+failure. You can also run one script alone, for example
+`HARNESS_PROVIDER=postgres integration/scenario-secrets.sh`.
+
+| Script | What it does | What it proves |
+|--------|--------------|----------------|
+| `scenario-service-outage.sh` | Pauses `postgres-fleet` for 90 s. | Within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="postgres"}` is 1). Within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online. No worker restarts. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, up to an hour after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
+| `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | After 30 s worker-1 lists worker-3 offline with `postgres`, because worker-3 cannot reach the database and its card gets old. With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
+| `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. | Within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. The takeover of an archive lock is skipped: the archive pass runs only after a recorder rotation, which is at least one hour; the election test kit covers it. |
+| `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the DSN password (`drakkar:drakkar@`, `postgresql://drakkar:`). Runs with both providers. |
+
+The scenarios change the harness (a killed and restarted worker, a paused
+database), so run `just integration-down` before the next run.
 
 ---
 

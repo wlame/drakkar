@@ -12,6 +12,7 @@ the schema of the connection; it is validated as a lower-case identifier when
 the config loads, so a plain replace is safe.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -159,16 +160,45 @@ async def close_pool(pool: asyncpg.Pool) -> None:
 async def borrow(pool: Any) -> AsyncIterator[Any]:
     """Borrow a connection from ``pool``; a transient Postgres error leaves as ``TransientError``.
 
+    A cancelled block (the caller's time limit) closes the connection's socket
+    before the pool takes it back. The pool's release otherwise waits, shielded
+    from cancellation, for the server to confirm the cancel of the running
+    query; a server that does not answer would hold the call past its limit.
     ``pool`` is typed ``Any`` so a test can hand in a fake that has ``acquire()``.
     """
     try:
         async with pool.acquire() as conn:
-            yield conn
+            try:
+                yield conn
+            except asyncio.CancelledError:
+                conn.terminate()
+                raise
     except asyncpg.PostgresError as exc:
         classified = classify(exc)
         if classified is exc:
             raise
         raise classified from exc
+
+
+@asynccontextmanager
+async def borrow_transaction(pool: Any) -> AsyncIterator[Any]:
+    """Borrow a connection as :func:`borrow` does and run the block in one transaction.
+
+    Commits after the block and rolls back on an error. A cancelled block sends
+    no ``ROLLBACK``: that would wait for the server, and :func:`borrow` closes
+    the connection instead, which ends the transaction on the server.
+    """
+    async with borrow(pool) as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            yield conn
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            await transaction.rollback()
+            raise
+        await transaction.commit()
 
 
 async def ensure_tables(
@@ -191,14 +221,14 @@ async def ensure_tables(
     schema is managed (every table of the corpus is created) and only drives
     the checks otherwise.
     """
-    async with borrow(pool) as conn:
-        if not manage_schema:
-            check_sql = render(STATEMENT_TEMPLATES['check_table'], schema)
+    if not manage_schema:
+        check_sql = render(STATEMENT_TEMPLATES['check_table'], schema)
+        async with borrow(pool) as conn:
             for table in tables:
                 if not await conn.fetchval(check_sql, f'{schema}.{table}'):
                     raise RuntimeError(missing_table_message(schema, table, connection))
-            return
-        async with conn.transaction():
-            await conn.execute(STATEMENT_TEMPLATES['ddl_lock'], schema)
-            for statement in ddl_for(schema):
-                await conn.execute(statement)
+        return
+    async with borrow_transaction(pool) as conn:
+        await conn.execute(STATEMENT_TEMPLATES['ddl_lock'], schema)
+        for statement in ddl_for(schema):
+            await conn.execute(statement)

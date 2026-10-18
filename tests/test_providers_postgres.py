@@ -4,6 +4,7 @@ No database: the pool is a small recording fake with the ``acquire()`` shape
 asyncpg's pool has. The statement texts are checked against the shared fixture.
 """
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ from drakkar.providers.postgres import (
     STATEMENT_TEMPLATES,
     TRANSIENT_SQLSTATE_PREFIXES,
     borrow,
+    borrow_transaction,
     classify,
     close_pool,
     ddl_for,
@@ -38,13 +40,33 @@ from drakkar.providers.resilience import TransientError
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())
 
 
+class FakeTransaction:
+    """Records the transaction boundaries among the calls of its connection."""
+
+    def __init__(self, calls: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._calls = calls
+
+    async def start(self) -> None:
+        self._calls.append(('BEGIN', ()))
+
+    async def commit(self) -> None:
+        self._calls.append(('COMMIT', ()))
+
+    async def rollback(self) -> None:
+        self._calls.append(('ROLLBACK', ()))
+
+
 class FakeConnection:
     """Records every call as ``(sql, args)`` and answers ``fetchval`` with a fixed value."""
 
     def __init__(self, fetchval_answer: Any = True, fail_on_execute: Exception | None = None) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.terminated = False
         self._fail_on_execute = fail_on_execute
         self._fetchval_answer = fetchval_answer
+
+    def terminate(self) -> None:
+        self.terminated = True
 
     async def execute(self, sql: str, *args: Any) -> str:
         self.calls.append((sql, args))
@@ -52,12 +74,8 @@ class FakeConnection:
             raise self._fail_on_execute
         return 'OK'
 
-    @asynccontextmanager
-    async def transaction(self):
-        """Record the transaction boundaries among the calls."""
-        self.calls.append(('BEGIN', ()))
-        yield
-        self.calls.append(('COMMIT', ()))
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self.calls)
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
         self.calls.append((sql, args))
@@ -207,6 +225,83 @@ async def test_borrow_lets_other_errors_through():
     with pytest.raises(ValueError, match='boom'):
         async with borrow(pool):
             raise ValueError('boom')
+
+    assert pool.conn.terminated is False
+
+
+async def test_borrow_terminates_the_connection_when_the_block_is_cancelled():
+    pool = FakePool(FakeConnection())
+
+    with pytest.raises(asyncio.CancelledError):
+        async with borrow(pool):
+            raise asyncio.CancelledError
+
+    assert pool.conn.terminated is True
+
+
+class ReleaseWaitsForServerPool(FakePool):
+    """A pool whose release of a cancelled connection waits for a server that never answers, unless it was closed."""
+
+    def __init__(self, conn: FakeConnection) -> None:
+        super().__init__(conn)
+        self.server_answers = asyncio.Event()
+
+    @asynccontextmanager
+    async def acquire(self):
+        try:
+            yield self.conn
+        finally:
+            if not self.conn.terminated:
+                await asyncio.shield(self.server_answers.wait())
+
+
+async def test_a_time_limit_around_borrow_holds_when_the_server_does_not_answer():
+    pool = ReleaseWaitsForServerPool(FakeConnection())
+    query_never_returns = asyncio.Event()
+
+    async def call() -> None:
+        async with borrow(pool):
+            await query_never_returns.wait()
+
+    limited = asyncio.ensure_future(asyncio.wait_for(call(), timeout=0.05))
+    # An outer bound, so a regression fails here instead of hanging the suite.
+    done, _ = await asyncio.wait({limited}, timeout=1)
+    pool.server_answers.set()
+
+    assert limited in done
+    assert isinstance(limited.exception(), TimeoutError)
+    assert pool.conn.terminated is True
+
+
+async def test_borrow_transaction_commits_after_the_block():
+    conn = FakeConnection()
+
+    async with borrow_transaction(FakePool(conn)) as borrowed:
+        await borrowed.execute('SELECT 1')
+
+    assert conn.calls == [('BEGIN', ()), ('SELECT 1', ()), ('COMMIT', ())]
+
+
+async def test_borrow_transaction_rolls_back_on_an_error():
+    conn = FakeConnection()
+
+    with pytest.raises(ValueError, match='boom'):
+        async with borrow_transaction(FakePool(conn)):
+            raise ValueError('boom')
+
+    assert conn.calls == [('BEGIN', ()), ('ROLLBACK', ())]
+    assert conn.terminated is False
+
+
+async def test_borrow_transaction_sends_no_rollback_when_cancelled():
+    conn = FakeConnection()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with borrow_transaction(FakePool(conn)):
+            raise asyncio.CancelledError
+
+    assert conn.calls == [('BEGIN', ())]
+    assert conn.terminated is True
 
 
 async def test_ensure_tables_runs_the_lock_and_the_ddl_in_one_transaction_when_managed():

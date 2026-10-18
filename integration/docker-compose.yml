@@ -70,6 +70,24 @@ services:
       timeout: 5s
       retries: 10
 
+  # Database of the main cluster's worker registry and archive election
+  # when the harness runs with `just integration-up provider=postgres`.
+  # Separate from the sinks' database so that pausing it (the
+  # service-outage scenario) touches the providers and nothing else.
+  postgres-fleet:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: drakkar
+      POSTGRES_PASSWORD: drakkar
+      POSTGRES_DB: drakkar_fleet
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drakkar -d drakkar_fleet"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
   mongo:
     image: mongo:7
     ports:
@@ -162,6 +180,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      postgres-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-1
       CLUSTER_ID: analytics-prod
@@ -169,6 +189,13 @@ services:
       DK_METRICS__PORT: "9090"
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
+      # Registry and archive-election provider of the main cluster:
+      # filesystem (the default) or postgres, chosen with
+      # `just integration-up provider=postgres`. The DSN carries the
+      # password, so it lives here and not in drakkar.yaml.
+      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the
@@ -221,6 +248,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      postgres-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-2
       CLUSTER_ID: analytics-prod
@@ -228,6 +257,10 @@ services:
       DK_METRICS__PORT: "9091"
       DK_UI__PORT: "8082"
       DK_UI__PUBLIC_URL: "http://localhost:8082/"
+      # Same provider and DSN as worker-1 (see there).
+      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       # App-config demo (docs/app-config.md): override one field of the
       # handler-declared AppConfig via the handler's OWN env prefix —
       # never DK_APP__* (the framework rejects that). Only worker-2, so
@@ -258,12 +291,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      postgres-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-3
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9093"
       DK_UI__PORT: "8083"
       DK_UI__PUBLIC_URL: "http://localhost:8083/"
+      # Same provider and DSN as worker-1 (see there).
+      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
     ports:
       - "9093:9093"
       - "8083:8083"

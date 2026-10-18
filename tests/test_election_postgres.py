@@ -7,6 +7,7 @@ the statements and their arguments, the takeover log line, the table check
 at start, the shared pool and the error mapping.
 """
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -380,6 +381,30 @@ async def test_a_failed_upsert_rolls_the_acquire_back(fake):
         await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
 
     assert fake.calls[-1] == ('ROLLBACK', ())
+    assert fake.locks == {}
+
+
+async def test_a_cancelled_acquire_closes_the_connection_instead_of_rolling_back(fake):
+    provider = await _started(fake)
+    fake.calls.clear()
+    real_run = fake.run
+
+    def cancel_after_upsert(sql: str, args: tuple[Any, ...]) -> Any:
+        answer = real_run(sql, args)
+        if sql == statements_for('drakkar')['acquire']:
+            # The time limit ends the call after the server wrote the row.
+            raise asyncio.CancelledError
+        return answer
+
+    fake.run = cancel_after_upsert  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+
+    # A ROLLBACK would wait for a server that may not answer; closing the
+    # connection ends the transaction on the server instead.
+    assert ('ROLLBACK', ()) not in fake.calls
+    assert fake.calls[-1] == ('TERMINATE', ())
     assert fake.locks == {}
 
 

@@ -410,7 +410,36 @@ cache:
 storage:
   dir: "/shared"
 
+# Shared connections that the providers below name. The DSN here has no
+# password: docker-compose.yml supplies the full DSN through
+# DK_CONNECTIONS__POSTGRES__MAIN__DSN, so the secret never sits in this
+# file. The worker creates the schema and its tables on first use
+# (manage_schema defaults to true).
+connections:
+  postgres:
+    main:
+      dsn: "postgresql://drakkar@postgres-fleet:5432/drakkar_fleet"
+      schema: drakkar
+
 fleet:
+  # Worker registry. The provider is filesystem (cards in storage.dir) or
+  # postgres (cards in the database of connections.postgres.main), chosen
+  # by DK_FLEET__REGISTRY__PROVIDER in docker-compose.yml. The timings are
+  # short so the outage scenarios finish in minutes: a card missing for
+  # 10 s is offline, and one missing for 30 s is deleted.
+  registry:
+    heartbeat_seconds: 2
+    refresh_seconds: 3
+    offline_after_seconds: 10
+    prune_after_seconds: 30
+    # Each call gets 2 s and one retry; three failed operations open the
+    # breaker, which lets one probe through after 10 s.
+    resilience:
+      timeout_seconds: 2
+      retries: 1
+      breaker:
+        failure_threshold: 3
+        cooldown_seconds: 10
   # Cache exchange: pulls new cluster/global rows from the other workers
   # over HTTP, at the URL on their registry card (ui.host 0.0.0.0 above
   # makes this worker reachable to them), LWW-merges them into our local
@@ -421,3 +450,17 @@ fleet:
     interval_seconds: 30.0
     page_size: 500
     timeout_seconds: 5.0
+
+# Archive election: which worker of the cluster writes the archive after a
+# rotation. DK_HISTORY__ARCHIVE__ELECTION__PROVIDER in docker-compose.yml
+# sets the provider to the same value as the registry's, and the
+# resilience block is the same as the registry's.
+history:
+  archive:
+    election:
+      resilience:
+        timeout_seconds: 2
+        retries: 1
+        breaker:
+          failure_threshold: 3
+          cooldown_seconds: 10

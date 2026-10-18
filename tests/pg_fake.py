@@ -66,6 +66,7 @@ class FakePostgres:
         self.tables: set[str] = {FLEET_WORKERS_TABLE, ARCHIVE_LOCKS_TABLE} if tables_exist else set()
         # Set by FakeConnection.transaction while its block runs.
         self.in_transaction = False
+        self.open_transaction: FakeTransaction | None = None
         self.now = 1_000.0
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.workers: dict[str, WorkerRow] = {}
@@ -244,18 +245,43 @@ class FakeConnection:
         rows = self._server.run(sql, args)[0]
         return rows[0][0] if rows else None
 
-    @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[None]:
-        """Record the transaction; an exception rolls the tables back and is raised again."""
+    def transaction(self) -> 'FakeTransaction':
+        """A transaction to start, as ``asyncpg.Connection.transaction`` returns."""
+        return FakeTransaction(self._server)
+
+    def terminate(self) -> None:
+        """Close the connection; the server rolls back a transaction left open on it."""
+        self._server.calls.append(('TERMINATE', ()))
+        if self._server.open_transaction is not None:
+            self._server.open_transaction.discard()
+
+
+class FakeTransaction:
+    """One transaction of a :class:`FakeConnection`; a rollback puts the tables back."""
+
+    def __init__(self, server: FakePostgres) -> None:
+        self._server = server
+        self._saved: Any = None
+
+    async def start(self) -> None:
         self._server.calls.append(('BEGIN', ()))
-        saved = self._server.snapshot()
+        self._saved = self._server.snapshot()
         self._server.in_transaction = True
-        try:
-            yield
-        except BaseException:
-            self._server.restore(saved)
-            self._server.calls.append(('ROLLBACK', ()))
-            raise
-        finally:
-            self._server.in_transaction = False
+        self._server.open_transaction = self
+
+    async def commit(self) -> None:
         self._server.calls.append(('COMMIT', ()))
+        self._close()
+
+    async def rollback(self) -> None:
+        self._server.calls.append(('ROLLBACK', ()))
+        self.discard()
+
+    def discard(self) -> None:
+        """Put the tables back and close the transaction; the server's side of a rollback."""
+        self._server.restore(self._saved)
+        self._close()
+
+    def _close(self) -> None:
+        self._server.in_transaction = False
+        self._server.open_transaction = None

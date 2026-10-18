@@ -201,10 +201,20 @@ release-notes version:
 drakkar-ui *args:
     uv run drakkar-ui {{ args }}
 
-# Start the integration environment (Kafka, sinks, worker clusters, load generator)
-integration-up:
+# Start the integration environment; provider: filesystem or postgres (just integration-up provider=postgres)
+integration-up provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
+    # The main cluster's registry and archive-election provider; read by
+    # docker-compose.yml. just passes `provider=postgres` through as it is,
+    # so the prefix is stripped and the value is checked.
+    provider="{{ provider }}"
+    provider="${provider#provider=}"
+    case "$provider" in
+        filesystem|postgres) ;;
+        *) echo "unknown provider '$provider': expected filesystem or postgres" >&2; exit 2 ;;
+    esac
+    export HARNESS_PROVIDER="$provider"
     # A non-default interpreter image means a release candidate, which means no
     # confluent-kafka wheel: the service images compile it from source and need
     # librdkafka headers newer than any distro package. Build that base once
@@ -238,6 +248,24 @@ verify-delivery total='5000' *args:
 # Run the rolling-outage chaos test against the integration environment
 chaos:
     cd integration && ./chaos-test.sh
+
+# Needs the harness up with the same provider. Stops at the first failing
+# scenario; each script prints one verdict line.
+#
+# Run the four provider outage scenarios (just integration-scenarios provider=postgres)
+integration-scenarios provider='filesystem':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    provider="{{ provider }}"
+    provider="${provider#provider=}"
+    case "$provider" in
+        filesystem|postgres) ;;
+        *) echo "unknown provider '$provider': expected filesystem or postgres" >&2; exit 2 ;;
+    esac
+    export HARNESS_PROVIDER="$provider"
+    for scenario in service-outage worker-cut-off unclean-exit secrets; do
+        integration/scenario-${scenario}.sh
+    done
 
 # Replay dead-lettered records (docs/sinks.md#dlq-replay); script flags pass through
 replay-dlq *args:
