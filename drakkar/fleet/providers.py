@@ -1,4 +1,4 @@
-"""The built-in registry providers: ``filesystem``, ``static``, ``none`` and ``postgres``.
+"""The built-in registry providers: ``filesystem``, ``static``, ``none``, ``postgres`` and ``redis``.
 
 ``BUILTIN_PROVIDERS`` maps each name to its factory ``(options) -> provider``.
 Plugins add names to that table at lookup time (see ``drakkar.fleet.plugins``).
@@ -18,6 +18,7 @@ from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE
 from drakkar.fleet.card import CARD_SCHEMA, MAX_CARD_BYTES, decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext, RegistryFactory
 from drakkar.fleet.providers_postgres import postgres_registry_factory
+from drakkar.fleet.providers_redis import redis_registry_factory
 from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
 
 # Cards live in this subfolder of the registry folder, one file per worker.
@@ -345,4 +346,5 @@ BUILTIN_PROVIDERS: dict[str, RegistryFactory] = {
     'static': _static_factory,
     'none': _none_factory,
     'postgres': postgres_registry_factory,
+    'redis': redis_registry_factory,
 }

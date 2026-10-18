@@ -111,6 +111,10 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
             'connection': registry.connection,
             'prune_after_seconds': registry.prune_after_seconds,
         },
+        'redis': lambda: {
+            'connection': registry.connection,
+            'prune_after_seconds': registry.prune_after_seconds,
+        },
     }
     build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
     return build()

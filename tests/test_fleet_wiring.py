@@ -171,6 +171,16 @@ def test_registry_provider_options_for_postgres_names_the_connection_and_prune(t
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
 
 
+def test_registry_provider_options_for_redis_names_the_connection_and_prune(tmp_path):
+    config = _config(
+        tmp_path,
+        connections={'redis': {'main': {'url': 'redis://user:secret@cache:6379/0'}}},
+        fleet={'registry': {'provider': 'redis'}},
+    )
+
+    assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
+
+
 def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):
     received: list[dict] = []
     _install_plugins(monkeypatch, election={'example-election': lambda options: received.append(dict(options))})
