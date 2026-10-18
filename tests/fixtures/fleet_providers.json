@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared corpus of the postgres registry and election providers: the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. Pinned so every implementation emits the same bytes.",
+  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, and one worked example with the arguments of every command (@name stands for the script of that name). Pinned so every implementation emits the same bytes.",
   "schema_placeholder": "{schema}",
   "ddl": [
     "CREATE SCHEMA IF NOT EXISTS {schema}",
@@ -35,5 +35,54 @@
     {"args": ["postgres", "--schema=Bad-Name"], "exit": 2},
     {"args": ["postgres", "--schema="], "exit": 2},
     {"args": ["mysql", "--schema=drakkar"], "exit": 2}
-  ]
+  ],
+  "redis": {
+    "placeholders": {"prefix": "{prefix}", "worker": "{worker}", "scope": "{scope}"},
+    "keys": {
+      "registry_index": "{prefix}fleet:workers",
+      "registry_card": "{prefix}fleet:workers:{worker}",
+      "election_lock": "{prefix}archive-locks:{scope}"
+    },
+    "scripts": {
+      "publish": "local now = redis.call('TIME')\nlocal score = now[1] .. '.' .. string.rep('0', 6 - #now[2]) .. now[2]\nredis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])\nredis.call('ZADD', KEYS[2], score, ARGV[3])\nredis.call('PEXPIRE', KEYS[2], ARGV[2])\nreturn 1",
+      "list": "local now = redis.call('TIME')\nlocal reply = {now[1], now[2]}\nlocal entries = redis.call('ZRANGE', KEYS[1], '0', '-1', 'WITHSCORES')\nfor i = 1, #entries, 2 do\n  local card = redis.call('GET', ARGV[1] .. entries[i])\n  if card then\n    reply[#reply + 1] = entries[i]\n    reply[#reply + 1] = entries[i + 1]\n    reply[#reply + 1] = card\n  else\n    redis.call('ZREM', KEYS[1], entries[i])\n  end\nend\nreturn reply",
+      "withdraw": "local card = redis.call('GET', KEYS[1])\nif card and string.find(card, ARGV[1], 1, true) then\n  redis.call('DEL', KEYS[1])\n  redis.call('ZREM', KEYS[2], ARGV[2])\n  return 1\nend\nreturn 0",
+      "acquire": "local body = redis.call('GET', KEYS[1])\nif not body then\n  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])\n  return 1\nend\nif string.find(body, ARGV[2], 1, true) then\n  redis.call('PEXPIRE', KEYS[1], ARGV[3])\n  return 1\nend\nreturn 0",
+      "refresh": "local body = redis.call('GET', KEYS[1])\nif body and string.find(body, ARGV[1], 1, true) then\n  redis.call('PEXPIRE', KEYS[1], ARGV[2])\n  return 1\nend\nreturn 0",
+      "release": "local body = redis.call('GET', KEYS[1])\nif body and string.find(body, ARGV[1], 1, true) then\n  redis.call('DEL', KEYS[1])\n  return 1\nend\nreturn 0"
+    },
+    "transient_reply_codes": ["BUSY", "LOADING", "MASTERDOWN", "TRYAGAIN"],
+    "connect_timeout_seconds": 5.0,
+    "messages": {"bad_url": "redis connection: the url cannot be parsed"},
+    "key_examples": [
+      {"name": "registry_index", "prefix": "drakkar:", "worker": "", "scope": "", "key": "drakkar:fleet:workers"},
+      {"name": "registry_card", "prefix": "", "worker": "w_rker-1", "scope": "", "key": "fleet:workers:w_rker-1"},
+      {"name": "election_lock", "prefix": "ops.fleet:", "worker": "", "scope": "main", "key": "ops.fleet:archive-locks:main"}
+    ],
+    "fragments": [
+      {"field": "instance", "value": "9c41e0b27fd34a1e", "fragment": "\"instance\":\"9c41e0b27fd34a1e\""},
+      {"field": "instance", "value": "a\"b<ü", "fragment": "\"instance\":\"a\\\"b<ü\""},
+      {"field": "token", "value": "5f0c1d2e3a4b6978", "fragment": "\"token\":\"5f0c1d2e3a4b6978\""}
+    ],
+    "milliseconds": [[10, 10000], [86400, 86400000], [4.35, 4350], [0.0005, 1], [0.0001, 1]],
+    "example": {
+      "inputs": {
+        "prefix": "drakkar:",
+        "card": {"schema": 1, "worker": "search-worker-3", "instance": "9c41e0b27fd34a1e", "cluster": "main", "url": "http://10.0.0.3:8080/", "state": "running"},
+        "prune_after_seconds": 86400,
+        "scope": "main", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
+        "acquired_at": "2026-10-14T02:00:00.125000Z"
+      },
+      "commands": {
+        "start": ["PING"],
+        "publish": ["EVAL", "@publish", "2", "drakkar:fleet:workers:search-worker-3", "drakkar:fleet:workers", "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}", "86400000", "search-worker-3"],
+        "list": ["EVAL", "@list", "1", "drakkar:fleet:workers", "drakkar:fleet:workers:"],
+        "withdraw": ["EVAL", "@withdraw", "2", "drakkar:fleet:workers:search-worker-3", "drakkar:fleet:workers", "\"instance\":\"9c41e0b27fd34a1e\"", "search-worker-3"],
+        "acquire": ["EVAL", "@acquire", "1", "drakkar:archive-locks:main", "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"redis\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
+        "refresh": ["EVAL", "@refresh", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
+        "is_held": ["GET", "drakkar:archive-locks:main"],
+        "release": ["EVAL", "@release", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\""]
+      }
+    }
+  }
 }
