@@ -93,8 +93,9 @@ class FleetRegistryConfig(BaseModel):
         description=(
             'Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), '
             'none (no peers), postgres (cards in a table of the database named by '
-            'fleet.registry.connection), or the name of a provider plugin. The names consul and redis '
-            'are reserved for providers of later releases; this release ships neither. '
+            'fleet.registry.connection), redis (cards in keys of the Redis server named by '
+            'fleet.registry.connection), or the name of a provider plugin. The name consul is '
+            'reserved for a provider of a later release; this release does not ship it. '
             'Needs ui.enabled.'
         ),
     )
@@ -102,8 +103,8 @@ class FleetRegistryConfig(BaseModel):
         default='main',
         min_length=1,
         description=(
-            'Name of the entry under connections.<provider> that the postgres provider uses, and '
-            'that the consul and redis providers will use. The other providers ignore it.'
+            'Name of the entry under connections.<provider> that the postgres and redis providers use, '
+            'and that the consul provider will use. The other providers ignore it.'
         ),
     )
     heartbeat_seconds: int = Field(default=10, ge=1, description='Seconds between card publishes.')
@@ -133,7 +134,7 @@ class FleetRegistryConfig(BaseModel):
     )
     redis: RedisRegistryConfig = Field(
         default_factory=RedisRegistryConfig,
-        description='Settings of the redis provider.',
+        description='Settings of the redis provider; none yet. The key prefix comes from the connection.',
     )
     postgres: PostgresRegistryConfig = Field(
         default_factory=PostgresRegistryConfig,

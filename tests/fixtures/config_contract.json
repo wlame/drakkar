@@ -269,6 +269,28 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
+      "name": "election_redis",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "redis"
+            }
+          }
+        },
+        "connections": {
+          "redis": {
+            "main": {
+              "url": "redis://localhost:6379/0"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
       "name": "registry_postgres_loads",
       "yaml": {
         "fleet": {
@@ -287,6 +309,26 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "registry_redis_loads",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "redis"
+          }
+        },
+        "connections": {
+          "redis": {
+            "main": {
+              "url": "redis://localhost:6379/0"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "election_filesystem_is_silent",

@@ -45,10 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use the entry-point group `drakkar.election_providers`, and
   `drakkar.recorder.electiontest` holds the checks a provider should pass.
   A registry provider can give its own `online` verdict (`PeerCard.online`);
-  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The names `consul`
-  and `redis` are reserved, and the release ships no provider with these
-  names. The summary line shows ` election=<provider>` when the election
-  provider is not `filesystem`. New metrics:
+  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The name `consul`
+  is reserved, and the release ships no provider with this name. The
+  summary line shows ` election=<provider>` when the election provider is not
+  `filesystem`. New metrics:
   `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`
   and `drakkar_provider_breaker_open`. New log events: `provider_started`,
   `provider_call_failed`, `provider_breaker_opened`,
@@ -88,6 +88,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is already in progress when the limit comes still waits for the server. It
   holds one pool connection until the server answers, and the pool gets the
   connection back then.
+- **Redis providers.** `fleet.registry.provider: redis` keeps the worker
+  cards in Redis keys with one index of the workers, and
+  `history.archive.election.provider: redis` keeps the archive lease in one
+  key per cluster. Both use the `key_prefix` of the connection that the
+  `connection` key of the feature names (`connections.redis.<name>`). The
+  clock of the Redis server decides the age of a card, and key expiry ends a
+  lease. The client does not retry on its own. The `resilience` block of the
+  feature retries connection errors and four server replies (`BUSY`,
+  `LOADING`, `MASTERDOWN` and `TRYAGAIN`). Any other reply, such as
+  `WRONGPASS` or `NOPERM`, is final. A connect gives up after 5 seconds. The
+  providers need Redis 5.0 or later, standalone. Redis Cluster is not
+  supported. A provider refuses to start when the URL of its connection has
+  query options (`?...`). The error is
+  `redis connection: the url cannot carry query options`. The minimum
+  version of the `redis` package is now 7.2 (it was 5.2.0), because the
+  providers read the reply code that the client sets from 7.2 on. This
+  applies to the Redis sink too, as it uses the same package.
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
   and archive election on a separate Postgres service, `postgres-fleet`.
