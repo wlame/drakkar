@@ -119,6 +119,8 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
         'none': dict,
         'postgres': lambda: _connection_and_prune(registry),
         'redis': lambda: _connection_and_prune(registry),
+        # A consul card lives as long as its session, whose TTL comes from the offline limit; it is never pruned.
+        'consul': lambda: {'connection': registry.connection, 'offline_after_seconds': registry.offline_after_seconds},
     }
     build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
     return build()

@@ -28,8 +28,8 @@ class _EntryPoint:
         return self._target
 
 
-def _consul_factory(options):
-    return ('consul', options)
+def _plugin_factory(options):
+    return ('example-plugin', options)
 
 
 @pytest.fixture
@@ -57,41 +57,42 @@ def test_a_builtin_name_resolves_to_its_factory(installed):
 
 
 def test_a_plugin_name_resolves_to_the_entry_point_factory(installed):
-    installed(_EntryPoint('consul', _consul_factory))
+    installed(_EntryPoint('example-plugin', _plugin_factory))
 
-    factory = resolve_provider_factory('consul')
+    factory = resolve_provider_factory('example-plugin')
 
-    assert factory({'address': 'x'}) == ('consul', {'address': 'x'})
+    assert factory({'address': 'x'}) == ('example-plugin', {'address': 'x'})
 
 
 def test_a_plugin_replaces_a_builtin_of_the_same_name(installed):
-    installed(_EntryPoint('filesystem', _consul_factory))
+    installed(_EntryPoint('filesystem', _plugin_factory))
 
-    assert resolve_provider_factory('filesystem') is _consul_factory
+    assert resolve_provider_factory('filesystem') is _plugin_factory
 
 
 def test_a_plugin_that_fails_to_load_is_logged_and_skipped(installed):
     installed(
-        _EntryPoint('broken', error=ImportError('no module named consul_api')), _EntryPoint('consul', _consul_factory)
+        _EntryPoint('broken', error=ImportError('no module named example_api')),
+        _EntryPoint('example-plugin', _plugin_factory),
     )
 
     with capture_logs() as logs:
-        factory = resolve_provider_factory('consul')
+        factory = resolve_provider_factory('example-plugin')
 
-    assert factory is _consul_factory
+    assert factory is _plugin_factory
     failures = [entry for entry in logs if entry['event'] == 'provider_entry_point_load_failed']
     assert len(failures) == 1
     assert failures[0]['name'] == 'broken'
-    assert 'consul_api' in failures[0]['error']
+    assert 'example_api' in failures[0]['error']
 
 
 def test_a_plugin_that_is_not_callable_is_logged_and_skipped(installed):
-    installed(_EntryPoint('consul', target='not a factory'))
+    installed(_EntryPoint('example-plugin', target='not a factory'))
 
     with capture_logs() as logs, pytest.raises(UnknownRegistryProviderError):
-        resolve_provider_factory('consul')
+        resolve_provider_factory('example-plugin')
 
-    assert [entry['name'] for entry in logs if entry['event'] == 'provider_entry_point_invalid'] == ['consul']
+    assert [entry['name'] for entry in logs if entry['event'] == 'provider_entry_point_invalid'] == ['example-plugin']
 
 
 def test_an_unreadable_entry_point_table_is_logged_and_builtins_still_resolve(monkeypatch):
@@ -108,12 +109,12 @@ def test_an_unreadable_entry_point_table_is_logged_and_builtins_still_resolve(mo
 
 
 def test_an_unknown_name_fails_and_lists_the_known_providers(installed):
-    installed(_EntryPoint('consul', _consul_factory))
+    installed(_EntryPoint('example-plugin', _plugin_factory))
 
     with pytest.raises(UnknownRegistryProviderError) as raised:
         resolve_provider_factory('etcd')
 
     assert str(raised.value) == (
-        "fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, postgres, redis, static"
+        "fleet.registry.provider 'etcd' is not known; known providers: consul, example-plugin, filesystem, none, postgres, redis, static"
     )
     assert isinstance(raised.value, UnknownProviderError)

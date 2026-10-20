@@ -181,6 +181,16 @@ def test_registry_provider_options_for_redis_names_the_connection_and_prune(tmp_
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
 
 
+def test_registry_provider_options_for_consul_names_the_connection_and_the_offline_limit(tmp_path):
+    config = _config(
+        tmp_path,
+        connections={'consul': {'agents': {}}},
+        fleet={'registry': {'provider': 'consul', 'connection': 'agents', 'offline_after_seconds': 90}},
+    )
+
+    assert registry_provider_options(config) == {'connection': 'agents', 'offline_after_seconds': 90}
+
+
 def test_election_provider_options_for_redis_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
