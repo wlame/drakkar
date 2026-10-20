@@ -382,13 +382,40 @@ host of the URL. This cannot be switched off. Put a private certificate
 authority into that store; the environment variables `SSL_CERT_FILE` (a file
 of certificates) and `SSL_CERT_DIR` (a directory of them) replace the default
 locations of the store. The database number is the path, for example `/3`.
-The path may be empty, `/`, or `/` followed by the digits 0-9. Any other
-path, such as `/three`, `/0/extra`, `/0/` or `/+1`, does not parse. A URL with query options (`?...`) is
-refused when the provider starts, with
-`redis connection: the url cannot carry query options`. A URL that does not
-parse fails the start with `redis connection: the url cannot be parsed`.
-Neither message quotes the URL. The registry tries the start again at the
-next heartbeat, like any failed start.
+A `unix://` URL names the socket file instead, by its absolute path, for
+example `unix:///run/redis/redis.sock`.
+
+A URL with query options (`?...`) is refused when the provider starts, with
+`redis connection: the url cannot carry query options`. Every other URL goes
+through one check before the client reads it, and a URL that fails the check,
+or that the client cannot parse, fails the start with
+`redis connection: the url cannot be parsed`. Neither message quotes the URL.
+The check keeps only the URLs whose meaning is plain:
+
+- Every character is printable ASCII. A space, a tab, a line break, any other
+  control character and any non-ASCII character are refused. A trailing
+  newline is an error, not something the worker removes: a URL read from a
+  secret file often ends with one, so remove it there.
+- Every `%` starts an escape of two hex digits, and the escapes decode to
+  UTF-8.
+- The user name and the password hold only letters, digits, the characters
+  `-._~!$&'()*+,;=:@` and escapes. Write any other character as its escape:
+  `%` as `%25`, `^` as `%5E`, `/` as `%2F`, `#` as `%23`, `?` as `%3F`, a
+  space as `%20`, and a non-ASCII character as the escapes of its UTF-8 bytes
+  (`ä` is `%C3%A4`).
+- The host is a name of letters, digits, `.`, `_` and `-`, or an IPv6 address
+  in brackets (`[::1]`) without a zone index. With no host, the client uses
+  `localhost`.
+- A port, when the URL has one, is 1 to 65535, written with at most five
+  digits. With no port, the client uses 6379.
+- The scheme is `redis`, `rediss` or `unix`, in any case.
+- The path of a `redis://` or `rediss://` URL is empty, `/`, or `/` followed
+  by at most ten digits 0-9 that make a number up to 2147483647, the largest
+  that the server's `SELECT` takes. Any other path, such as `/three`, `/0/extra`, `/0/`
+  or `/+1`, is refused. The path of a `unix://` URL starts with `/`.
+
+The registry tries a failed start again at the next heartbeat, like any
+failed start.
 
 **The server.** Redis 5.0 or later, standalone or a primary behind a fixed
 address. A script reads `TIME` and then writes, which Redis allows from

@@ -1,5 +1,5 @@
 {
-  "_comment": "Worker card schema 1, shared byte-for-byte by every implementation. inputs/card/bytes: what a worker builds and the exact serialized bytes (sorted keys, compact separators, raw UTF-8 with no escaping of non-ASCII or <>&, no trailing newline). byte_cases: more cards and their bytes. valid: raw cards every validator accepts. invalid: raw cards every validator rejects with the given reason; the checks run in this order: size (at most 4096 bytes), JSON, object, schema (present, an integer literal, equal to 1), required worker/cluster/url (present, a string, worker and url not empty), optional instance/backend/version/state/started_at/heartbeat_at (a string when present), optional features (an object when present). sanitize: card file names; every character outside [a-zA-Z0-9_-] becomes one underscore (per character, not per byte).",
+  "_comment": "Worker card schema 1, shared byte-for-byte by every implementation. inputs/card/bytes: what a worker builds and the exact serialized bytes (sorted keys, compact separators, raw UTF-8 with no escaping of non-ASCII, <>&, U+2028 or U+2029, no trailing newline). byte_cases: more cards and their bytes. valid: raw cards every validator accepts. invalid: raw cards every validator rejects with the given reason; the checks run in this order: size (at most 4096 bytes), JSON, object, schema (present, an integer literal, equal to 1), required worker/cluster/url (present, a string, worker and url not empty), optional instance/backend/version/state/started_at/heartbeat_at (a string when present), optional features (an object when present). sanitize: card file names; every character outside [a-zA-Z0-9_-] becomes one underscore (per character, not per byte).",
   "inputs": {
     "worker": "search-worker-3",
     "instance": "9c41e0b27fd34a1e",
@@ -68,6 +68,17 @@
         }
       },
       "bytes": "{\"cluster\":\"search\",\"features\":{\"cache\":{\"cluster\":{\"key\":\"k/1\",\"ms\":1760000000000},\"global\":{\"key\":\"k:2\",\"ms\":1760000000123}}},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
+    },
+    {
+      "name": "line_and_paragraph_separators_kept_raw",
+      "card": {
+        "schema": 1,
+        "worker": "w\u2028x",
+        "cluster": "c\u2029",
+        "url": "http://10.0.0.5:8080/",
+        "state": "a\\u2028b"
+      },
+      "bytes": "{\"cluster\":\"c\u2029\",\"schema\":1,\"state\":\"a\\\\u2028b\",\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w\u2028x\"}"
     }
   ],
   "valid": [

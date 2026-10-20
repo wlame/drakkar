@@ -165,7 +165,11 @@ What to check:
   the host of the URL; this cannot be switched off. Put a private
   certificate authority into that store, or set `SSL_CERT_FILE` or
   `SSL_CERT_DIR`, which replace the default locations of the store. A URL
-  with query options (`?...`) is refused when the provider starts.
+  with query options (`?...`) is refused when the provider starts, and so is
+  a URL with a space, a control character or a non-ASCII character: remove a
+  trailing newline from a URL read from a secret file. Write the special
+  characters of a password as percent escapes (see the URL rules in
+  [Fleet registry](fleet.md#redis)).
 - A Redis server that restarts without its data loses the cards and the
   leases, and so does a flush of the database. Eviction can delete them too:
   every key of the providers has a time to live, so any `volatile-*` and any

@@ -780,7 +780,7 @@ connections:
                                        #   env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
   redis:
     main:
-      url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...).
+      url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...); percent-encode special characters of the password.
                                        #   env: DK_CONNECTIONS__REDIS__MAIN__URL
       key_prefix: 'drakkar:'           # letters, digits, _ : . -; may be empty. env: DK_CONNECTIONS__REDIS__MAIN__KEY_PREFIX
   postgres:

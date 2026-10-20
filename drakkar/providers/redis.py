@@ -29,19 +29,22 @@ client library has.
 The URL of a connection cannot carry query options (``?...``): the client
 applies them after its own settings, and the options of a URL are not the same
 for every implementation, so one URL could behave differently in each. For the
-same reason the raw path of a ``redis://`` or ``rediss://`` URL must be empty,
-``/``, or ``/`` and ASCII digits. The client strips every ``/`` from the path
+same reason every URL passes one shared check before the client parses it
+(see :func:`is_portable_url`). URL parsers disagree at the edges: one drops a
+trailing newline that another refuses, one takes a raw ``%`` or ``^`` in a
+password that another refuses, and the client strips every ``/`` from the path
 and reads the rest as a number, so ``/0/extra`` falls back to database 0 and
-``/1/2`` becomes database 12. The rule keeps only the paths whose meaning is
-plain.
+``/1/2`` becomes database 12. The check keeps only the URLs whose meaning is
+plain to every parser, and the shared fixture pins its cases.
 """
 
+import ipaddress
 import json
 import math
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote_to_bytes
 
 from drakkar.config.connections import RedisConnectionConfig
 from drakkar.providers.connections import Connections
@@ -156,11 +159,27 @@ RESP_PROTOCOL = 2
 BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
 # The client applies the options of a URL query after its own settings, so a query could undo them.
 URL_QUERY_MESSAGE = 'redis connection: the url cannot carry query options'
-# The schemes whose URL path is the database number (a unix:// path is the socket).
-DATABASE_PATH_SCHEMES = ('redis', 'rediss')
-# Empty, '/', or '/' and ASCII digits, matched on the raw path. The client strips every '/' and
-# reads the rest as a number ('/0/extra' falls back to 0, '/1/2' is 12), so only these paths are plain.
-DATABASE_PATH_RE = re.compile(r'(/[0-9]*)?')
+# The parts of the URL check (see is_portable_url). Every class is ASCII and spelled out, never \w or
+# \d, which match more than ASCII in Python.
+# 0x21 to 0x7E: no space, tab, line break, other control character, DEL or non-ASCII character.
+PRINTABLE_ASCII_RE = re.compile(r'[!-~]*')
+# A '%' that does not start a two-digit hex escape.
+BAD_ESCAPE_RE = re.compile(r'%(?![0-9A-Fa-f]{2})')
+# The user info of RFC 3986 (letters, digits, '-._~', the sub-delimiters, ':' and escapes) and '@':
+# every parser splits user info from host at the last '@'. Any other character needs an escape.
+USER_INFO_RE = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%]*")
+# A host name, or nothing (the client then uses localhost).
+HOST_NAME_RE = re.compile(r'[A-Za-z0-9._-]*')
+# The characters of an IPv6 address in brackets. No '%': a zone index is decoded differently by each parser.
+IPV6_LITERAL_RE = re.compile(r'[0-9A-Fa-f:.]+')
+# The port and the database number have a fixed number of digits at most (leading zeros count), so
+# a number is never longer than every client reads alike: int() refuses a text of more than 4300 digits.
+PORT_RE = re.compile(r'[0-9]{1,5}')
+MAX_PORT = 65535
+# Empty, '/', or '/' and up to ten ASCII digits, matched on the raw path.
+DATABASE_PATH_RE = re.compile(r'(/[0-9]{0,10})?')
+# The largest database number: the server's SELECT takes a signed 32-bit number.
+MAX_DATABASE = 2**31 - 1
 
 
 def key(name: str, *, prefix: str, worker: str = '', scope: str = '') -> str:
@@ -262,11 +281,9 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
     tests expect. A URL with a ``?`` is refused with ``URL_QUERY_MESSAGE`` before
     it is parsed: the client applies the options of a URL query after its own
     settings, so a query such as ``socket_timeout`` would undo the ones set here.
-    A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``, and so does
-    a ``redis://`` or ``rediss://`` URL whose raw path is not empty, ``/`` or
-    ``/`` and ASCII digits (see the module docstring). Both errors have no
-    cause and quote nothing, because the
-    client's own message can quote the URL.
+    A URL that fails :func:`is_portable_url`, or that the client cannot parse,
+    raises ``ValueError(BAD_URL_MESSAGE)``. Both errors have no cause and quote
+    nothing, because the client's own message can quote the URL.
     """
     from redis.asyncio import Redis
     from redis.asyncio.retry import Retry
@@ -274,8 +291,9 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
 
     if '?' in settings.url:
         raise ValueError(URL_QUERY_MESSAGE)
+    if not is_portable_url(settings.url):
+        raise ValueError(BAD_URL_MESSAGE)
     try:
-        _check_database_path(settings.url)
         return Redis.from_url(
             settings.url,
             retry=Retry(NoBackoff(), 0),
@@ -287,17 +305,92 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
         raise ValueError(BAD_URL_MESSAGE) from None
 
 
-def _check_database_path(url: str) -> None:
-    """Raise ``ValueError`` when the path of a ``redis://`` or ``rediss://`` URL is not a database number.
+def is_portable_url(url: str) -> bool:
+    """Tell whether ``url`` passes the URL check that every implementation runs before its client parses the URL.
 
-    The path may be empty, ``/``, or ``/`` and ASCII digits. ``urlsplit`` keeps
-    a ``;`` in the path and does not percent-decode it, so ``/0;x`` and ``/%30``
-    are refused too. The caller replaces the error with ``BAD_URL_MESSAGE``, so
-    the text here never reaches a log.
+    The URL, a ``?`` already ruled out, is split by hand into scheme,
+    authority and path (the fragment after ``#`` is dropped), so every
+    implementation judges the same pieces whatever its URL parser does. The
+    rules:
+
+    - every character is printable ASCII (no white space, no control character,
+      no non-ASCII character), so a trailing newline is refused rather than
+      dropped;
+    - every ``%`` starts a two-digit hex escape, and the escapes decode to UTF-8;
+    - the scheme is ``redis``, ``rediss`` or ``unix``, in any case;
+    - the user info (up to the last ``@``) has only the characters of
+      :data:`USER_INFO_RE`, so any other character of a password is escaped;
+    - the host is empty, a host name of letters, digits, ``.``, ``_`` and
+      ``-``, or an IPv6 address in brackets with no zone;
+    - a port, when one is given, is at most five digits and 1 to 65535;
+    - a ``redis://`` or ``rediss://`` path is empty, ``/``, or ``/`` and a
+      database number of at most ten digits and at most
+      :data:`MAX_DATABASE`; a ``unix://`` path, the socket file, starts with
+      ``/``.
     """
-    parts = urlsplit(url)
-    if parts.scheme in DATABASE_PATH_SCHEMES and DATABASE_PATH_RE.fullmatch(parts.path) is None:
-        raise ValueError('the url path is not a database number')
+    if PRINTABLE_ASCII_RE.fullmatch(url) is None or BAD_ESCAPE_RE.search(url) is not None:
+        return False
+    try:
+        unquote_to_bytes(url).decode('utf-8')
+    except UnicodeDecodeError:
+        return False
+    scheme, colon, rest = url.partition(':')
+    is_path_valid = PATH_RULES.get(scheme.lower())
+    if not colon or is_path_valid is None:
+        return False
+    rest = rest.partition('#')[0]
+    authority, path = '', rest
+    if rest.startswith('//'):
+        authority, slash, tail = rest[2:].partition('/')
+        path = slash + tail
+    return _is_portable_authority(authority) and is_path_valid(path)
+
+
+def _is_portable_authority(authority: str) -> bool:
+    """Tell whether the user info, the host and the port of a URL pass the URL check."""
+    user_info, at, host_and_port = authority.rpartition('@')
+    if at and USER_INFO_RE.fullmatch(user_info) is None:
+        return False
+    if host_and_port.startswith('['):
+        address, bracket, after = host_and_port[1:].partition(']')
+        if not bracket or not _is_ipv6_address(address) or after[:1] not in ('', ':'):
+            return False
+        port = after[1:]
+    else:
+        host, _, port = host_and_port.partition(':')
+        if HOST_NAME_RE.fullmatch(host) is None:
+            return False
+    return not port or (PORT_RE.fullmatch(port) is not None and 1 <= int(port) <= MAX_PORT)
+
+
+def _is_ipv6_address(text: str) -> bool:
+    """Tell whether ``text`` is an IPv6 address; an IPv4 address in brackets is not one."""
+    if IPV6_LITERAL_RE.fullmatch(text) is None:
+        return False
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_database_path(path: str) -> bool:
+    """Tell whether the raw path of a ``redis://`` or ``rediss://`` URL names a database plainly."""
+    return DATABASE_PATH_RE.fullmatch(path) is not None and int(path[1:] or '0') <= MAX_DATABASE
+
+
+def _is_socket_path(path: str) -> bool:
+    """Tell whether the raw path of a ``unix://`` URL is an absolute socket path."""
+    return path.startswith('/')
+
+
+# The path rule of each scheme the client knows: a redis:// or rediss:// path is the database
+# number, a unix:// path is the socket file.
+PATH_RULES: dict[str, Callable[[str], bool]] = {
+    'redis': _is_database_path,
+    'rediss': _is_database_path,
+    'unix': _is_socket_path,
+}
 
 
 async def close_client(client: Any) -> None:

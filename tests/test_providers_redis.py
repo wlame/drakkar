@@ -49,6 +49,7 @@ from drakkar.providers.redis import (
     classify,
     close_client,
     fragment,
+    is_portable_url,
     is_transient_reply,
     key,
     milliseconds,
@@ -303,6 +304,17 @@ async def test_open_client_follows_the_pinned_url_cases(case):
     assert str(info.value) == FIXTURE['messages'][case['error']]
     assert 'secret' not in str(info.value)
     assert info.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    'url',
+    ['redis://h:' + '0' * 5000 + '6379/0', 'redis://h:6379/' + '0' * 5000 + '3'],
+    ids=['long port', 'long database number'],
+)
+def test_is_portable_url_refuses_a_number_with_thousands_of_digits(url):
+    # int() refuses a text of more than 4300 digits with its own error; the
+    # digit limit refuses the URL before int() sees it.
+    assert is_portable_url(url) is False
 
 
 async def test_run_returns_the_reply_of_the_command(server):

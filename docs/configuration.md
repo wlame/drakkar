@@ -1271,7 +1271,7 @@ Which feature names which entry: `fleet.registry.connection` and
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `url` | `str` | `redis://localhost:6379/0` | no query options (`?...`); checked when a provider starts | Redis connection URL, typically with the user and the password in it; `rediss://` is TLS, and the path is the database number. **Secret.** A URL with a `?` fails the start of a provider with `redis connection: the url cannot carry query options`, and a URL that does not parse with `redis connection: the url cannot be parsed`. |
+| `url` | `str` | `redis://localhost:6379/0` | checked when a provider starts: no query options (`?...`), printable ASCII only, other characters of the user name and the password percent-encoded (see [Fleet registry](fleet.md#redis)) | Redis connection URL, typically with the user and the password in it; `rediss://` is TLS, and the path is the database number. **Secret.** A URL with a `?` fails the start of a provider with `redis connection: the url cannot carry query options`, and a URL that does not parse with `redis connection: the url cannot be parsed`. |
 | `key_prefix` | `str` | `drakkar:` | letters, digits, `_`, `:`, `.`, `-`; may be empty | Prefix of every key a feature stores in Redis. |
 
 The `redis` providers need Redis 5.0 or later, standalone or a primary behind a

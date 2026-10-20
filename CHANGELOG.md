@@ -103,9 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   providers need Redis 5.0 or later, standalone. Redis Cluster is not
   supported. A provider refuses to start when the URL of its connection has
   query options (`?...`). The error is
-  `redis connection: the url cannot carry query options`. A URL whose path
-  is not empty, `/`, or `/` followed by the digits 0-9, such as `/three` or
-  `/0/extra`, fails with `redis connection: the url cannot be parsed`. With `rediss://` the client
+  `redis connection: the url cannot carry query options`. Every other URL
+  goes through one fixed check, and a URL that fails it fails with
+  `redis connection: the url cannot be parsed`. The check refuses a space, a
+  control character (such as a trailing newline) and a non-ASCII character,
+  a `%` that does not start a two-digit escape, a character of the user name
+  or the password outside letters, digits and `-._~!$&'()*+,;=:@` (write it
+  as a percent escape), a host that is not a name or an IPv6 address in
+  brackets, a port outside 1 to 65535 or of more than five digits, a
+  `redis://` path that is not empty, `/`, or `/` and a database number of at
+  most ten digits up to 2147483647 (such as `/three` or
+  `/0/extra`), and a `unix://` path that does not start with `/`. With `rediss://` the client
   always verifies the certificate and the host name of the server. The
   providers need version 7.2 or later of the `redis` package, because they
   read the reply code that the client sets from 7.2 on (see Breaking).

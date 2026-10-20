@@ -243,7 +243,11 @@ below applies to the entries you declare and to any provider that uses them.
   The first line makes the user. Its password goes into the `url` of the
   connection, for example
   `redis://drakkar-fleet:change-me@redis.internal:6379/3`, which you set from
-  the environment (`DK_CONNECTIONS__REDIS__MAIN__URL`). The second line
+  the environment (`DK_CONNECTIONS__REDIS__MAIN__URL`). Any character of the
+  password other than a letter, a digit or one of `-._~!$&'()*+,;=:@` goes
+  into the URL as a percent escape, for example `^` as `%5E`; the provider
+  refuses the URL otherwise (see the URL rules in
+  [Fleet registry](fleet.md#redis)). The second line
   switches the `default` user off, so that nobody connects without a
   password; run it only when no other client of the server uses that user.
   Use `rediss://` in the URL for TLS. The client then verifies the
