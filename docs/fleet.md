@@ -376,12 +376,17 @@ address. A script reads `TIME` and then writes, which Redis allows from
 version 5.0 on. Redis Cluster is not supported, because the scripts touch
 keys that are not all named in `KEYS`.
 
-**The Redis user.** A user of its own needs these rights and no more, on the
-keys that start with the prefix: `~<prefix>* +@read +@write +@scripting
-+@connection +time`. See [Security](security.md#provider-credentials) for a
-complete `ACL SETUSER` line. Use a database number of its own for the fleet,
-so no other data is within reach of this user and none is in the way of the
-provider.
+**The Redis user.** Give the providers a Redis user of its own, with these
+rights: `~<prefix>* +@read +@write +@scripting +@connection +time`. The key
+pattern `~<prefix>*` limits which keys the user may name in a command. The
+other rights are categories, so they allow more commands than the providers
+send, for example `FLUSHDB` and `KEYS`, and the key pattern does not limit
+those two. A Redis ACL does not limit databases either. Use a database number
+of its own for the fleet all the same, so that the keys of the providers stay
+apart from other data. ACL users need Redis 6.0 or later; on Redis 5.0, use
+`requirepass` and a database number of its own. See
+[Security](security.md#provider-credentials) for a complete `ACL SETUSER`
+line.
 
 **During an outage.** The client does not retry on its own; the
 [`resilience`](#resilience) block of the registry is the only retry and the

@@ -309,6 +309,10 @@ are new. See [Fleet registry](fleet.md#metrics).
   has `provider`. See [Fencing](local-databases.md#fencing).
 - **The summary line** shows ` election=<provider>` after `fleet=` when
   `history.archive.election.provider` is not `filesystem`.
+- **The `redis` package must be 7.2 or later.** The minimum was 5.2.0. The
+  `redis` providers need it, and the Redis sink uses the same package.
+  Installing `py-drakkar` brings a matching version; check it only when you
+  pin `redis` yourself.
 - **New sections and keys** need no action. `connections` is empty by
   default. `fleet.registry.connection`, `fleet.registry.consul`,
   `history.archive.election` and the `resilience` blocks have working

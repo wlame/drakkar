@@ -202,7 +202,8 @@ below applies to the entries you declare and to any provider that uses them.
   (the plugin gets the key `token` and the value as a string).
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
-  to `key_prefix`, a Redis user limited to its `key_prefix`, a Postgres role
+  to `key_prefix`, a Redis user whose key pattern is its `key_prefix` (see
+  below for what the pattern limits), a Postgres role
   limited to its `schema` (with `manage_schema: false`, a role that only
   uses tables that already exist). Do not reuse the credentials of a sink,
   and declare a separate named entry for each feature that needs different
@@ -226,13 +227,13 @@ below applies to the entries you declare and to any provider that uses them.
   `archive_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the archive lease, so protect the
   schema like the card folder of the `filesystem` provider.
-- **Give the Redis user the rights it needs and no more.** The `redis`
-  providers send `EVAL`, `GET` and `PING`, and their scripts call `GET`,
-  `SET`, `DEL`, `ZADD`, `ZRANGE`, `ZREM`, `PEXPIRE` and `TIME`. The client
-  also sends its connection commands when it connects. Create a user of its
-  own for the fleet, with the rights
-  `~<prefix>* +@read +@write +@scripting +@connection +time`, where
-  `<prefix>` is the `key_prefix` of the connection. With the default prefix:
+- **Give the providers a Redis user of their own.** The `redis` providers
+  send `EVAL`, `GET` and `PING`, and their scripts call `GET`, `SET`, `DEL`,
+  `ZADD`, `ZRANGE`, `ZREM`, `PEXPIRE` and `TIME`. The client also sends its
+  connection commands when it connects. The rights
+  `~<prefix>* +@read +@write +@scripting +@connection +time` cover all of
+  them, where `<prefix>` is the `key_prefix` of the connection. With the
+  default prefix:
 
   ```text
   ACL SETUSER drakkar-fleet on '>change-me' '~drakkar:*' +@read +@write +@scripting +@connection +time
@@ -245,14 +246,32 @@ below applies to the entries you declare and to any provider that uses them.
   the environment (`DK_CONNECTIONS__REDIS__MAIN__URL`). The second line
   switches the `default` user off, so that nobody connects without a
   password; run it only when no other client of the server uses that user.
-  Use `rediss://` in the URL for TLS. Give the fleet a **database number of
-  its own** (the path of the URL, for example `/3`). The key pattern limits
-  the user to the prefix, but a database of its own also keeps other data out
-  of reach and out of the way of the providers. With an empty `key_prefix`
-  the pattern is `~*`, and the database is the only boundary. A user with
-  these rights can publish and delete worker cards and take the archive
-  lease, so protect the database like the card folder of the `filesystem`
-  provider.
+  Use `rediss://` in the URL for TLS. ACL users need Redis 6.0 or later. On
+  Redis 5.0, set `requirepass` on the server and give the fleet a database
+  number of its own; the URL then holds only the password, for example
+  `redis://:change-me@redis.internal:6379/3`, and that password allows every
+  command.
+
+  Know what these rights allow and what they do not limit:
+
+  - The rights that start with `+@` are category rights. They allow more
+    commands than the providers send. For example, `+@write` allows `FLUSHDB`
+    and `FLUSHALL`, and `+@read` allows `KEYS`.
+  - The key pattern `~drakkar:*` limits only which keys a command may name.
+    It does not limit `FLUSHDB`, `FLUSHALL` or `KEYS`. With an empty
+    `key_prefix` the pattern is `~*`, and the user may name every key.
+  - A Redis ACL does not limit databases. `+@connection` includes `SELECT`, so
+    the user can select any database and reach the keys that its pattern
+    matches there.
+
+  Give the fleet a **database number of its own** (the path of the URL, for
+  example `/3`) all the same. It keeps the keys of the providers apart from
+  other data. It does not protect that other data from this user.
+
+  Whoever holds the URL can publish and delete worker cards and take the
+  archive lease. That person can also run every other command that these
+  categories allow, so keep the URL secret and use the user for the providers
+  only.
 - **Operator views mask them.** The config reference shows a mask in place
   of `token`, `url` and `dsn`. For `plugin_options` it masks at every depth
   by key name (`password`, `token`, ...): every value under such a key is

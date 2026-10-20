@@ -1278,7 +1278,9 @@ The `redis` providers need Redis 5.0 or later, standalone or a primary behind a
 fixed address; Redis Cluster is not supported. The client does no retrying of
 its own: the [`resilience` block](#resilience-block) of the feature is the only
 retry and the only time limit, apart from a connect, which gives up after 5
-seconds. See [Fleet registry: redis](fleet.md#redis) and
+seconds. The Python package `redis` must be version 7.2 or later (the minimum
+was 5.2.0); the [Redis sink](#redis-sink-sinksredisname) uses the same
+package. See [Fleet registry: redis](fleet.md#redis) and
 [Security](security.md#provider-credentials).
 
 ### Postgres (`connections.postgres.<name>`)

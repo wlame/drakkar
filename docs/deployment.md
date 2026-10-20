@@ -148,11 +148,16 @@ What to check:
 - The registry needs `ui.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
   Only the cards and the archive lease move to Redis.
-- Use a **database number of its own** for the fleet and a Redis user of its
-  own, with the rights `~drakkar:* +@read +@write +@scripting +@connection
-  +time` (the pattern follows `key_prefix`) and the `default` user off where no
-  other client needs it. The user needs no other right. A complete `ACL SETUSER`
-  line is in [Security](security.md#provider-credentials).
+- Use a **database number of its own** for the fleet, so that the keys of the
+  providers stay apart from other data. Use a Redis user of its own too, with
+  the rights `~drakkar:* +@read +@write +@scripting +@connection +time` (the
+  pattern follows `key_prefix`) and the `default` user off where no other
+  client needs it. These are category rights, so they allow more commands than
+  the providers send, for example `FLUSHDB` and `KEYS`, and the key pattern
+  does not limit those two. A Redis ACL does not limit databases either. ACL
+  users need Redis 6.0 or later; on Redis 5.0, use `requirepass` and a database
+  number of its own. A complete `ACL SETUSER` line is in
+  [Security](security.md#provider-credentials).
 - The server is Redis 5.0 or later, standalone or a primary behind a fixed
   address. Redis Cluster is not supported. Use `rediss://` in the URL for TLS.
   A URL with query options (`?...`) is refused when the provider starts.
