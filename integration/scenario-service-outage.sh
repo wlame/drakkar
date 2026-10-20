@@ -3,12 +3,16 @@
 # Scenario: the registry's service goes away and comes back.
 #
 # Pauses the service container of the provider (postgres-fleet for postgres,
-# redis-fleet for redis; the table is in scenario-lib.sh) for 90 s while the
-# main cluster runs with that provider, twice: a pause after a recovery must
-# behave like the first one, because a cancelled call can leave state behind
-# that only a second outage shows. A paused container keeps its connections
-# open and answers nothing, so every call in flight must end at its own time
-# limit. Each pause proves that:
+# redis-fleet for redis, consul-fleet for consul; the table is in
+# scenario-lib.sh) for 90 s while the main cluster runs with that provider,
+# twice: a pause after a recovery must behave like the first one, because a
+# cancelled call can leave state behind that only a second outage shows. A
+# paused container keeps its connections open and answers nothing, so every
+# call in flight must end at its own time limit. With consul, the agent ends
+# at once on resume every session whose time ran out during the pause (the
+# registry's session TTL is 10 s here, so the workers renew sessions that no
+# longer exist and create new ones); a lease whose time did not run out is
+# kept. Each pause proves that:
 #   - worker-1's registry breaker opens within 40 s
 #     (drakkar_provider_breaker_open{feature="registry",provider="<provider>"} 1),
 #   - within 60 s of the unpause the breaker is closed again and worker-1
@@ -22,7 +26,7 @@
 #
 # Not applicable with the filesystem provider: it has no service to pause.
 #
-# Usage: HARNESS_PROVIDER=redis integration/scenario-service-outage.sh
+# Usage: HARNESS_PROVIDER=consul integration/scenario-service-outage.sh
 # Export TOTAL_MESSAGES when the producer ran with a value other than the
 # compose default (5000).
 # ============================================================================

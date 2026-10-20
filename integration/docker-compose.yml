@@ -120,6 +120,51 @@ services:
       timeout: 3s
       retries: 10
 
+  # Consul agent of the main cluster's worker registry and archive election
+  # when the harness runs with `just integration-up provider=consul`. A
+  # single dev agent: its state lives in memory, so a new container starts
+  # empty and consul-fleet-init sets it up again. ACLs are on and deny by
+  # default. consul-fleet-init creates the policy drakkar-fleet with exactly
+  # the two rules that docs/security.md gives the providers, and the
+  # workers' token of that policy, so a run proves that those rights are
+  # enough. Both UUIDs in this file, the management token below and the
+  # workers' token, are harness values, not secrets. The debug log names
+  # every request and every session that ends by its TTL; the unclean-exit
+  # scenario reads both.
+  consul-fleet:
+    image: hashicorp/consul:1.21
+    command:
+      - agent
+      - -dev
+      - -client=0.0.0.0
+      - -log-level=debug
+      - -hcl
+      - 'acl { enabled = true default_policy = "deny" tokens { initial_management = "0b7c9d4e-3f21-4a6b-8c5d-7e9f1a2b3c4d" } }'
+    ports:
+      - "8500:8500"
+    healthcheck:
+      # The leader request needs no token; the answer names the leader's
+      # server port once the agent has elected itself.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8500/v1/status/leader | grep -q 8300"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: the policy and the workers' token of consul-fleet. Runs again
+  # at every `just integration-up` and finds both on a running agent.
+  consul-fleet-init:
+    image: hashicorp/consul:1.21
+    depends_on:
+      consul-fleet:
+        condition: service_healthy
+    environment:
+      CONSUL_HTTP_ADDR: http://consul-fleet:8500
+      CONSUL_HTTP_TOKEN: "0b7c9d4e-3f21-4a6b-8c5d-7e9f1a2b3c4d"
+      WORKER_TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+    volumes:
+      - ./infra/init-consul.sh:/init-consul.sh:ro
+    entrypoint: ["/bin/sh", "/init-consul.sh"]
+
   mongo:
     image: mongo:7
     ports:
@@ -216,6 +261,8 @@ services:
         condition: service_healthy
       redis-fleet:
         condition: service_healthy
+      consul-fleet-init:
+        condition: service_completed_successfully
     environment:
       WORKER_ID: worker-1
       CLUSTER_ID: analytics-prod
@@ -224,13 +271,15 @@ services:
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
       # Registry and archive-election provider of the main cluster:
-      # filesystem (the default), postgres or redis, chosen with
+      # filesystem (the default), postgres, redis or consul, chosen with
       # `just integration-up provider=<name>`. The DSN and the Redis URL
-      # carry the password, so they live here and not in drakkar.yaml.
+      # carry the password, and the Consul token is a credential, so they
+      # live here and not in drakkar.yaml.
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
+      DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the
@@ -287,6 +336,8 @@ services:
         condition: service_healthy
       redis-fleet:
         condition: service_healthy
+      consul-fleet-init:
+        condition: service_completed_successfully
     environment:
       WORKER_ID: worker-2
       CLUSTER_ID: analytics-prod
@@ -294,11 +345,12 @@ services:
       DK_METRICS__PORT: "9091"
       DK_UI__PORT: "8082"
       DK_UI__PUBLIC_URL: "http://localhost:8082/"
-      # Same provider, DSN and Redis URL as worker-1 (see there).
+      # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
+      DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
       # App-config demo (docs/app-config.md): override one field of the
       # handler-declared AppConfig via the handler's OWN env prefix —
       # never DK_APP__* (the framework rejects that). Only worker-2, so
@@ -333,17 +385,20 @@ services:
         condition: service_healthy
       redis-fleet:
         condition: service_healthy
+      consul-fleet-init:
+        condition: service_completed_successfully
     environment:
       WORKER_ID: worker-3
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9093"
       DK_UI__PORT: "8083"
       DK_UI__PUBLIC_URL: "http://localhost:8083/"
-      # Same provider, DSN and Redis URL as worker-1 (see there).
+      # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
+      DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
     ports:
       - "9093:9093"
       - "8083:8083"

@@ -16,8 +16,8 @@ cd integration
 docker-compose up --build -d
 ```
 
-This starts 21 services, including six workers in three clusters. (A
-twenty-second, `load_generator_tenant_a`, is gated behind the `tenant` Compose
+This starts 23 services, including six workers in three clusters. (A
+twenty-fourth, `load_generator_tenant_a`, is gated behind the `tenant` Compose
 profile.) First run pulls images and builds workers (~2 minutes).
 Subsequent runs start in seconds.
 
@@ -39,6 +39,7 @@ docker-compose down -v
 | **PostgreSQL** | 5432 | `drakkar` database with `search_results` table |
 | **PostgreSQL (fleet)** | 5434 | `drakkar_fleet` database: the main cluster's worker registry and archive election when the harness runs with the `postgres` provider |
 | **Redis (fleet)** | 6380 | Database 3: the main cluster's worker registry and archive election when the harness runs with the `redis` provider. The `default` user is off; the only user is `drakkar` (password `drakkar`) |
+| **Consul (fleet)** | 8500 | A single Consul agent in dev mode: the main cluster's worker registry and archive election when the harness runs with the `consul` provider. ACLs are on and deny by default; the one-shot `consul-fleet-init` creates the workers' token |
 | **MongoDB** | 27017 | Document archive |
 | **Redis** | 6379 | Cached search summaries (1h TTL) |
 | **Webhook** | 9000 | HTTP echo server for webhook sink |
@@ -441,6 +442,7 @@ takes its registry and archive-election provider from the argument of
 just integration-up                      # filesystem: cards in /shared
 just integration-up provider=postgres    # postgres: cards in the postgres-fleet database
 just integration-up provider=redis       # redis: cards in database 3 of redis-fleet
+just integration-up provider=consul      # consul: cards in the KV store of consul-fleet
 ```
 
 The argument sets `HARNESS_PROVIDER`, which `docker-compose.yml` passes to
@@ -462,12 +464,33 @@ that has exactly the rights that
 `~drakkar:* +@read +@write +@scripting +@connection +time`. A run with
 `redis` therefore also shows that these rights are enough.
 
+With `consul`, both use the connection `connections.consul.main`: its
+entry in `drakkar.yaml` has the `address` and the `key_prefix` (`drakkar`)
+and no token, and `docker-compose.yml` supplies the ACL token through
+`DK_CONNECTIONS__CONSUL__MAIN__TOKEN`. `consul-fleet` runs with ACLs on and
+the default policy `deny`. Before the workers start, `consul-fleet-init`
+(the script `integration/infra/init-consul.sh`) creates the policy
+`drakkar-fleet` and a token of that policy for the workers. The policy has
+exactly the two rules that
+[Security](security.md#provider-credentials) gives the providers:
+`key_prefix "drakkar/" { policy = "write" }` and
+`session_prefix "" { policy = "write" }`. A run with `consul` therefore
+also shows that these rights are enough. The management token of the
+agent and the workers' token are fixed UUIDs in `docker-compose.yml`. They
+are harness values, not secrets. The agent keeps its state in memory: a
+new `consul-fleet` container starts empty, and the next
+`just integration-up` runs `consul-fleet-init` again, which finds or
+creates the policy and the token.
+
 The main cluster's registry timings are short, so that the scenarios
 below finish in minutes: a card is published every 2 s and read every
 3 s, a worker whose card is 10 s old is offline, and a card 30 s old is
-deleted. Each call to the provider has 2 s and one retry, and three
-failed operations open the [circuit breaker](fleet.md#resilience) for
-10 s. The archive election uses the same resilience block.
+deleted. With `consul` a card is not listed offline: the session of the
+card has a TTL of 10 s, and Consul deletes the card with the session about
+20 s after the last publish. Each call to the provider has 2 s and one
+retry, and three failed operations open the
+[circuit breaker](fleet.md#resilience) for 10 s. The archive election uses
+the same resilience block.
 
 ---
 
@@ -529,7 +552,7 @@ exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
 `HARNESS_PROVIDER=redis integration/scenario-secrets.sh`.
 
-A run with `postgres` or `redis` takes about two hours: the producer sends
+A run with `postgres`, `redis` or `consul` takes about two hours: the producer sends
 for about 20 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
@@ -537,10 +560,10 @@ scenario does not apply, and the other three take a few minutes.
 
 | Script | What it does | What it proves |
 |--------|--------------|----------------|
-| `scenario-service-outage.sh` | Pauses the service of the provider (`postgres-fleet` or `redis-fleet`) for 90 s, twice: the second pause starts after the recovery from the first. A paused container keeps its connections open and answers nothing. | For each pause: within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="<provider>"}` is 1), within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online, and no worker restarts. The second pause shows that the first one left nothing behind that keeps the next calls from reaching their time limit. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, an hour or more after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
-| `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres` or `redis`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the provider's service and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
-| `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. | Within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. The takeover of an archive lock is skipped: the archive pass runs only after a recorder rotation, which is at least one hour; the election test kit covers it. |
-| `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`), and the config reference lists both connections. Runs with every provider. |
+| `scenario-service-outage.sh` | Pauses the service of the provider (`postgres-fleet`, `redis-fleet` or `consul-fleet`) for 90 s, twice: the second pause starts after the recovery from the first. A paused container keeps its connections open and answers nothing. When `consul-fleet` resumes, it ends at once every session whose TTL ran out during the pause, so the workers create new sessions. | For each pause: within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="<provider>"}` is 1), within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online, and no worker restarts. The second pause shows that the first one left nothing behind that keeps the next calls from reaching their time limit. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, an hour or more after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
+| `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres` or `redis`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the provider's service and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `consul`, worker-3 is missing from worker-1's list within 30 s: it cannot renew its session, and Consul deletes the card when the session ends. After the reconnect, worker-3 finds that its session has ended and publishes with a new one. With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
+| `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The takeover of an archive lock is skipped: the archive pass runs only after a recorder rotation, which is at least one hour; the election test kit covers it. |
+| `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token, and the config reference lists the three connections, with `connections.consul.main.token` masked. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.

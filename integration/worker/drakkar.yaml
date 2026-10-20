@@ -411,13 +411,16 @@ storage:
   dir: "/shared"
 
 # Shared connections that the providers below name. The DSN and the URL
-# here have no password: docker-compose.yml supplies the full DSN through
-# DK_CONNECTIONS__POSTGRES__MAIN__DSN and the full URL through
-# DK_CONNECTIONS__REDIS__MAIN__URL, so the secrets never sit in this file.
+# here have no password, and the Consul entry has no token:
+# docker-compose.yml supplies the full DSN through
+# DK_CONNECTIONS__POSTGRES__MAIN__DSN, the full URL through
+# DK_CONNECTIONS__REDIS__MAIN__URL and the token through
+# DK_CONNECTIONS__CONSUL__MAIN__TOKEN, so the secrets never sit in this file.
 # The worker creates the Postgres schema and its tables on first use
 # (manage_schema defaults to true). The Redis keys start with key_prefix,
 # which is also the key pattern of the drakkar user on redis-fleet, and the
-# path of the URL picks database 3.
+# path of the URL picks database 3. The Consul keys start with key_prefix
+# and a "/", which is the key prefix of the token's policy on consul-fleet.
 connections:
   postgres:
     main:
@@ -427,14 +430,21 @@ connections:
     main:
       url: "redis://drakkar@redis-fleet:6379/3"
       key_prefix: "drakkar:"
+  consul:
+    main:
+      address: "http://consul-fleet:8500"
+      key_prefix: "drakkar"
 
 fleet:
   # Worker registry. The provider is filesystem (cards in storage.dir),
-  # postgres (cards in the database of connections.postgres.main) or redis
-  # (cards in the Redis of connections.redis.main), chosen by
+  # postgres (cards in the database of connections.postgres.main), redis
+  # (cards in the Redis of connections.redis.main) or consul (cards in the
+  # KV store of connections.consul.main), chosen by
   # DK_FLEET__REGISTRY__PROVIDER in docker-compose.yml. The timings are
   # short so the outage scenarios finish in minutes: a card missing for
-  # 10 s is offline, and one missing for 30 s is deleted.
+  # 10 s is offline, and one missing for 30 s is deleted. With consul a
+  # card leaves the list instead: its session has a 10 s TTL, and Consul
+  # deletes the card about 20 s after the last publish.
   registry:
     heartbeat_seconds: 2
     refresh_seconds: 3

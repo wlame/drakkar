@@ -146,10 +146,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and archive election on a separate Postgres service, `postgres-fleet`.
   `just integration-up provider=redis` runs them on a separate Redis
   service, `redis-fleet`. Its only user has the rights that the docs give
-  the providers, and no more.
+  the providers, and no more. `just integration-up provider=consul` runs
+  them on a separate Consul agent, `consul-fleet`, with ACLs that deny by
+  default. The workers' token has the two rules that the docs give the
+  providers, and no more.
   `just integration-scenarios provider=<name>` pauses that service, cuts a
   worker off the network, kills a worker, and checks that no Postgres or
-  Redis password reaches the config reference, the logs or the metrics. See
+  Redis password and no Consul token reaches the config reference, the logs
+  or the metrics. With `consul`, the killed worker is started again at once,
+  and the new instance takes its card over from the old session. See
   `docs/integration.md`.
 
 ### Fixed

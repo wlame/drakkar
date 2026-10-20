@@ -7,8 +7,9 @@
 # applicable) or 1 (fail).
 #
 # HARNESS_PROVIDER names the main cluster's registry and archive-election
-# provider: filesystem (the default), postgres or redis. It must match the
-# value the harness was started with (just integration-up provider=...).
+# provider: filesystem (the default), postgres, redis or consul. It must
+# match the value the harness was started with
+# (just integration-up provider=...).
 # ============================================================================
 
 # The variables below are read by the scenarios that source this file.
@@ -24,14 +25,25 @@ POLL_SECONDS=2
 # Seconds the last wait_until call waited; scripts print it as a timing.
 WAITED=0
 
-# The compose service that keeps each provider's state, one row per
-# provider. The filesystem provider keeps its state in the shared folder and
-# has no service, so its row is empty.
+# One row per provider, two columns:
+#   PROVIDER_SERVICE  the compose service that keeps the provider's state.
+#                     The filesystem provider keeps its state in the shared
+#                     folder and has no service, so its value is empty.
+#   LIVENESS_STYLE    how the list shows a worker that stopped publishing:
+#                     offline - its card stays listed with online false
+#                               until it is deleted (prune_after_seconds);
+#                     gone    - its card leaves the list: the card key
+#                               belongs to the worker's session, and the
+#                               service deletes the key when the session
+#                               ends. A worker started again under the same
+#                               name takes the card over from the session of
+#                               the worker before it.
 case "$HARNESS_PROVIDER" in
-    filesystem) PROVIDER_SERVICE="" ;;
-    postgres) PROVIDER_SERVICE=postgres-fleet ;;
-    redis) PROVIDER_SERVICE=redis-fleet ;;
-    *) echo "unknown HARNESS_PROVIDER '$HARNESS_PROVIDER': expected filesystem, postgres or redis" >&2; exit 1 ;;
+    filesystem) PROVIDER_SERVICE="";            LIVENESS_STYLE=offline ;;
+    postgres)   PROVIDER_SERVICE=postgres-fleet; LIVENESS_STYLE=offline ;;
+    redis)      PROVIDER_SERVICE=redis-fleet;    LIVENESS_STYLE=offline ;;
+    consul)     PROVIDER_SERVICE=consul-fleet;   LIVENESS_STYLE=gone ;;
+    *) echo "unknown HARNESS_PROVIDER '$HARNESS_PROVIDER': expected filesystem, postgres, redis or consul" >&2; exit 1 ;;
 esac
 
 # ANSI colors
@@ -186,6 +198,14 @@ peer_online_is() {
 # True when the worker on host port $1 does not list worker $2.
 peer_absent() {
     [ "$(peer_field "$1" "$2" worker_name)" = absent ]
+}
+
+# True when the worker on host port $1 does not list worker $2, or lists it
+# with online false. False when the list could not be read.
+peer_absent_or_offline() {
+    local online
+    online=$(peer_field "$1" "$2" online)
+    [ "$online" = absent ] || [ "$online" = false ]
 }
 
 # Sleep until <seconds> have passed since the SECONDS value $1:

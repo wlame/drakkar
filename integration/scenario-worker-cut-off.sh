@@ -3,21 +3,28 @@
 # Scenario: one worker loses the network and gets it back.
 #
 # Disconnects worker-3 from the compose network for 90 s, then proves that:
-#   - worker-1 lists worker-3 with the expected liveness:
+#   - worker-1 lists worker-3 with the expected liveness (the provider's
+#     service and liveness style are in the table in scenario-lib.sh):
 #       postgres, redis - online: false within 30 s (worker-3 cannot reach
 #                    the provider's service, so its card ages on the
 #                    service's clock). The check waits for the verdict
 #                    instead of reading it at 30 s: a card 30 s old is
 #                    deleted (prune_after_seconds), and the peer would then
 #                    be absent, not offline,
+#       consul     - absent (or online: false) within 30 s: worker-3 cannot
+#                    renew its session, Consul ends it about 20 s after the
+#                    last renew (twice the 10 s TTL) and deletes the card
+#                    with it, and worker-1 reads the list every 3 s,
 #       filesystem - online: true after 30 s (the card goes through the
 #                    shared folder, which a network cut does not touch),
 #   - worker-3's own completed counter (read inside its container) is not
 #     lower than before the cut,
-#   - within 20 s of the reconnect worker-1 lists worker-3 online,
+#   - within 20 s of the reconnect worker-1 lists worker-3 online (with
+#     consul its session ended during the cut, so the renew after the
+#     reconnect answers 404 and the worker publishes with a new session),
 #   - no worker container restarted.
 #
-# Usage: HARNESS_PROVIDER=redis integration/scenario-worker-cut-off.sh
+# Usage: HARNESS_PROVIDER=consul integration/scenario-worker-cut-off.sh
 # ============================================================================
 
 # Some functions below run only through trap or wait_until.
@@ -77,11 +84,24 @@ is_cut=true
 cut_at=$SECONDS
 
 # A provider with a service (see the table in scenario-lib.sh) loses it with
-# the network; the filesystem provider keeps its shared folder.
+# the network; the filesystem provider keeps its shared folder. How worker-1
+# lists the cut worker then follows the provider's liveness style.
 if [ -n "$PROVIDER_SERVICE" ]; then
-    wait_until "$OFFLINE_CHECK_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$CUT_WORKER" false \
-        || fail "worker-1 does not list ${CUT_WORKER} offline within ${OFFLINE_CHECK_SECONDS}s of the cut (online: $(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online))"
-    liveness_while_cut="online false after ${WAITED}s of the cut"
+    case "$LIVENESS_STYLE" in
+        offline)
+            wait_until "$OFFLINE_CHECK_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$CUT_WORKER" false \
+                || fail "worker-1 does not list ${CUT_WORKER} offline within ${OFFLINE_CHECK_SECONDS}s of the cut (online: $(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online))"
+            liveness_while_cut="online false after ${WAITED}s of the cut"
+            ;;
+        gone)
+            wait_until "$OFFLINE_CHECK_SECONDS" peer_absent_or_offline "$WORKER_1_UI_PORT" "$CUT_WORKER" \
+                || fail "worker-1 still lists ${CUT_WORKER} online ${OFFLINE_CHECK_SECONDS}s after the cut (online: $(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online))"
+            cut_wait=$WAITED
+            online_while_cut=$(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online)
+            liveness_while_cut="absent or offline (online: ${online_while_cut}) after ${cut_wait}s of the cut"
+            ;;
+        *) fail "unknown liveness style '${LIVENESS_STYLE}'" ;;
+    esac
 else
     sleep_until_elapsed "$cut_at" "$OFFLINE_CHECK_SECONDS"
     online_while_cut=$(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online)
