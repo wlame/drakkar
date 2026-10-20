@@ -13,9 +13,7 @@ from drakkar.providers.cardlog import InvalidCardLog
 from drakkar.providers.consul import (
     CARD_HELD_MESSAGE,
     DEFAULT_KEY_PREFIX,
-    INSTANCE_PLACEHOLDER,
-    SESSION_NAMES,
-    WORKER_PLACEHOLDER,
+    KV_PATH_HEAD,
     ConsulClient,
     ConsulError,
     acquire_key,
@@ -23,11 +21,13 @@ from drakkar.providers.consul import (
     close_client,
     create_session,
     destroy_session,
+    holder_of,
     is_own_session_name,
     open_client,
     path,
     read_key,
     read_prefix,
+    registry_session_name,
     renew_session,
     resolve_client,
     session_name,
@@ -35,14 +35,21 @@ from drakkar.providers.consul import (
 from drakkar.providers.thread import PROVIDER_STOPPED
 
 
-def _registry_session_name(member: str, instance: str) -> str:
-    """The name of the session that holds the card of ``member`` (a sanitized worker name) for ``instance``."""
-    return SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, member).replace(INSTANCE_PLACEHOLDER, instance)
+def _card_member(entry: dict[str, Any], card_key_prefix: str) -> str | None:
+    """The worker name a KV entry of the listing stands for, or ``None`` when its key cannot be a card key.
 
-
-def _member_of(entry: dict[str, Any]) -> str:
-    """The worker name a KV entry of the card prefix stands for: the last segment of its key."""
-    return entry['Key'].rpartition('/')[2]
+    A card key is ``card_key_prefix`` followed by one sanitized worker name,
+    which is never empty and has no ``/``. So the prefix itself (a folder key,
+    such as the one a Consul UI creates), a nested key and a key outside the
+    prefix are not cards.
+    """
+    key: str = entry['Key']
+    if not key.startswith(card_key_prefix):
+        return None
+    member = key[len(card_key_prefix) :]
+    if not member or '/' in member:
+        return None
+    return member
 
 
 class ConsulRegistry:
@@ -60,10 +67,12 @@ class ConsulRegistry:
     agent lost its state) is followed by a new session.
 
     ``list`` reads every key under the card prefix. A card whose key a session
-    holds is ``online``; a key without a session was written by something
-    other than a provider, and is listed offline. A card has no age: the session's TTL is the
-    liveness clock, kept by Consul, so no host's clock enters the verdict and
-    the provider reads no clock of its own.
+    holds (its ``Session`` is a non-empty string) is ``online``; a key without
+    a session was written by something other than a provider, and is listed
+    offline. A key that cannot be a card key (the prefix itself, or a nested
+    key) is skipped without a log line. A card has no age: the session's TTL is
+    the liveness clock, kept by Consul, so no host's clock enters the verdict
+    and the provider reads no clock of its own.
 
     A worker restarted under its old name finds its card key held by the
     session of its predecessor, which may live on for up to the offline
@@ -141,7 +150,7 @@ class ConsulRegistry:
         member = sanitize_worker_name(card['worker'])
         key_path = path('registry_card', prefix=prefix, worker=member)
         body = serialize_card(card).decode('utf-8')
-        session = await self._live_session(client, _registry_session_name(member, card['instance']))
+        session = await self._live_session(client, registry_session_name(member, card['instance']))
         if await acquire_key(client, key_path, session, body):
             return
         await self._clear_the_card_key(client, key_path, member)
@@ -151,15 +160,18 @@ class ConsulRegistry:
     async def list(self) -> PeerCardList:
         """Return every card under the card prefix; online while a session holds its key, never with an age."""
         client, prefix = self._started()
-        entries = await read_prefix(client, path('registry_list', prefix=prefix))
-        self._invalid_cards.cut_to(_member_of(entry) for entry in entries)
+        list_path = path('registry_list', prefix=prefix)
+        card_key_prefix = list_path.removeprefix(KV_PATH_HEAD)
+        entries = await read_prefix(client, list_path)
+        members = [(member, entry) for entry in entries if (member := _card_member(entry, card_key_prefix)) is not None]
+        self._invalid_cards.cut_to(member for member, _ in members)
         listed: PeerCardList = []
-        for entry in entries:
+        for member, entry in members:
             card, reason = decode_card(entry['Value'])
             if card is None:
-                await self._invalid_cards.report(self._logger, _member_of(entry), reason)
+                await self._invalid_cards.report(self._logger, member, reason)
                 continue
-            listed.append(PeerCard(card=card, age_seconds=None, online='Session' in entry))
+            listed.append(PeerCard(card=card, age_seconds=None, online=holder_of(entry) is not None))
         return listed
 
     async def withdraw(self, worker: str, instance: str) -> None:
@@ -168,6 +180,10 @@ class ConsulRegistry:
         The session is this provider's own, so ``worker`` and ``instance`` are
         not needed: when a twin under the same name has taken the card over,
         the session no longer holds it, and destroying it changes nothing.
+
+        A withdraw is single-shot: the registry service gives it one attempt,
+        and the id is forgotten before the destroy is sent. When the destroy
+        fails, the session (and the card with it) ends by its TTL.
         """
         client, _ = self._started()
         session, self._session = self._session, None
@@ -203,7 +219,7 @@ class ConsulRegistry:
         key. Any other holder raises ``ConsulError(CARD_HELD_MESSAGE)``.
         """
         entry = await read_key(client, key_path)
-        holder = None if entry is None else entry.get('Session')
+        holder = None if entry is None else holder_of(entry)
         if holder is None:
             return
         holder_name = await session_name(client, holder)

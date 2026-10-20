@@ -269,6 +269,7 @@ async def test_a_next_instance_takes_over_its_predecessors_card_at_once(fake):
 
 
 async def test_a_worker_never_destroys_the_session_of_a_longer_name(fake):
+    # Both cards here have their own key; the real pin of the own-session rule is the longer_worker_name case below.
     longer = await _started(fake)
     shorter = await _started(fake)
 
@@ -380,6 +381,35 @@ async def test_a_holder_that_left_before_the_takeover_lets_the_next_acquire_thro
     assert [(entry.card, entry.online) for entry in listed] == [(card, True)]
 
 
+@pytest.mark.parametrize('shown', [None, ''], ids=['null', 'empty'])
+async def test_a_card_key_with_a_null_or_empty_session_is_taken_as_unheld(shown, fake):
+    fake.plant_session(PREDECESSOR, f'drakkar-w-1-{PREDECESSOR_INSTANCE}', SESSION_TTL_SECONDS)
+    fake.put_raw(card_key('w-1'), b'old', session=PREDECESSOR)
+    provider = ConsulRegistry(
+        connection='main', offline_after_seconds=OFFLINE_AFTER, client=_client_showing_session(fake, shown)
+    )
+    await provider.start(_context())
+    card = _card('w-1')
+
+    def free_the_key_at_the_read(seen: Seen) -> None:
+        if seen.method == 'GET' and seen.path == card_path('w-1'):
+            fake.put_raw(card_key('w-1'), b'unheld')
+
+    fake.before_answer = free_the_key_at_the_read
+    mark = len(fake.seen)
+
+    await provider.publish(card)
+    sent = _routes(fake, mark)
+
+    assert sent == [
+        ('PUT', PATHS['session_create']),
+        ('PUT', card_path('w-1')),
+        ('GET', card_path('w-1')),
+        ('PUT', card_path('w-1')),
+    ]
+    assert _destroys(fake) == []
+
+
 async def test_two_names_with_one_stem_share_one_card(fake):
     first = await _started(fake)
     second = await _started(fake)
@@ -441,6 +471,59 @@ async def test_a_key_without_a_session_is_listed_offline(fake):
     listed = await provider.list()
 
     assert [(entry.card, entry.age_seconds, entry.online) for entry in listed] == [(card, None, False)]
+
+
+@pytest.mark.parametrize('shown', [None, ''], ids=['null', 'empty'])
+async def test_a_key_with_a_null_or_empty_session_is_listed_offline(shown, fake):
+    card = _card('w-2')
+    fake.put_raw(card_key('w-2'), serialize_card(card))
+    provider = ConsulRegistry(
+        connection='main', offline_after_seconds=OFFLINE_AFTER, client=_client_showing_session(fake, shown)
+    )
+    await provider.start(_context())
+
+    listed = await provider.list()
+
+    assert [(entry.card, entry.online) for entry in listed] == [(card, False)]
+
+
+@pytest.mark.parametrize(
+    ('key', 'value'),
+    [
+        (f'{DEFAULT_KEY_PREFIX}/fleet/workers/', b''),
+        (f'{DEFAULT_KEY_PREFIX}/fleet/workers/x/y', serialize_card(_card('x'))),
+    ],
+    ids=['folder_key', 'nested_key'],
+)
+async def test_list_skips_a_key_that_cannot_be_a_card_key_without_a_log_line(key, value, fake):
+    fake.put_raw(key, value)
+    provider = await _started(fake)
+    await provider.publish(_card('w-1'))
+
+    with capture_logs() as logs:
+        listed = await provider.list()
+
+    assert [entry.card['worker'] for entry in listed] == ['w-1']
+    assert _invalid_card_logs(logs) == []
+
+
+async def test_list_skips_a_key_outside_the_card_prefix(fake):
+    def add_a_key_outside_the_prefix(entries: list[dict[str, Any]]) -> None:
+        entries.append({'Key': 'w-9', 'Value': None, 'Session': FIRST})
+
+    provider = ConsulRegistry(
+        connection='main',
+        offline_after_seconds=OFFLINE_AFTER,
+        client=_client_rewriting_reads(fake, add_a_key_outside_the_prefix),
+    )
+    await provider.start(_context())
+    await provider.publish(_card('w-1'))
+
+    with capture_logs() as logs:
+        listed = await provider.list()
+
+    assert [entry.card['worker'] for entry in listed] == ['w-1']
+    assert _invalid_card_logs(logs) == []
 
 
 async def test_list_skips_an_undecodable_card_and_logs_once(fake):
@@ -508,6 +591,36 @@ def _client_holding_renews(fake: FakeConsul, reached: asyncio.Event, release: as
     return ConsulClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(handle)), base=FAKE_BASE, token='', datacenter=''
     )
+
+
+def _client_rewriting_reads(fake: FakeConsul, rewrite: Callable[[list[dict[str, Any]]], None]) -> ConsulClient:
+    """A client of ``fake`` whose key reads that answer ``200`` have their entries changed by ``rewrite`` first."""
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        response = await fake.transport().handle_async_request(request)
+        if request.method != 'GET' or not request.url.path.startswith('/v1/kv/') or response.status_code != 200:
+            return response
+        entries = json.loads(response.content)
+        rewrite(entries)
+        return httpx.Response(200, json=entries)
+
+    return ConsulClient(
+        http=httpx.AsyncClient(transport=httpx.MockTransport(handle)), base=FAKE_BASE, token='', datacenter=''
+    )
+
+
+def _client_showing_session(fake: FakeConsul, shown: str | None) -> ConsulClient:
+    """A client of ``fake`` whose key reads give every entry no session holds the field ``"Session": shown``.
+
+    The agent leaves the field out of such an entry; another writer of the
+    answer could send ``null`` or an empty string, which must read the same.
+    """
+
+    def show_the_session(entries: list[dict[str, Any]]) -> None:
+        for entry in entries:
+            entry.setdefault('Session', shown)
+
+    return _client_rewriting_reads(fake, show_the_session)
 
 
 async def test_a_withdraw_during_a_publish_leaves_no_session_the_provider_forgot(fake):

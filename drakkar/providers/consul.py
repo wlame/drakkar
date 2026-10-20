@@ -35,7 +35,7 @@ import base64
 import json
 import math
 import re
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -66,6 +66,8 @@ PATHS: dict[str, str] = {
     'registry_list': '/v1/kv/{prefix}/fleet/workers/',
     'election_lock': '/v1/kv/{prefix}/archive-locks/{scope}',
 }
+# The head of every KV request path; the rest of the path is the KV key.
+KV_PATH_HEAD = '/v1/kv/'
 
 SESSION_NAMES: dict[str, str] = {
     'registry': 'drakkar-{worker}-{instance}',
@@ -183,6 +185,28 @@ def session_body(name: str, ttl: str) -> str:
     )
 
 
+def registry_session_name(member: str, instance: str) -> str:
+    """Return the name of the session that holds the card of ``member`` (a sanitized worker name) for ``instance``."""
+    return SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, member).replace(INSTANCE_PLACEHOLDER, instance)
+
+
+def election_session_name(scope: str, token: str) -> str:
+    """Return the name of the session that holds the lease of ``token`` on ``scope`` (a sanitized cluster name)."""
+    return SESSION_NAMES['election'].replace(SCOPE_PLACEHOLDER, scope).replace(TOKEN_PLACEHOLDER, token)
+
+
+def holder_of(entry: Mapping[str, Any]) -> str | None:
+    """Return the id of the session that holds a KV entry, or ``None`` when no session holds it.
+
+    An entry is held while its ``Session`` is a non-empty string. The agent
+    leaves the field out of an entry that no session holds; a ``null`` or an
+    empty string reads the same, so a reader never has to tell an absent field
+    from an empty one.
+    """
+    session = entry.get('Session')
+    return session if isinstance(session, str) and session else None
+
+
 def is_own_session_name(name: str, member: str) -> bool:
     """Tell whether ``name`` is the session name of a registry card of ``member`` (a sanitized worker name).
 
@@ -195,7 +219,7 @@ def is_own_session_name(name: str, member: str) -> bool:
     instance = name[-INSTANCE_LENGTH:]
     if INSTANCE_RE.fullmatch(instance) is None:
         return False
-    return name == SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, member).replace(INSTANCE_PLACEHOLDER, instance)
+    return name == registry_session_name(member, instance)
 
 
 def base_url(address: str) -> str:
@@ -492,7 +516,7 @@ async def session_name(client: ConsulClient, session: str) -> str | None:
 async def read_key(client: ConsulClient, key_path: str) -> dict[str, Any] | None:
     """Return the KV entry at ``key_path`` (a path of :data:`PATHS`), or ``None`` when there is none (``404``).
 
-    ``Value`` is decoded to bytes; ``Session`` is present only while a session holds the key.
+    ``Value`` is decoded to bytes; :func:`holder_of` tells which session holds the key, if any.
     """
     status, answer = await request(client, 'GET', key_path, answers=(200, 404))
     if status == 404:

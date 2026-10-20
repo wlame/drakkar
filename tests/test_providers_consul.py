@@ -55,11 +55,14 @@ from drakkar.providers.consul import (
     close_client,
     create_session,
     destroy_session,
+    election_session_name,
+    holder_of,
     is_own_session_name,
     open_client,
     path,
     read_key,
     read_prefix,
+    registry_session_name,
     renew_session,
     request,
     resolve_client,
@@ -89,16 +92,6 @@ WRONG_TOKEN = '0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a'
 @pytest.fixture
 def fake() -> FakeConsul:
     return FakeConsul()
-
-
-def registry_session_name(member: str, instance: str) -> str:
-    """The session name of a registry card, rendered from the fixture's template."""
-    return SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, member).replace(INSTANCE_PLACEHOLDER, instance)
-
-
-def election_session_name(scope: str, token: str) -> str:
-    """The session name of an election lease, rendered from the fixture's template."""
-    return SESSION_NAMES['election'].replace(SCOPE_PLACEHOLDER, scope).replace(TOKEN_PLACEHOLDER, token)
 
 
 def example_card_text() -> str:
@@ -214,6 +207,36 @@ def test_session_ttl_rounds_a_fractional_half_up_to_whole_seconds():
 @pytest.mark.parametrize('case', FIXTURE['own_session_names'], ids=lambda c: c['name'])
 def test_is_own_session_name_follows_the_pinned_cases(case):
     assert is_own_session_name(case['name'], case['member']) is case['own']
+
+
+def test_session_names_fill_the_fixture_templates():
+    registry = registry_session_name(MEMBER, INPUTS['card']['instance'])
+    election = election_session_name(INPUTS['scope'], INPUTS['token'])
+
+    assert registry == 'drakkar-search-worker-3-9c41e0b27fd34a1e'
+    assert election == 'drakkar/archive-lock/main/5f0c1d2e3a4b6978'
+    assert registry == SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, MEMBER).replace(
+        INSTANCE_PLACEHOLDER, INPUTS['card']['instance']
+    )
+    assert election == SESSION_NAMES['election'].replace(SCOPE_PLACEHOLDER, INPUTS['scope']).replace(
+        TOKEN_PLACEHOLDER, INPUTS['token']
+    )
+    assert is_own_session_name(registry, MEMBER)
+
+
+@pytest.mark.parametrize(
+    ('entry', 'holder'),
+    [
+        ({'Key': 'k', 'Session': FIRST}, FIRST),
+        ({'Key': 'k'}, None),
+        ({'Key': 'k', 'Session': None}, None),
+        ({'Key': 'k', 'Session': ''}, None),
+        ({'Key': 'k', 'Session': 7}, None),
+    ],
+    ids=['held', 'absent', 'null', 'empty', 'not_a_string'],
+)
+def test_holder_of_is_the_session_only_when_it_is_a_non_empty_string(entry, holder):
+    assert holder_of(entry) == holder
 
 
 @pytest.mark.parametrize('case', FIXTURE['address_cases'], ids=lambda c: repr(c['address']))
