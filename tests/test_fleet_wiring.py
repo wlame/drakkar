@@ -203,6 +203,18 @@ def test_election_provider_options_for_redis_names_the_connection(tmp_path):
     assert election_provider_options(config) == {'connection': 'locks'}
 
 
+def test_election_provider_options_for_consul_names_the_connection(tmp_path):
+    config = _config(
+        tmp_path,
+        connections={'consul': {'locks': {}}},
+        history={
+            'archive': {'election': {'provider': 'consul', 'connection': 'locks', 'plugin_options': {'unused': 1}}}
+        },
+    )
+
+    assert election_provider_options(config) == {'connection': 'locks'}
+
+
 def test_election_provider_options_for_a_plugin_name_are_its_plugin_options(tmp_path):
     config = _config(
         tmp_path,

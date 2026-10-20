@@ -41,7 +41,7 @@ def test_resolve_factory_names_the_election_path(no_election_plugins):
 
     assert (
         str(raised.value)
-        == "history.archive.election.provider 'nope' is not known; known providers: filesystem, postgres, redis"
+        == "history.archive.election.provider 'nope' is not known; known providers: consul, filesystem, postgres, redis"
     )
 
 
