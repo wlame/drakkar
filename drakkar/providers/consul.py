@@ -421,7 +421,12 @@ def _first_session_name(value: Any) -> str | None:
 
 
 def _decoded_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Return a KV entry with its base64 ``Value`` decoded to bytes; a null value is ``b''``."""
+    """Return a KV entry with its base64 ``Value`` decoded to bytes; a null value is ``b''``.
+
+    The entry must name its key with a string ``Key``: a listing reads the
+    worker name from it.
+    """
+    _string(entry['Key'])
     value = entry.get('Value')
     return {**entry, 'Value': b'' if value is None else base64.b64decode(_string(value), validate=True)}
 
