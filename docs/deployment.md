@@ -194,6 +194,101 @@ More: [Fleet registry: redis](fleet.md#redis),
 [The redis election provider](local-databases.md#the-redis-election-provider),
 [Security: provider credentials](security.md#provider-credentials).
 
+## A shared folder plus Consul and Postgres
+
+This layout fits a deployment that already runs Consul and Postgres. The
+workers keep their sealed history in a shared folder, as with the defaults.
+They find each other through keys in Consul, and they choose the one worker
+that builds the archives of a cluster through a table in Postgres. The two
+features are chosen on their own, so each names its own connection; the
+registry uses `connections.consul.main` and the election uses
+`connections.postgres.main`.
+
+```yaml
+storage:
+  dir: /var/lib/drakkar
+shared:
+  dir: /mnt/drakkar-shared
+
+connections:
+  consul:
+    main:
+      address: http://127.0.0.1:8500   # the agent of the worker's host
+      key_prefix: drakkar
+  postgres:
+    main:
+      schema: drakkar
+      manage_schema: true
+
+fleet:
+  registry:
+    provider: consul
+    connection: main
+
+history:
+  archive:
+    election:
+      provider: postgres
+      connection: main
+```
+
+Set the token and the connection string in the environment of every worker,
+for example from a Kubernetes Secret, not in the YAML file:
+
+```bash
+DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
+DK_CONNECTIONS__POSTGRES__MAIN__DSN='postgresql://drakkar:...@db.internal/drakkar'
+```
+
+What to check:
+
+- Every worker of the fleet uses the same registry provider, and the same
+  Consul cluster, datacenter and `key_prefix`. Every worker of one cluster uses
+  the same election provider and the same database and schema. Workers on
+  different providers or stores do not see each other's cards or leases.
+- The registry needs `ui.enabled: true`.
+- The shared folder still holds the sealed recorder files and the archives.
+  Only the cards move to Consul, and only the archive lease moves to Postgres.
+- The Consul token needs two rules, in which `drakkar/` is the `key_prefix`:
+  `key_prefix "drakkar/" { policy = "write" }` and
+  `session_prefix "" { policy = "write" }`. The first allows every key under
+  the prefix and the second every session of the datacenter, so give the fleet
+  a `key_prefix` of its own and a token that nothing else uses. Without
+  `session:write` the first publish fails with a `403`, not the start. See
+  [Security](security.md#provider-credentials).
+- The Postgres role needs the rights of the election only, because the card
+  table `fleet_workers` is not used. With `manage_schema: true` the first
+  election start still creates both tables, and the table `fleet_workers`
+  stays empty. The role needs `CREATE` on the database and on the schema, and
+  must own `fleet_workers`, as in the [Postgres layout](#a-shared-folder-plus-a-shared-postgres).
+  With an operator-managed schema, set `manage_schema: false` and run
+  `drakkar-schema postgres --schema=drakkar | psql "$ADMIN_DSN"` once; the
+  worker role then needs `USAGE` on the schema and `SELECT`, `INSERT`,
+  `UPDATE` and `DELETE` on `archive_locks`.
+- Two clocks decide liveness, and neither is a worker's: Consul ends the
+  session of a worker that stopped renewing (half of `offline_after_seconds`,
+  at least 10 seconds, and Consul ends a session at most twice that after the
+  last renew), and the Postgres server's `now()` decides the length of the
+  archive lease.
+- Point each worker at a Consul agent that stays reachable and healthy,
+  usually the agent of its own host. When the cluster marks the agent's node as
+  failed, Consul ends the sessions of that node, and the cards of its workers
+  leave the lists until the next heartbeat after the node is healthy. Use
+  `https://` in the `address` for TLS (see [Security](security.md#provider-credentials)
+  for what it verifies).
+- During a Consul outage the pipeline keeps running. The workers list keeps its
+  last snapshot, and a worker that cannot reach Consul drops out of the lists
+  of the others once its session ends. It writes its card again when Consul is
+  back, without a restart. During a Postgres outage an archive pass stops
+  without publishing, and the election recovers when the server is back. Watch
+  `drakkar_provider_breaker_open` and `drakkar_provider_calls_total`, which
+  carry the label `feature` (`registry` or `election`) for each provider (see
+  [Observability](observability.md)).
+
+More: [Fleet registry: consul](fleet.md#consul),
+[The postgres election provider](local-databases.md#the-postgres-election-provider),
+[Security: provider credentials](security.md#provider-credentials).
+
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the

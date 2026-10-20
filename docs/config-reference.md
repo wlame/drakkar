@@ -684,14 +684,16 @@ history:
                                    # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
     lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver; also the
                                    # lease length of every election provider (<= 86400 with provider consul);
-                                   # with postgres and redis it is judged on the server's clock.
+                                   # with postgres and redis it is judged on the server's clock, with consul by the
+                                   # time to live of the lease's session (half of this value, at least 10 s).
                                    # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
     election:                      # which worker of a cluster builds the archives; see "Resilience block" below
-      provider: filesystem         # filesystem | postgres | redis | <plugin name> (consul is a reserved name).
+      provider: filesystem         # filesystem | postgres | redis | consul | <plugin name>.
                                    # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>;
-                                   # redis keeps it in one key per cluster on the server of connections.redis.<connection>.
+                                   # redis keeps it in one key per cluster on the server of connections.redis.<connection>;
+                                   # consul keeps it in one key per cluster, held by a session, on the agent of connections.consul.<connection>.
                                    # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
-      connection: main             # entry of connections.<provider>; read by postgres and redis (consul is reserved).
+      connection: main             # entry of connections.<provider>; read by postgres, redis and consul.
                                    # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
       resilience:                  # same keys and defaults as fleet.registry.resilience
         timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
@@ -719,17 +721,19 @@ How workers find each other and exchange cache rows. Peers pull `cluster`/`globa
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | postgres | redis | <plugin name> (consul is a reserved name);
+    provider: filesystem           # filesystem | static | none | postgres | redis | consul | <plugin name>;
                                    # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>;
-                                   # redis keeps them in keys of connections.redis.<connection>, with an index of the workers.
+                                   # redis keeps them in keys of connections.redis.<connection>, with an index of the workers;
+                                   # consul keeps them in keys of connections.consul.<connection>, each held by a session of its worker.
                                    # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
-    connection: main               # entry of connections.<provider>; read by postgres and redis (consul is reserved).
+    connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
                                    # env: DK_FLEET__REGISTRY__CONNECTION
     heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
     refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
     offline_after_seconds: 60      # card older than this = offline; must be >= 2 x heartbeat_seconds and >= 10.
+                                   # consul: sets the session's time to live (half of this, at least 10 s); <= 86400.
                                    # env: DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS
-    prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds.
+    prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds. Not used by consul.
                                    # env: DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS
     resilience:                    # see "Resilience block" below; replaces the key timeout_seconds
       timeout_seconds: 5.0         # time limit for one attempt. env: DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS
@@ -746,9 +750,10 @@ fleet:
       dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
     static:
       peers: []                    # [{name, cluster, url}]. YAML only.
-    consul:                        # reserved for the consul provider of a later release; none shipped, and a plugin does not read it
-      mode: publish                # publish | catalog. env: DK_FLEET__REGISTRY__CONSUL__MODE
-      service_name: drakkar        # Consul service that lists the workers (mode catalog). env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
+    consul:                        # settings of the consul provider; a plugin does not read this block
+      mode: publish                # publish | catalog. catalog is reserved for a later release and fails the load with provider consul.
+                                   # env: DK_FLEET__REGISTRY__CONSUL__MODE
+      service_name: drakkar        # for the catalog mode of a later release; not used now. env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
     redis: {}                      # block of the redis provider; no keys (address, credentials and key prefix come from the connection)
     postgres: {}                   # block of the postgres provider; no keys (schema and pool come from the connection)
     plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
@@ -767,17 +772,17 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, and the `redis` ones read `connections.redis.<name>`; this release ships no provider that reads the Consul entries, but a provider plugin can use any entry through `ctx.connections`.
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`. A provider plugin can use any entry through `ctx.connections`.
 
 ```yaml
 connections:
   consul:
     main:
-      address: http://127.0.0.1:8500   # env: DK_CONNECTIONS__CONSUL__MAIN__ADDRESS
-      token: ''                        # ACL token; a secret. env: DK_CONNECTIONS__CONSUL__MAIN__TOKEN
+      address: http://127.0.0.1:8500   # http:// or https://, checked when a provider starts. env: DK_CONNECTIONS__CONSUL__MAIN__ADDRESS
+      token: ''                        # ACL token, sent in the X-Consul-Token header; a secret. env: DK_CONNECTIONS__CONSUL__MAIN__TOKEN
       datacenter: ''                   # '' = the agent's datacenter. env: DK_CONNECTIONS__CONSUL__MAIN__DATACENTER
-      key_prefix: drakkar              # segments of letters, digits, _ . - joined by '/'; no leading or trailing '/'.
-                                       #   env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
+      key_prefix: drakkar              # segments of letters, digits, _ . - joined by '/'; no leading or trailing '/';
+                                       #   no segment '.' or '..'. env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
   redis:
     main:
       url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...); percent-encode special characters of the password.

@@ -1129,8 +1129,8 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
 | `archive.lock_stale_seconds` | `int` | `7200` | >= 1; at most `86400` when `archive.election.provider` is `consul` | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. It is also the lease length of every [election provider](local-databases.md#the-election-provider). |
-| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder), `postgres` (a row in a table of the database named by `archive.election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `archive.election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). `consul` is a reserved name for a later release; see [Fleet registry](fleet.md#providers). Every worker of one cluster must use the same provider. |
-| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres` and `redis` providers use; the name `consul` is reserved. With one of these names, the entry must be declared. Other providers ignore it. |
+| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder), `postgres` (a row in a table of the database named by `archive.election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `archive.election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `archive.election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). Every worker of one cluster must use the same provider. |
+| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
 | `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
 | `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
@@ -1162,17 +1162,17 @@ provider plugin are on [Fleet registry](fleet.md).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), or the name of a provider plugin. `consul` is a reserved name for a later release; see [Fleet registry](fleet.md#providers). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
-| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres` and `redis` providers use; the name `consul` is reserved. With one of these names, the entry must be declared. Other providers ignore it. |
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)), or the name of a provider plugin. Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
 | `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
-| `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. |
-| `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. |
+| `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds`; at most `86400` when `provider` is `consul` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. The `consul` provider decides it: its card is online while a session holds the key, and this value sets the session's time to live (half of it, at least 10 seconds). |
+| `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. Not used by the `consul` provider: Consul deletes a card when its session ends. |
 | `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
 | `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
 | `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
-| `consul.mode` | `str` | `publish` | `publish` or `catalog` | Setting of the `consul` provider, which this release does not ship; no provider reads it, and a plugin does not (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog`: workers are listed from the Consul service catalog and this worker publishes nothing. |
-| `consul.service_name` | `str` | `drakkar` | non-empty | Setting of the `consul` provider, which this release does not ship; no provider reads it. The Consul service that lists the workers, used only with `mode: catalog`. |
+| `consul.mode` | `str` | `publish` | `publish` or `catalog`; `catalog` fails the load when `provider` is `consul` | Setting of the `consul` provider; a plugin does not read it (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog` is reserved for a later release, in which workers would be listed from the Consul service catalog and this worker would publish nothing; the load refuses it with the `consul` provider. |
+| `consul.service_name` | `str` | `drakkar` | non-empty | Setting for the catalog mode of a later release; it is not used now. The Consul service that would list the workers. |
 | `redis` | block | `{}` | | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
 | `postgres` | block | `{}` | | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 | `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_FLEET__REGISTRY__PLUGIN_OPTIONS` itself fails the load. |
@@ -1250,10 +1250,10 @@ feature that names the connection. `connections` has one map per service
 type, and each map goes from a connection name that you choose to its
 settings. A feature that names no connection uses `main`. How features name
 and share a connection is on [Fleet registry](fleet.md#connections). This
-release ships the `postgres` and `redis` registry and election providers,
-which read `connections.postgres.<name>` and `connections.redis.<name>`; it
-ships no provider that reads the Consul entries, but a provider plugin can use
-any entry through `ctx.connections`.
+release ships the `postgres`, `redis` and `consul` registry and election
+providers, which read `connections.postgres.<name>`, `connections.redis.<name>`
+and `connections.consul.<name>`. A provider plugin can use any entry through
+`ctx.connections`.
 
 Which feature names which entry: `fleet.registry.connection` and
 `history.archive.election.connection`.
@@ -1262,10 +1262,43 @@ Which feature names which entry: `fleet.registry.connection` and
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `address` | `str` | `http://127.0.0.1:8500` | | Base URL of the Consul HTTP API. |
-| `token` | `str` | `''` | | ACL token sent with every request. Empty means none. **Secret.** |
-| `datacenter` | `str` | `''` | | Datacenter to address. Empty means the datacenter of the agent. |
-| `key_prefix` | `str` | `drakkar` | segments of letters, digits, `_`, `.`, `-` joined by `/`; no leading or trailing `/` | Key prefix of everything a feature stores in Consul. |
+| `address` | `str` | `http://127.0.0.1:8500` | checked when a provider starts: `http://` or `https://`, printable ASCII, no user name, query or fragment (see below) | Base URL of the Consul HTTP API. |
+| `token` | `str` | `''` | empty, or printable ASCII without a space (checked when a provider starts) | ACL token, sent with every request in the `X-Consul-Token` header. Empty means none. **Secret.** |
+| `datacenter` | `str` | `''` | letters, digits, `_`, `.`, `-` | Datacenter to address, sent as `dc` with every request. Empty means the datacenter of the agent. |
+| `key_prefix` | `str` | `drakkar` | segments of letters, digits, `_`, `.`, `-` joined by `/`; no leading or trailing `/`; no segment `.` or `..` | Key prefix of everything a feature stores in Consul. |
+
+The `consul` providers talk to the HTTP API of a Consul agent. Each card or
+lease is a key that a session holds. The session's time to live is half of
+`fleet.registry.offline_after_seconds` (cards) or of
+`history.archive.lock_stale_seconds` (leases), at least 10 seconds, and Consul
+ends a session at most twice its time to live after the last renew.
+
+The `address` and the `token` are checked when a provider starts. The address
+is printable ASCII, with the scheme `http` or `https` (in any case), a host and
+an optional port as for the [Redis URL](fleet.md#redis), and an optional path
+of segments of letters, digits, `.`, `_`, `~` and `-`, none of them `.` or `..`,
+with no user name, query or fragment. An address that fails the check fails the
+start with `consul connection: the address cannot be parsed`, and a `token`
+that is neither empty nor printable ASCII without a space fails it with
+`consul connection: the token cannot be sent in a header`. Neither message
+quotes the value.
+
+The config load checks the rest, with the path and the rule in the message:
+
+- `connections.consul.<name>.key_prefix '<value>' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'`
+- `connections.consul.<name>.datacenter '<value>' may only contain letters, digits, '_', '.' and '-'`
+- `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`
+- `history.archive.lock_stale_seconds (<n>) must be <= 86400 when history.archive.election.provider is consul`
+- `fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only`, for the catalog mode with the `consul` registry.
+
+The client does no retrying of its own: the [`resilience`
+block](#resilience-block) of the feature is the only retry and the only time
+limit, apart from a connect, which gives up after 5 seconds. It follows no
+redirect. With `https://`, the client verifies the certificate of the agent and
+checks that it names the host of the address. See
+[Security](security.md#provider-credentials) for the trust store, the proxy
+variables and the rights of the token, and [Fleet registry:
+consul](fleet.md#consul) for the rest.
 
 ### Redis (`connections.redis.<name>`)
 

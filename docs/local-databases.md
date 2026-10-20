@@ -653,8 +653,8 @@ history:
   archive:
     lock_stale_seconds: 7200     # the lease length, for every provider
     election:
-      provider: filesystem       # the default: the archive lock above; or postgres, redis, or a plugin name
-      # connection: main         # read by the postgres and redis providers (consul is reserved)
+      provider: filesystem       # the default: the archive lock above; or postgres, redis, consul, or a plugin name
+      # connection: main         # read by the postgres, redis and consul providers
       # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
       # plugin_options: {}       # passed unchanged to a provider plugin
 ```
@@ -667,24 +667,24 @@ history:
   seconds. A holder that died stops refreshing, and once the lease length has
   passed another worker may take the scope over. With a `consul` provider
   the value may not exceed 86400.
-- **Providers.** `filesystem`, `postgres` and `redis` are built in. Other
-  providers are plugins of the entry-point group `drakkar.election_providers`,
-  in the same way as for the [fleet registry](fleet.md#writing-a-provider).
-  The name `consul` is reserved for a provider of a later release that keeps
-  the lease in a service reached through a [named
-  connection](fleet.md#connections); this release does not ship it, and a
-  plugin of that name (or of the name `postgres` or `redis`) is checked like
-  the provider of that name (its connection must be declared). An unknown
-  name fails startup with a message that lists the providers that exist, for
+- **Providers.** `filesystem`, `postgres`, `redis` and `consul` are built in.
+  The last three keep the lease in a service reached through a [named
+  connection](fleet.md#connections). Other providers are plugins of the
+  entry-point group `drakkar.election_providers`, in the same way as for the
+  [fleet registry](fleet.md#writing-a-provider). A plugin named `postgres`,
+  `redis` or `consul` is checked like the provider of that name (its
+  connection must be declared) and wins over the built-in one. An unknown name
+  fails startup with a message that lists the providers that exist, for
   example
-  `history.archive.election.provider 'consul' is not known; known providers: filesystem, postgres, redis`.
+  `history.archive.election.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
   The name is checked whenever `history.archive.enabled` is true and the UI
   is on, also with `storage.dir: ''`. With archiving off, any name is
   accepted.
 - **Start and stop.** The provider starts at the first archive pass, not at
   worker start (so with the `postgres` provider the tables are first checked
-  or created then, and with the `redis` provider the server is first sent a
-  `PING` then). When the start fails, that pass ends at once (its `acquire`
+  or created then, with the `redis` provider the server is first sent a
+  `PING` then, and with the `consul` provider the agent is first asked for the
+  leader of its cluster then). When the start fails, that pass ends at once (its `acquire`
   is counted `not_started`) and the next pass tries the start again. While
   the circuit breaker is open, a pass skips the start until the cooldown has
   passed. At a clean stop the recorder lets the pass in progress end its
@@ -853,6 +853,99 @@ redis](fleet.md#redis) and [Security](security.md#provider-credentials).
   key stays until the lease length has passed, as for any holder that stops
   refreshing, and then another pass takes the scope.
 
+#### The `consul` election provider {#the-consul-election-provider}
+
+The lease is a key of the Consul agent that the connection named by
+`history.archive.election.connection` points at, held by a session of the
+archive pass. It fits a deployment that already runs Consul. The sealed
+history folder (`shared.dir`) is still a shared folder; only the choice of the
+archiving worker moves to Consul.
+
+```yaml
+shared:
+  dir: /mnt/drakkar-shared
+connections:
+  consul:
+    main:
+      address: http://127.0.0.1:8500
+      key_prefix: drakkar
+history:
+  archive:
+    lock_stale_seconds: 7200
+    election:
+      provider: consul
+      connection: main
+```
+
+The ACL token comes from the environment: `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`.
+The Consul cluster, the datacenter and the `key_prefix` must be the same on
+every worker of the cluster. The requirements for the agent, the address and the
+token are the same as for the registry; see [Fleet registry:
+consul](fleet.md#consul) and [Security](security.md#provider-credentials).
+
+- **One key per scope.** The key is `<key_prefix>/archive-locks/<scope>`, for
+  example `drakkar/archive-locks/main`. Its value is the lock body, in the same
+  encoding as the `filesystem` lock:
+
+  ```json
+  {"acquired_at":"2026-10-14T02:00:00.125000Z","instance":"9c41e0b27fd34a1e","provider":"consul","token":"5f0c1d2e3a4b6978","worker":"search-worker-3"}
+  ```
+
+  `acquired_at` comes from the clock of the worker that took the lease and is
+  for information only.
+- **The lease is the time to live of the session.** Each pass creates a
+  session named `drakkar/archive-lock/<scope>/<token>`, with `Behavior: delete`
+  and `LockDelay: 0s`. Its time to live is half of
+  `history.archive.lock_stale_seconds`, rounded up, and at least 10 seconds
+  (Consul accepts no less): 3600 seconds with the default. Consul ends a
+  session at most twice its time to live after the last renew, so the lease of
+  a dead holder ends by `lock_stale_seconds`, or by 20 seconds when that value
+  is below 20. Consul keeps the time, so no worker's wall clock is compared
+  with another's. With the `consul` provider `lock_stale_seconds` is at most
+  86400; a larger value fails the load with
+  `history.archive.lock_stale_seconds (<n>) must be <= 86400 when history.archive.election.provider is consul`.
+  The holder renews the session every 60 seconds, so keep
+  `lock_stale_seconds` well above 120: a shorter lease can end between two
+  renewals.
+- **Acquire.** The provider creates the session and writes the body to the key
+  with `?acquire=<session>`. Consul grants this only to a session when no other
+  session holds the key. When another session holds it, the provider destroys
+  the new session at once, and the pass gets `False` and skips the tick. For a
+  token that already holds the key, acquire renews its session and writes the
+  same body again, so `acquired_at` keeps its first value; when that session
+  has ended, a new one is created.
+- **Refresh and release.** `refresh` renews the session, and answers `False`
+  once Consul no longer knows it. `release` destroys the session, which deletes
+  the key only while that session holds it. A holder that was taken over cannot
+  free the new holder's lease. Consul answers `200` when it destroys a session
+  that is already gone, so a release that is sent again after a failure is
+  harmless. `is_held` (the fencing check) reads the key and is true only while
+  the session that holds it is the pass's own.
+- **Takeover.** A lease that ran out is a key that Consul has deleted, because
+  of `Behavior: delete`. The next pass finds a free scope. There is no previous
+  holder to read, and the `consul` provider writes no
+  `recorder_archive_lock_taken_over` line. Only the `filesystem` and `postgres`
+  providers write it. A fenced pass logs `recorder_archive_fenced` as described
+  below.
+- **A lost lease.** A session can end before the lease length: the agent
+  restarts without its data, the health check of the agent's node fails (Consul
+  then ends every session of the node), or the holder could not renew within
+  twice the time to live. The holder's next refresh then answers `False`, or its
+  fencing check finds no key, and the pass stops without publishing or
+  deleting. It logs `recorder_archive_fenced` with `reason` `taken_over`, whose
+  detail says that another worker took the archive lock over, although no
+  worker did: the provider can only answer that the pass no longer holds the
+  lease. The next pass takes the scope.
+- **An outage** is handled as for the registry: timeouts, connection errors and
+  the statuses `429`, `500`, `502`, `503` and `504` are retried under
+  `history.archive.election.resilience`, and the breaker opens after
+  `failure_threshold` failed operations. Any other status, such as a `403`
+  from a token without the rights, is final. A lease that cannot be confirmed
+  counts as lost (see above), so a pass during an outage stops without
+  publishing or deleting. Its key stays until the session ends, at most twice
+  its time to live after the last renew, as for any holder that stops
+  refreshing, and then another pass takes the scope.
+
 #### Fencing
 
 Before it publishes an archive and before it deletes any source, the pass
@@ -863,7 +956,7 @@ deletes nothing and counts in `drakkar_recorder_archive_failures_total`.
 
 | `reason` | Meaning |
 |---|---|
-| `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. With the `redis` provider it can also mean that the lease key was lost, and no worker took it over (see [The `redis` election provider](#the-redis-election-provider)). |
+| `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. With the `redis` provider it can also mean that the lease key was lost, and with the `consul` provider that the lease's session ended early; in both cases no worker took it over (see [The `redis` election provider](#the-redis-election-provider) and [The `consul` election provider](#the-consul-election-provider)). |
 | `unconfirmed` | The provider could not confirm the lease: the call failed or timed out, or the breaker was open. The lease may still be held. |
 
 Both reasons stop the pass the same way. The `detail` field of the line

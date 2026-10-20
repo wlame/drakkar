@@ -189,8 +189,9 @@ shared services that providers use: the Consul ACL `token`, the Redis `url`
 `postgres` registry and election providers read `connections.postgres.<name>`:
 they open one pool with the `dsn` and use the `schema`. The `redis` providers
 read `connections.redis.<name>`: they open one client with the `url` and use
-the `key_prefix`. This release ships no provider that reads the Consul entries;
-a provider plugin can use any entry through `ctx.connections`. The advice
+the `key_prefix`. The `consul` providers read `connections.consul.<name>`: they
+open one client with the `address` and the `token`, and use the `key_prefix`.
+A provider plugin can use any entry through `ctx.connections`. The advice
 below applies to the entries you declare and to any provider that uses them.
 
 - **Set them from the environment.** For example a Kubernetes Secret that
@@ -202,8 +203,9 @@ below applies to the entries you declare and to any provider that uses them.
   (the plugin gets the key `token` and the value as a string).
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
-  to `key_prefix`, a Redis user whose key pattern is its `key_prefix` (see
-  below for what the pattern limits), a Postgres role
+  to `key_prefix` and to sessions (see below for what its rules allow), a
+  Redis user whose key pattern is its `key_prefix` (see below for what the
+  pattern limits), a Postgres role
   limited to its `schema` (with `manage_schema: false`, a role that only
   uses tables that already exist). Do not reuse the credentials of a sink,
   and declare a separate named entry for each feature that needs different
@@ -227,6 +229,65 @@ below applies to the entries you declare and to any provider that uses them.
   `archive_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the archive lease, so protect the
   schema like the card folder of the `filesystem` provider.
+- **Give the Consul providers a token of their own.** The `consul` providers
+  send `GET /v1/status/leader`, the session requests (`create`, `renew`,
+  `destroy` and `info`) and the key requests (a read of one key, a recursive
+  read of the card prefix, and a write with `?acquire=`) of the agent's HTTP
+  API. The leader request needs no right. The rest needs two rules, in which
+  `drakkar/` is the `key_prefix` of the connection and a `/`:
+
+  ```hcl
+  key_prefix "drakkar/" { policy = "write" }
+  session_prefix "" { policy = "write" }
+  ```
+
+  Put them into a policy, make a token of the policy, and set the token from
+  the environment (`DK_CONNECTIONS__CONSUL__MAIN__TOKEN`). The `/` after the
+  prefix keeps the rule from matching a sibling such as `drakkar-other/`. A
+  `key_prefix` with more than one segment, such as `team/drakkar`, gives the
+  rule `key_prefix "team/drakkar/"`. A token without `session:write` cannot
+  create a session; its first publish fails with a `403`.
+
+  Know what these rights allow beyond what the providers need:
+
+  - `write` on the key prefix lets the token read, write and delete **any**
+    key under the prefix, not only the cards and the locks. Whoever holds the
+    token can publish and delete worker cards and take the archive lease. Give
+    the fleet a `key_prefix` of its own, so that no other tool keeps keys
+    under it.
+  - `session_prefix ""` matches every node, so the token can create, renew,
+    read and destroy **any session** of the datacenter, also the sessions of
+    other applications. Destroying a session that holds a lock breaks that
+    application's lock. The providers' own destroy is limited to sessions with
+    names of the shape `drakkar-<worker>-<instance>` (a worker's own
+    predecessor or twin); the token is not.
+  - For workers that all use one agent, `session "<node name of the agent>" {
+    policy = "write" }` limits the token to the sessions of that node. It does
+    not work when workers use different agents: a worker that takes over the
+    card of a predecessor from another node needs `session:write` on that
+    node, and a worker that moved to another node needs it there. The error of
+    a missing right is final and ends the operation at once.
+
+  The token travels only in the `X-Consul-Token` header, and only when it is
+  not empty. The providers never write it into a log line, a metric label, a
+  card or an error message. The text that Consul writes in an answer to a
+  refused request (the first line, up to 200 characters) does appear in the
+  error, and it can name the AccessorID of the token, which is not the secret.
+
+  The client uses the defaults of the HTTP library that the HTTP sink uses.
+  With `http://` in the `address`, the token and the cards cross the network
+  in clear text: use it only for an agent on the same host or on a network you
+  trust. With `https://` the client verifies the certificate of the agent
+  against the bundle of certificate authorities that the HTTP library ships
+  (the `certifi` bundle), not the store of the operating system, and checks
+  that the certificate names the host of the address. This cannot be switched
+  off. Use a private certificate authority through `SSL_CERT_FILE` (a file of
+  certificates) or `SSL_CERT_DIR` (a directory of them): either replaces the
+  bundle. The client sends no client certificate, so an agent that requires one
+  on its HTTPS port cannot be used. The proxy environment variables
+  (`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`) apply to the requests: add the
+  agent to `NO_PROXY` when it must not go through a proxy.
+  The client follows no redirect.
 - **Give the providers a Redis user of their own.** The `redis` providers
   send `EVAL`, `GET` and `PING`, and their scripts call `GET`, `SET`, `DEL`,
   `ZADD`, `ZRANGE`, `ZREM`, `PEXPIRE` and `TIME`. The client also sends its

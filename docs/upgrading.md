@@ -329,9 +329,9 @@ are new. See [Fleet registry](fleet.md#metrics).
   unless that entry exists. Declare `connections.<provider>.<connection>` (for
   `consul` or `redis`, an empty entry such as `connections: {consul: {main: {}}}`
   is enough; `postgres` needs a `dsn`), or rename the plugin.
-- **`postgres` and `redis` are now built-in providers.** A registry or
-  election plugin named `postgres` or `redis` still wins over the built-in
-  one, as any plugin name wins over a built-in name.
+- **`postgres`, `redis` and `consul` are now built-in providers.** A registry
+  or election plugin named `postgres`, `redis` or `consul` still wins over the
+  built-in one, as any plugin name wins over a built-in name.
 - `start` can be called again after a failure (registry and election), so it
   must leave nothing behind.
 - `stop` is not called when no `start` succeeded, while the breaker is open,

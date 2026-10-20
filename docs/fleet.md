@@ -48,6 +48,7 @@ Each feature has its own `connection`, [`resilience`](#resilience) block and
 | `static` | nowhere: a fixed peer list in the config | unknown |
 | `postgres` | one row per worker in the table `fleet_workers` of a Postgres schema | from the database server's clock (`heartbeat_at` against `now()`) |
 | `redis` | one key per worker plus an index of workers, under the key prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
+| `consul` | one key per worker under the key prefix of a Consul connection, held by a session of the worker | the session's time to live (online while the key has a session; no age) |
 | `none` | nowhere: no peers | — |
 | a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock, or its own verdict |
 
@@ -56,24 +57,24 @@ exchange pulls nothing. `static` cards come from the config and carry no
 `features` object, so the cache exchange pulls every `static` peer each
 cycle, without the mark check.
 
-`postgres` and `redis` are built in; see [`postgres`](#postgres) and
-[`redis`](#redis). The name `consul` is reserved for a provider of a later
-release that keeps its data in a service reached through a [named
-connection](#connections). Its own settings sit in `fleet.registry.consul`
-(`mode`, `service_name`); a plugin does not read this block, it gets
-`plugin_options`. This release ships no provider with the name `consul`.
-Two checks apply to a name that uses a connection (`consul`, `redis` and
-`postgres`), in this order:
+`postgres`, `redis` and `consul` are built in; see [`postgres`](#postgres),
+[`redis`](#redis) and [`consul`](#consul). Each keeps its data in a service
+reached through a [named connection](#connections). The block
+`fleet.registry.consul` has the keys `mode` and `service_name`; a plugin does
+not read this block, it gets `plugin_options`.
 
-1. The config load checks that the connection the name uses is declared.
-   Without `connections.consul.main`, for example, the load fails with
-   `fleet.registry.connection 'main' is not defined under connections.consul`.
-2. A worker starts with the name only when a provider of that name exists.
-   For `postgres` and `redis` it does. For `consul` a plugin of that name
-   must be installed. Otherwise startup fails (with the UI on, which the
-   registry needs) with a message that lists the providers that exist, for
-   example
-   `fleet.registry.provider 'consul' is not known; known providers: filesystem, none, postgres, redis, static`.
+A name that uses a connection (`consul`, `redis` and `postgres`) is checked
+when the config loads: the connection it uses must be declared. Without
+`connections.consul.main`, for example, the load fails with
+`fleet.registry.connection 'main' is not defined under connections.consul`. A
+plugin of one of these names is checked the same way, and it wins over the
+built-in provider of that name, as any plugin name does.
+
+A worker starts with the name only when a provider of that name exists. For a
+name that is neither built in nor an installed plugin, startup fails (with the
+UI on, which the registry needs) with a message that lists the providers that
+exist, for example
+`fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, postgres, redis, static`.
 
 ### `filesystem`
 
@@ -454,6 +455,193 @@ wait for any of this. When the server is back, the next probe operation
 closes the breaker and the registry recovers without a restart; nothing
 needs to be reset, because the client opens new connections by itself.
 
+### `consul`
+
+One key per worker in the key-value store of a Consul agent, each held by a
+session of its worker. It fits a deployment that already runs Consul and has
+no shared folder for the cards. Consul keeps the time: a card is online while
+the session that holds its key lives.
+
+```yaml
+connections:
+  consul:
+    main:
+      address: http://127.0.0.1:8500   # the HTTP API of a Consul agent; the default
+      key_prefix: drakkar              # the default; every key starts with it
+      # token: set from the environment, see below
+fleet:
+  registry:
+    provider: consul
+    connection: main             # the default
+    offline_after_seconds: 60    # the default; it also sets the session's time to live
+```
+
+Set the ACL token in the environment, not in the YAML file:
+
+```bash
+export DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
+```
+
+Without a token the requests go out without one, and Consul treats them as
+the anonymous token. The registry needs the UI server (`ui.enabled: true`), as
+with every provider. Every worker of the fleet uses the same provider and the
+same Consul cluster, datacenter and `key_prefix`; workers on different stores
+do not see each other.
+
+What it keeps and does:
+
+- **The keys and the sessions.** With the default prefix,
+  `drakkar/fleet/workers/<worker>` is the card of one worker: its canonical
+  bytes as text, the same bytes the `filesystem` provider writes to a file. In
+  `<worker>`, characters of the worker name outside `[a-zA-Z0-9_-]` become
+  `_`. A session of the worker holds the key. The session is named
+  `drakkar-<worker>-<instance>` (the same stem, then the 16 hex characters of
+  the instance). It is created with `Behavior: delete`, so the key goes when
+  the session ends, and `LockDelay: 0s`, so another session can take a free
+  key at once. The `key_prefix` may have more than one segment, for example
+  `team/drakkar`.
+- **Publish.** At every heartbeat and every state change the provider renews
+  the worker's session, and then writes the card to its key with
+  `?acquire=<session>`. A worker with no session, or one whose renew Consul
+  answers with `404` (the session ended), creates a new session first. The
+  session that already holds the key writes it again, so a republish is the
+  same call.
+- **The session's time to live.** It is half of `offline_after_seconds`,
+  rounded up, and at least 10 seconds, which is the least that Consul
+  accepts. With the default of 60 it is 30 seconds. Consul ends a session at
+  most twice its time to live after the last renew, so the card of a dead
+  worker leaves the list by `offline_after_seconds`, or by 20 seconds when
+  `offline_after_seconds` is below 20. A live worker renews at every
+  heartbeat. If a session ends under a live worker (a heartbeat came late, or
+  the agent lost its state), the next publish meets `404` on the renew, creates
+  a new session and writes the card again. With this provider
+  `offline_after_seconds` is at most 86400; a larger value fails the load
+  with `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`.
+- **List.** One read of every key under `<key_prefix>/fleet/workers/`. A key
+  that cannot be a card key is skipped without a log line: the folder key
+  itself, which a Consul UI creates, and a key nested deeper. A card is
+  online while its key has a session, and the workers list shows it with no
+  age, so its `last_seen_ts` is `null`. A key that no session holds was
+  written by something other than the provider. It is listed offline, and
+  nothing deletes it: `prune_after_seconds` is not used with `consul`, because
+  Consul deletes a card when its session ends. Remove such a key in Consul.
+- **Liveness.** The provider gives its own `online` verdict, so no worker's
+  wall clock and no age enter it. See [Liveness](#liveness).
+- **Duplicate names.** The card key comes from the sanitized worker name, so
+  one name has one card. A worker that restarts under its old name finds the
+  key held by its predecessor's session. It knows the session by its name,
+  destroys it and takes the card at once, without waiting for the session to
+  end. A live twin does the same at its next heartbeat, so two live processes
+  with one name take the card from each other at every heartbeat, and each
+  logs `fleet_duplicate_worker_name` for the other (see [Duplicate worker
+  names](#duplicate-worker-names)). Names that differ only in characters
+  outside `[a-zA-Z0-9_-]` share one card in the same way. A key that a
+  session of any other name holds is never taken: the publish fails with
+  `consul registry: the card key of <worker> is held by a session of another worker`.
+- **Withdraw.** At a clean stop the worker destroys its session, which
+  deletes its card. A worker that never published sends nothing. If a twin has
+  taken the card over, the destroy changes nothing. If the destroy fails, the
+  session ends by its time to live.
+- **A card that does not decode** is skipped with `fleet_card_invalid` and the
+  reason, once for that worker name while the name stays listed. The other
+  cards are still listed.
+- **Start.** The provider asks the agent for the cluster's leader
+  (`GET /v1/status/leader`). So `provider_started` means that the agent
+  answered and that the cluster has a leader. It does not mean that the token
+  has the rights (see below).
+
+The address, the token, the datacenter and the key prefix come from the
+connection: `connections.consul.<connection>` (see
+[Configuration](configuration.md#connections)). `fleet.registry.consul` has two
+keys. `mode` is `publish`, which this section describes; `catalog` is reserved
+for a later release, and the load refuses it with `provider: consul`.
+`service_name` belongs to catalog mode and is not used. The client is created
+once, at the first provider start, and the registry and the archive election
+share it when they name the same connection. The worker closes it at shutdown,
+after both providers have stopped (see [Connections](#connections)).
+
+**The agent.** The provider talks to the HTTP API of one Consul agent, with
+`http://` or `https://` in the `address` and the paths `/v1/status/leader`,
+`/v1/session/...` and `/v1/kv/...`. The address is checked when the provider
+starts. Every character must be printable ASCII. The host is a name of
+letters, digits, `.`, `_` and `-` (so an IPv4 address is fine) or an IPv6
+address in brackets without a zone index. A port is optional, 1 to 65535, with
+at most five digits. A path is optional too: segments of letters, digits, `.`,
+`_`, `~` and `-`, none of them exactly `.` or `..`. A user name, a query and a
+fragment are refused. An address that fails the check fails the start with
+`consul connection: the address cannot be parsed`, and a token with a space or
+a non-ASCII character fails it with
+`consul connection: the token cannot be sent in a header`; neither message
+quotes the value. The client follows no redirect, so a `3xx` answer is an
+error. For `https://` and the proxy variables, see
+[Security](security.md#provider-credentials).
+
+A session belongs to the node of the agent that created it. Consul also ends
+the sessions of a node when the node's health check (`serfHealth`) fails,
+whatever their time to live. So when the cluster marks the agent's node as
+failed, the cards of all workers that use that agent leave the list, and the
+workers write them again at the next heartbeat after the node is healthy.
+Point the workers at an agent that stays reachable and healthy, usually the
+agent of their own host.
+
+**The token.** Give the providers a token of their own, with these rights, in
+which `drakkar/` is the `key_prefix` of the connection and a `/`:
+
+```hcl
+key_prefix "drakkar/" { policy = "write" }
+session_prefix "" { policy = "write" }
+```
+
+The leader request needs no right. [Security](security.md#provider-credentials)
+says what these rights allow beyond the providers' needs. A wrong token does
+not show at the start, so look for it at the first publish:
+
+- A token that Consul does not know (`ACL not found`), or one without a right
+  (`Permission denied: token with AccessorID ... lacks permission
+  'session:write' ...`), passes `start`, because the leader request needs no
+  right. The first publish fails with a `403`. A `403` is final: one attempt,
+  no retry, and it counts as a failed operation for the breaker. The
+  `provider_call_failed` line carries the first line of Consul's answer, cut to
+  200 characters, for example
+  `consul: PUT /v1/session/create answered 403: Permission denied: ...`.
+- A token that cannot read the card keys gets an answer that looks like an
+  empty prefix: Consul answers the read with `404` and the header
+  `X-Consul-Results-Filtered-By-Acls: true`. The provider treats an answer
+  with that header as an error, so `list` fails with
+  `consul: GET /v1/kv/drakkar/fleet/workers/ answered with results hidden by the token's rights`
+  and does not show an empty fleet. The workers list keeps its last snapshot,
+  and `drakkar_fleet_registry_snapshot_age_seconds` grows. A token that cannot
+  read a session fails the takeover of a predecessor's card in the same way.
+  With no token at all Consul does not flag the read as hidden, so `list` can
+  read an empty fleet without an error; the failed publish shows the problem.
+- A `datacenter` that Consul does not know makes every request fail with
+  `500` and `No path to datacenter`, the leader request of `start` included. A
+  `500` is transient, so the operation is retried under the
+  [`resilience`](#resilience) block, and it fails with
+  `consul: GET /v1/status/leader answered 500: No path to datacenter`. The
+  breaker opens after `failure_threshold` failed operations, and then one
+  probe goes out after each cooldown. Fix the name; nothing else cures it.
+
+**During an outage.** The client does not retry on its own; the
+[`resilience`](#resilience) block of the registry is the only retry and the
+only time limit. A connect gives up after 5 seconds, and a read or a write
+ends at `timeout_seconds` of the block. A connection that is refused or lost,
+a timeout, and the statuses `429`, `500`, `502`, `503` and `504` are transient
+errors, and they are retried. Any other status is final: a `403` or a `400`,
+for example, ends the operation at once, and it counts as a failed operation
+for the breaker. When operations keep failing, the breaker opens after
+`failure_threshold` failed operations and the provider is skipped until the
+cooldown has passed. The workers list keeps its last snapshot, and
+`drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not wait
+for any of this.
+
+A worker that cannot reach Consul for longer than its session lives drops out
+of the lists of the others, because Consul ends the session and deletes the
+card. When Consul is reachable again, the next probe operation closes the
+breaker. The worker's renew then meets `404`, creates a new session and writes
+the card again. The registry recovers without a restart; nothing needs to be
+reset, because the client opens new connections by itself.
+
 ## The card
 
 A card is a JSON object, at most 4096 bytes:
@@ -551,6 +739,12 @@ rows, so every listed card has an age. The `redis` provider needs none
 either: the script that lists the cards reads the Redis server's `TIME`, and
 the age is that time minus the server's `TIME` at the card's last publish.
 
+The `consul` provider gives an `online` verdict and no age. A card is online
+while a session holds its key and offline when its key has no session. Consul
+ends the session of a worker that stopped renewing, and the card goes with it.
+So `offline_after_seconds` is compared with no age for these cards: it sets the
+time to live of the session (see [`consul`](#consul)).
+
 Each refresh (every `refresh_seconds`, default 15) keeps the age of every
 card at the moment it was listed. The workers list adds the time since that
 refresh, so a peer never looks younger because a refresh is slow or failed.
@@ -571,10 +765,10 @@ its card that are present; see the UI contract for the full row shape.
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
-This release ships the `postgres` and `redis` providers, which read
-`connections.postgres.<name>` and `connections.redis.<name>`; the entry for
-Consul is reserved, and a provider plugin can use any entry (see [Writing a
-provider](#writing-a-provider)).
+This release ships the `postgres`, `redis` and `consul` providers, which read
+`connections.postgres.<name>`, `connections.redis.<name>` and
+`connections.consul.<name>`; a provider plugin can use any entry (see [Writing
+a provider](#writing-a-provider)).
 
 ```yaml
 connections:
@@ -593,13 +787,14 @@ fleet:
 Each `postgres` entry also needs its `dsn`, set from the environment, for
 example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
 `DK_CONNECTIONS__POSTGRES__FLEET_DATABASE__DSN`. A `redis` entry has its
-`url` the same way, for example `DK_CONNECTIONS__REDIS__MAIN__URL`.
+`url` the same way, for example `DK_CONNECTIONS__REDIS__MAIN__URL`, and a
+`consul` entry its `token`, for example `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`.
 
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `history.archive.election.connection` name
-  an entry. The `postgres` and `redis` providers read it; the name `consul`
-  is reserved. `filesystem`, `static` and `none` ignore it, and so does
+  an entry. The `postgres`, `redis` and `consul` providers read it.
+  `filesystem`, `static` and `none` ignore it, and so does
   a plugin with any other name. The config load checks the key by provider name, so a provider
   named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
   connection declared; otherwise the load fails with
@@ -647,7 +842,10 @@ failure) and `40P01` (deadlock). The `redis` providers raise
 `TransientError` for a lost or refused connection and for the server replies
 `BUSY`, `LOADING`, `MASTERDOWN` and `TRYAGAIN`; a client timeout counts as a
 timeout. Every other reply, such as `WRONGPASS`, `NOPERM` or `ERR ...`, ends
-the operation at once. With the defaults one operation takes at
+the operation at once. The `consul` providers raise `TransientError` for a
+lost or refused connection and for the statuses `429`, `500`, `502`, `503`
+and `504`; a client timeout counts as a timeout. Every other status, such as
+`403`, ends the operation at once. With the defaults one operation takes at
 most 3 × 5 s plus the waits of 0.2 s and 0.4 s, which is 15.6 s. The
 registry publishes the next card only after the previous publish ended, so
 keep the longest operation well below `offline_after_seconds`.
@@ -698,7 +896,9 @@ provider that never started gets neither call (both count as `not_started`);
 with the breaker open both are skipped at once. A stuck provider cannot hold
 the shutdown longer than that budget. A card that was not withdrawn stays
 in the store until `prune_after_seconds`, and peers show the worker as
-offline once the card is older than `offline_after_seconds`.
+offline once the card is older than `offline_after_seconds`. With `consul`, the
+session ends by its time to live and Consul deletes the card with it, so the
+card leaves the list by `offline_after_seconds`.
 
 ## Failures
 
@@ -724,6 +924,10 @@ offline once the card is older than `offline_after_seconds`.
 - The `redis` provider awaits its commands on the event loop. The client has
   no read limit of its own: the time limit of an attempt ends a command that
   does not answer, so a paused server holds up only that attempt. A connect
+  gives up after 5 seconds.
+- The `consul` provider awaits its requests on the event loop. The client has
+  no read limit of its own: the time limit of an attempt ends a request that
+  does not answer, so a paused agent holds up only that attempt. A connect
   gives up after 5 seconds.
 - A provider that fails to start is retried; see [Resilience](#resilience).
 - An iteration of a registry loop can raise outside a provider call, for
@@ -945,20 +1149,20 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), or a plugin name. `consul` is [reserved](#providers). |
-| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres` and `redis` providers use. The name `consul` is reserved. |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul), or a plugin name. |
+| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
-| `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. |
-| `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. At least `offline_after_seconds`. |
+| `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. With `consul` it sets the time to live of the worker's session (half of it, at least 10 seconds) and is at most `86400`. |
+| `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. At least `offline_after_seconds`. The `consul` provider does not use it: Consul deletes a card when its session ends. |
 | `fleet.registry.resilience.*` | see [Resilience](#resilience) | Time limit, retries, backoff and breaker for the registry's provider operations. |
 | `fleet.registry.filesystem.dir` | `""` | Card folder; empty means `<shared.dir>/fleet`. |
 | `fleet.registry.static.peers` | `[]` | The `static` peer list: `name`, `cluster`, `url`. |
-| `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of a `consul` provider. |
+| `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of the `consul` provider. `mode` is `publish`; `catalog` is reserved for a later release, and the load refuses it with `provider: consul`. `service_name` belongs to catalog mode and is not used. |
 | `fleet.registry.postgres` | `{}` | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 | `fleet.registry.redis` | `{}` | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
 | `fleet.registry.plugin_options` | `{}` | Options for a provider plugin. |
-| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
+| `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `consul` providers read `connections.consul.*`, the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
 `DK_FLEET__REGISTRY__PROVIDER=static`. The full table with constraints is in

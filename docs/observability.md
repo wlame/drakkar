@@ -234,7 +234,7 @@ The provider log events:
 | `provider_breaker_opened` | warning | A breaker opened (once per opening; a failed probe does not log it again). |
 | `provider_breaker_closed` | info | A probe succeeded and the breaker closed. |
 | `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call. At most once a minute per loop, with `suppressed`. |
-| `recorder_archive_lock_taken_over` | warning | A worker took over the archive lease of a dead archiver. Written by the `filesystem` and `postgres` providers only: the `redis` provider writes no such line, because an expired lease is a key that Redis has deleted and there is no previous holder to name. Fields: `provider` (`filesystem` or `postgres`), `previous_worker`, `previous_instance`, `age_seconds`, and the place of the lease: `folder` for `filesystem`, `scope` (the sanitized cluster name) for `postgres`. |
+| `recorder_archive_lock_taken_over` | warning | A worker took over the archive lease of a dead archiver. Written by the `filesystem` and `postgres` providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server has deleted (Redis by its time to live, Consul with the session that ended) and there is no previous holder to name. Fields: `provider` (`filesystem` or `postgres`), `previous_worker`, `previous_instance`, `age_seconds`, and the place of the lease: `folder` for `filesystem`, `scope` (the sanitized cluster name) for `postgres`. |
 
 #### Webapp
 
@@ -836,10 +836,10 @@ byte-level spec. The short version:
   with the fields `provider` and `reason`: `taken_over`, or `unconfirmed`
   when the election provider could not confirm the lease). This is the
   default `filesystem` election provider; `history.archive.election` selects
-  another one (`postgres` and `redis` are built in), and every worker of a
-  cluster must use the same. With `redis` an expired lease is a deleted key, so
-  no `recorder_archive_lock_taken_over` line is written; the pass that finds the
-  scope free just takes it.
+  another one (`postgres`, `redis` and `consul` are built in), and every worker
+  of a cluster must use the same. With `redis` or `consul` an expired lease is a
+  deleted key, so no `recorder_archive_lock_taken_over` line is written; the
+  pass that finds the scope free just takes it.
   See [Local Databases — The election provider](local-databases.md#the-election-provider).
 - **Sources die last.** A sealed file is deleted only once its archive is
   durably on disk. A file the merge cannot read is renamed to
