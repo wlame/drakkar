@@ -17,7 +17,7 @@ import re
 
 # 0x21 to 0x7E: no space, tab, line break, other control character, DEL or non-ASCII character.
 PRINTABLE_ASCII_RE = re.compile(r'[!-~]*')
-# A host name, or nothing (the client then uses localhost).
+# A host name, or nothing; the caller decides whether an empty host is allowed.
 HOST_NAME_RE = re.compile(r'[A-Za-z0-9._-]*')
 # The characters of an IPv6 address in brackets. No '%': a zone index is decoded differently by each parser.
 IPV6_LITERAL_RE = re.compile(r'[0-9A-Fa-f:.]+')

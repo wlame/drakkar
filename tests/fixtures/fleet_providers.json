@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). Pinned so every implementation emits the same bytes.",
+  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
   "schema_placeholder": "{schema}",
   "ddl": [
     "CREATE SCHEMA IF NOT EXISTS {schema}",
@@ -148,6 +148,120 @@
         "refresh": ["EVAL", "@refresh", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
         "is_held": ["GET", "drakkar:archive-locks:main"],
         "release": ["EVAL", "@release", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\""]
+      }
+    }
+  },
+  "consul": {
+    "placeholders": {"prefix": "{prefix}", "worker": "{worker}", "scope": "{scope}", "session": "{session}", "instance": "{instance}", "token": "{token}"},
+    "paths": {
+      "leader": "/v1/status/leader",
+      "session_create": "/v1/session/create",
+      "session_renew": "/v1/session/renew/{session}",
+      "session_destroy": "/v1/session/destroy/{session}",
+      "session_info": "/v1/session/info/{session}",
+      "registry_card": "/v1/kv/{prefix}/fleet/workers/{worker}",
+      "registry_list": "/v1/kv/{prefix}/fleet/workers/",
+      "election_lock": "/v1/kv/{prefix}/archive-locks/{scope}"
+    },
+    "session_names": {"registry": "drakkar-{worker}-{instance}", "election": "drakkar/archive-lock/{scope}/{token}"},
+    "session_settings": {"Behavior": "delete", "LockDelay": "0s"},
+    "token_header": "X-Consul-Token",
+    "transient_statuses": [429, 500, 502, 503, 504],
+    "connect_timeout_seconds": 5.0,
+    "status_text_limit": 200,
+    "session_id_pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    "ttl": [[60, "30s"], [61, "31s"], [10, "10s"], [19, "10s"], [21, "11s"], [1, "10s"], [7200, "3600s"], [86400, "43200s"]],
+    "messages": {
+      "bad_address": "consul connection: the address cannot be parsed",
+      "bad_token": "consul connection: the token cannot be sent in a header",
+      "no_leader": "consul: the cluster has no leader",
+      "bad_session_id": "consul: the answer carries no valid session id",
+      "card_held": "consul registry: the card key of {worker} is held by a session of another worker",
+      "refresh_before_acquire": "consul election: refresh of a scope this provider has not acquired",
+      "status": "consul: {method} {path} answered {status}: {text}",
+      "status_no_text": "consul: {method} {path} answered {status}"
+    },
+    "address_cases": [
+      {"address": "http://127.0.0.1:8500", "base": "http://127.0.0.1:8500"},
+      {"address": "http://127.0.0.1:8500/", "base": "http://127.0.0.1:8500"},
+      {"address": "HTTPS://consul-1.example.test:8501", "base": "HTTPS://consul-1.example.test:8501"},
+      {"address": "http://[::1]:8500", "base": "http://[::1]:8500"},
+      {"address": "http://consul.example.test/api/consul/", "base": "http://consul.example.test/api/consul"},
+      {"address": "http://127.0.0.1:8500//", "base": "http://127.0.0.1:8500"},
+      {"address": "http://consul.example.test/api//consul", "base": null},
+      {"address": "127.0.0.1:8500", "base": null},
+      {"address": "ftp://consul.example.test", "base": null},
+      {"address": "http://", "base": null},
+      {"address": "http://user:secret@consul.example.test:8500", "base": null},
+      {"address": "http://consul.example.test:8500?dc=a", "base": null},
+      {"address": "http://consul.example.test:8500#top", "base": null},
+      {"address": "http://consul.example.test:0", "base": null},
+      {"address": "http://consul.example.test:65536", "base": null},
+      {"address": "http://consul.example.test:", "base": null},
+      {"address": "http://consul.example.test:008500", "base": null},
+      {"address": "http://consul.example.test/a b", "base": null},
+      {"address": "http://consul.example.test/%2e", "base": null},
+      {"address": "http://consul.example.test:8500\n", "base": null},
+      {"address": "http://[fe80::1%25eth0]:8500", "base": null},
+      {"address": "http://[127.0.0.1]:8500", "base": null},
+      {"address": "unix:///var/run/consul.sock", "base": null}
+    ],
+    "token_cases": [["", true], ["6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90", true], ["a b", false], ["tok\n", false], ["tök", false]],
+    "own_session_names": [
+      {"member": "w", "name": "drakkar-w-0123456789abcdef", "own": true},
+      {"member": "w", "name": "drakkar-w-1-0123456789abcdef", "own": false},
+      {"member": "w-1", "name": "drakkar-w-1-0123456789abcdef", "own": true},
+      {"member": "w", "name": "drakkar-w-0123456789ABCDEF", "own": false},
+      {"member": "w", "name": "drakkar-w-0123456789abcde", "own": false},
+      {"member": "w", "name": "drakkar-w0123456789abcdef", "own": false},
+      {"member": "archive-lock", "name": "drakkar/archive-lock/main/5f0c1d2e3a4b6978", "own": false}
+    ],
+    "example": {
+      "inputs": {
+        "address": "http://127.0.0.1:8500", "datacenter": "dc1", "prefix": "drakkar",
+        "card": {"schema": 1, "worker": "search-worker-3", "instance": "9c41e0b27fd34a1e", "cluster": "main", "url": "http://10.0.0.3:8080/", "state": "running"},
+        "offline_after_seconds": 60,
+        "scope": "main", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
+        "acquired_at": "2026-10-14T02:00:00.125000Z",
+        "sessions": {"first": "00000000-0000-4000-8000-000000000001", "second": "00000000-0000-4000-8000-000000000002", "predecessor": "00000000-0000-4000-8000-000000000009"},
+        "predecessor_name": "drakkar-search-worker-3-0123456789abcdef"
+      },
+      "requests": {
+        "start": [["GET", "/v1/status/leader", [["dc", "dc1"]], null]],
+        "first_publish": [
+          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar-search-worker-3-9c41e0b27fd34a1e\",\"TTL\":\"30s\"}"],
+          ["PUT", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "next_publish": [
+          ["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null],
+          ["PUT", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "publish_after_the_session_ended": [
+          ["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null],
+          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar-search-worker-3-9c41e0b27fd34a1e\",\"TTL\":\"30s\"}"],
+          ["PUT", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["acquire", "00000000-0000-4000-8000-000000000002"], ["dc", "dc1"]], "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "publish_over_the_predecessor": [
+          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar-search-worker-3-9c41e0b27fd34a1e\",\"TTL\":\"30s\"}"],
+          ["PUT", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}"],
+          ["GET", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["dc", "dc1"]], null],
+          ["GET", "/v1/session/info/00000000-0000-4000-8000-000000000009", [["dc", "dc1"]], null],
+          ["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000009", [["dc", "dc1"]], null],
+          ["PUT", "/v1/kv/drakkar/fleet/workers/search-worker-3", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "list": [["GET", "/v1/kv/drakkar/fleet/workers/", [["dc", "dc1"], ["recurse", "true"]], null]],
+        "withdraw": [["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]],
+        "acquire": [
+          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar/archive-lock/main/5f0c1d2e3a4b6978\",\"TTL\":\"3600s\"}"],
+          ["PUT", "/v1/kv/drakkar/archive-locks/main", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "acquire_by_the_holder": [
+          ["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null],
+          ["PUT", "/v1/kv/drakkar/archive-locks/main", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
+        ],
+        "refresh": [["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]],
+        "is_held": [["GET", "/v1/kv/drakkar/archive-locks/main", [["dc", "dc1"]], null]],
+        "release": [["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]]
       }
     }
   }
