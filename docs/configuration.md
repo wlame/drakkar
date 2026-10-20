@@ -1274,10 +1274,12 @@ lease is a key that a session holds. The session's time to live is half of
 ends a session at most twice its time to live after the last renew.
 
 The `address` and the `token` are checked when a provider starts. The address
-is printable ASCII, with the scheme `http` or `https` (in any case), a host and
-an optional port as for the [Redis URL](fleet.md#redis), and an optional path
+is printable ASCII, with the scheme `http` or `https` (in any case), a host
+(a name of letters, digits, `.`, `_` and `-`, or an IPv6 address in brackets,
+as in the [Redis URL](fleet.md#redis)), an optional port, and an optional path
 of segments of letters, digits, `.`, `_`, `~` and `-`, none of them `.` or `..`,
-with no user name, query or fragment. An address that fails the check fails the
+with no user name, query or fragment. Unlike the Redis URL, the address refuses
+an empty host and a port with no digits (a `:` at the end of the host). An address that fails the check fails the
 start with `consul connection: the address cannot be parsed`, and a `token`
 that is neither empty nor printable ASCII without a space fails it with
 `consul connection: the token cannot be sent in a header`. Neither message

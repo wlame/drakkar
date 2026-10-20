@@ -565,10 +565,11 @@ after both providers have stopped (see [Connections](#connections)).
 `/v1/session/...` and `/v1/kv/...`. The address is checked when the provider
 starts. Every character must be printable ASCII. The host is a name of
 letters, digits, `.`, `_` and `-` (so an IPv4 address is fine) or an IPv6
-address in brackets without a zone index. A port is optional, 1 to 65535, with
-at most five digits. A path is optional too: segments of letters, digits, `.`,
-`_`, `~` and `-`, none of them exactly `.` or `..`. A user name, a query and a
-fragment are refused. An address that fails the check fails the start with
+address in brackets without a zone index. An empty host is refused. A port is
+optional, 1 to 65535, with at most five digits; a `:` with no port digits is
+refused. A path is optional too: segments of letters, digits, `.`, `_`, `~` and
+`-`, none of them exactly `.` or `..`. A user name, a query and a fragment are
+refused. An address that fails the check fails the start with
 `consul connection: the address cannot be parsed`, and a token with a space or
 a non-ASCII character fails it with
 `consul connection: the token cannot be sent in a header`; neither message

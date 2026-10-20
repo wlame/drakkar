@@ -258,15 +258,11 @@ below applies to the entries you declare and to any provider that uses them.
   - `session_prefix ""` matches every node, so the token can create, renew,
     read and destroy **any session** of the datacenter, also the sessions of
     other applications. Destroying a session that holds a lock breaks that
-    application's lock. The providers' own destroy is limited to sessions with
-    names of the shape `drakkar-<worker>-<instance>` (a worker's own
-    predecessor or twin); the token is not.
-  - For workers that all use one agent, `session "<node name of the agent>" {
-    policy = "write" }` limits the token to the sessions of that node. It does
-    not work when workers use different agents: a worker that takes over the
-    card of a predecessor from another node needs `session:write` on that
-    node, and a worker that moved to another node needs it there. The error of
-    a missing right is final and ends the operation at once.
+    application's lock. Each provider destroys its own sessions: the
+    registry's withdraw, the election's release, and the new session after a
+    refused acquire. In a takeover the registry destroys only a session named
+    for the same worker (`drakkar-<worker>-<instance>`); it never destroys a
+    session of another name. The token has no such limit.
 
   The token travels only in the `X-Consul-Token` header, and only when it is
   not empty. The providers never write it into a log line, a metric label, a
