@@ -382,8 +382,8 @@ host of the URL. This cannot be switched off. Put a private certificate
 authority into that store; the environment variables `SSL_CERT_FILE` (a file
 of certificates) and `SSL_CERT_DIR` (a directory of them) replace the default
 locations of the store. The database number is the path, for example `/3`.
-A path that is not empty, `/` or `/` and one number, such as `/three` or
-`/0/extra`, does not parse. A URL with query options (`?...`) is
+The path may be empty, `/`, or `/` followed by the digits 0-9. Any other
+path, such as `/three`, `/0/extra`, `/0/` or `/+1`, does not parse. A URL with query options (`?...`) is
 refused when the provider starts, with
 `redis connection: the url cannot carry query options`. A URL that does not
 parse fails the start with `redis connection: the url cannot be parsed`.

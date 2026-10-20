@@ -115,7 +115,7 @@ services:
     ports:
       - "6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "--user", "drakkar", "--pass", "drakkar", "--no-auth-warning", "ping"]
+      test: ["CMD-SHELL", "redis-cli --user drakkar --pass drakkar --no-auth-warning ping | grep -q PONG"]
       interval: 3s
       timeout: 3s
       retries: 10

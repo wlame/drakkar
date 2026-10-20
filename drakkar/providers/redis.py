@@ -29,9 +29,11 @@ client library has.
 The URL of a connection cannot carry query options (``?...``): the client
 applies them after its own settings, and the options of a URL are not the same
 for every implementation, so one URL could behave differently in each. For the
-same reason the path of a ``redis://`` or ``rediss://`` URL must be empty,
-``/`` or ``/`` and a database number: the client would read any other path as
-database 0.
+same reason the raw path of a ``redis://`` or ``rediss://`` URL must be empty,
+``/``, or ``/`` and ASCII digits. The client strips every ``/`` from the path
+and reads the rest as a number, so ``/0/extra`` falls back to database 0 and
+``/1/2`` becomes database 12. The rule keeps only the paths whose meaning is
+plain.
 """
 
 import json
@@ -156,7 +158,8 @@ BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
 URL_QUERY_MESSAGE = 'redis connection: the url cannot carry query options'
 # The schemes whose URL path is the database number (a unix:// path is the socket).
 DATABASE_PATH_SCHEMES = ('redis', 'rediss')
-# Empty, '/', or '/' and ASCII digits. The client would read any other path as database 0.
+# Empty, '/', or '/' and ASCII digits, matched on the raw path. The client strips every '/' and
+# reads the rest as a number ('/0/extra' falls back to 0, '/1/2' is 12), so only these paths are plain.
 DATABASE_PATH_RE = re.compile(r'(/[0-9]*)?')
 
 
@@ -260,9 +263,9 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
     it is parsed: the client applies the options of a URL query after its own
     settings, so a query such as ``socket_timeout`` would undo the ones set here.
     A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``, and so does
-    a ``redis://`` or ``rediss://`` URL whose path is not empty, ``/`` or ``/``
-    and a database number (the client would read ``/three`` or ``/0/extra`` as
-    database 0). Both errors have no cause and quote nothing, because the
+    a ``redis://`` or ``rediss://`` URL whose raw path is not empty, ``/`` or
+    ``/`` and ASCII digits (see the module docstring). Both errors have no
+    cause and quote nothing, because the
     client's own message can quote the URL.
     """
     from redis.asyncio import Redis
@@ -288,8 +291,9 @@ def _check_database_path(url: str) -> None:
     """Raise ``ValueError`` when the path of a ``redis://`` or ``rediss://`` URL is not a database number.
 
     The path may be empty, ``/``, or ``/`` and ASCII digits. ``urlsplit`` keeps
-    a ``;`` in the path, so ``/0;x`` is refused too. The caller replaces the
-    error with ``BAD_URL_MESSAGE``, so the text here never reaches a log.
+    a ``;`` in the path and does not percent-decode it, so ``/0;x`` and ``/%30``
+    are refused too. The caller replaces the error with ``BAD_URL_MESSAGE``, so
+    the text here never reaches a log.
     """
     parts = urlsplit(url)
     if parts.scheme in DATABASE_PATH_SCHEMES and DATABASE_PATH_RE.fullmatch(parts.path) is None:

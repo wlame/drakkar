@@ -104,8 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supported. A provider refuses to start when the URL of its connection has
   query options (`?...`). The error is
   `redis connection: the url cannot carry query options`. A URL whose path
-  is not a database number, such as `/three`, fails with
-  `redis connection: the url cannot be parsed`. With `rediss://` the client
+  is not empty, `/`, or `/` followed by the digits 0-9, such as `/three` or
+  `/0/extra`, fails with `redis connection: the url cannot be parsed`. With `rediss://` the client
   always verifies the certificate and the host name of the server. The
   providers need version 7.2 or later of the `redis` package, because they
   read the reply code that the client sets from 7.2 on (see Breaking).

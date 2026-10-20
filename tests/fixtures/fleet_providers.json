@@ -64,7 +64,14 @@
       {"url": "http://x", "error": "bad_url"},
       {"url": "rediss://u:secret@h:6380/1", "error": null},
       {"url": "redis://h:6379/three", "error": "bad_url"},
-      {"url": "redis://h:6379/0/extra", "error": "bad_url"}
+      {"url": "redis://h:6379/0/extra", "error": "bad_url"},
+      {"url": "redis://h:6379/0/", "error": "bad_url"},
+      {"url": "redis://h:6379//", "error": "bad_url"},
+      {"url": "redis://h:6379/%30", "error": "bad_url"},
+      {"url": "redis://h:6379/+1", "error": "bad_url"},
+      {"url": "redis://h:6379/-1", "error": "bad_url"},
+      {"url": "redis://h:6379/", "error": null},
+      {"url": "redis://h:6379", "error": null}
     ],
     "key_examples": [
       {"name": "registry_index", "prefix": "drakkar:", "worker": "", "scope": "", "key": "drakkar:fleet:workers"},
