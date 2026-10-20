@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
+  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the header that marks an answer whose results the token's rights hid, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
   "schema_placeholder": "{schema}",
   "ddl": [
     "CREATE SCHEMA IF NOT EXISTS {schema}",
@@ -166,6 +166,7 @@
     "session_names": {"registry": "drakkar-{worker}-{instance}", "election": "drakkar/archive-lock/{scope}/{token}"},
     "session_settings": {"Behavior": "delete", "LockDelay": "0s"},
     "token_header": "X-Consul-Token",
+    "filtered_header": "X-Consul-Results-Filtered-By-Acls",
     "transient_statuses": [429, 500, 502, 503, 504],
     "connect_timeout_seconds": 5.0,
     "status_text_limit": 200,
@@ -179,7 +180,9 @@
       "card_held": "consul registry: the card key of {worker} is held by a session of another worker",
       "refresh_before_acquire": "consul election: refresh of a scope this provider has not acquired",
       "status": "consul: {method} {path} answered {status}: {text}",
-      "status_no_text": "consul: {method} {path} answered {status}"
+      "status_no_text": "consul: {method} {path} answered {status}",
+      "filtered": "consul: {method} {path} answered with results hidden by the token's rights",
+      "unreadable": "consul: {method} {path} answered {status} with an answer that cannot be read"
     },
     "address_cases": [
       {"address": "http://127.0.0.1:8500", "base": "http://127.0.0.1:8500"},
@@ -200,6 +203,8 @@
       {"address": "http://consul.example.test:0", "base": null},
       {"address": "http://consul.example.test:65536", "base": null},
       {"address": "http://consul.example.test:", "base": null},
+      {"address": "http://:8500", "base": null},
+      {"address": "http://[::1]:", "base": null},
       {"address": "http://consul.example.test:008500", "base": null},
       {"address": "http://consul.example.test/a b", "base": null},
       {"address": "http://consul.example.test/%2e", "base": null},

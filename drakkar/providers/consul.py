@@ -76,6 +76,9 @@ SESSION_NAMES: dict[str, str] = {
 SESSION_SETTINGS: dict[str, str] = {'Behavior': 'delete', 'LockDelay': '0s'}
 
 TOKEN_HEADER = 'X-Consul-Token'
+# The agent sets this header to 'true' on an answer from which the token's rights hid results.
+FILTERED_HEADER = 'X-Consul-Results-Filtered-By-Acls'
+FILTERED_HEADER_VALUE = 'true'
 
 # A rate limit, a server error (a raft apply that failed, a session that vanished under a request)
 # and the three answers of a proxy or a server that is not ready. Every other status is final.
@@ -109,6 +112,8 @@ CARD_HELD_MESSAGE = 'consul registry: the card key of {worker} is held by a sess
 REFRESH_BEFORE_ACQUIRE_MESSAGE = 'consul election: refresh of a scope this provider has not acquired'
 STATUS_MESSAGE = 'consul: {method} {path} answered {status}: {text}'
 STATUS_NO_TEXT_MESSAGE = 'consul: {method} {path} answered {status}'
+FILTERED_MESSAGE = "consul: {method} {path} answered with results hidden by the token's rights"
+UNREADABLE_MESSAGE = 'consul: {method} {path} answered {status} with an answer that cannot be read'
 
 
 class ConsulError(Exception):
@@ -135,15 +140,25 @@ def path(name: str, *, prefix: str, worker: str = '', scope: str = '', session: 
     """Return the path of ``name`` (a key of :data:`PATHS`) with the placeholders replaced.
 
     None of the values can contain a brace (the config loader, the sanitizers
-    and :data:`SESSION_ID_RE` see to that), so a plain replace is safe.
+    and :data:`SESSION_ID_RE` see to that), so a plain replace is safe. A
+    placeholder of the template with an empty value raises ``ValueError``:
+    a card path without a worker would otherwise be the list path.
     """
-    return (
-        PATHS[name]
-        .replace(PREFIX_PLACEHOLDER, prefix)
-        .replace(WORKER_PLACEHOLDER, worker)
-        .replace(SCOPE_PLACEHOLDER, scope)
-        .replace(SESSION_PLACEHOLDER, session)
-    )
+    template = PATHS[name]
+    values = {
+        PREFIX_PLACEHOLDER: prefix,
+        WORKER_PLACEHOLDER: worker,
+        SCOPE_PLACEHOLDER: scope,
+        SESSION_PLACEHOLDER: session,
+    }
+    rendered = template
+    for placeholder, value in values.items():
+        if placeholder not in template:
+            continue
+        if not value:
+            raise ValueError(f'the consul path {name} needs a value for {placeholder}')
+        rendered = rendered.replace(placeholder, value)
+    return rendered
 
 
 def session_ttl(seconds: float) -> str:
@@ -318,8 +333,12 @@ async def request(
     ``dc`` is one of them when the client has a datacenter. The token travels
     in :data:`TOKEN_HEADER` when it is not empty. ``body`` is sent as UTF-8.
 
-    A status outside ``answers`` raises :func:`status_error`; a transport error
-    leaves as :func:`classify` maps it.
+    An answer that carries :data:`FILTERED_HEADER` with the value ``true`` (the
+    header name in any letter case) raises ``ConsulError(FILTERED_MESSAGE)``,
+    whatever its status: the token's rights hid results, and an empty answer
+    must not pass for an empty fleet or a session that ended. Then a status
+    outside ``answers`` raises :func:`status_error`. A transport error leaves
+    as :func:`classify` maps it.
     """
     pairs = [*query, ('dc', client.datacenter)] if client.datacenter else list(query)
     url = client.base + path
@@ -331,17 +350,90 @@ async def request(
         response = await client.http.request(method, url, content=content, headers=headers)
     except httpx.TransportError as exc:
         raise classify(exc) from exc
+    # Header names are matched in any letter case by the HTTP library.
+    if response.headers.get(FILTERED_HEADER) == FILTERED_HEADER_VALUE:
+        raise ConsulError(FILTERED_MESSAGE.format(method=method, path=path))
     if response.status_code not in answers:
         raise status_error(method, path, response.status_code, response.content)
     return response.status_code, response.content
 
 
-def _json_or_none(answer: bytes) -> Any:
-    """Return the JSON value of ``answer``, or ``None`` when it is not JSON."""
+def _read_answer[T](answer: bytes, reader: Callable[[Any], T], *, method: str, path: str, status: int) -> T:
+    """Return ``reader`` applied to the JSON value of ``answer``.
+
+    An answer that is not JSON, or whose shape ``reader`` refuses (it raises
+    ``TypeError``, ``KeyError``, ``IndexError`` or ``ValueError``), raises
+    ``ConsulError(UNREADABLE_MESSAGE)`` naming the request, never the parser's
+    own error.
+    """
     try:
-        return json.loads(answer)
-    except ValueError:
-        return None
+        return reader(json.loads(answer))
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        raise ConsulError(UNREADABLE_MESSAGE.format(method=method, path=path, status=status)) from exc
+
+
+async def _ask[T](
+    client: ConsulClient,
+    method: str,
+    path: str,
+    reader: Callable[[Any], T],
+    *,
+    query: Sequence[tuple[str, str]] = (),
+    body: str | None = None,
+) -> T:
+    """Send a request that must answer ``200`` and return ``reader`` of its answer (see :func:`_read_answer`)."""
+    status, answer = await request(client, method, path, query=query, body=body)
+    return _read_answer(answer, reader, method=method, path=path, status=status)
+
+
+def _string(value: Any) -> str:
+    """Return ``value`` when it is a JSON string."""
+    if not isinstance(value, str):
+        raise TypeError('not a string')
+    return value
+
+
+def _flag(value: Any) -> bool:
+    """Return ``value`` when it is a JSON boolean."""
+    if not isinstance(value, bool):
+        raise TypeError('not a boolean')
+    return value
+
+
+def _objects(value: Any) -> list[dict[str, Any]]:
+    """Return ``value`` when it is a JSON list of objects."""
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise TypeError('not a list of objects')
+    return value
+
+
+def _created_id(value: Any) -> Any:
+    """Return the ``ID`` of a session create's answer, an object; the id is checked by :func:`_session_id`."""
+    if not isinstance(value, dict):
+        raise TypeError('not an object')
+    return value['ID']
+
+
+def _first_session_name(value: Any) -> str | None:
+    """Return the ``Name`` of the first session of an ``info`` answer, or ``None`` for ``[]``."""
+    sessions = _objects(value)
+    return _string(sessions[0]['Name']) if sessions else None
+
+
+def _decoded_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return a KV entry with its base64 ``Value`` decoded to bytes; a null value is ``b''``."""
+    value = entry.get('Value')
+    return {**entry, 'Value': b'' if value is None else base64.b64decode(_string(value), validate=True)}
+
+
+def _entries(value: Any) -> list[dict[str, Any]]:
+    """Return the KV entries of a read's answer, each decoded."""
+    return [_decoded_entry(entry) for entry in _objects(value)]
+
+
+def _first_entry(value: Any) -> dict[str, Any]:
+    """Return the one KV entry of a single-key read's answer."""
+    return _entries(value)[0]
 
 
 def _session_id(value: object) -> str:
@@ -351,35 +443,27 @@ def _session_id(value: object) -> str:
     return value
 
 
-def _decoded_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Return a KV entry with its base64 ``Value`` decoded to bytes; a null value is ``b''``."""
-    value = entry.get('Value')
-    return {**entry, 'Value': b'' if value is None else base64.b64decode(value, validate=True)}
-
-
 async def check_leader(client: ConsulClient) -> None:
     """Raise ``TransientError(NO_LEADER_MESSAGE)`` unless the agent names a leader of its cluster.
 
     The leader request needs no ACL right, so it says the agent answers and the
-    cluster can write; it says nothing about the rights of the token.
+    cluster can write; it says nothing about the rights of the token. An answer
+    that is not a JSON string is unreadable (:data:`UNREADABLE_MESSAGE`).
     """
-    _, answer = await request(client, 'GET', PATHS['leader'])
-    leader = _json_or_none(answer)
-    if not isinstance(leader, str) or not leader:
+    if not await _ask(client, 'GET', PATHS['leader'], _string):
         raise TransientError(NO_LEADER_MESSAGE)
 
 
 async def create_session(client: ConsulClient, name: str, limit_seconds: float) -> str:
     """Create a session named ``name`` whose TTL stands for ``limit_seconds``; return its id.
 
-    An answer without an id that matches :data:`SESSION_ID_RE` raises
-    ``ConsulError(BAD_SESSION_ID_MESSAGE)``: the id goes into later paths.
+    An answer that is not an object with an ``ID`` is unreadable
+    (:data:`UNREADABLE_MESSAGE`); an ``ID`` that does not match
+    :data:`SESSION_ID_RE` raises ``ConsulError(BAD_SESSION_ID_MESSAGE)``,
+    because the id goes into later paths.
     """
-    _, answer = await request(
-        client, 'PUT', PATHS['session_create'], body=session_body(name, session_ttl(limit_seconds))
-    )
-    created = _json_or_none(answer)
-    return _session_id(created.get('ID') if isinstance(created, dict) else None)
+    body = session_body(name, session_ttl(limit_seconds))
+    return _session_id(await _ask(client, 'PUT', PATHS['session_create'], _created_id, body=body))
 
 
 async def renew_session(client: ConsulClient, session: str) -> bool:
@@ -397,9 +481,7 @@ async def destroy_session(client: ConsulClient, session: str) -> None:
 
 async def session_name(client: ConsulClient, session: str) -> str | None:
     """Return the name of ``session``, or ``None`` when the agent no longer knows it (``200 []``)."""
-    _, answer = await request(client, 'GET', path('session_info', prefix='', session=_session_id(session)))
-    sessions = json.loads(answer)
-    return sessions[0]['Name'] if sessions else None
+    return await _ask(client, 'GET', path('session_info', prefix='', session=_session_id(session)), _first_session_name)
 
 
 async def read_key(client: ConsulClient, key_path: str) -> dict[str, Any] | None:
@@ -410,7 +492,7 @@ async def read_key(client: ConsulClient, key_path: str) -> dict[str, Any] | None
     status, answer = await request(client, 'GET', key_path, answers=(200, 404))
     if status == 404:
         return None
-    return _decoded_entry(json.loads(answer)[0])
+    return _read_answer(answer, _first_entry, method='GET', path=key_path, status=status)
 
 
 async def read_prefix(client: ConsulClient, prefix_path: str) -> list[dict[str, Any]]:
@@ -421,7 +503,7 @@ async def read_prefix(client: ConsulClient, prefix_path: str) -> list[dict[str, 
     status, answer = await request(client, 'GET', prefix_path, query=(('recurse', 'true'),), answers=(200, 404))
     if status == 404:
         return []
-    return [_decoded_entry(entry) for entry in json.loads(answer)]
+    return _read_answer(answer, _entries, method='GET', path=prefix_path, status=status)
 
 
 async def acquire_key(client: ConsulClient, key_path: str, session: str, body: str) -> bool:
@@ -430,8 +512,7 @@ async def acquire_key(client: ConsulClient, key_path: str, session: str, body: s
     The session that already holds the key gets ``True`` again and replaces the
     value. A session the agent does not know answers ``500``, a ``TransientError``.
     """
-    _, answer = await request(client, 'PUT', key_path, query=(('acquire', _session_id(session)),), body=body)
-    return json.loads(answer) is True
+    return await _ask(client, 'PUT', key_path, _flag, query=(('acquire', _session_id(session)),), body=body)
 
 
 async def resolve_client(

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpcore
 import httpx
 import pytest
 
@@ -24,6 +25,8 @@ from drakkar.providers.consul import (
     CONNECT_TIMEOUT_SECONDS,
     CONSUL_PROVIDER,
     DEFAULT_KEY_PREFIX,
+    FILTERED_HEADER,
+    FILTERED_MESSAGE,
     INSTANCE_PLACEHOLDER,
     NO_LEADER_MESSAGE,
     PATHS,
@@ -40,6 +43,7 @@ from drakkar.providers.consul import (
     TOKEN_HEADER,
     TOKEN_PLACEHOLDER,
     TRANSIENT_STATUSES,
+    UNREADABLE_MESSAGE,
     WORKER_PLACEHOLDER,
     ConsulClient,
     ConsulError,
@@ -122,11 +126,11 @@ def example_election_body() -> str:
     return session_body(name, session_ttl(INPUTS['lease_seconds']))
 
 
-def answering(status: int, content: bytes) -> ConsulClient:
+def answering(status: int, content: bytes, headers: dict[str, str] | None = None) -> ConsulClient:
     """A client whose every request gets the same answer."""
 
     async def answer(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, content=content)
+        return httpx.Response(status, content=content, headers=headers)
 
     return ConsulClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(answer)),
@@ -149,7 +153,29 @@ def test_paths_session_names_and_settings_match_the_fixture():
     assert FIXTURE['session_names'] == SESSION_NAMES
     assert FIXTURE['session_settings'] == SESSION_SETTINGS
     assert FIXTURE['token_header'] == TOKEN_HEADER
+    assert FIXTURE['filtered_header'] == FILTERED_HEADER
     assert FIXTURE['session_id_pattern'] == SESSION_ID_RE.pattern
+
+
+@pytest.mark.parametrize(
+    ('name', 'values'),
+    [
+        ('registry_card', {'prefix': 'drakkar'}),
+        ('registry_card', {'worker': 'w'}),
+        ('election_lock', {'prefix': 'drakkar'}),
+        ('session_renew', {}),
+    ],
+)
+def test_path_refuses_a_placeholder_without_a_value(name, values):
+    # Without the check, a card path with no worker would be the list path.
+    with pytest.raises(ValueError, match=f'the consul path {name} needs a value for'):
+        path(name, **{'prefix': '', **values})
+
+
+def test_path_needs_no_value_for_a_placeholder_its_template_does_not_have():
+    assert path('registry_list', prefix='drakkar') == '/v1/kv/drakkar/fleet/workers/'
+    assert path('session_info', prefix='', session=FIRST) == f'/v1/session/info/{FIRST}'
+    assert path('leader', prefix='') == '/v1/status/leader'
 
 
 def test_statuses_timeouts_and_messages_match_the_fixture():
@@ -165,6 +191,8 @@ def test_statuses_timeouts_and_messages_match_the_fixture():
         'refresh_before_acquire': REFRESH_BEFORE_ACQUIRE_MESSAGE,
         'status': STATUS_MESSAGE,
         'status_no_text': STATUS_NO_TEXT_MESSAGE,
+        'filtered': FILTERED_MESSAGE,
+        'unreadable': UNREADABLE_MESSAGE,
     }
 
 
@@ -361,6 +389,25 @@ async def test_open_client_follows_no_redirect_and_bounds_only_the_connect():
     assert client.http.is_closed
 
 
+async def test_open_client_transports_make_no_retries(monkeypatch):
+    # httpx keeps the retry count on each transport's connection pool and has no public
+    # accessor for it. A proxy variable makes httpx add a proxy transport per scheme;
+    # those must not retry either. Nothing connects, so the proxy host is never looked up.
+    monkeypatch.setenv('HTTP_PROXY', 'http://proxy.example.test:3128')
+    monkeypatch.setenv('HTTPS_PROXY', 'http://proxy.example.test:3128')
+    client = await open_client(ConsulConnectionConfig(address='http://consul.example.test:8500'))
+
+    transports = [client.http._transport, *(t for t in client.http._mounts.values() if t is not None)]
+
+    assert len(transports) == 3
+    for transport in transports:
+        assert isinstance(transport, httpx.AsyncHTTPTransport)
+        pool = transport._pool
+        assert isinstance(pool, httpcore.AsyncConnectionPool)
+        assert pool._retries == 0
+    await close_client(client)
+
+
 async def test_open_client_keeps_the_token_and_the_datacenter():
     settings = ConsulConnectionConfig(
         address='https://consul.example.test:8501/', token=CONFIGURED_TOKEN, datacenter='dc1'
@@ -444,6 +491,7 @@ async def test_a_transient_status_raises_transient_error(status, fake):
 
 async def test_a_forbidden_answer_is_final_and_names_no_token(fake):
     fake.token = CONFIGURED_TOKEN
+    fake.tokens_without_rights.add(WRONG_TOKEN)
     client = fake_client(fake, token=WRONG_TOKEN)
     # A long key makes the server's text longer than the limit.
     key_path = path('registry_card', prefix='drakkar', worker='w' * 150)
@@ -459,6 +507,76 @@ async def test_a_forbidden_answer_is_final_and_names_no_token(fake):
     assert text.startswith(head + 'Permission denied: token with AccessorID ')
     assert len(text) == len(head) + STATUS_TEXT_LIMIT
     assert fake.seen[0].token == WRONG_TOKEN
+
+
+async def test_an_unknown_token_is_final_and_named_nowhere(fake):
+    fake.token = CONFIGURED_TOKEN
+
+    with pytest.raises(ConsulError) as info:
+        await read_prefix(fake_client(fake, token=WRONG_TOKEN), LIST_PATH)
+
+    assert str(info.value) == f'consul: GET {LIST_PATH} answered 403: ACL not found'
+    assert not isinstance(info.value, TransientError)
+
+
+async def holder_of_one_card(fake: FakeConsul) -> str:
+    """Publish one card with the full-rights token of ``fake``; return its session."""
+    client = fake_client(fake, token=CONFIGURED_TOKEN)
+    session = await create_session(client, 'drakkar-w-0123456789abcdef', 60)
+    await acquire_key(client, CARD_PATH, session, 'card')
+    return session
+
+
+async def test_a_filtered_recursive_read_raises_the_final_error(fake):
+    fake.token = CONFIGURED_TOKEN
+    fake.tokens_without_rights.add(WRONG_TOKEN)
+    await holder_of_one_card(fake)
+
+    with pytest.raises(ConsulError) as info:
+        await read_prefix(fake_client(fake, token=WRONG_TOKEN), LIST_PATH)
+
+    assert str(info.value) == f"consul: GET {LIST_PATH} answered with results hidden by the token's rights"
+    assert not isinstance(info.value, TransientError)
+
+
+async def test_a_filtered_session_info_raises_the_final_error(fake):
+    fake.token = CONFIGURED_TOKEN
+    fake.tokens_without_rights.add(WRONG_TOKEN)
+    session = await holder_of_one_card(fake)
+
+    with pytest.raises(ConsulError) as info:
+        await session_name(fake_client(fake, token=WRONG_TOKEN), session)
+
+    assert str(info.value) == FILTERED_MESSAGE.format(method='GET', path=f'/v1/session/info/{session}')
+
+
+@pytest.mark.parametrize('name', [FILTERED_HEADER, FILTERED_HEADER.lower(), FILTERED_HEADER.upper()])
+@pytest.mark.parametrize('status', [200, 404, 500])
+async def test_the_filtered_header_is_read_in_any_letter_case_and_before_the_status(name, status):
+    with pytest.raises(ConsulError) as info:
+        await request(answering(status, b'[]', headers={name: 'true'}), 'GET', LIST_PATH, answers=(200, 404))
+
+    assert str(info.value) == FILTERED_MESSAGE.format(method='GET', path=LIST_PATH)
+
+
+async def test_a_filtered_header_that_is_not_true_changes_nothing():
+    client = answering(200, b'[]', headers={FILTERED_HEADER: 'false'})
+
+    assert await request(client, 'GET', LIST_PATH) == (200, b'[]')
+
+
+async def test_an_anonymous_request_reads_hidden_results_as_absent_ones_like_the_recorded_agent(fake):
+    fake.token = CONFIGURED_TOKEN
+    session = await holder_of_one_card(fake)
+    anonymous = fake_client(fake)
+
+    # The recorded agent hid these results from the anonymous token without the header.
+    assert await read_prefix(anonymous, LIST_PATH) == []
+    assert await session_name(anonymous, session) is None
+    with pytest.raises(ConsulError, match="anonymous token lacks permission 'key:read'"):
+        await read_key(anonymous, CARD_PATH)
+    with pytest.raises(ConsulError, match="anonymous token lacks permission 'session:write'"):
+        await renew_session(anonymous, session)
 
 
 async def test_a_redirect_is_a_final_status():
@@ -556,12 +674,6 @@ async def test_check_leader_raises_transient_without_a_leader(fake):
     assert str(info.value) == NO_LEADER_MESSAGE
 
 
-@pytest.mark.parametrize('answer', [b'null', b'7', b'not json'])
-async def test_check_leader_reads_an_answer_that_is_no_address_as_no_leader(answer):
-    with pytest.raises(TransientError, match=NO_LEADER_MESSAGE):
-        await check_leader(answering(200, answer))
-
-
 async def test_create_session_sends_the_session_body_and_returns_the_id(fake):
     client = fake_client(fake)
 
@@ -579,9 +691,7 @@ async def test_create_session_sends_the_session_body_and_returns_the_id(fake):
         b'{"ID": "2F2DF444-95C6-E646-5691-7B3B719583E9"}',
         b'{"ID": "2f2df444-95c6-e646-5691-7b3b719583e9\\n"}',
         b'{"ID": 7}',
-        b'{}',
-        b'[]',
-        b'not json',
+        b'{"ID": null}',
     ],
 )
 async def test_create_session_refuses_an_id_that_is_not_a_uuid(answer):
@@ -589,6 +699,42 @@ async def test_create_session_refuses_an_id_that_is_not_a_uuid(answer):
         await create_session(answering(200, answer), 'drakkar-w-0123456789abcdef', 60)
 
     assert str(info.value) == BAD_SESSION_ID_MESSAGE
+
+
+SESSION_INFO_PATH = f'/v1/session/info/{FIRST}'
+
+
+@pytest.mark.parametrize(
+    ('call', 'answer', 'method', 'request_path'),
+    [
+        (check_leader, b'not json', 'GET', PATHS['leader']),
+        (check_leader, b'null', 'GET', PATHS['leader']),
+        (check_leader, b'7', 'GET', PATHS['leader']),
+        (lambda client: create_session(client, 'x', 20), b'{}', 'PUT', PATHS['session_create']),
+        (lambda client: create_session(client, 'x', 20), b'[]', 'PUT', PATHS['session_create']),
+        (lambda client: create_session(client, 'x', 20), b'not json', 'PUT', PATHS['session_create']),
+        (lambda client: session_name(client, FIRST), b'{"Name": "x"}', 'GET', SESSION_INFO_PATH),
+        (lambda client: session_name(client, FIRST), b'[7]', 'GET', SESSION_INFO_PATH),
+        (lambda client: session_name(client, FIRST), b'[{"ID": "x"}]', 'GET', SESSION_INFO_PATH),
+        (lambda client: session_name(client, FIRST), b'[{"Name": 7}]', 'GET', SESSION_INFO_PATH),
+        (lambda client: read_key(client, CARD_PATH), b'[]', 'GET', CARD_PATH),
+        (lambda client: read_key(client, CARD_PATH), b'{"Value": null}', 'GET', CARD_PATH),
+        (lambda client: read_key(client, CARD_PATH), b'[{"Value": "%%%"}]', 'GET', CARD_PATH),
+        (lambda client: read_key(client, CARD_PATH), b'[{"Value": "\\u00fc"}]', 'GET', CARD_PATH),
+        (lambda client: read_key(client, CARD_PATH), b'[{"Value": 7}]', 'GET', CARD_PATH),
+        (lambda client: read_prefix(client, LIST_PATH), b'[7]', 'GET', LIST_PATH),
+        (lambda client: read_prefix(client, LIST_PATH), b'{"Key": "k"}', 'GET', LIST_PATH),
+        (lambda client: read_prefix(client, LIST_PATH), b'\xff', 'GET', LIST_PATH),
+        (lambda client: acquire_key(client, CARD_PATH, FIRST, 'x'), b'null', 'PUT', CARD_PATH),
+        (lambda client: acquire_key(client, CARD_PATH, FIRST, 'x'), b'"true"', 'PUT', CARD_PATH),
+    ],
+)
+async def test_a_malformed_answer_raises_the_unreadable_error(call, answer, method, request_path):
+    with pytest.raises(ConsulError) as info:
+        await call(answering(200, answer))
+
+    assert str(info.value) == f'consul: {method} {request_path} answered 200 with an answer that cannot be read'
+    assert not isinstance(info.value, TransientError)
 
 
 @pytest.mark.parametrize(
@@ -739,6 +885,27 @@ async def test_fake_checks_the_token_except_for_the_leader(fake):
         'Permission denied: anonymous token lacks permission \'session:write\' on "consul-fake-node".'
     )
     assert await create_session(fake_client(fake, token=CONFIGURED_TOKEN), 'x', 20) == FIRST
+
+
+async def test_fake_flags_only_answers_that_hid_something_from_a_token_without_rights(fake):
+    fake.token = CONFIGURED_TOKEN
+    fake.tokens_without_rights.add(WRONG_TOKEN)
+    weak = fake_client(fake, token=WRONG_TOKEN)
+
+    assert await request(weak, 'GET', LIST_PATH, query=[('recurse', 'true')], answers=(404,)) == (404, b'')
+    assert await session_name(weak, UNKNOWN_SESSION) is None
+    with pytest.raises(
+        ConsulError, match=r"AccessorID '[0-9a-f-]+' lacks permission 'session:write' on \"consul-fake-node\""
+    ):
+        await create_session(weak, 'x', 20)
+    with pytest.raises(ConsulError, match='lacks permission \'key:write\' on "drakkar/fleet/workers/w"'):
+        await acquire_key(weak, path('registry_card', prefix='drakkar', worker='w'), FIRST, 'x')
+
+
+async def test_fake_answers_the_leader_to_an_unknown_token(fake):
+    fake.token = CONFIGURED_TOKEN
+
+    assert await check_leader(fake_client(fake, token=WRONG_TOKEN)) is None
 
 
 async def test_fake_refuses_a_datacenter_it_does_not_know(fake):

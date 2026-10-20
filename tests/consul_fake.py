@@ -20,9 +20,17 @@ agent (Consul 1.21 with ACLs) gave to the same requests:
 * A key read answers ``404`` with an empty body when there is no key, and so
   does a recursive read of an empty prefix. ``Value`` is base64, ``null`` for
   an empty value, and ``Session`` is there only while a session holds the key.
-* With :attr:`FakeConsul.token` set, a request without that ``X-Consul-Token``
-  answers ``403 Permission denied ...`` (the leader request excepted). Any other
-  token stands for a token without the rights; the fake knows no other token.
+* With :attr:`FakeConsul.token` set, ACLs are on and that token has every
+  right. The leader request needs no token. For every other request:
+
+  - a token in :attr:`FakeConsul.tokens_without_rights` gets a recursive read
+    as ``404`` and a session ``info`` as ``200 []``, both with
+    ``X-Consul-Results-Filtered-By-Acls: true`` when they hid something; a
+    single-key read and every write answer
+    ``403 Permission denied: token with AccessorID '<id>' lacks permission ...``;
+  - no token gets the same hidden answers without the header, and ``403`` with
+    the anonymous text for a single-key read and every write;
+  - any other token answers ``403 ACL not found``.
 * A ``dc`` other than ``dc1`` answers ``500 No path to datacenter``.
 
 The fake's clock is its own: it starts at 0 and moves only by
@@ -42,14 +50,33 @@ from typing import Any
 
 import httpx
 
-from drakkar.providers.consul import CONNECT_TIMEOUT_SECONDS, TOKEN_HEADER, ConsulClient
+from drakkar.providers.consul import CONNECT_TIMEOUT_SECONDS, FILTERED_HEADER, TOKEN_HEADER, ConsulClient
 
 FAKE_BASE = 'http://127.0.0.1:8500'
 DATACENTER = 'dc1'
 LEADER = '127.0.0.1:8300'
 NODE = 'consul-fake-node'
-# The AccessorID of the token without the rights; an AccessorID is not the secret.
+# The AccessorID of every token without the rights; an AccessorID is not the secret.
 ACCESSOR_ID = '0b6d1f0e-3c2a-4d8e-9f71-5a2c3e4d6b80'
+
+# Who sent a request that lacks the right, and what kind of request it is, decide the answer
+# (recorded on a real agent): HIDE answers as if there were nothing, HIDE_FLAGGED does too and
+# sets the filtered header when something was hidden, DENY answers 403.
+ANONYMOUS, WITHOUT_RIGHTS = 'anonymous', 'without_rights'
+LIST, INFO, READ, WRITE = 'list', 'info', 'read', 'write'
+HIDE, HIDE_FLAGGED, DENY = 'hide', 'hide_flagged', 'deny'
+REFUSALS: dict[tuple[str, str], str] = {
+    (ANONYMOUS, LIST): HIDE,
+    (ANONYMOUS, INFO): HIDE,
+    (ANONYMOUS, READ): DENY,
+    (ANONYMOUS, WRITE): DENY,
+    (WITHOUT_RIGHTS, LIST): HIDE_FLAGGED,
+    (WITHOUT_RIGHTS, INFO): HIDE_FLAGGED,
+    (WITHOUT_RIGHTS, READ): DENY,
+    (WITHOUT_RIGHTS, WRITE): DENY,
+}
+# The answer of a request whose results were all hidden: (status, body).
+HIDDEN_ANSWERS: dict[str, tuple[int, bytes]] = {LIST: (404, b''), INFO: (200, b'[]')}
 FAILURE_TEXT = 'injected failure'
 SESSION_ID_FORMAT = '00000000-0000-4000-8000-{:012d}'
 MIN_TTL_SECONDS = 10
@@ -138,6 +165,10 @@ def _text(status: int, text: str) -> httpx.Response:
     return httpx.Response(status, text=text)
 
 
+_Handler = Callable[[Seen, re.Match[str]], httpx.Response]
+_Route = tuple[str, re.Pattern[str], _Handler, str, str]
+
+
 class FakeConsul:
     """An in-process Consul agent with the answers of the recorded agent; its own clock starts at 0.
 
@@ -149,12 +180,14 @@ class FakeConsul:
     ``before_answer`` is called with each request before the fake answers it.
     ``fail_after_answer`` lets the next request change the fake's state, then
     raises instead of answering (an answer lost on the way back), and is then
-    cleared.
+    cleared. ``token`` turns ACLs on (see the module docstring), and
+    ``tokens_without_rights`` names the tokens the agent knows but grants nothing.
     """
 
     def __init__(self) -> None:
         self.seen: list[Seen] = []
         self.token: str | None = None
+        self.tokens_without_rights: set[str] = set()
         self.leader = LEADER
         self.fail_next: int | Exception | None = None
         self.fail_every: int | Exception | None = None
@@ -166,14 +199,15 @@ class FakeConsul:
         self._next_session = 1
         self._sessions: dict[str, _Session] = {}
         self._keys: dict[str, _Key] = {}
-        # (method, path pattern, handler, ACL right); the right is checked on the key or on the node.
-        self._routes: tuple[tuple[str, re.Pattern[str], Callable[[Seen, re.Match[str]], httpx.Response], str], ...] = (
-            ('PUT', re.compile(r'/v1/session/create'), self._create_session, 'session:write'),
-            ('PUT', re.compile(r'/v1/session/renew/(?P<id>[^/]+)'), self._renew_session, 'session:write'),
-            ('PUT', re.compile(r'/v1/session/destroy/(?P<id>[^/]+)'), self._destroy_session, 'session:write'),
-            ('GET', re.compile(r'/v1/session/info/(?P<id>[^/]+)'), self._session_info, 'session:read'),
-            ('GET', re.compile(r'/v1/kv/(?P<key>.+)'), self._read_keys, 'key:read'),
-            ('PUT', re.compile(r'/v1/kv/(?P<key>.+)'), self._acquire_key, 'key:write'),
+        # (method, path pattern, handler, ACL right, kind of request); the right is checked on the
+        # key or on the node. A key read with ``recurse`` is a LIST.
+        self._routes: tuple[_Route, ...] = (
+            ('PUT', re.compile(r'/v1/session/create'), self._create_session, 'session:write', WRITE),
+            ('PUT', re.compile(r'/v1/session/renew/(?P<id>[^/]+)'), self._renew_session, 'session:write', WRITE),
+            ('PUT', re.compile(r'/v1/session/destroy/(?P<id>[^/]+)'), self._destroy_session, 'session:write', WRITE),
+            ('GET', re.compile(r'/v1/session/info/(?P<id>[^/]+)'), self._session_info, 'session:read', INFO),
+            ('GET', re.compile(r'/v1/kv/(?P<key>.+)'), self._read_keys, 'key:read', READ),
+            ('PUT', re.compile(r'/v1/kv/(?P<key>.+)'), self._acquire_key, 'key:write', WRITE),
         )
 
     def transport(self) -> httpx.MockTransport:
@@ -280,14 +314,29 @@ class FakeConsul:
             return _text(500, 'No path to datacenter')
         if seen.method == 'GET' and seen.path == LEADER_PATH:
             return _json(200, self.leader)
-        for method, pattern, handler, right in self._routes:
+        for method, pattern, handler, right, kind in self._routes:
             match = pattern.fullmatch(seen.path)
             if seen.method != method or match is None:
                 continue
-            if self.token is not None and seen.token != self.token:
-                return _text(403, self._denied(seen.token, right, match.groupdict().get('key', NODE)))
-            return handler(seen, match)
+            if self.token is None or seen.token == self.token:
+                return handler(seen, match)
+            return self._refused(seen, match, handler, right, kind)
         return _text(400, f'fake consul: no answer for {seen.method} {seen.path}')
+
+    def _refused(self, seen: Seen, match: re.Match[str], handler: _Handler, right: str, kind: str) -> httpx.Response:
+        """The answer to a request whose token lacks ``right``, by who sent it and the kind of request."""
+        if seen.token is not None and seen.token not in self.tokens_without_rights:
+            return _text(403, 'ACL not found')
+        if kind == READ and 'recurse' in dict(seen.query):
+            kind = LIST
+        refusal = REFUSALS[(ANONYMOUS if seen.token is None else WITHOUT_RIGHTS, kind)]
+        if refusal == DENY:
+            return _text(403, self._denied(seen.token, right, match.groupdict().get('key', NODE)))
+        status, body = HIDDEN_ANSWERS[kind]
+        # Hiding is read-only, so the handler's full answer only tells whether anything was hidden.
+        hid_something = handler(seen, match).content not in (b'', b'[]')
+        headers = {FILTERED_HEADER: 'true'} if refusal == HIDE_FLAGGED and hid_something else {}
+        return httpx.Response(status, content=body, headers=headers)
 
     @staticmethod
     def _denied(token: str | None, right: str, resource: str) -> str:
