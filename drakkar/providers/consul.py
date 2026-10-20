@@ -376,7 +376,10 @@ async def request(
     whatever its status: the token's rights hid results, and an empty answer
     must not pass for an empty fleet or a session that ended. Then a status
     outside ``answers`` raises :func:`status_error`. A transport error leaves
-    as :func:`classify` maps it.
+    as :func:`classify` maps it. A body that the HTTP library cannot decode
+    (a ``Content-Encoding`` that does not match the bytes) raises
+    ``ConsulError(UNREADABLE_MESSAGE)`` naming the request and its status,
+    before the header and the status are judged.
     """
     pairs = [*query, ('dc', client.datacenter)] if client.datacenter else list(query)
     url = client.base + path
@@ -385,7 +388,14 @@ async def request(
     headers = {TOKEN_HEADER: client.token} if client.token else {}
     content = None if body is None else body.encode('utf-8')
     try:
-        response = await client.http.request(method, url, content=content, headers=headers)
+        # Streamed and then read, so a body that cannot be decoded is caught while the status is known:
+        # the library's decoding error carries no response.
+        async with client.http.stream(method, url, content=content, headers=headers) as response:
+            try:
+                await response.aread()
+            except httpx.DecodingError as exc:
+                status = response.status_code
+                raise ConsulError(UNREADABLE_MESSAGE.format(method=method, path=path, status=status)) from exc
     except httpx.TransportError as exc:
         raise classify(exc) from exc
     # Header names are matched in any letter case by the HTTP library.

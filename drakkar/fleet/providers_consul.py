@@ -145,6 +145,10 @@ class ConsulRegistry:
         member = sanitize_worker_name(card['worker'])
         key_path = path('registry_card', prefix=prefix, worker=member)
         body = serialize_card(card).decode('utf-8')
+        # The instance is used as it comes: the worker builds it as 16 lowercase hex characters (a new
+        # random value at every start), which is the only tail that is_own_session_name recognises. A
+        # session named with any other instance would still hold the card, but a successor under the same
+        # name could not tell it for its own and would wait for it to end instead of taking the card over.
         session = await self._live_session(client, registry_session_name(member, card['instance']))
         if await acquire_key(client, key_path, session, body):
             return

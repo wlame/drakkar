@@ -80,6 +80,13 @@ class ConsulElection:
     ``RuntimeError``: the archive pass always refreshes on the provider that
     acquired. ``is_held`` without an entry answers False without a request.
 
+    Two kinds of entry can stay: the entry of a lease that was lost as taken
+    over (no ``release`` follows a clear refusal, so only a ``refresh`` that
+    answers False forgets it), and the entry of a release whose destroy
+    failed for good. Each keeps one small entry (a session id and a lock body)
+    until the process ends. Every archive pass uses a token of its own, so an
+    entry is never reused, and these cases are rare.
+
     The client is the one of ``connections.consul.<connection>``, shared with
     every other feature that names the same connection. ``stop`` sends nothing
     and leaves the client open: leases are released by their holders, and the

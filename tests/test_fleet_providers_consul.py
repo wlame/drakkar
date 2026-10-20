@@ -37,16 +37,20 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.consul import (
     CARD_HELD_MESSAGE,
     DEFAULT_KEY_PREFIX,
+    INSTANCE_RE,
     NO_LEADER_MESSAGE,
     PATHS,
     ConsulClient,
     ConsulError,
+    is_own_session_name,
     path,
     read_key,
+    registry_session_name,
 )
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
 from tests.consul_fake import FAKE_BASE, LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
+from tests.test_recorder_wiring import _app as recorder_wiring_app
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
 EXAMPLE = FIXTURE['example']
@@ -451,6 +455,16 @@ async def test_the_session_name_and_ttl_follow_the_member_the_instance_and_the_o
         'Name': 'drakkar-w_rker_1-0123456789abcdef',
         'TTL': '3600s',
     }
+
+
+def test_the_worker_instance_is_a_tail_that_the_own_session_name_rule_recognises(tmp_path):
+    # publish names the session with the card's instance unchecked; a successor takes the card over only
+    # when is_own_session_name recognises that tail, which reads 16 lowercase hex characters.
+    instance = recorder_wiring_app(tmp_path)._instance
+
+    assert INSTANCE_RE.fullmatch(instance) is not None
+    assert is_own_session_name(registry_session_name('w-1', instance), 'w-1')
+    assert not is_own_session_name(registry_session_name('w-1', 'ABCDEF0123456789'), 'w-1')
 
 
 # --- The listing ---

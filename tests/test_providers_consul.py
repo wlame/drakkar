@@ -7,6 +7,7 @@ the messages and the worked example are checked against the shared fixture.
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -451,6 +452,12 @@ async def test_open_client_transports_make_no_retries(monkeypatch):
     # httpx keeps the retry count on each transport's connection pool and has no public
     # accessor for it. A proxy variable makes httpx add a proxy transport per scheme;
     # those must not retry either. Nothing connects, so the proxy host is never looked up.
+    # The host's own proxy variables are cleared first: httpx reads every variable whose name ends in
+    # `_proxy` in any letter case (ALL_PROXY adds a transport, NO_PROXY=* removes them all), and
+    # REQUEST_METHOD makes it ignore HTTP_PROXY.
+    for name in list(os.environ):
+        if name.lower().endswith('_proxy') or name == 'REQUEST_METHOD':
+            monkeypatch.delenv(name)
     monkeypatch.setenv('HTTP_PROXY', 'http://proxy.example.test:3128')
     monkeypatch.setenv('HTTPS_PROXY', 'http://proxy.example.test:3128')
     client = await open_client(ConsulConnectionConfig(address='http://consul.example.test:8500'))
@@ -717,6 +724,24 @@ async def test_request_raises_a_transport_error_classified(fake, failure, expect
         await request(fake_client(fake), 'GET', PATHS['leader'])
 
     assert info.value.__cause__ is failure
+
+
+async def test_request_with_an_answer_that_cannot_be_decoded_raises_unreadable_naming_the_request():
+    async def answer(request: httpx.Request) -> httpx.Response:
+        # A streamed body, as a network transport delivers it: `content=` would be decoded at construction.
+        return httpx.Response(200, headers={'Content-Encoding': 'gzip'}, stream=httpx.ByteStream(b'not gzip'))
+
+    client = await open_client(
+        ConsulConnectionConfig(address='http://consul.example.test:8500'), transport=httpx.MockTransport(answer)
+    )
+
+    with pytest.raises(ConsulError) as info:
+        await request(client, 'GET', PATHS['leader'])
+
+    assert str(info.value) == UNREADABLE_MESSAGE.format(method='GET', path=PATHS['leader'], status=200)
+    assert not isinstance(info.value, TransientError)
+    assert isinstance(info.value.__cause__, httpx.DecodingError)
+    await close_client(client)
 
 
 async def test_check_leader_passes_with_a_leader(fake):
