@@ -425,3 +425,23 @@ def fake_client(fake: FakeConsul, *, datacenter: str = '', token: str = '') -> C
         timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
     )
     return ConsulClient(http=http, base=FAKE_BASE, token=token, datacenter=datacenter)
+
+
+def client_holding_the_first_renew(fake: FakeConsul, reached: asyncio.Event, release: asyncio.Event) -> ConsulClient:
+    """Return a client of ``fake`` whose first session renew waits for ``release``; later renews pass at once.
+
+    ``reached`` is set when the first renew starts to wait, so a test can make
+    another call while that renew is pending.
+    """
+    held: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith('/v1/session/renew/') and not held:
+            held.append(request.url.path)
+            reached.set()
+            await release.wait()
+        return await fake.transport().handle_async_request(request)
+
+    return ConsulClient(
+        http=httpx.AsyncClient(transport=httpx.MockTransport(handle)), base=FAKE_BASE, token='', datacenter=''
+    )

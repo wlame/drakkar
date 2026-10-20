@@ -41,7 +41,7 @@ from typing import Any, cast
 
 import httpx
 
-from drakkar.config.connections import ConsulConnectionConfig
+from drakkar.config.connections import CONSUL_PREFIX_RE, ConsulConnectionConfig
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import TransientError
 from drakkar.providers.urlcheck import PRINTABLE_ASCII_RE, is_portable_host_and_port
@@ -116,6 +116,10 @@ STATUS_MESSAGE = 'consul: {method} {path} answered {status}: {text}'
 STATUS_NO_TEXT_MESSAGE = 'consul: {method} {path} answered {status}'
 FILTERED_MESSAGE = "consul: {method} {path} answered with results hidden by the token's rights"
 UNREADABLE_MESSAGE = 'consul: {method} {path} answered {status} with an answer that cannot be read'
+KEY_PREFIX_MESSAGE = (
+    "key_prefix '{prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
+    "with no leading or trailing '/'"
+)
 
 
 class ConsulError(Exception):
@@ -262,6 +266,16 @@ def _is_portable_address(address: str) -> bool:
     if ADDRESS_PATH_RE.fullmatch(path) is None or any(segment in DOT_SEGMENTS for segment in path.split('/')):
         return False
     return is_portable_host_and_port(host_and_port)
+
+
+def check_key_prefix(prefix: str) -> None:
+    """Raise ``ValueError(KEY_PREFIX_MESSAGE)`` unless ``prefix`` has the characters a connection entry allows.
+
+    A provider checks a preset prefix with it, since such a prefix skips the
+    config loader and goes into the paths as it is.
+    """
+    if re.fullmatch(CONSUL_PREFIX_RE, prefix) is None:
+        raise ValueError(KEY_PREFIX_MESSAGE.format(prefix=prefix))
 
 
 def check_token(token: str) -> None:

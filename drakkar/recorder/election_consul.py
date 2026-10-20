@@ -1,18 +1,17 @@
 """The ``consul`` election provider: archive leases as keys of a Consul agent's KV store, each held by a session."""
 
-import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from drakkar.config.connections import CONSUL_PREFIX_RE
 from drakkar.providers.consul import (
     CONSUL_PROVIDER,
     DEFAULT_KEY_PREFIX,
     REFRESH_BEFORE_ACQUIRE_MESSAGE,
     ConsulClient,
     acquire_key,
+    check_key_prefix,
     check_leader,
     close_client,
     create_session,
@@ -69,8 +68,11 @@ class ConsulElection:
     The provider remembers, per scope and token, the session and the lock body.
     The entry is recorded as soon as the session exists, before the acquire
     request, so a retry of an acquire whose answer was lost, and a release
-    after an unclear acquire, find the session. An acquire by the token that
-    already has an entry renews its session and writes the remembered body
+    after an unclear acquire, find the session. A create whose answer is lost
+    leaves a session that nothing tracks; it holds no key and ends within
+    twice its TTL. An entry is forgotten only after the destroy of its session
+    succeeded, so a retried release really retries. An acquire by the token
+    that already has an entry renews its session and writes the remembered body
     again, which keeps the holder's ``acquired_at``; when its session ended, a
     new one is created. An acquire that the agent refuses destroys its session
     at once (it holds nothing, and would otherwise live for up to twice its
@@ -97,11 +99,7 @@ class ConsulElection:
         client: ConsulClient | None = None,
         key_prefix: str = DEFAULT_KEY_PREFIX,
     ) -> None:
-        if not re.fullmatch(CONSUL_PREFIX_RE, key_prefix):
-            raise ValueError(
-                f"key_prefix '{key_prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
-                "with no leading or trailing '/'"
-            )
+        check_key_prefix(key_prefix)
         self._connection = connection
         self._open_client = open_client
         self._close_client = close_client
@@ -183,14 +181,17 @@ class ConsulElection:
     async def release(self, scope: str, token: str) -> None:
         """Destroy the session of ``token`` on ``scope``, which deletes the key only while it holds it.
 
-        The entry is forgotten before the destroy is sent; when the destroy
-        fails, the session (and the key, while it holds it) ends by its TTL.
+        The entry is forgotten only after the destroy succeeded, so a release
+        that the caller retries after a failed destroy sends the destroy
+        again; destroying a session that is already gone is no error.
         Without an entry nothing is sent.
         """
         client, _ = self._started()
-        lease = self._leases.pop((scope, token), None)
-        if lease is not None:
-            await destroy_session(client, lease.session)
+        lease = self._leases.get((scope, token))
+        if lease is None:
+            return
+        await destroy_session(client, lease.session)
+        self._forget(scope, token, lease)
 
     async def stop(self) -> None:
         """Refuse every later call; leases are released by their holders, the shared client by the worker."""

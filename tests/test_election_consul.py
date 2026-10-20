@@ -31,7 +31,6 @@ from drakkar.providers.consul import (
     NO_LEADER_MESSAGE,
     PATHS,
     REFRESH_BEFORE_ACQUIRE_MESSAGE,
-    ConsulClient,
     path,
     read_key,
     session_name,
@@ -42,7 +41,7 @@ from drakkar.recorder import electiontest
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext
 from drakkar.recorder.election_consul import REFRESH_BEFORE_ACQUIRE, ConsulElection, consul_election_factory
 from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
-from tests.consul_fake import FAKE_BASE, LEADER, FakeConsul, Seen, fake_client
+from tests.consul_fake import LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
 EXAMPLE = FIXTURE['example']
@@ -369,23 +368,9 @@ async def test_refresh_of_an_ended_session_is_false_and_forgets_it(fake):
         await provider.refresh(SCOPE, TOKEN_A)
 
 
-def _client_holding_renews(fake: FakeConsul, reached: asyncio.Event, release: asyncio.Event) -> ConsulClient:
-    """A client of ``fake`` whose session renews wait for ``release``; ``reached`` is set when one waits."""
-
-    async def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith('/v1/session/renew/'):
-            reached.set()
-            await release.wait()
-        return await fake.transport().handle_async_request(request)
-
-    return ConsulClient(
-        http=httpx.AsyncClient(transport=httpx.MockTransport(handle)), base=FAKE_BASE, token='', datacenter=''
-    )
-
-
 async def test_a_release_during_a_refresh_is_not_undone(fake):
     reached, release = asyncio.Event(), asyncio.Event()
-    provider = ConsulElection(connection='main', client=_client_holding_renews(fake, reached, release))
+    provider = ConsulElection(connection='main', client=client_holding_the_first_renew(fake, reached, release))
     await provider.start(_context())
     await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
 
@@ -400,6 +385,31 @@ async def test_a_release_during_a_refresh_is_not_undone(fake):
     assert _destroys(fake) == [f'/v1/session/destroy/{FIRST}']
     assert await read_key(fake_client(fake), LOCK_PATH) is None
     assert await provider.is_held(SCOPE, TOKEN_A) is False
+
+
+async def test_a_refresh_that_ends_after_a_new_acquire_keeps_the_new_entry(fake):
+    reached, release = asyncio.Event(), asyncio.Event()
+    provider = ConsulElection(connection='main', client=client_holding_the_first_renew(fake, reached, release))
+    await provider.start(_context())
+    await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    fake.end_session(FIRST)
+
+    refreshing = asyncio.create_task(provider.refresh(SCOPE, TOKEN_A))
+    await reached.wait()
+    # While the refresh's renew is pending, an acquire of the same scope and token finds the session
+    # ended and records a new entry with a new session.
+    took = await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    release.set()
+    refreshed = await refreshing
+
+    # The refresh's renew of the old session answered 404; it forgot nothing, since the entry is a new one.
+    assert took is True
+    assert refreshed is False
+    assert await provider.is_held(SCOPE, TOKEN_A) is True
+    assert await provider.refresh(SCOPE, TOKEN_A) is True
+    stored = await read_key(fake_client(fake), LOCK_PATH)
+    assert stored is not None
+    assert stored['Session'] == SECOND
 
 
 # --- Is held ---
@@ -437,6 +447,47 @@ async def test_release_without_an_acquire_sends_nothing(fake):
     await provider.release(SCOPE, TOKEN_A)
 
     assert fake.seen[mark:] == []
+
+
+async def test_a_release_whose_destroy_failed_sends_the_destroy_again(fake):
+    provider = await _started(fake)
+    await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    fake.fail_next = 503
+
+    with pytest.raises(TransientError):
+        await provider.release(SCOPE, TOKEN_A)
+    # The resilience caller retries a transient failure: the retry must destroy the session, not find nothing.
+    await provider.release(SCOPE, TOKEN_A)
+    mark = len(fake.seen)
+    await provider.release(SCOPE, TOKEN_A)
+    sent_by_the_third_release = fake.seen[mark:]
+
+    assert _destroys(fake) == [f'/v1/session/destroy/{FIRST}', f'/v1/session/destroy/{FIRST}']
+    assert await read_key(fake_client(fake), LOCK_PATH) is None
+    assert await session_name(fake_client(fake), FIRST) is None
+    # A release that succeeded forgot the entry, so the next one sends nothing.
+    assert sent_by_the_third_release == []
+
+
+async def test_a_refused_acquire_whose_destroy_failed_leaves_the_session_to_the_release(fake):
+    holder = await _started(fake, 'w-1', INSTANCE_A)
+    other = await _started(fake, 'w-2', INSTANCE_B)
+    await holder.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+
+    def fail_the_first_destroy(seen: Seen) -> None:
+        if seen.path.startswith('/v1/session/destroy/') and len(_destroys(fake)) == 1:
+            fake.fail_next = 503
+
+    fake.before_answer = fail_the_first_destroy
+
+    with pytest.raises(TransientError):
+        await other.acquire(SCOPE, TOKEN_B, LEASE_SECONDS)
+    # The entry was kept, so the release that follows an unclear acquire destroys the refused session.
+    await other.release(SCOPE, TOKEN_B)
+
+    assert _destroys(fake) == [f'/v1/session/destroy/{SECOND}', f'/v1/session/destroy/{SECOND}']
+    assert await session_name(fake_client(fake), SECOND) is None
+    assert await holder.is_held(SCOPE, TOKEN_A) is True
 
 
 async def test_release_by_a_token_that_was_taken_over_leaves_the_new_holder_alone(fake):

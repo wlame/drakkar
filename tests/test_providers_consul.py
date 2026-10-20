@@ -49,6 +49,7 @@ from drakkar.providers.consul import (
     ConsulError,
     acquire_key,
     base_url,
+    check_key_prefix,
     check_leader,
     check_token,
     classify,
@@ -73,7 +74,7 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.resilience import TransientError
 from drakkar.recorder.history import serialize_json
-from tests.consul_fake import FakeConsul, Seen, fake_client
+from tests.consul_fake import FakeConsul, Seen, client_holding_the_first_renew, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
 EXAMPLE = FIXTURE['example']
@@ -202,6 +203,22 @@ def test_session_ttl_follows_the_pinned_rule(seconds, expected):
 def test_session_ttl_rounds_a_fractional_half_up_to_whole_seconds():
     assert session_ttl(20.5) == '11s'
     assert session_ttl(60.0) == '30s'
+
+
+@pytest.mark.parametrize('prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n'])
+def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_characters(prefix):
+    with pytest.raises(ValueError) as info:
+        check_key_prefix(prefix)
+
+    assert str(info.value) == (
+        f"key_prefix '{prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
+        "with no leading or trailing '/'"
+    )
+
+
+@pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e'])
+def test_check_key_prefix_accepts_a_prefix_inside_the_allowed_characters(prefix):
+    check_key_prefix(prefix)
 
 
 @pytest.mark.parametrize('case', FIXTURE['own_session_names'], ids=lambda c: c['name'])
@@ -997,6 +1014,22 @@ async def test_fake_calls_before_answer_with_each_request_first(fake):
         await acquire_key(client, CARD_PATH, session, 'card')
     # Ending a session that already ended changes nothing.
     fake.end_session(session)
+
+
+async def test_client_holding_the_first_renew_holds_only_that_renew(fake):
+    reached, release = asyncio.Event(), asyncio.Event()
+    client = client_holding_the_first_renew(fake, reached, release)
+    session = await create_session(client, 'x', 20)
+
+    first = asyncio.create_task(renew_session(client, session))
+    await reached.wait()
+    second = await renew_session(client, session)
+    first_done_before_the_release = first.done()
+    release.set()
+
+    assert second is True
+    assert first_done_before_the_release is False
+    assert await first is True
 
 
 async def test_fake_plants_a_predecessor_and_a_raw_key(fake):

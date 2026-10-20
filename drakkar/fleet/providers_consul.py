@@ -1,12 +1,10 @@
 """The ``consul`` registry provider: worker cards as keys of a Consul agent's KV store, held by the worker's session."""
 
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import structlog
 
-from drakkar.config.connections import CONSUL_PREFIX_RE
 from drakkar.fleet.card import decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.providers.cardlog import InvalidCardLog
@@ -17,6 +15,7 @@ from drakkar.providers.consul import (
     ConsulClient,
     ConsulError,
     acquire_key,
+    check_key_prefix,
     check_leader,
     close_client,
     create_session,
@@ -101,11 +100,7 @@ class ConsulRegistry:
         client: ConsulClient | None = None,
         key_prefix: str = DEFAULT_KEY_PREFIX,
     ) -> None:
-        if not re.fullmatch(CONSUL_PREFIX_RE, key_prefix):
-            raise ValueError(
-                f"key_prefix '{key_prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
-                "with no leading or trailing '/'"
-            )
+        check_key_prefix(key_prefix)
         self._connection = connection
         self._offline_after = float(offline_after_seconds)
         self._open_client = open_client

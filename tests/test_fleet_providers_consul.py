@@ -46,7 +46,7 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
-from tests.consul_fake import FAKE_BASE, LEADER, FakeConsul, Seen, fake_client
+from tests.consul_fake import FAKE_BASE, LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
 EXAMPLE = FIXTURE['example']
@@ -579,20 +579,6 @@ async def test_withdraw_destroys_the_session_and_forgets_it(fake):
     assert _routes(fake, mark) == [('PUT', PATHS['session_create']), ('PUT', card_path('w-1'))]
 
 
-def _client_holding_renews(fake: FakeConsul, reached: asyncio.Event, release: asyncio.Event) -> ConsulClient:
-    """A client of ``fake`` whose session renews wait for ``release``; ``reached`` is set when one waits."""
-
-    async def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith('/v1/session/renew/'):
-            reached.set()
-            await release.wait()
-        return await fake.transport().handle_async_request(request)
-
-    return ConsulClient(
-        http=httpx.AsyncClient(transport=httpx.MockTransport(handle)), base=FAKE_BASE, token='', datacenter=''
-    )
-
-
 def _client_rewriting_reads(fake: FakeConsul, rewrite: Callable[[list[dict[str, Any]]], None]) -> ConsulClient:
     """A client of ``fake`` whose key reads that answer ``200`` have their entries changed by ``rewrite`` first."""
 
@@ -628,7 +614,7 @@ async def test_a_withdraw_during_a_publish_leaves_no_session_the_provider_forgot
     provider = ConsulRegistry(
         connection='main',
         offline_after_seconds=OFFLINE_AFTER,
-        client=_client_holding_renews(fake, reached, release),
+        client=client_holding_the_first_renew(fake, reached, release),
     )
     await provider.start(_context())
     await provider.publish(_card())
