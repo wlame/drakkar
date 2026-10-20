@@ -4,11 +4,12 @@
 #
 # Disconnects worker-3 from the compose network for 90 s, then proves that:
 #   - worker-1 lists worker-3 with the expected liveness:
-#       postgres   - online: false within 30 s (worker-3 cannot reach the
-#                    database, so its card ages on the database clock). The
-#                    check waits for the verdict instead of reading it at
-#                    30 s: a card 30 s old is deleted (prune_after_seconds),
-#                    and the peer would then be absent, not offline,
+#       postgres, redis - online: false within 30 s (worker-3 cannot reach
+#                    the provider's service, so its card ages on the
+#                    service's clock). The check waits for the verdict
+#                    instead of reading it at 30 s: a card 30 s old is
+#                    deleted (prune_after_seconds), and the peer would then
+#                    be absent, not offline,
 #       filesystem - online: true after 30 s (the card goes through the
 #                    shared folder, which a network cut does not touch),
 #   - worker-3's own completed counter (read inside its container) is not
@@ -16,7 +17,7 @@
 #   - within 20 s of the reconnect worker-1 lists worker-3 online,
 #   - no worker container restarted.
 #
-# Usage: HARNESS_PROVIDER=postgres integration/scenario-worker-cut-off.sh
+# Usage: HARNESS_PROVIDER=redis integration/scenario-worker-cut-off.sh
 # ============================================================================
 
 # Some functions below run only through trap or wait_until.
@@ -75,7 +76,9 @@ docker network disconnect "$network" "$container"
 is_cut=true
 cut_at=$SECONDS
 
-if [ "$HARNESS_PROVIDER" = postgres ]; then
+# A provider with a service (see the table in scenario-lib.sh) loses it with
+# the network; the filesystem provider keeps its shared folder.
+if [ -n "$PROVIDER_SERVICE" ]; then
     wait_until "$OFFLINE_CHECK_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$CUT_WORKER" false \
         || fail "worker-1 does not list ${CUT_WORKER} offline within ${OFFLINE_CHECK_SECONDS}s of the cut (online: $(peer_field "$WORKER_1_UI_PORT" "$CUT_WORKER" online))"
     liveness_while_cut="online false after ${WAITED}s of the cut"

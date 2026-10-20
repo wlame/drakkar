@@ -108,9 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
   and archive election on a separate Postgres service, `postgres-fleet`.
-  `just integration-scenarios provider=<name>` pauses that database, cuts a
-  worker off the network, kills a worker, and checks that no database
-  password reaches the config reference, the logs or the metrics. See
+  `just integration-up provider=redis` runs them on a separate Redis
+  service, `redis-fleet`. Its only user has the rights that the docs give
+  the providers, and no more.
+  `just integration-scenarios provider=<name>` pauses that service, cuts a
+  worker off the network, kills a worker, and checks that no Postgres or
+  Redis password reaches the config reference, the logs or the metrics. See
   `docs/integration.md`.
 
 ### Fixed

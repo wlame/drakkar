@@ -201,7 +201,7 @@ release-notes version:
 drakkar-ui *args:
     uv run drakkar-ui {{ args }}
 
-# Start the integration environment; provider: filesystem or postgres (just integration-up provider=postgres)
+# Start the integration environment; provider: filesystem, postgres or redis (just integration-up provider=redis)
 integration-up provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -211,8 +211,8 @@ integration-up provider='filesystem':
     provider="{{ provider }}"
     provider="${provider#provider=}"
     case "$provider" in
-        filesystem|postgres) ;;
-        *) echo "unknown provider '$provider': expected filesystem or postgres" >&2; exit 2 ;;
+        filesystem|postgres|redis) ;;
+        *) echo "unknown provider '$provider': expected filesystem, postgres or redis" >&2; exit 2 ;;
     esac
     export HARNESS_PROVIDER="$provider"
     # A non-default interpreter image means a release candidate, which means no
@@ -259,8 +259,8 @@ integration-scenarios provider='filesystem':
     provider="{{ provider }}"
     provider="${provider#provider=}"
     case "$provider" in
-        filesystem|postgres) ;;
-        *) echo "unknown provider '$provider': expected filesystem or postgres" >&2; exit 2 ;;
+        filesystem|postgres|redis) ;;
+        *) echo "unknown provider '$provider': expected filesystem, postgres or redis" >&2; exit 2 ;;
     esac
     export HARNESS_PROVIDER="$provider"
     for scenario in service-outage worker-cut-off unclean-exit secrets; do

@@ -7,8 +7,8 @@
 # applicable) or 1 (fail).
 #
 # HARNESS_PROVIDER names the main cluster's registry and archive-election
-# provider: filesystem (the default) or postgres. It must match the value the
-# harness was started with (just integration-up provider=...).
+# provider: filesystem (the default), postgres or redis. It must match the
+# value the harness was started with (just integration-up provider=...).
 # ============================================================================
 
 # The variables below are read by the scenarios that source this file.
@@ -24,9 +24,14 @@ POLL_SECONDS=2
 # Seconds the last wait_until call waited; scripts print it as a timing.
 WAITED=0
 
+# The compose service that keeps each provider's state, one row per
+# provider. The filesystem provider keeps its state in the shared folder and
+# has no service, so its row is empty.
 case "$HARNESS_PROVIDER" in
-    filesystem|postgres) ;;
-    *) echo "unknown HARNESS_PROVIDER '$HARNESS_PROVIDER': expected filesystem or postgres" >&2; exit 1 ;;
+    filesystem) PROVIDER_SERVICE="" ;;
+    postgres) PROVIDER_SERVICE=postgres-fleet ;;
+    redis) PROVIDER_SERVICE=redis-fleet ;;
+    *) echo "unknown HARNESS_PROVIDER '$HARNESS_PROVIDER': expected filesystem, postgres or redis" >&2; exit 1 ;;
 esac
 
 # ANSI colors

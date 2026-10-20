@@ -410,21 +410,29 @@ cache:
 storage:
   dir: "/shared"
 
-# Shared connections that the providers below name. The DSN here has no
-# password: docker-compose.yml supplies the full DSN through
-# DK_CONNECTIONS__POSTGRES__MAIN__DSN, so the secret never sits in this
-# file. The worker creates the schema and its tables on first use
-# (manage_schema defaults to true).
+# Shared connections that the providers below name. The DSN and the URL
+# here have no password: docker-compose.yml supplies the full DSN through
+# DK_CONNECTIONS__POSTGRES__MAIN__DSN and the full URL through
+# DK_CONNECTIONS__REDIS__MAIN__URL, so the secrets never sit in this file.
+# The worker creates the Postgres schema and its tables on first use
+# (manage_schema defaults to true). The Redis keys start with key_prefix,
+# which is also the key pattern of the drakkar user on redis-fleet, and the
+# path of the URL picks database 3.
 connections:
   postgres:
     main:
       dsn: "postgresql://drakkar@postgres-fleet:5432/drakkar_fleet"
       schema: drakkar
+  redis:
+    main:
+      url: "redis://drakkar@redis-fleet:6379/3"
+      key_prefix: "drakkar:"
 
 fleet:
-  # Worker registry. The provider is filesystem (cards in storage.dir) or
-  # postgres (cards in the database of connections.postgres.main), chosen
-  # by DK_FLEET__REGISTRY__PROVIDER in docker-compose.yml. The timings are
+  # Worker registry. The provider is filesystem (cards in storage.dir),
+  # postgres (cards in the database of connections.postgres.main) or redis
+  # (cards in the Redis of connections.redis.main), chosen by
+  # DK_FLEET__REGISTRY__PROVIDER in docker-compose.yml. The timings are
   # short so the outage scenarios finish in minutes: a card missing for
   # 10 s is offline, and one missing for 30 s is deleted.
   registry:

@@ -14,7 +14,7 @@
 # dead worker's archive lock needs an archive pass, which runs only after a
 # rotation (at least one hour).
 #
-# Usage: HARNESS_PROVIDER=postgres integration/scenario-unclean-exit.sh
+# Usage: HARNESS_PROVIDER=redis integration/scenario-unclean-exit.sh
 # ============================================================================
 
 # Some functions below run only through trap or wait_until.

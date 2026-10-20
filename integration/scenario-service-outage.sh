@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Scenario: the registry's database goes away and comes back.
+# Scenario: the registry's service goes away and comes back.
 #
-# Pauses the postgres-fleet container for 90 s while the main cluster runs
-# with the postgres provider, twice: a pause after a recovery must behave
-# like the first one, because a cancelled query can leave state behind that
-# only a second outage shows. Each pause proves that:
+# Pauses the service container of the provider (postgres-fleet for postgres,
+# redis-fleet for redis; the table is in scenario-lib.sh) for 90 s while the
+# main cluster runs with that provider, twice: a pause after a recovery must
+# behave like the first one, because a cancelled call can leave state behind
+# that only a second outage shows. A paused container keeps its connections
+# open and answers nothing, so every call in flight must end at its own time
+# limit. Each pause proves that:
 #   - worker-1's registry breaker opens within 40 s
-#     (drakkar_provider_breaker_open{feature="registry",provider="postgres"} 1),
+#     (drakkar_provider_breaker_open{feature="registry",provider="<provider>"} 1),
 #   - within 60 s of the unpause the breaker is closed again and worker-1
 #     lists worker-2 and worker-3 online,
 #   - no worker container restarted.
@@ -19,7 +22,7 @@
 #
 # Not applicable with the filesystem provider: it has no service to pause.
 #
-# Usage: HARNESS_PROVIDER=postgres integration/scenario-service-outage.sh
+# Usage: HARNESS_PROVIDER=redis integration/scenario-service-outage.sh
 # Export TOTAL_MESSAGES when the producer ran with a value other than the
 # compose default (5000).
 # ============================================================================
@@ -32,15 +35,16 @@ SCENARIO=scenario-service-outage
 # shellcheck source=integration/scenario-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/scenario-lib.sh"
 
-if [ "$HARNESS_PROVIDER" != postgres ]; then
-    not_applicable "the filesystem provider has no service container"
+if [ -z "$PROVIDER_SERVICE" ]; then
+    not_applicable "the ${HARNESS_PROVIDER} provider has no service container"
 fi
 
-DATABASE_SERVICE=postgres-fleet
+PAUSED_SERVICE=$PROVIDER_SERVICE
 WORKER_1_UI_PORT=8081
 WORKER_1_METRICS_PORT=9090
 BREAKER_METRIC=drakkar_provider_breaker_open
-REGISTRY_LABELS='feature="registry",provider="postgres"'
+# The provider label of the provider metrics is the provider's name.
+REGISTRY_LABELS="feature=\"registry\",provider=\"${HARNESS_PROVIDER}\""
 BREAKER_OPEN_LIMIT_SECONDS=40
 OUTAGE_SECONDS=90
 RECOVERY_LIMIT_SECONDS=60
@@ -55,10 +59,10 @@ DRAIN_LIMIT_SECONDS=7200
 DRAIN_POLL_SECONDS=30
 
 is_paused=false
-# Never leave the database paused, also when a check fails half way.
+# Never leave the service paused, also when a check fails half way.
 unpause_on_exit() {
     if [ "$is_paused" = true ]; then
-        "${COMPOSE[@]}" unpause "$DATABASE_SERVICE" >/dev/null 2>&1 || true
+        "${COMPOSE[@]}" unpause "$PAUSED_SERVICE" >/dev/null 2>&1 || true
     fi
 }
 trap unpause_on_exit EXIT
@@ -104,7 +108,7 @@ drained() {
     [ "$lag" = 0 ]
 }
 
-# One outage: pause the database, see the breaker open, unpause, see the
+# One outage: pause the service, see the breaker open, unpause, see the
 # breaker close and the peers online, and check that no worker restarted.
 # Appends "<opened>s/<recovered>s" for the verdict to OUTAGE_TIMINGS.
 #   pause_and_recover <outage number>
@@ -117,8 +121,8 @@ pause_and_recover() {
     before=$(restart_snapshot "${MAIN_WORKERS[@]}")
     ok "outage ${outage}: breaker closed, worker-2 and worker-3 online"
 
-    log "outage ${outage}: pausing ${DATABASE_SERVICE}"
-    "${COMPOSE[@]}" pause "$DATABASE_SERVICE"
+    log "outage ${outage}: pausing ${PAUSED_SERVICE}"
+    "${COMPOSE[@]}" pause "$PAUSED_SERVICE"
     is_paused=true
     paused_at=$SECONDS
 
@@ -128,8 +132,8 @@ pause_and_recover() {
     ok "outage ${outage}: registry breaker open after ${opened_after}s"
 
     sleep_until_elapsed "$paused_at" "$OUTAGE_SECONDS"
-    log "outage ${outage}: unpausing ${DATABASE_SERVICE} after $((SECONDS - paused_at))s"
-    "${COMPOSE[@]}" unpause "$DATABASE_SERVICE"
+    log "outage ${outage}: unpausing ${PAUSED_SERVICE} after $((SECONDS - paused_at))s"
+    "${COMPOSE[@]}" unpause "$PAUSED_SERVICE"
     is_paused=false
 
     wait_until "$RECOVERY_LIMIT_SECONDS" recovered \
@@ -143,7 +147,7 @@ pause_and_recover() {
     OUTAGE_TIMINGS="${OUTAGE_TIMINGS}${OUTAGE_TIMINGS:+, }outage ${outage} breaker open after ${opened_after}s and recovered ${recovered_after}s after the unpause"
 }
 
-step "Scenario: service outage (${DATABASE_SERVICE} paused twice for ${OUTAGE_SECONDS}s)"
+step "Scenario: service outage (${PAUSED_SERVICE} paused twice for ${OUTAGE_SECONDS}s)"
 
 pause_and_recover 1
 pause_and_recover 2

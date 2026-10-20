@@ -16,8 +16,8 @@ cd integration
 docker-compose up --build -d
 ```
 
-This starts 20 services, including six workers in three clusters. (A
-twenty-first, `load_generator_tenant_a`, is gated behind the `tenant` Compose
+This starts 21 services, including six workers in three clusters. (A
+twenty-second, `load_generator_tenant_a`, is gated behind the `tenant` Compose
 profile.) First run pulls images and builds workers (~2 minutes).
 Subsequent runs start in seconds.
 
@@ -38,6 +38,7 @@ docker-compose down -v
 | **Kafka** | 9092 | Single-node KRaft broker (no Zookeeper) |
 | **PostgreSQL** | 5432 | `drakkar` database with `search_results` table |
 | **PostgreSQL (fleet)** | 5434 | `drakkar_fleet` database: the main cluster's worker registry and archive election when the harness runs with the `postgres` provider |
+| **Redis (fleet)** | 6380 | Database 3: the main cluster's worker registry and archive election when the harness runs with the `redis` provider. The `default` user is off; the only user is `drakkar` (password `drakkar`) |
 | **MongoDB** | 27017 | Document archive |
 | **Redis** | 6379 | Cached search summaries (1h TTL) |
 | **Webhook** | 9000 | HTTP echo server for webhook sink |
@@ -439,6 +440,7 @@ takes its registry and archive-election provider from the argument of
 ```bash
 just integration-up                      # filesystem: cards in /shared
 just integration-up provider=postgres    # postgres: cards in the postgres-fleet database
+just integration-up provider=redis       # redis: cards in database 3 of redis-fleet
 ```
 
 The argument sets `HARNESS_PROVIDER`, which `docker-compose.yml` passes to
@@ -449,6 +451,16 @@ the three workers as `DK_FLEET__REGISTRY__PROVIDER` and
 full DSN through `DK_CONNECTIONS__POSTGRES__MAIN__DSN`. The worker
 creates the `drakkar` schema and its tables in `drakkar_fleet` on first
 use.
+
+With `redis`, both use the connection `connections.redis.main`: its URL
+in `drakkar.yaml` has no password, and `docker-compose.yml` supplies the
+full URL through `DK_CONNECTIONS__REDIS__MAIN__URL`. The keys start with
+`drakkar:` (the `key_prefix`) and are in database 3 (the path of the URL).
+`redis-fleet` starts with the `default` user off and one user, `drakkar`,
+that has exactly the rights that
+[Security](security.md#provider-credentials) gives the providers:
+`~drakkar:* +@read +@write +@scripting +@connection +time`. A run with
+`redis` therefore also shows that these rights are enough.
 
 The main cluster's registry timings are short, so that the scenarios
 below finish in minutes: a card is published every 2 s and read every
@@ -506,8 +518,8 @@ provider, wait until the workers are healthy, then run the scenarios with
 the same provider:
 
 ```bash
-just integration-up provider=postgres
-just integration-scenarios provider=postgres
+just integration-up provider=redis
+just integration-scenarios provider=redis
 just integration-down
 ```
 
@@ -515,23 +527,23 @@ just integration-down
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
-`HARNESS_PROVIDER=postgres integration/scenario-secrets.sh`.
+`HARNESS_PROVIDER=redis integration/scenario-secrets.sh`.
 
-A run with `postgres` takes about two hours: the producer sends for about
-20 minutes, and the main cluster then needs an hour or more to work off the
-backlog before `just verify-delivery` can check it. The outage scenario
-allows up to two hours for that drain. With `filesystem` the outage
+A run with `postgres` or `redis` takes about two hours: the producer sends
+for about 20 minutes, and the main cluster then needs an hour or more to
+work off the backlog before `just verify-delivery` can check it. The outage
+scenario allows up to two hours for that drain. With `filesystem` the outage
 scenario does not apply, and the other three take a few minutes.
 
 | Script | What it does | What it proves |
 |--------|--------------|----------------|
-| `scenario-service-outage.sh` | Pauses `postgres-fleet` for 90 s, twice: the second pause starts after the recovery from the first. | For each pause: within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="postgres"}` is 1), within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online, and no worker restarts. The second pause shows that the first one left nothing behind that keeps the next calls from reaching their time limit. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, an hour or more after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
-| `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the database and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
+| `scenario-service-outage.sh` | Pauses the service of the provider (`postgres-fleet` or `redis-fleet`) for 90 s, twice: the second pause starts after the recovery from the first. A paused container keeps its connections open and answers nothing. | For each pause: within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="<provider>"}` is 1), within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online, and no worker restarts. The second pause shows that the first one left nothing behind that keeps the next calls from reaching their time limit. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, an hour or more after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
+| `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres` or `redis`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the provider's service and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
 | `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. | Within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. The takeover of an archive lock is skipped: the archive pass runs only after a recorder rotation, which is at least one hour; the election test kit covers it. |
-| `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the DSN password (`drakkar:drakkar@`, `postgresql://drakkar:`). Runs with both providers. |
+| `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`), and the config reference lists both connections. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
-database), so run `just integration-down` before the next run.
+service), so run `just integration-down` before the next run.
 
 ---
 

@@ -88,6 +88,38 @@ services:
       timeout: 5s
       retries: 10
 
+  # Redis of the main cluster's worker registry and archive election when
+  # the harness runs with `just integration-up provider=redis`. Separate
+  # from the sinks' Redis so that pausing it (the service-outage scenario)
+  # touches the providers and nothing else. The default user is off, and
+  # the only user, drakkar, holds exactly the rights that docs/security.md
+  # gives the providers, so a run proves that those rights are enough. The
+  # workers use database 3.
+  redis-fleet:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --user
+      - default
+      - "off"
+      - --user
+      - drakkar
+      - "on"
+      - ">drakkar"
+      - "~drakkar:*"
+      - "+@read"
+      - "+@write"
+      - "+@scripting"
+      - "+@connection"
+      - "+time"
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--user", "drakkar", "--pass", "drakkar", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
   mongo:
     image: mongo:7
     ports:
@@ -182,6 +214,8 @@ services:
         condition: service_healthy
       postgres-fleet:
         condition: service_healthy
+      redis-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-1
       CLUSTER_ID: analytics-prod
@@ -190,12 +224,13 @@ services:
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
       # Registry and archive-election provider of the main cluster:
-      # filesystem (the default) or postgres, chosen with
-      # `just integration-up provider=postgres`. The DSN carries the
-      # password, so it lives here and not in drakkar.yaml.
+      # filesystem (the default), postgres or redis, chosen with
+      # `just integration-up provider=<name>`. The DSN and the Redis URL
+      # carry the password, so they live here and not in drakkar.yaml.
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the
@@ -250,6 +285,8 @@ services:
         condition: service_healthy
       postgres-fleet:
         condition: service_healthy
+      redis-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-2
       CLUSTER_ID: analytics-prod
@@ -257,10 +294,11 @@ services:
       DK_METRICS__PORT: "9091"
       DK_UI__PORT: "8082"
       DK_UI__PUBLIC_URL: "http://localhost:8082/"
-      # Same provider and DSN as worker-1 (see there).
+      # Same provider, DSN and Redis URL as worker-1 (see there).
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       # App-config demo (docs/app-config.md): override one field of the
       # handler-declared AppConfig via the handler's OWN env prefix —
       # never DK_APP__* (the framework rejects that). Only worker-2, so
@@ -293,16 +331,19 @@ services:
         condition: service_healthy
       postgres-fleet:
         condition: service_healthy
+      redis-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-3
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9093"
       DK_UI__PORT: "8083"
       DK_UI__PUBLIC_URL: "http://localhost:8083/"
-      # Same provider and DSN as worker-1 (see there).
+      # Same provider, DSN and Redis URL as worker-1 (see there).
       DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_HISTORY__ARCHIVE__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
     ports:
       - "9093:9093"
       - "8083:8083"
