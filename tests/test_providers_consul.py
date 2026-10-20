@@ -201,6 +201,28 @@ def test_base_url_follows_the_pinned_cases(case):
     assert 'secret' not in str(info.value)
 
 
+@pytest.mark.parametrize(
+    ('address', 'base'),
+    [
+        ('http://consul.example.test/..x/', 'http://consul.example.test/..x'),
+        ('http://consul.example.test/v1.2', 'http://consul.example.test/v1.2'),
+        ('http://consul.example.test/.../api', 'http://consul.example.test/.../api'),
+        ('http://consul.example.test/.x', 'http://consul.example.test/.x'),
+    ],
+)
+def test_base_url_keeps_a_segment_with_dots_among_other_characters(address, base):
+    # Only a segment that is exactly '.' or '..' is a dot segment, which an HTTP client may remove.
+    assert base_url(address) == base
+
+
+@pytest.mark.parametrize(
+    'address', ['http://consul.example.test/..', 'http://consul.example.test/api/./', 'http://[::1]:8500/../']
+)
+def test_base_url_refuses_a_dot_segment_anywhere_in_the_path(address):
+    with pytest.raises(ValueError, match=BAD_ADDRESS_MESSAGE):
+        base_url(address)
+
+
 @pytest.mark.parametrize(('token', 'ok'), FIXTURE['token_cases'])
 def test_check_token_follows_the_pinned_cases(token, ok):
     if ok:

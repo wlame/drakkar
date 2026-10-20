@@ -96,6 +96,8 @@ ADDRESS_SCHEMES = ('http', 'https')
 # The path of an address, its trailing '/' dropped: nothing, or '/' and a segment, repeated.
 # Every class is ASCII and spelled out, never \w, which matches more than ASCII in Python.
 ADDRESS_PATH_RE = re.compile(r'(/[A-Za-z0-9._~-]+)*')
+# Segments that some HTTP clients remove from a path before they send it and others send as written.
+DOT_SEGMENTS = ('.', '..')
 
 # Parse errors could quote the address, so the message is fixed.
 BAD_ADDRESS_MESSAGE = 'consul connection: the address cannot be parsed'
@@ -194,7 +196,9 @@ def base_url(address: str) -> str:
       (:func:`drakkar.providers.urlcheck.is_portable_host_and_port`), the host
       is not empty, and a ``:`` is followed by a port;
     - the path is empty, or segments of letters, digits, ``.``, ``_``, ``~``
-      and ``-``, each after one ``/``, with any number of trailing ``/``.
+      and ``-``, each after one ``/``, with any number of trailing ``/``; no
+      segment is exactly ``.`` or ``..`` (a segment such as ``..x`` or
+      ``v1.2`` is kept).
 
     Any other address raises ``ValueError(BAD_ADDRESS_MESSAGE)``, which quotes
     nothing of the address and has no cause.
@@ -215,9 +219,10 @@ def _is_portable_address(address: str) -> bool:
     # The shared rule takes an empty host and a ':' with no port; URL parsers read either differently.
     if not host_and_port.partition(':')[0] or host_and_port.endswith(':'):
         return False
-    return (
-        is_portable_host_and_port(host_and_port) and ADDRESS_PATH_RE.fullmatch((slash + tail).rstrip('/')) is not None
-    )
+    path = (slash + tail).rstrip('/')
+    if ADDRESS_PATH_RE.fullmatch(path) is None or any(segment in DOT_SEGMENTS for segment in path.split('/')):
+        return False
+    return is_portable_host_and_port(host_and_port)
 
 
 def check_token(token: str) -> None:

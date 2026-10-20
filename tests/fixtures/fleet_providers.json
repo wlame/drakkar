@@ -189,6 +189,8 @@
       {"address": "http://consul.example.test/api/consul/", "base": "http://consul.example.test/api/consul"},
       {"address": "http://127.0.0.1:8500//", "base": "http://127.0.0.1:8500"},
       {"address": "http://consul.example.test/api//consul", "base": null},
+      {"address": "http://consul.example.test/a/../b", "base": null},
+      {"address": "http://consul.example.test/./api", "base": null},
       {"address": "127.0.0.1:8500", "base": null},
       {"address": "ftp://consul.example.test", "base": null},
       {"address": "http://", "base": null},
