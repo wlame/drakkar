@@ -18,8 +18,9 @@ from drakkar.config.resilience import ResilienceConfig, validate_resilience
 # manages its own connections.
 CONNECTION_PROVIDERS = ('consul', 'redis', 'postgres')
 
-# The smallest session TTL Consul accepts. The floor applies to every
-# provider, so a config written for one provider stays valid for the others.
+# The floor of offline_after_seconds for every provider, not for one: a config written for one provider
+# stays valid for the others. The consul registry's session TTL is derived from it (half the limit, at
+# least 10 s), but the floor is what keeps the setting portable.
 MIN_OFFLINE_AFTER_SECONDS = 10
 
 # The consul registry sets the TTL of a card's session to half of offline_after_seconds, and Consul

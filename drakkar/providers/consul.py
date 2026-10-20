@@ -43,8 +43,8 @@ import httpx
 
 from drakkar.config.connections import (
     CONSUL_PREFIX_RULE,
-    DOT_SEGMENTS,
     ConsulConnectionConfig,
+    has_dot_segment,
     is_consul_key_prefix,
 )
 from drakkar.providers.connections import Connections
@@ -263,7 +263,7 @@ def _is_portable_address(address: str) -> bool:
     if not host_and_port.partition(':')[0] or host_and_port.endswith(':'):
         return False
     path = (slash + tail).rstrip('/')
-    if ADDRESS_PATH_RE.fullmatch(path) is None or any(segment in DOT_SEGMENTS for segment in path.split('/')):
+    if ADDRESS_PATH_RE.fullmatch(path) is None or has_dot_segment(path):
         return False
     return is_portable_host_and_port(host_and_port)
 

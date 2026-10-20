@@ -28,11 +28,16 @@ REDIS_PREFIX_RE = r'^[A-Za-z0-9_:.-]*$'
 SCHEMA_RE = r'^[a-z_][a-z0-9_]*$'
 
 
+def has_dot_segment(path: str) -> bool:
+    """Whether a ``/``-separated ``path`` has a segment that is exactly ``.`` or ``..``."""
+    return any(segment in DOT_SEGMENTS for segment in path.split('/'))
+
+
 def is_consul_key_prefix(prefix: str) -> bool:
     """Whether ``prefix`` is segments of the allowed characters joined by ``/``, none of them ``.`` or ``..``."""
     if re.fullmatch(CONSUL_PREFIX_RE, prefix) is None:
         return False
-    return not any(segment in DOT_SEGMENTS for segment in prefix.split('/'))
+    return not has_dot_segment(prefix)
 
 
 class ConsulConnectionConfig(BaseModel):
