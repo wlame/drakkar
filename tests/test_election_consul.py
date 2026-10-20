@@ -509,14 +509,16 @@ async def test_release_by_a_token_that_was_taken_over_leaves_the_new_holder_alon
 # --- The preset seam ---
 
 
-@pytest.mark.parametrize('prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n'])
-def test_a_preset_prefix_outside_the_allowed_characters_is_refused(prefix, fake):
+@pytest.mark.parametrize(
+    'prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n', '.', '..', 'a/../b', 'a/./b']
+)
+def test_a_preset_prefix_outside_the_allowed_shape_is_refused(prefix, fake):
     with pytest.raises(ValueError, match='key_prefix'):
         _provider(fake, key_prefix=prefix)
 
 
-@pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e'])
-def test_a_preset_prefix_inside_the_allowed_characters_is_accepted(prefix, fake):
+@pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'v1.2'])
+def test_a_preset_prefix_inside_the_allowed_shape_is_accepted(prefix, fake):
     assert _provider(fake, key_prefix=prefix) is not None
 
 

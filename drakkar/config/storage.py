@@ -19,7 +19,8 @@ from drakkar.config.resilience import ResilienceConfig, validate_resilience
 # keeps a month of history queryable.
 DEFAULT_ARCHIVE_RETENTION_DAYS = 30
 
-# A Consul session lives at most a day, and the lock lease is the session TTL.
+# The consul election sets the TTL of the lease's session to half of the lease, and Consul accepts a
+# TTL of 24 hours at most, so a lease could be twice as long. One day is the documented limit.
 CONSUL_MAX_LOCK_STALE_SECONDS = 86_400
 
 
@@ -58,17 +59,17 @@ class ElectionConfig(BaseModel):
         description=(
             'Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table '
             'of the database named by history.archive.election.connection), redis (a key on the '
-            'Redis server named by history.archive.election.connection), or the name of a '
-            'provider plugin. The name consul is reserved for a provider of a later release; this '
-            'release does not ship it. Every worker of a cluster must use the same provider.'
+            'Redis server named by history.archive.election.connection), consul (a key of the '
+            'Consul agent named by history.archive.election.connection, held by a session), or the '
+            'name of a provider plugin. Every worker of a cluster must use the same provider.'
         ),
     )
     connection: str = Field(
         default='main',
         min_length=1,
         description=(
-            'Name of the entry under connections.<provider> that the postgres and redis providers use, '
-            'and that the consul provider will use. The other providers ignore it.'
+            'Name of the entry under connections.<provider> that the consul, postgres and redis '
+            'providers use. The other providers ignore it.'
         ),
     )
     resilience: ResilienceConfig = Field(

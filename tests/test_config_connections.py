@@ -26,7 +26,10 @@ BASE_YAML = {'sources': {'kafka': {'enabled': True}}, 'ui': {'release': {'enable
 
 CONSUL_PREFIX_MESSAGE = (
     "connections.consul.{name}.key_prefix '{value}' must be segments of letters, digits, '_', '.' and '-' "
-    "joined by '/', with no leading or trailing '/'"
+    "joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
+)
+CONSUL_DATACENTER_MESSAGE = (
+    "connections.consul.{name}.datacenter '{value}' may only contain letters, digits, '_', '.' and '-'"
 )
 REDIS_PREFIX_MESSAGE = (
     "connections.redis.{name}.key_prefix '{value}' may only contain letters, digits, '_', ':', '.' and '-'"
@@ -131,6 +134,16 @@ def test_a_postgres_connection_without_a_dsn_fails_the_load(load):
         ('consul', 'key_prefix', 'a//b', CONSUL_PREFIX_MESSAGE),
         ('consul', 'key_prefix', '', CONSUL_PREFIX_MESSAGE),
         ('consul', 'key_prefix', 'bad prefix', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', '.', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', '..', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', 'drakkar/../other', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', 'a/./b', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', './a', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'key_prefix', 'a/..', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'datacenter', 'dc 1', CONSUL_DATACENTER_MESSAGE),
+        ('consul', 'datacenter', 'dc/1', CONSUL_DATACENTER_MESSAGE),
+        ('consul', 'datacenter', 'dc1\n', CONSUL_DATACENTER_MESSAGE),
+        ('consul', 'datacenter', 'd\u00e7', CONSUL_DATACENTER_MESSAGE),
         ('redis', 'key_prefix', 'bad prefix', REDIS_PREFIX_MESSAGE),
         ('redis', 'key_prefix', 'a/b', REDIS_PREFIX_MESSAGE),
         ('postgres', 'schema', 'Drakkar', SCHEMA_MESSAGE),
@@ -139,7 +152,7 @@ def test_a_postgres_connection_without_a_dsn_fails_the_load(load):
         ('postgres', 'schema', '', SCHEMA_MESSAGE),
     ],
 )
-def test_an_invalid_prefix_or_schema_fails_the_load_with_the_contract_message(load, kind, field, value, message):
+def test_an_invalid_field_fails_the_load_with_the_contract_message(load, kind, field, value, message):
     entry = {'dsn': 'postgresql://h/db', field: value} if kind == 'postgres' else {field: value}
 
     with pytest.raises(ValidationError) as excinfo:
@@ -153,13 +166,19 @@ def test_an_invalid_prefix_or_schema_fails_the_load_with_the_contract_message(lo
     [
         ('consul', 'key_prefix', 'drakkar'),
         ('consul', 'key_prefix', 'team-a/drakkar_1.v2'),
+        ('consul', 'key_prefix', '..x'),
+        ('consul', 'key_prefix', 'a/...'),
+        ('consul', 'key_prefix', 'v1.2/x..'),
+        ('consul', 'datacenter', ''),
+        ('consul', 'datacenter', 'dc1'),
+        ('consul', 'datacenter', 'eu-west_1.prod'),
         ('redis', 'key_prefix', ''),
         ('redis', 'key_prefix', 'team-a:drakkar.v2_'),
         ('postgres', 'schema', '_private'),
         ('postgres', 'schema', 'drakkar_2'),
     ],
 )
-def test_a_valid_prefix_or_schema_loads(load, kind, field, value):
+def test_a_valid_field_loads(load, kind, field, value):
     entry = {'dsn': 'postgresql://h/db', field: value} if kind == 'postgres' else {field: value}
 
     cfg = load({'connections': {kind: {'main': entry}}})
@@ -185,6 +204,39 @@ def test_with_several_wrong_connections_the_first_by_name_is_reported(load):
         load({'connections': {'redis': {'b': {'key_prefix': 'x y'}, 'a': {'key_prefix': 'x y'}}}})
 
     assert REDIS_PREFIX_MESSAGE.format(name='a', value='x y') in str(excinfo.value)
+
+
+def test_an_entry_with_a_wrong_prefix_and_a_wrong_datacenter_reports_the_prefix(load):
+    entry = {'key_prefix': '/drakkar', 'datacenter': 'dc 1'}
+
+    with pytest.raises(ValidationError) as excinfo:
+        load({'connections': {'consul': {'main': entry}}})
+
+    text = str(excinfo.value)
+    assert CONSUL_PREFIX_MESSAGE.format(name='main', value='/drakkar') in text
+    assert 'datacenter' not in text
+
+
+def test_the_datacenter_of_an_earlier_entry_is_reported_before_the_prefix_of_a_later_one(load):
+    connections = {'consul': {'a': {'datacenter': 'dc 1'}, 'b': {'key_prefix': '/drakkar'}}}
+
+    with pytest.raises(ValidationError) as excinfo:
+        load({'connections': connections})
+
+    text = str(excinfo.value)
+    assert CONSUL_DATACENTER_MESSAGE.format(name='a', value='dc 1') in text
+    assert 'key_prefix' not in text
+
+
+def test_a_datacenter_error_does_not_echo_the_token(load):
+    entry = {'token': 'hunter2-token', 'datacenter': 'dc 1'}
+
+    with pytest.raises(ValidationError) as excinfo:
+        load({'connections': {'consul': {'main': entry}}})
+
+    text = str(excinfo.value)
+    assert CONSUL_DATACENTER_MESSAGE.format(name='main', value='dc 1') in text
+    assert 'hunter2-token' not in text
 
 
 def test_pool_max_below_pool_min_names_the_connection(load):

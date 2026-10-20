@@ -15,8 +15,24 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CONSUL_PREFIX_RE = r'^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
+CONSUL_DATACENTER_RE = r'^[A-Za-z0-9_.-]*$'
+# Path segments that some HTTP clients remove from a path before they send it and others send as written,
+# so a path that holds one is not the same request for every client.
+DOT_SEGMENTS = ('.', '..')
+# The rule of a key prefix, as the tail of its load message and of the providers' message for a preset prefix.
+CONSUL_PREFIX_RULE = (
+    "must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', "
+    "and no segment may be '.' or '..'"
+)
 REDIS_PREFIX_RE = r'^[A-Za-z0-9_:.-]*$'
 SCHEMA_RE = r'^[a-z_][a-z0-9_]*$'
+
+
+def is_consul_key_prefix(prefix: str) -> bool:
+    """Whether ``prefix`` is segments of the allowed characters joined by ``/``, none of them ``.`` or ``..``."""
+    if re.fullmatch(CONSUL_PREFIX_RE, prefix) is None:
+        return False
+    return not any(segment in DOT_SEGMENTS for segment in prefix.split('/'))
 
 
 class ConsulConnectionConfig(BaseModel):
@@ -24,7 +40,10 @@ class ConsulConnectionConfig(BaseModel):
 
     address: str = Field(
         default='http://127.0.0.1:8500',
-        description='Base URL of the Consul HTTP API.',
+        description=(
+            'Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional '
+            'path; no user info, query or fragment.'
+        ),
     )
     token: str = Field(
         default='',
@@ -33,13 +52,15 @@ class ConsulConnectionConfig(BaseModel):
     )
     datacenter: str = Field(
         default='',
-        description='Consul datacenter to address. Empty means the datacenter of the agent.',
+        description=(
+            'Consul datacenter to address: letters, digits, "_", "." and "-". Empty means the datacenter of the agent.'
+        ),
     )
     key_prefix: str = Field(
         default='drakkar',
         description=(
             'Key prefix of everything a feature stores in Consul: segments of letters, digits, "_", "." '
-            'and "-" joined by "/", with no leading or trailing "/".'
+            'and "-" joined by "/", with no leading or trailing "/", and no segment may be "." or "..".'
         ),
     )
 
@@ -109,12 +130,14 @@ class ConnectionsConfig(BaseModel):
 
     @model_validator(mode='after')
     def _validate_shapes(self) -> 'ConnectionsConfig':
-        """Check prefixes, schemas and pool sizes; the first wrong connection by service type and name is reported."""
+        """Check the shape of every entry; the first wrong connection by service type and name is reported."""
         for name, consul in sorted(self.consul.items()):
-            if not re.fullmatch(CONSUL_PREFIX_RE, consul.key_prefix):
+            path = f'connections.consul.{name}'
+            if not is_consul_key_prefix(consul.key_prefix):
+                raise ValueError(f"{path}.key_prefix '{consul.key_prefix}' {CONSUL_PREFIX_RULE}")
+            if not re.fullmatch(CONSUL_DATACENTER_RE, consul.datacenter):
                 raise ValueError(
-                    f"connections.consul.{name}.key_prefix '{consul.key_prefix}' must be segments of letters, "
-                    "digits, '_', '.' and '-' joined by '/', with no leading or trailing '/'"
+                    f"{path}.datacenter '{consul.datacenter}' may only contain letters, digits, '_', '.' and '-'"
                 )
         for name, redis in sorted(self.redis.items()):
             if not re.fullmatch(REDIS_PREFIX_RE, redis.key_prefix):

@@ -331,6 +331,26 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
+      "name": "registry_consul_loads",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "consul"
+          }
+        },
+        "connections": {
+          "consul": {
+            "main": {
+              "address": "http://127.0.0.1:8500"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
       "name": "election_filesystem_is_silent",
       "yaml": {
         "history": {
@@ -819,6 +839,43 @@
       "message": "history.archive.lock_stale_seconds (90000) must be <= 86400 when history.archive.election.provider is consul"
     },
     {
+      "name": "consul_catalog_mode_reserved",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "consul",
+            "consul": {
+              "mode": "catalog"
+            }
+          }
+        },
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "message": "fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only"
+    },
+    {
+      "name": "consul_offline_after_too_long",
+      "yaml": {
+        "fleet": {
+          "registry": {
+            "provider": "consul",
+            "offline_after_seconds": 86401,
+            "prune_after_seconds": 86401
+          }
+        },
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "message": "fleet.registry.offline_after_seconds (86401) must be <= 86400 when fleet.registry.provider is consul"
+    },
+    {
       "name": "registry_resilience_backoff_max_below_base",
       "yaml": {
         "fleet": {
@@ -887,7 +944,33 @@
           }
         }
       },
-      "message": "connections.consul.main.key_prefix '/drakkar' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/'"
+      "message": "connections.consul.main.key_prefix '/drakkar' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
+    },
+    {
+      "name": "consul_prefix_dot_segment",
+      "yaml": {
+        "connections": {
+          "consul": {
+            "main": {
+              "key_prefix": "drakkar/../other"
+            }
+          }
+        }
+      },
+      "message": "connections.consul.main.key_prefix 'drakkar/../other' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
+    },
+    {
+      "name": "consul_datacenter_invalid",
+      "yaml": {
+        "connections": {
+          "consul": {
+            "main": {
+              "datacenter": "dc 1"
+            }
+          }
+        }
+      },
+      "message": "connections.consul.main.datacenter 'dc 1' may only contain letters, digits, '_', '.' and '-'"
     },
     {
       "name": "schema_invalid",

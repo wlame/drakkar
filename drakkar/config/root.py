@@ -196,7 +196,7 @@ class DrakkarConfig(BaseSettings):
 
     @model_validator(mode='after')
     def _validate_consul_lock_lease(self) -> 'DrakkarConfig':
-        """The lock lease is a Consul session TTL, which Consul caps at one day."""
+        """With the consul election the lease is at most one day: the session TTL is half of it."""
         archive = self.history.archive
         if archive.election.provider == 'consul' and archive.lock_stale_seconds > CONSUL_MAX_LOCK_STALE_SECONDS:
             raise ValueError(

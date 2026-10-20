@@ -205,19 +205,37 @@ def test_session_ttl_rounds_a_fractional_half_up_to_whole_seconds():
     assert session_ttl(60.0) == '30s'
 
 
-@pytest.mark.parametrize('prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n'])
-def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_characters(prefix):
+@pytest.mark.parametrize(
+    'prefix',
+    [
+        '',
+        '/drakkar',
+        'drakkar/',
+        'a//b',
+        'has space',
+        'a:b',
+        'brace{',
+        'line\n',
+        '.',
+        '..',
+        'a/../b',
+        'a/./b',
+        './a',
+        'a/..',
+    ],
+)
+def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_shape(prefix):
     with pytest.raises(ValueError) as info:
         check_key_prefix(prefix)
 
     assert str(info.value) == (
         f"key_prefix '{prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
-        "with no leading or trailing '/'"
+        "with no leading or trailing '/', and no segment may be '.' or '..'"
     )
 
 
-@pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e'])
-def test_check_key_prefix_accepts_a_prefix_inside_the_allowed_characters(prefix):
+@pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'a/...', 'v1.2/x..'])
+def test_check_key_prefix_accepts_a_prefix_inside_the_allowed_shape(prefix):
     check_key_prefix(prefix)
 
 

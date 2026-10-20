@@ -47,8 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use the entry-point group `drakkar.election_providers`, and
   `drakkar.recorder.electiontest` holds the checks a provider should pass.
   A registry provider can give its own `online` verdict (`PeerCard.online`);
-  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The name `consul`
-  is reserved, and the release ships no provider with this name. The
+  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The
   summary line shows ` election=<provider>` when the election provider is not
   `filesystem`. New metrics:
   `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`
@@ -117,6 +116,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always verifies the certificate and the host name of the server. The
   providers need version 7.2 or later of the `redis` package, because they
   read the reply code that the client sets from 7.2 on (see Breaking).
+- **Consul providers.** `fleet.registry.provider: consul` keeps each worker
+  card in a Consul key that a session of its worker holds, and
+  `history.archive.election.provider: consul` keeps the archive lease in one
+  key per cluster. Both use the `key_prefix` of the connection that the
+  `connection` key of the feature names (`connections.consul.<name>`). The
+  time to live of a session is half of the limit (`offline_after_seconds`
+  for a card, `lock_stale_seconds` for a lease), and at least 10 seconds.
+  Consul can end a session up to twice its time to live after the last
+  renew, so a dead worker's card or lease ends by the limit. A card is
+  online while a session holds its key, and the workers list shows no age
+  for it. A key that no session holds is listed as offline. A worker that
+  restarts under its old name takes its card over at once. Like the redis
+  providers, the client does not retry on its own. The `resilience` block of
+  the feature retries timeouts, connection errors and the statuses 429, 500,
+  502, 503 and 504. Any other status, such as 403, is final. A connect gives
+  up after 5 seconds. The token goes only in the `X-Consul-Token` header. A
+  provider refuses to start when the `address` of its connection is not an
+  `http://` or `https://` address (a host, an optional port and an optional
+  path, with no user info, query or fragment, and no empty, `.` or `..`
+  segment), or when the `token` has a space or a character outside printable
+  ASCII. New load checks: catalog mode is refused with the `consul` registry
+  (this release ships publish mode only), `offline_after_seconds` is at most
+  86400 with the `consul` registry, a Consul datacenter name may only
+  contain letters, digits, `_`, `.` and `-`, and a `key_prefix` of a Consul
+  connection may not have a segment that is `.` or `..`.
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
   and archive election on a separate Postgres service, `postgres-fleet`.

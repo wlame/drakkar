@@ -291,6 +291,87 @@ def test_registry_names_a_connection_of_its_own_kind_only():
         _config(fleet={'registry': {'provider': 'consul'}}, connections={'redis': {'main': {}}})
 
 
+CATALOG_MODE_MESSAGE = (
+    'fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only'
+)
+
+
+def _consul_registry(**registry) -> DrakkarConfig:
+    """A config whose registry is the consul provider, with ``registry`` merged over it."""
+    return _config(
+        fleet={'registry': {'provider': 'consul', **registry}},
+        connections={'consul': {'main': {}}},
+    )
+
+
+def test_consul_registry_in_catalog_mode_fails_the_load():
+    with pytest.raises(ValueError) as excinfo:
+        _consul_registry(consul={'mode': 'catalog'})
+
+    assert CATALOG_MODE_MESSAGE in str(excinfo.value)
+
+
+def test_consul_registry_in_publish_mode_loads():
+    config = _consul_registry(consul={'mode': 'publish'})
+
+    assert config.fleet.registry.consul.mode == 'publish'
+
+
+@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'redis', 'postgres'])
+def test_catalog_mode_loads_when_the_provider_is_not_consul(provider):
+    config = _config(
+        fleet={'registry': {'provider': provider, 'consul': {'mode': 'catalog'}}},
+        connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
+    )
+
+    assert config.fleet.registry.consul.mode == 'catalog'
+
+
+def test_consul_offline_after_seconds_at_the_cap_loads():
+    config = _consul_registry(offline_after_seconds=86_400)
+
+    assert config.fleet.registry.offline_after_seconds == 86_400
+
+
+def test_consul_offline_after_seconds_over_the_cap_fails_the_load():
+    with pytest.raises(ValueError) as excinfo:
+        _consul_registry(offline_after_seconds=86_401, prune_after_seconds=86_401)
+
+    assert (
+        'fleet.registry.offline_after_seconds (86401) must be <= 86400 when fleet.registry.provider is consul'
+        in str(excinfo.value)
+    )
+
+
+@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'redis', 'postgres'])
+def test_offline_after_seconds_over_the_consul_cap_loads_for_other_providers(provider):
+    config = _config(
+        fleet={'registry': {'provider': provider, 'offline_after_seconds': 86_401, 'prune_after_seconds': 86_401}},
+        connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
+    )
+
+    assert config.fleet.registry.offline_after_seconds == 86_401
+
+
+def test_consul_registry_checks_the_prune_limit_before_the_offline_cap():
+    # The prune check is the older timing check and keeps its place ahead of the consul cap.
+    with pytest.raises(ValueError) as excinfo:
+        _consul_registry(offline_after_seconds=86_401)
+
+    text = str(excinfo.value)
+    assert 'fleet.registry.prune_after_seconds (86400) must be >= fleet.registry.offline_after_seconds (86401)' in text
+    assert 'must be <= 86400' not in text
+
+
+def test_consul_registry_in_catalog_mode_reports_the_mode_before_the_offline_cap():
+    with pytest.raises(ValueError) as excinfo:
+        _consul_registry(offline_after_seconds=86_401, prune_after_seconds=86_401, consul={'mode': 'catalog'})
+
+    text = str(excinfo.value)
+    assert CATALOG_MODE_MESSAGE in text
+    assert 'must be <= 86400' not in text
+
+
 def test_consul_lock_stale_seconds_at_the_session_limit_loads():
     config = _config(
         history={'archive': {'lock_stale_seconds': 86_400, 'election': {'provider': 'consul'}}},

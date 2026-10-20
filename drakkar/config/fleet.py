@@ -22,6 +22,10 @@ CONNECTION_PROVIDERS = ('consul', 'redis', 'postgres')
 # provider, so a config written for one provider stays valid for the others.
 MIN_OFFLINE_AFTER_SECONDS = 10
 
+# The consul registry sets the TTL of a card's session to half of offline_after_seconds, and Consul
+# accepts a TTL of 24 hours at most. One day is the documented limit of the setting.
+CONSUL_MAX_OFFLINE_AFTER_SECONDS = 86_400
+
 
 class StaticPeerConfig(BaseModel):
     """One peer of the ``static`` registry provider."""
@@ -59,14 +63,16 @@ class ConsulRegistryConfig(BaseModel):
         default='publish',
         description=(
             'publish: every worker stores its own card in Consul under a session and reads the cards of '
-            'its peers. catalog: workers are listed from the Consul service catalog and this worker '
-            'publishes nothing.'
+            'its peers. catalog is reserved for a later release; this release ships publish only.'
         ),
     )
     service_name: str = Field(
         default='drakkar',
         min_length=1,
-        description='Name of the Consul service that lists the workers. Used only when mode is catalog.',
+        description=(
+            'Name of the Consul service that lists the workers in catalog mode, which a later release adds. '
+            'Unused in this release.'
+        ),
     )
 
 
@@ -94,17 +100,17 @@ class FleetRegistryConfig(BaseModel):
             'Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), '
             'none (no peers), postgres (cards in a table of the database named by '
             'fleet.registry.connection), redis (cards in keys of the Redis server named by '
-            'fleet.registry.connection), or the name of a provider plugin. The name consul is '
-            'reserved for a provider of a later release; this release does not ship it. '
-            'Needs ui.enabled.'
+            'fleet.registry.connection), consul (cards in keys of the Consul agent named by '
+            'fleet.registry.connection, each held by a session of its worker), or the name of a '
+            'provider plugin. Needs ui.enabled.'
         ),
     )
     connection: str = Field(
         default='main',
         min_length=1,
         description=(
-            'Name of the entry under connections.<provider> that the postgres and redis providers use, '
-            'and that the consul provider will use. The other providers ignore it.'
+            'Name of the entry under connections.<provider> that the consul, postgres and redis '
+            'providers use. The other providers ignore it.'
         ),
     )
     heartbeat_seconds: int = Field(default=10, ge=1, description='Seconds between card publishes.')
@@ -114,7 +120,8 @@ class FleetRegistryConfig(BaseModel):
         ge=1,
         description=(
             'A peer whose card is older than this many seconds (on the provider clock) is offline. '
-            f'Must be >= 2 * heartbeat_seconds and >= {MIN_OFFLINE_AFTER_SECONDS}.'
+            f'Must be >= 2 * heartbeat_seconds and >= {MIN_OFFLINE_AFTER_SECONDS}. '
+            f'With the consul provider it must also be <= {CONSUL_MAX_OFFLINE_AFTER_SECONDS}.'
         ),
     )
     prune_after_seconds: int = Field(
@@ -162,6 +169,22 @@ class FleetRegistryConfig(BaseModel):
             raise ValueError(
                 f'fleet.registry.prune_after_seconds ({self.prune_after_seconds}) must be >= '
                 f'fleet.registry.offline_after_seconds ({self.offline_after_seconds})'
+            )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_consul(self) -> 'FleetRegistryConfig':
+        """The consul registry ships publish mode only, and its card session lives at most a day."""
+        if self.provider != 'consul':
+            return self
+        if self.consul.mode == 'catalog':
+            raise ValueError(
+                'fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only'
+            )
+        if self.offline_after_seconds > CONSUL_MAX_OFFLINE_AFTER_SECONDS:
+            raise ValueError(
+                f'fleet.registry.offline_after_seconds ({self.offline_after_seconds}) must be <= '
+                f'{CONSUL_MAX_OFFLINE_AFTER_SECONDS} when fleet.registry.provider is consul'
             )
         return self
 
