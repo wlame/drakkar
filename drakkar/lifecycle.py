@@ -82,7 +82,7 @@ from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
-    from drakkar.config import DrakkarConfig
+    from drakkar.config import DrakkarConfig, ElectionConfig, FleetRegistryConfig
 
 logger = structlog.get_logger()
 
@@ -91,6 +91,16 @@ NO_SINKS_ERROR = (
     'No sinks configured, but results are delivered to sinks (the Kafka source is on, '
     'or sources.http.sinks_enabled is true). Add at least one sink to the sinks: section in config.'
 )
+
+
+def _connection_and_prune(registry: FleetRegistryConfig) -> dict[str, Any]:
+    """The registry options of a provider that keeps its cards in a shared database: the connection and the prune age."""
+    return {'connection': registry.connection, 'prune_after_seconds': registry.prune_after_seconds}
+
+
+def _connection_only(election: ElectionConfig) -> dict[str, Any]:
+    """The election options of a provider that keeps its lock in a shared database: the connection."""
+    return {'connection': election.connection}
 
 
 def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
@@ -107,14 +117,8 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
         },
         'static': lambda: {'peers': [peer.model_dump() for peer in registry.static.peers]},
         'none': dict,
-        'postgres': lambda: {
-            'connection': registry.connection,
-            'prune_after_seconds': registry.prune_after_seconds,
-        },
-        'redis': lambda: {
-            'connection': registry.connection,
-            'prune_after_seconds': registry.prune_after_seconds,
-        },
+        'postgres': lambda: _connection_and_prune(registry),
+        'redis': lambda: _connection_and_prune(registry),
     }
     build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
     return build()
@@ -129,8 +133,8 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     election = config.history.archive.election
     builders = {
         'filesystem': dict,
-        'postgres': lambda: {'connection': election.connection},
-        'redis': lambda: {'connection': election.connection},
+        'postgres': lambda: _connection_only(election),
+        'redis': lambda: _connection_only(election),
     }
     build = builders.get(election.provider, lambda: dict(election.plugin_options))
     return build()

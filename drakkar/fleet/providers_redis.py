@@ -9,6 +9,7 @@ import structlog
 from drakkar.config.connections import REDIS_PREFIX_RE
 from drakkar.fleet.card import decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
+from drakkar.providers.cardlog import InvalidCardLog
 from drakkar.providers.redis import (
     DEFAULT_KEY_PREFIX,
     SCRIPTS,
@@ -102,10 +103,7 @@ class RedisRegistry:
         self._preset_prefix = key_prefix
         # The client and the key prefix that go with it, set once a start succeeded.
         self._ready: tuple[Any, str] | None = None
-        # Members whose card was logged as undecodable. Cut down to the members
-        # of each listing, so it never outgrows the index, and a worker that
-        # expired and came back with a bad card is logged again.
-        self._reported_members: set[str] = set()
+        self._invalid_cards = InvalidCardLog()
         self._logger: Any = structlog.get_logger()
         self._stopped = False
 
@@ -154,12 +152,12 @@ class RedisRegistry:
             key('registry_card', prefix=prefix, worker=''),
         )
         now, entries = _parse_list_reply(reply)
-        self._reported_members &= {entry.member for entry in entries}
+        self._invalid_cards.cut_to(entry.member for entry in entries)
         listed: PeerCardList = []
         for entry in entries:
             card, reason = decode_card(entry.card)
             if card is None:
-                await self._report_invalid_card(entry.member, reason)
+                await self._invalid_cards.report(self._logger, entry.member, reason)
                 continue
             # max(0, ...): the server's clock may step back between a write and a read.
             listed.append(PeerCard(card=card, age_seconds=max(0.0, now - entry.published_at), online=None))
@@ -191,13 +189,6 @@ class RedisRegistry:
         if self._ready is None:
             raise RuntimeError('RedisRegistry used before start()')
         return self._ready
-
-    async def _report_invalid_card(self, member: str, reason: str) -> None:
-        """Log a card that does not decode, once per member while that member stays listed."""
-        if member in self._reported_members:
-            return
-        self._reported_members.add(member)
-        await self._logger.awarning('fleet_card_invalid', category='fleet', worker=member, reason=reason)
 
 
 def redis_registry_factory(options: Mapping[str, Any]) -> RedisRegistry:

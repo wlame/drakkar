@@ -9,6 +9,7 @@ import structlog
 from drakkar.config.connections import SCHEMA_RE, PostgresConnectionConfig
 from drakkar.fleet.card import decode_card, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
+from drakkar.providers.cardlog import InvalidCardLog
 from drakkar.providers.postgres import (
     DEFAULT_SCHEMA,
     FLEET_WORKERS_TABLE,
@@ -65,10 +66,7 @@ class PostgresRegistry:
         self._preset_manage_schema = manage_schema
         # The pool and the statements rendered for its schema, set once a start succeeded.
         self._ready: tuple[Any, dict[str, str]] | None = None
-        # Workers whose card was logged as undecodable. Cut down to the
-        # workers of each listing, so it never outgrows the table, and a
-        # worker pruned and back with a bad card is logged again.
-        self._reported_workers: set[str] = set()
+        self._invalid_cards = InvalidCardLog()
         self._logger: Any = structlog.get_logger()
         self._stopped = False
 
@@ -100,13 +98,13 @@ class PostgresRegistry:
         async with borrow(pool) as conn:
             await conn.execute(statements['list_prune'], self._prune_after)
             rows = await conn.fetch(statements['list_select'])
-        self._reported_workers &= {row[0] for row in rows}
+        self._invalid_cards.cut_to(row[0] for row in rows)
         listed: PeerCardList = []
         for row in rows:
             worker, text, age = row[0], row[1], row[2]
             card, reason = decode_card(text.encode('utf-8'))
             if card is None:
-                await self._report_invalid_card(worker, reason)
+                await self._invalid_cards.report(self._logger, worker, reason)
                 continue
             # max(0, ...): the server's clock may step back between a write and a read.
             listed.append(PeerCard(card=card, age_seconds=max(0.0, float(age)), online=None))
@@ -139,13 +137,6 @@ class PostgresRegistry:
         if self._ready is None:
             raise RuntimeError('PostgresRegistry used before start()')
         return self._ready
-
-    async def _report_invalid_card(self, worker: str, reason: str) -> None:
-        """Log a card that does not decode, once per worker name while that name stays listed."""
-        if worker in self._reported_workers:
-            return
-        self._reported_workers.add(worker)
-        await self._logger.awarning('fleet_card_invalid', category='fleet', worker=worker, reason=reason)
 
 
 def postgres_registry_factory(options: Mapping[str, Any]) -> PostgresRegistry:

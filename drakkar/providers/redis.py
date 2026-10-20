@@ -38,7 +38,6 @@ and reads the rest as a number, so ``/0/extra`` falls back to database 0 and
 plain to every parser, and the shared fixture pins its cases.
 """
 
-import ipaddress
 import json
 import math
 import re
@@ -49,6 +48,7 @@ from urllib.parse import unquote_to_bytes
 from drakkar.config.connections import RedisConnectionConfig
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import TransientError
+from drakkar.providers.urlcheck import PRINTABLE_ASCII_RE, is_portable_host_and_port
 
 REDIS_PROVIDER = 'redis'
 PREFIX_PLACEHOLDER = '{prefix}'
@@ -159,23 +159,16 @@ RESP_PROTOCOL = 2
 BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
 # The client applies the options of a URL query after its own settings, so a query could undo them.
 URL_QUERY_MESSAGE = 'redis connection: the url cannot carry query options'
-# The parts of the URL check (see is_portable_url). Every class is ASCII and spelled out, never \w or
-# \d, which match more than ASCII in Python.
-# 0x21 to 0x7E: no space, tab, line break, other control character, DEL or non-ASCII character.
-PRINTABLE_ASCII_RE = re.compile(r'[!-~]*')
+# The parts of the URL check (see is_portable_url) that are particular to a Redis URL. Every class is
+# ASCII and spelled out, never \w or \d, which match more than ASCII in Python. The host and the port
+# are judged by the rule that every provider shares (drakkar.providers.urlcheck).
 # A '%' that does not start a two-digit hex escape.
 BAD_ESCAPE_RE = re.compile(r'%(?![0-9A-Fa-f]{2})')
 # The user info of RFC 3986 (letters, digits, '-._~', the sub-delimiters, ':' and escapes) and '@':
 # every parser splits user info from host at the last '@'. Any other character needs an escape.
 USER_INFO_RE = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%]*")
-# A host name, or nothing (the client then uses localhost).
-HOST_NAME_RE = re.compile(r'[A-Za-z0-9._-]*')
-# The characters of an IPv6 address in brackets. No '%': a zone index is decoded differently by each parser.
-IPV6_LITERAL_RE = re.compile(r'[0-9A-Fa-f:.]+')
-# The port and the database number have a fixed number of digits at most (leading zeros count), so
-# a number is never longer than every client reads alike: int() refuses a text of more than 4300 digits.
-PORT_RE = re.compile(r'[0-9]{1,5}')
-MAX_PORT = 65535
+# The database number has a fixed number of digits at most (leading zeros count), so a number is
+# never longer than every client reads alike: int() refuses a text of more than 4300 digits.
 # Empty, '/', or '/' and up to ten ASCII digits, matched on the raw path.
 DATABASE_PATH_RE = re.compile(r'(/[0-9]{0,10})?')
 # The largest database number: the server's SELECT takes a signed 32-bit number.
@@ -351,27 +344,7 @@ def _is_portable_authority(authority: str) -> bool:
     user_info, at, host_and_port = authority.rpartition('@')
     if at and USER_INFO_RE.fullmatch(user_info) is None:
         return False
-    if host_and_port.startswith('['):
-        address, bracket, after = host_and_port[1:].partition(']')
-        if not bracket or not _is_ipv6_address(address) or after[:1] not in ('', ':'):
-            return False
-        port = after[1:]
-    else:
-        host, _, port = host_and_port.partition(':')
-        if HOST_NAME_RE.fullmatch(host) is None:
-            return False
-    return not port or (PORT_RE.fullmatch(port) is not None and 1 <= int(port) <= MAX_PORT)
-
-
-def _is_ipv6_address(text: str) -> bool:
-    """Tell whether ``text`` is an IPv6 address; an IPv4 address in brackets is not one."""
-    if IPV6_LITERAL_RE.fullmatch(text) is None:
-        return False
-    try:
-        ipaddress.IPv6Address(text)
-    except ValueError:
-        return False
-    return True
+    return is_portable_host_and_port(host_and_port)
 
 
 def _is_database_path(path: str) -> bool:
