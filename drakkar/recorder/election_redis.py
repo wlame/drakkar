@@ -38,7 +38,7 @@ class RedisElection:
     key, so a taker finds a free scope and there is no previous holder to read:
     this provider logs no ``recorder_archive_lock_taken_over`` line.
 
-    Every write names the token and the server checks it. Each operation is one
+    Every write names the token and the server checks it. Each write is one
     script that reads the key's body and acts only while the body holds the
     caller's ``"token":"<token>"`` text, so a holder that was taken over can
     neither extend nor free the new holder's lease. ``acquire`` sets the body

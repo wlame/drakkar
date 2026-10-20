@@ -28,13 +28,18 @@ client library has.
 
 The URL of a connection cannot carry query options (``?...``): the client
 applies them after its own settings, and the options of a URL are not the same
-for every implementation, so one URL could behave differently in each.
+for every implementation, so one URL could behave differently in each. For the
+same reason the path of a ``redis://`` or ``rediss://`` URL must be empty,
+``/`` or ``/`` and a database number: the client would read any other path as
+database 0.
 """
 
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from drakkar.config.connections import RedisConnectionConfig
 from drakkar.providers.connections import Connections
@@ -149,6 +154,10 @@ RESP_PROTOCOL = 2
 BAD_URL_MESSAGE = 'redis connection: the url cannot be parsed'
 # The client applies the options of a URL query after its own settings, so a query could undo them.
 URL_QUERY_MESSAGE = 'redis connection: the url cannot carry query options'
+# The schemes whose URL path is the database number (a unix:// path is the socket).
+DATABASE_PATH_SCHEMES = ('redis', 'rediss')
+# Empty, '/', or '/' and ASCII digits. The client would read any other path as database 0.
+DATABASE_PATH_RE = re.compile(r'(/[0-9]*)?')
 
 
 def key(name: str, *, prefix: str, worker: str = '', scope: str = '') -> str:
@@ -250,17 +259,20 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
     tests expect. A URL with a ``?`` is refused with ``URL_QUERY_MESSAGE`` before
     it is parsed: the client applies the options of a URL query after its own
     settings, so a query such as ``socket_timeout`` would undo the ones set here.
-    A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``. Both errors
-    have no cause and quote nothing, because the client's own message can quote
-    the URL.
+    A URL that does not parse raises ``ValueError(BAD_URL_MESSAGE)``, and so does
+    a ``redis://`` or ``rediss://`` URL whose path is not empty, ``/`` or ``/``
+    and a database number (the client would read ``/three`` or ``/0/extra`` as
+    database 0). Both errors have no cause and quote nothing, because the
+    client's own message can quote the URL.
     """
     from redis.asyncio import Redis
     from redis.asyncio.retry import Retry
     from redis.backoff import NoBackoff
 
     if '?' in settings.url:
-        raise ValueError(URL_QUERY_MESSAGE) from None
+        raise ValueError(URL_QUERY_MESSAGE)
     try:
+        _check_database_path(settings.url)
         return Redis.from_url(
             settings.url,
             retry=Retry(NoBackoff(), 0),
@@ -270,6 +282,18 @@ async def open_client(settings: RedisConnectionConfig) -> Any:
         )
     except ValueError:
         raise ValueError(BAD_URL_MESSAGE) from None
+
+
+def _check_database_path(url: str) -> None:
+    """Raise ``ValueError`` when the path of a ``redis://`` or ``rediss://`` URL is not a database number.
+
+    The path may be empty, ``/``, or ``/`` and ASCII digits. ``urlsplit`` keeps
+    a ``;`` in the path, so ``/0;x`` is refused too. The caller replaces the
+    error with ``BAD_URL_MESSAGE``, so the text here never reaches a log.
+    """
+    parts = urlsplit(url)
+    if parts.scheme in DATABASE_PATH_SCHEMES and DATABASE_PATH_RE.fullmatch(parts.path) is None:
+        raise ValueError('the url path is not a database number')
 
 
 async def close_client(client: Any) -> None:

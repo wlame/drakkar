@@ -160,11 +160,27 @@ What to check:
   [Security](security.md#provider-credentials).
 - The server is Redis 5.0 or later, standalone or a primary behind a fixed
   address. Redis Cluster is not supported. Use `rediss://` in the URL for TLS.
-  A URL with query options (`?...`) is refused when the provider starts.
+  The client then verifies the certificate of the server against the
+  system's default certificate store and checks that the certificate names
+  the host of the URL; this cannot be switched off. Put a private
+  certificate authority into that store, or set `SSL_CERT_FILE` or
+  `SSL_CERT_DIR`, which replace the default locations of the store. A URL
+  with query options (`?...`) is refused when the provider starts.
 - A Redis server that restarts without its data loses the cards and the
-  leases. The workers publish their cards again at the next heartbeat. A pass
-  that held the lease finds it gone at its next check, stops without
-  publishing, and the next pass takes the scope.
+  leases, and so does a flush of the database. Eviction can delete them too:
+  every key of the providers has a time to live, so any `volatile-*` and any
+  `allkeys-*` `maxmemory` policy can evict a live card or a lease. A database
+  number of its own does not protect them, because the memory limit and
+  eviction cover the whole server. The workers publish their cards again at
+  the next heartbeat. A pass that held the lease finds it gone at its next
+  refresh or check, stops without publishing, and the next pass takes the
+  scope. That pass logs `recorder_archive_fenced` with `reason=taken_over`,
+  whose detail says that another worker took the archive lock over, although
+  no worker did: the provider can only answer that the pass no longer holds
+  the lease. Under the default policy, `noeviction`, a full server evicts
+  nothing and answers a script that needs more memory with an error that
+  names `OOM`. That error is final and counts as a failed operation for the
+  breaker.
 - During a Redis outage the pipeline keeps running. The workers list keeps its
   last snapshot, an archive pass stops without publishing, and both providers
   recover when the server is back. Watch `drakkar_provider_breaker_open` and

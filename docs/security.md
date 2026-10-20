@@ -246,7 +246,13 @@ below applies to the entries you declare and to any provider that uses them.
   the environment (`DK_CONNECTIONS__REDIS__MAIN__URL`). The second line
   switches the `default` user off, so that nobody connects without a
   password; run it only when no other client of the server uses that user.
-  Use `rediss://` in the URL for TLS. ACL users need Redis 6.0 or later. On
+  Use `rediss://` in the URL for TLS. The client then verifies the
+  certificate of the server against the system's default certificate store
+  and checks that the certificate names the host of the URL. This cannot be
+  switched off: the URL takes no query options, so no option can turn the
+  check off or name a file of certificates. Put a private certificate
+  authority into that store; `SSL_CERT_FILE` and `SSL_CERT_DIR` replace the
+  default locations of the store. ACL users need Redis 6.0 or later. On
   Redis 5.0, set `requirepass` on the server and give the fleet a database
   number of its own; the URL then holds only the password, for example
   `redis://:change-me@redis.internal:6379/3`, and that password allows every

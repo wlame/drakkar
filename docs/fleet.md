@@ -335,6 +335,18 @@ What it keeps and does:
   worker publishes for that long, the index goes as well, and cards that are
   still alive at that moment are not listed until their workers publish
   again. A live worker comes back at its next heartbeat.
+- **Lost keys.** A Redis server that restarts without its data, or a flush
+  of the database, deletes the cards and the index. Eviction can delete them
+  too: every key of the providers has a time to live, so any `volatile-*`
+  and any `allkeys-*` `maxmemory` policy can evict a live card or the index.
+  A database number of its own does not protect them, because the memory
+  limit and eviction cover the whole server. The workers publish their cards
+  again at the next heartbeat, and the list is complete again. Under the
+  default policy, `noeviction`, a full server evicts nothing and answers a
+  script that needs more memory with an error that names `OOM`. That error
+  is final and counts as a failed operation for the breaker. The archive
+  lease is lost the same way (see [The redis election
+  provider](local-databases.md#the-redis-election-provider)).
 - **Liveness.** The provider gives no `online` verdict. The
   [liveness rule](#liveness) applies: a peer is online while its age is at
   most `offline_after_seconds`. No worker's wall clock enters an age, and the
@@ -363,8 +375,15 @@ the registry and the archive election share it when they name the same
 connection. The worker closes it at shutdown, after both providers have
 stopped (see [Connections](#connections)).
 
-**The URL.** `redis://` is plain TCP and `rediss://` is TLS. The database
-number is the path, for example `/3`. A URL with query options (`?...`) is
+**The URL.** `redis://` is plain TCP and `rediss://` is TLS. With
+`rediss://`, the client verifies the certificate of the server against the
+system's default certificate store and checks that the certificate names the
+host of the URL. This cannot be switched off. Put a private certificate
+authority into that store; the environment variables `SSL_CERT_FILE` (a file
+of certificates) and `SSL_CERT_DIR` (a directory of them) replace the default
+locations of the store. The database number is the path, for example `/3`.
+A path that is not empty, `/` or `/` and one number, such as `/three` or
+`/0/extra`, does not parse. A URL with query options (`?...`) is
 refused when the provider starts, with
 `redis connection: the url cannot carry query options`. A URL that does not
 parse fails the start with `redis connection: the url cannot be parsed`.
@@ -373,8 +392,11 @@ next heartbeat, like any failed start.
 
 **The server.** Redis 5.0 or later, standalone or a primary behind a fixed
 address. A script reads `TIME` and then writes, which Redis allows from
-version 5.0 on. Redis Cluster is not supported, because the scripts touch
-keys that are not all named in `KEYS`.
+version 5.0 on, unless the server sets `lua-replicate-commands no`. On Redis
+5.x and 6.x that setting makes these scripts fail with
+`Write commands not allowed after non deterministic commands`; Redis 7.0 and
+later ignore the setting. Redis Cluster is not supported, because the scripts
+touch keys that are not all named in `KEYS`.
 
 **The Redis user.** Give the providers a Redis user of its own, with these
 rights: `~<prefix>* +@read +@write +@scripting +@connection +time`. The key

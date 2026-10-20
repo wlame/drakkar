@@ -229,6 +229,19 @@ async def test_refresh_extends_the_lease_of_the_last_acquire_of_that_scope(clock
     assert await raw.pttl('drakkar:archive-locks:scope-long') == 200_000
 
 
+async def test_refresh_uses_the_lease_of_the_last_successful_acquire(clock, server):
+    raw = fake_client(server)
+    provider = await _started(server)
+    await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    await provider.acquire(SCOPE, TOKEN_A, 900)
+    clock.advance(100)
+
+    refreshed = await provider.refresh(SCOPE, TOKEN_A)
+
+    assert refreshed is True
+    assert await raw.pttl(LOCK_KEY) == 900_000
+
+
 async def test_refresh_after_a_takeover_answers_false_and_keeps_the_new_holders_ttl(clock, server):
     raw = fake_client(server)
     stalled = await _started(server, 'w-stalled', INSTANCE_A)

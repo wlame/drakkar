@@ -1275,7 +1275,12 @@ Which feature names which entry: `fleet.registry.connection` and
 | `key_prefix` | `str` | `drakkar:` | letters, digits, `_`, `:`, `.`, `-`; may be empty | Prefix of every key a feature stores in Redis. |
 
 The `redis` providers need Redis 5.0 or later, standalone or a primary behind a
-fixed address; Redis Cluster is not supported. The client does no retrying of
+fixed address; Redis Cluster is not supported. With `rediss://`, the client
+verifies the certificate of the server against the system's default
+certificate store and checks that the certificate names the host of the URL;
+this cannot be switched off. Put a private certificate authority into that
+store; `SSL_CERT_FILE` and `SSL_CERT_DIR` replace the default locations of the
+store. The client does no retrying of
 its own: the [`resilience` block](#resilience-block) of the feature is the only
 retry and the only time limit, apart from a connect, which gives up after 5
 seconds. The Python package `redis` must be version 7.2 or later (the minimum

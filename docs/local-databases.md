@@ -830,6 +830,20 @@ redis](fleet.md#redis) and [Security](security.md#provider-credentials).
   `redis` provider writes no `recorder_archive_lock_taken_over` line. Only the
   `filesystem` and `postgres` providers write it. A fenced pass logs
   `recorder_archive_fenced` as described below.
+- **A lost key.** A Redis server that restarts without its data, a flush of
+  the database, or eviction deletes the lease key before its time to live
+  ends. Every key of the providers has a time to live, so any `volatile-*`
+  and any `allkeys-*` `maxmemory` policy can evict the key. A database number
+  of its own does not protect it, because the memory limit and eviction cover
+  the whole server. The holder's next refresh then answers `False`, or its
+  fencing check finds no key, and the pass stops without publishing or
+  deleting. It logs `recorder_archive_fenced` with `reason` `taken_over`,
+  whose detail says that another worker took the archive lock over, although
+  no worker did: the provider can only answer that the pass no longer holds
+  the lease. The next pass takes the scope. Under the default policy,
+  `noeviction`, a full server evicts nothing and answers a script that needs
+  more memory with an error that names `OOM`. That error is final and counts
+  as a failed operation for the breaker.
 - **An outage** is handled as for the registry: connection errors and the
   server replies `BUSY`, `LOADING`, `MASTERDOWN` and `TRYAGAIN` are retried
   under `history.archive.election.resilience`, and the breaker opens after
@@ -849,7 +863,7 @@ deletes nothing and counts in `drakkar_recorder_archive_failures_total`.
 
 | `reason` | Meaning |
 |---|---|
-| `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. |
+| `taken_over` | The provider answered that this pass no longer holds the lease, usually because another worker took it over. With the `redis` provider it can also mean that the lease key was lost, and no worker took it over (see [The `redis` election provider](#the-redis-election-provider)). |
 | `unconfirmed` | The provider could not confirm the lease: the call failed or timed out, or the breaker was open. The lease may still be held. |
 
 Both reasons stop the pass the same way. The `detail` field of the line

@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `redis` or `postgres` now fails the config load unless the connection it
   uses is declared as `connections.<provider>.<connection>`. Declare the
   connection, or rename the plugin. See `docs/upgrading.md`.
+- **The `redis` package must be version 7.2 or later** (it was 5.2.0). The
+  Redis sink uses the same package, so this applies to it too.
 
 ### Added
 
@@ -101,10 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   providers need Redis 5.0 or later, standalone. Redis Cluster is not
   supported. A provider refuses to start when the URL of its connection has
   query options (`?...`). The error is
-  `redis connection: the url cannot carry query options`. The minimum
-  version of the `redis` package is now 7.2 (it was 5.2.0), because the
-  providers read the reply code that the client sets from 7.2 on. This
-  applies to the Redis sink too, as it uses the same package.
+  `redis connection: the url cannot carry query options`. A URL whose path
+  is not a database number, such as `/three`, fails with
+  `redis connection: the url cannot be parsed`. With `rediss://` the client
+  always verifies the certificate and the host name of the server. The
+  providers need version 7.2 or later of the `redis` package, because they
+  read the reply code that the client sets from 7.2 on (see Breaking).
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
   and archive election on a separate Postgres service, `postgres-fleet`.
