@@ -6,7 +6,7 @@
 # helper, prints exactly one verdict line, and exits 0 (pass, not
 # applicable) or 1 (fail).
 #
-# HARNESS_PROVIDER names the main cluster's registry and archive-election
+# HARNESS_PROVIDER names the main cluster's registry and periodic-election
 # provider: filesystem (the default), postgres, redis or consul. It must
 # match the value the harness was started with
 # (just integration-up provider=...).
@@ -264,6 +264,25 @@ seconds_between() {
     python3 -c 'import sys; print(f"{float(sys.argv[2]) - float(sys.argv[1]):.1f}")' "$1" "$2"
 }
 
+# The first slot boundary after now of a schedule every $1 seconds of epoch
+# time, in whole seconds since the epoch (a cluster task's slots).
+#   next_slot_boundary <interval>
+next_slot_boundary() {
+    python3 -c 'import sys, time; interval = int(sys.argv[1]); print((int(time.time()) // interval + 1) * interval)' "$1"
+}
+
+# Sleep until the epoch time $1; return at once when it has passed.
+#   sleep_until_epoch <epoch>
+sleep_until_epoch() {
+    sleep "$(python3 -c 'import sys, time; print(f"{max(0.0, float(sys.argv[1]) - time.time()):.3f}")' "$1")"
+}
+
+# True when the epoch time $1 is later than the epoch time $2.
+#   epoch_after <epoch> <epoch>
+epoch_after() {
+    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)' "$1" "$2"
+}
+
 # The agent's HTTP API of consul-fleet on the host.
 CONSUL_HOST_URL=http://localhost:8500
 
@@ -287,14 +306,21 @@ consul_get() {
 #   PLANTED scope=<s> window_start=<epoch> window_end=<epoch> files=<n> archive=<name>
 PLANT_HISTORY_CMD=(uv run --project "$REPO_DIR" python "$REPO_DIR/integration/plant_history.py")
 
-# The archive lock of the main cluster ("main cluster" sanitized), and where
-# each provider keeps it (the connections of worker/drakkar.yaml).
-LOCK_SCOPE=main_cluster
-LOCK_FILE="$SCENARIO_DIR/shared/history/${LOCK_SCOPE}/.archive.lock"
-LOCK_POSTGRES_TABLE=drakkar.archive_locks
+# Make the first run of PLANT_HISTORY_CMD start at once: uv creates or
+# syncs the project environment here, before any timed wait of a scenario.
+plant_history_prepare() {
+    "${PLANT_HISTORY_CMD[@]}" --help >/dev/null
+}
+
+# The lock of the archive task of the main cluster: the scope is
+# <cluster>/<task>, with "main cluster" sanitized. Where each provider keeps
+# it (the connections of worker/drakkar.yaml).
+LOCK_SCOPE=main_cluster/history.archive
+LOCK_FILE="$SCENARIO_DIR/shared/tasks/${LOCK_SCOPE}.lock"
+LOCK_POSTGRES_TABLE=drakkar.task_locks
 LOCK_REDIS_DATABASE=3
-LOCK_REDIS_KEY="drakkar:archive-locks:${LOCK_SCOPE}"
-LOCK_CONSUL_PATH="/v1/kv/drakkar/archive-locks/${LOCK_SCOPE}"
+LOCK_REDIS_KEY="drakkar:task-locks:${LOCK_SCOPE}"
+LOCK_CONSUL_PATH="/v1/kv/drakkar/task-locks/${LOCK_SCOPE}"
 
 # Read the admin settings that lock_holder needs from the compose config,
 # once, into LOCK_ADMIN_USER, LOCK_ADMIN_PASSWORD, LOCK_ADMIN_DATABASE and
@@ -351,9 +377,9 @@ if text:
 # Print the worker that holds the archive lock of the main cluster, or
 # nothing when no lock is held. Returns 1 when the lock could not be read.
 # Needs lock_holder_prepare first (filesystem excepted).
-#   filesystem - the body of history/main_cluster/.archive.lock in the
+#   filesystem - the body of tasks/main_cluster/history.archive.lock in the
 #                shared folder;
-#   postgres   - the row of the scope in drakkar.archive_locks;
+#   postgres   - the row of the scope in drakkar.task_locks;
 #   redis      - the lock key's body on database 3 of redis-fleet;
 #   consul     - the lock key's body, only while a session holds the key.
 # A lock that its holder left behind when it died stays until another
@@ -379,7 +405,7 @@ if text:
         postgres)
             "${COMPOSE[@]}" exec -T postgres-fleet psql -q -t -A -v ON_ERROR_STOP=1 \
                 -U "$LOCK_ADMIN_USER" -d "$LOCK_ADMIN_DATABASE" \
-                -c "SELECT worker FROM ${LOCK_POSTGRES_TABLE} WHERE cluster = '${LOCK_SCOPE}'"
+                -c "SELECT worker FROM ${LOCK_POSTGRES_TABLE} WHERE scope = '${LOCK_SCOPE}'"
             ;;
         redis)
             response=$("${COMPOSE[@]}" exec -T redis-fleet redis-cli --user "$LOCK_ADMIN_USER" \
@@ -406,4 +432,46 @@ if entry.get("Session") and entry.get("Value"):
 ' <<<"${response%$'\n'*}"
             ;;
     esac
+}
+
+# The harness_cluster_tick lines that worker-1, worker-2 and worker-3 logged
+# since $1 (a time that `docker compose logs --since` takes), one line per
+# tick: <worker> <slot>. The handler logs the slot of each run of its
+# cluster task. Returns 1 when a log could not be read.
+#   cluster_ticks <since>
+cluster_ticks() {
+    local service logs
+    for service in "${MAIN_WORKERS[@]}"; do
+        logs=$("${COMPOSE[@]}" logs --no-color --no-log-prefix --since="$1" "$service" 2>/dev/null) || return 1
+        WORKER_NAME="$service" python3 -c '
+import json, os, sys
+for line in sys.stdin:
+    start = line.find("{")
+    if start < 0:
+        continue
+    try:
+        record = json.loads(line[start:])
+    except ValueError:
+        continue
+    if isinstance(record, dict) and record.get("event") == "harness_cluster_tick":
+        print(os.environ["WORKER_NAME"], record.get("slot"))
+' <<<"$logs"
+    done
+}
+
+# The slots that ran more than once, from `cluster_ticks` lines on stdin, one
+# line per slot: <slot> <worker>,<worker>[,...]. Nothing when every slot ran
+# at most once.
+doubled_tick_slots() {
+    python3 -c '
+import sys
+workers = {}
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) == 2:
+        workers.setdefault(fields[1], []).append(fields[0])
+for slot in sorted(workers):
+    if len(workers[slot]) > 1:
+        print(slot, ",".join(workers[slot]))
+'
 }

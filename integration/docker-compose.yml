@@ -70,8 +70,8 @@ services:
       timeout: 5s
       retries: 10
 
-  # Database of the main cluster's worker registry and archive election
-  # when the harness runs with `just integration-up provider=postgres`.
+  # Database of the main cluster's worker registry and periodic election
+  # (the archive and the cluster tick) when the harness runs with `just integration-up provider=postgres`.
   # Separate from the sinks' database so that pausing it (the
   # service-outage scenario) touches the providers and nothing else.
   postgres-fleet:
@@ -88,8 +88,8 @@ services:
       timeout: 5s
       retries: 10
 
-  # Redis of the main cluster's worker registry and archive election when
-  # the harness runs with `just integration-up provider=redis`. Separate
+  # Redis of the main cluster's worker registry and periodic election (the
+  # archive and the cluster tick) when the harness runs with `just integration-up provider=redis`. Separate
   # from the sinks' Redis so that pausing it (the service-outage scenario)
   # touches the providers and nothing else. The default user is off, and
   # the only user, drakkar, holds exactly the rights that docs/security.md
@@ -120,8 +120,8 @@ services:
       timeout: 3s
       retries: 10
 
-  # Consul agent of the main cluster's worker registry and archive election
-  # when the harness runs with `just integration-up provider=consul`. A
+  # Consul agent of the main cluster's worker registry and periodic election
+  # (the archive and the cluster tick) when the harness runs with `just integration-up provider=consul`. A
   # single dev agent: its state lives in memory, so a new container starts
   # empty and consul-fleet-init sets it up again. ACLs are on and deny by
   # default. consul-fleet-init creates the policy drakkar-fleet with exactly
@@ -270,7 +270,7 @@ services:
       DK_METRICS__PORT: "9090"
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
-      # Registry and archive-election provider of the main cluster:
+      # Registry and periodic-election provider of the main cluster:
       # filesystem (the default), postgres, redis or consul, chosen with
       # `just integration-up provider=<name>`. The DSN and the Redis URL
       # carry the password, and the Consul token is a credential, so they
@@ -291,6 +291,13 @@ services:
       # worker-1 labels the nav entry differently from worker-2/3, which
       # keep the yaml title; all three serve the same site.
       DK_UI__DOCS__TITLE: "Ripgrep Pipeline Handbook (worker-1)"
+      # worker-1 is the observer of every scenario, so it never runs the
+      # archive and never holds its lock: the unclean-exit scenario kills
+      # the lock holder, and worker-1 must stay up. With the archive off,
+      # worker-1's cluster task definitions differ from worker-2's and
+      # worker-3's, and the cluster-tasks scenario checks that worker-2
+      # shows worker-1 with cluster_tasks_match false.
+      DK_HISTORY__ARCHIVE__ENABLED: "false"
     ports:
       - "9090:9090"
       - "8081:8081"

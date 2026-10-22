@@ -118,11 +118,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `integration/wait-ready.sh` waits until the workers are listed online and
   answer `/readyz` before the scenarios.
 - **Archive election in the unclean-exit scenario.** The scenario now plants
-  a due history window (`integration/plant_history.py`), kills the worker
-  that holds the archive lock during its pass, and checks that another
-  worker takes the lock over and publishes the archive, with every election
-  provider. The harness runs one-hour windows, a 30 s lease and a 20 s pass
-  timer on worker-2 and worker-3.
+  a due history window (`integration/plant_history.py`) between two archive
+  slots, kills the worker that won the next slot during its pass, and checks
+  that another worker takes the lock over and publishes the archive within
+  150 s, with every election provider. The harness runs one-hour windows and
+  the archive as a cluster task with a slot every 30 s and a 40 s lease on
+  worker-2 and worker-3; worker-1 turns the archive off.
+- **Cluster task scenario in the integration harness.** The harness handler
+  declares `harness_cluster_tick`, a cluster task with a slot every 30 s.
+  `integration/scenario-cluster-tasks.sh` watches 8 slots and checks that no
+  slot runs twice, that at least 7 run once, and that worker-2 lists worker-1
+  with `cluster_tasks_match: false` and worker-3 with `true`. It runs in
+  `just integration-scenarios` and `just integration-matrix` with every
+  provider.
 
 - **Provider framework.** The worker registry and the election share
   one set of rules for their calls to a provider. The blocks
@@ -240,7 +248,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection may not have a segment that is `.` or `..`.
 - **Provider outage scenarios in the integration harness.**
   `just integration-up provider=postgres` runs the main cluster's registry
-  and archive election on a separate Postgres service, `postgres-fleet`.
+  and periodic election on a separate Postgres service, `postgres-fleet`.
   `just integration-up provider=redis` runs them on a separate Redis
   service, `redis-fleet`. Its only user has the rights that the docs give
   the providers, and no more. `just integration-up provider=consul` runs

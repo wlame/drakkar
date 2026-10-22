@@ -205,7 +205,7 @@ drakkar-ui *args:
 integration-up provider='filesystem' profile='full':
     #!/usr/bin/env bash
     set -euo pipefail
-    # The main cluster's registry and archive-election provider; read by
+    # The main cluster's registry and periodic-election provider; read by
     # docker-compose.yml. just passes `provider=postgres` through as it is,
     # so the prefix is stripped and the value is checked.
     provider="{{ provider }}"
@@ -279,7 +279,7 @@ chaos:
 # Needs the harness up with the same provider. Stops at the first failing
 # scenario; each script prints one verdict line.
 #
-# Wait for the workers, then run the four provider outage scenarios (just integration-scenarios provider=postgres)
+# Wait for the workers, then run the five harness scenarios (just integration-scenarios provider=postgres)
 integration-scenarios provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -291,7 +291,7 @@ integration-scenarios provider='filesystem':
     esac
     export HARNESS_PROVIDER="$provider"
     integration/wait-ready.sh
-    for scenario in service-outage worker-cut-off unclean-exit secrets; do
+    for scenario in service-outage worker-cut-off unclean-exit secrets cluster-tasks; do
         integration/scenario-${scenario}.sh
     done
 
@@ -306,7 +306,7 @@ integration-matrix profile='quick':
         *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
     esac
     providers=(filesystem postgres redis consul)
-    steps=(service-outage worker-cut-off unclean-exit secrets drain-delivery)
+    steps=(service-outage worker-cut-off unclean-exit secrets cluster-tasks drain-delivery)
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     any_failed=false
@@ -345,7 +345,7 @@ integration-matrix profile='quick':
             continue
         fi
         if integration/wait-ready.sh; then
-            for step in service-outage worker-cut-off unclean-exit secrets; do
+            for step in service-outage worker-cut-off unclean-exit secrets cluster-tasks; do
                 run_step "$provider" "$step" "integration/scenario-${step}.sh"
             done
             run_step "$provider" drain-delivery integration/verify-after-drain.sh

@@ -32,28 +32,37 @@
 # With every style, worker-1 and worker-3 did not restart.
 #
 # Archive-election half, with every provider, after worker-2 is back. The
-# harness runs an archive pass every 20 s on worker-2 and worker-3 (worker-1
-# is the observer: its compose environment sets the timer to 0, so it runs a
-# pass only after its hourly rotation), with a 30 s lease refreshed every
-# 10 s:
-#   - the history of one hour window twelve hours back is planted into the
-#     shared folder (PLANT_HISTORY_CMD, see scenario-lib.sh), so the window
-#     is due at once; an archive of that window left by an earlier run is a
-#     FAIL before anything is planted,
-#   - within one pass interval plus 10 s a worker H holds the archive lock
-#     in two polls in a row (each timer tick takes and releases the lock for
-#     a moment even with nothing due; the pass of the planted window holds
-#     it for seconds), and H is worker-2 or worker-3,
+# archive is a cluster task: a slot every 30 s of epoch time, a 40 s lease,
+# on worker-2 and worker-3 (worker-1 is the observer: its compose
+# environment turns the archive off, so it never holds the lock). The winner
+# of a slot holds the lock for its whole pass and at least 20 s, also when
+# nothing is due, so a held lock alone does not show the planted window's
+# pass, and the plant is timed against the slots:
+#   - an archive of the planted window left by an earlier run is a FAIL
+#     before anything is planted,
+#   - 2 s after a slot boundary S0 (the winner of S0 has listed the history
+#     folder by then), the history of one hour window twelve hours back is
+#     planted into the shared folder (PLANT_HISTORY_CMD, see
+#     scenario-lib.sh), so the window is due at once; a plant that ends after
+#     S1 - 2 (S1 = S0 + 30) is a FAIL that names the plant's duration,
+#   - an archive of the window already published at S1 + 1 is a FAIL (the
+#     winner of S0 acquired late and listed the plant),
+#   - from S1 + 1, within the 10 s acquire window, a worker H holds the
+#     archive lock in two polls in a row: H won S1 and archives the planted
+#     window, and H is worker-2 or worker-3,
 #   - H is killed at once; its archive is not published yet and every
 #     planted file is still there (otherwise FAIL: the planted window is
 #     too small),
-#   - within the lease plus one pass interval plus 60 s of the kill another
-#     worker W holds the lock, the archive of the window exists, W logged
-#     recorder_archive_created for it, and every planted file is gone,
-#   - with filesystem and postgres, W logged recorder_archive_lock_taken_over
-#     with its provider (redis and consul write no such line),
+#   - within 150 s of the kill another worker W holds the lock, the archive
+#     of the window exists, W logged recorder_archive_created for it, and
+#     every planted file is gone,
+#   - with filesystem and postgres, W logged periodic_lock_taken_over with
+#     its provider and the archive's scope (redis and consul write no such
+#     line),
 #   - H, started again, is listed online by worker-1; worker-1 and W did not
-#     restart.
+#     restart,
+#   - no slot of the handler's cluster tick (harness_cluster_tick) ran twice
+#     from the plant to the end of the half.
 #
 # Usage: HARNESS_PROVIDER=consul integration/scenario-unclean-exit.sh
 # ============================================================================
@@ -91,13 +100,22 @@ CONSUL_CARD_PATH="/v1/kv/drakkar/fleet/workers/${KILLED_WORKER}"
 AGENT_LOG_SINCE=5m
 
 # The archive settings of worker/drakkar.yaml (history.archive).
-PASS_INTERVAL_SECONDS=20
-LOCK_STALE_SECONDS=30
+ARCHIVE_INTERVAL_SECONDS=30
+LEASE_SECONDS=40
+# A cluster task's slot is won only in the first 10 s after its boundary.
+ACQUIRE_WINDOW_SECONDS=10
+# The plant starts this long after the slot boundary S0, so the winner of S0
+# has listed the history folder before it, and must end this long before the
+# next boundary S1, so the winner of S1 lists the whole window.
+PLANT_DELAY_SECONDS=2
+PLANT_MARGIN_SECONDS=2
+# The holder is read from this long after S1, once its winner holds the lock.
+HOLDER_DELAY_SECONDS=1
 # The planted window: its size makes one archive pass take at least 8 s and
-# at most 25 s on the harness (below the 30 s lease). Measured: 50 files of
+# at most 25 s on the harness (below the 40 s lease). Measured: 50 files of
 # 1000 events (about 78 MB) take about 12 to 21 s on an idle harness, and
 # longer while the workers are busy; 60 files took up to 24 s idle and more
-# than the lease under load.
+# than 30 s under load.
 PLANTED_FILES=50
 PLANTED_EVENTS_PER_FILE=1000
 # Twelve hours back stays clear of the files the workers seal themselves in
@@ -106,16 +124,15 @@ PLANTED_HOURS_AGO=12
 SHARED_DIR="$SCENARIO_DIR/shared"
 # Seconds between two reads of the lock holder.
 LOCK_POLL_SECONDS=0.2
-# How long the half waits for the first holder, and, from the kill, for the
-# takeover and the published archive.
-HOLDER_LIMIT_SECONDS=$((PASS_INTERVAL_SECONDS + 10))
-# The takeover comes at the earliest one lease after the last refresh, at the
-# next timer tick; the 60 s on top cover the pass of the planted window under
-# load (the slowest archive came about 87 s after the kill).
-ELECTION_TAKEOVER_LIMIT_SECONDS=$((LOCK_STALE_SECONDS + PASS_INTERVAL_SECONDS + 60))
-# The workers that run archive passes on a timer: the holder must be one of
-# them.
-TIMER_WORKERS="worker-2 worker-3"
+# How long the half waits, from S1 + 1, for the holder of S1.
+HOLDER_LIMIT_SECONDS=$ACQUIRE_WINDOW_SECONDS
+# How long the half waits, from the kill, for the takeover and the published
+# archive. The dead holder's lease ends up to one lease after the kill, the
+# next slot comes within one interval, and the pass of the planted window
+# takes up to about 40 s under load: 110 s, and 40 s of margin.
+ELECTION_TAKEOVER_LIMIT_SECONDS=150
+# The workers that run the archive: the holder must be one of them.
+ARCHIVE_WORKERS="worker-2 worker-3"
 
 step "Scenario: unclean exit of ${KILLED_WORKER}"
 
@@ -362,14 +379,27 @@ sys.exit(0 if found else 1)
 }
 
 lock_holder_prepare || fail "the admin settings of the ${HARNESS_PROVIDER} lock could not be read from docker-compose.yml"
+plant_history_prepare || fail "the history generator could not be prepared (PLANT_HISTORY_CMD in scenario-lib.sh)"
 election_before=$(restart_snapshot worker-1 worker-2 worker-3)
 plant_since=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
+slot_0=$(next_slot_boundary "$ARCHIVE_INTERVAL_SECONDS")
+slot_1=$((slot_0 + ARCHIVE_INTERVAL_SECONDS))
+plant_deadline=$((slot_1 - PLANT_MARGIN_SECONDS))
+log "planting ${PLANT_DELAY_SECONDS}s after the archive slot ${slot_0}; the plant must end by ${plant_deadline}"
+sleep_until_epoch $((slot_0 + PLANT_DELAY_SECONDS))
+
 # The generator refuses, writing nothing, when the window's archive already
 # exists: a leftover of an earlier run would make the checks below lie.
+plant_started_at=$(epoch_now)
 planted=$("${PLANT_HISTORY_CMD[@]}" --shared-dir="$SHARED_DIR" --cluster="main cluster" \
     --files="$PLANTED_FILES" --events-per-file="$PLANTED_EVENTS_PER_FILE" --hours-ago="$PLANTED_HOURS_AGO" 2>&1) \
     || fail "the history window could not be planted: ${planted}"
+plant_ended_at=$(epoch_now)
+plant_seconds=$(seconds_between "$plant_started_at" "$plant_ended_at")
+if epoch_after "$plant_ended_at" "$plant_deadline"; then
+    fail "the plant took ${plant_seconds} s and ended after ${plant_deadline} (${PLANT_MARGIN_SECONDS} s before the archive slot ${slot_1}); the slot winner may have listed a partial window"
+fi
 planted=$(grep '^PLANTED ' <<<"$planted") || fail "the history generator printed no PLANTED line"
 archive=$(planted_field archive "$planted")
 history_folder="${SHARED_DIR}/history/$(planted_field scope "$planted")"
@@ -379,11 +409,15 @@ while IFS= read -r name; do
 done < <(cd "$history_folder" && ls -- planted-*.db)
 [ "${#planted_names[@]}" -eq "$PLANTED_FILES" ] \
     || fail "the history folder holds ${#planted_names[@]} planted files, expected ${PLANTED_FILES} (a leftover of an earlier run?)"
-ok "planted ${PLANTED_FILES} files of ${PLANTED_EVENTS_PER_FILE} events, window $(planted_field window_start "$planted")-$(planted_field window_end "$planted"), archive ${archive}"
+ok "planted ${PLANTED_FILES} files of ${PLANTED_EVENTS_PER_FILE} events in ${plant_seconds} s, window $(planted_field window_start "$planted")-$(planted_field window_end "$planted"), archive ${archive}"
 
-# A holder seen in two polls in a row is the pass of the planted window: a
-# timer tick with nothing due holds the lock for milliseconds only.
-log "waiting up to ${HOLDER_LIMIT_SECONDS}s for a worker to hold the archive lock"
+# The winner of S1 holds the lock for its whole pass and at least 20 s, so
+# a holder seen in two polls in a row from S1 + 1 on is that winner.
+sleep_until_epoch $((slot_1 + HOLDER_DELAY_SECONDS))
+if archive_exists; then
+    fail "the archive ${archive} was published before the archive slot ${slot_1}: the winner of the slot ${slot_0} acquired more than ${PLANT_DELAY_SECONDS} s late and listed the planted window"
+fi
+log "waiting up to ${HOLDER_LIMIT_SECONDS}s for the winner of the archive slot ${slot_1} to hold the archive lock"
 holder=""
 previous=""
 holder_deadline=$((SECONDS + HOLDER_LIMIT_SECONDS))
@@ -395,12 +429,12 @@ while true; do
     fi
     previous=$current
     [ "$SECONDS" -lt "$holder_deadline" ] \
-        || fail "no worker held the archive lock in two polls in a row within ${HOLDER_LIMIT_SECONDS}s of the plant (archive published: $(archive_exists && echo yes || echo no); last lock read error: $(last_holder_error))"
+        || fail "no worker held the archive lock in two polls in a row within ${HOLDER_LIMIT_SECONDS}s of the archive slot ${slot_1} plus ${HOLDER_DELAY_SECONDS}s (archive published: $(archive_exists && echo yes || echo no); last lock read error: $(last_holder_error))"
     sleep "$LOCK_POLL_SECONDS"
 done
-case " ${TIMER_WORKERS} " in
+case " ${ARCHIVE_WORKERS} " in
     *" ${holder} "*) ;;
-    *) fail "the archive lock is held by ${holder}, expected one of ${TIMER_WORKERS}: either worker-1 runs an archive timer (check DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS: \"0\" in docker-compose.yml) or worker-1's hourly rotation pass took the lock (about 1% of runs; run the scenario again)" ;;
+    *) fail "the archive lock is held by ${holder}, expected one of ${ARCHIVE_WORKERS}: worker-1 must not run the archive (check DK_HISTORY__ARCHIVE__ENABLED: \"false\" on worker-1 in docker-compose.yml)" ;;
 esac
 ok "${holder} holds the archive lock"
 
@@ -417,7 +451,7 @@ missing=$(planted_gone)
     || fail "planted files are gone after the kill but the archive ${archive} is not published: $(tr '\n' ' ' <<<"$missing")"
 ok "${holder} killed during its pass: no archive yet, every planted file still there"
 
-log "waiting up to ${ELECTION_TAKEOVER_LIMIT_SECONDS}s from the kill for another worker to take the lock over"
+log "waiting up to ${ELECTION_TAKEOVER_LIMIT_SECONDS}s from the kill for another worker to take the lock over (lease ${LEASE_SECONDS}s, a slot every ${ARCHIVE_INTERVAL_SECONDS}s)"
 takeover_deadline=$(python3 -c 'import sys; print(float(sys.argv[1]) + int(sys.argv[2]))' "$election_kill_at" "$ELECTION_TAKEOVER_LIMIT_SECONDS")
 before_deadline() {
     python3 -c 'import sys, time; sys.exit(0 if time.time() < float(sys.argv[1]) else 1)' "$takeover_deadline"
@@ -457,11 +491,11 @@ log_has "$taker" "$plant_since" event=recorder_archive_created name="$archive" \
 ok "${taker} logged recorder_archive_created for ${archive}"
 case "$HARNESS_PROVIDER" in
     filesystem | postgres)
-        log_has "$taker" "$plant_since" event=recorder_archive_lock_taken_over provider="$HARNESS_PROVIDER" \
-            || fail "the log of ${taker} has no recorder_archive_lock_taken_over line with provider=${HARNESS_PROVIDER}"
-        ok "${taker} logged recorder_archive_lock_taken_over with provider=${HARNESS_PROVIDER}"
+        log_has "$taker" "$plant_since" event=periodic_lock_taken_over provider="$HARNESS_PROVIDER" scope="$LOCK_SCOPE" \
+            || fail "the log of ${taker} has no periodic_lock_taken_over line with provider=${HARNESS_PROVIDER} scope=${LOCK_SCOPE}"
+        ok "${taker} logged periodic_lock_taken_over with provider=${HARNESS_PROVIDER} scope=${LOCK_SCOPE}"
         ;;
-    *) log "${HARNESS_PROVIDER} writes no recorder_archive_lock_taken_over line (the contract); not looked for" ;;
+    *) log "${HARNESS_PROVIDER} writes no periodic_lock_taken_over line (the contract); not looked for" ;;
 esac
 
 log "starting ${holder}"
@@ -478,4 +512,10 @@ for service in worker-1 "$taker"; do
 done
 ok "worker-1 and ${taker} did not restart"
 
-pass "${outcome}; archive lock of ${holder} taken over by ${taker} ${takeover_after}s after the kill, archive published ${published_after}s after the kill"
+ticks=$(cluster_ticks "$plant_since") || fail "the logs of the main-cluster workers could not be read for harness_cluster_tick lines"
+doubled=$(doubled_tick_slots <<<"$ticks")
+[ -z "$doubled" ] \
+    || fail "slots of harness_cluster_tick ran twice from the plant to the end of the half (slot workers): $(tr '\n' ' ' <<<"$doubled")"
+ok "no slot of harness_cluster_tick ran twice from the plant to the end of the half ($(grep -c . <<<"$ticks" || true) ticks)"
+
+pass "${outcome}; plant ${plant_seconds}s; archive lock of ${holder} taken over by ${taker} ${takeover_after}s after the kill, archive published ${published_after}s after the kill"

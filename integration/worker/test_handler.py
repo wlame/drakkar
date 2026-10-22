@@ -12,12 +12,19 @@ behaviour so any implementation of it stays provably identical.
 from pathlib import Path
 
 import pytest
-from handler import HTTP_PATTERNS, RipgrepHandler, _human_file_size, _scan_target_module
+from handler import (
+    CLUSTER_TICK_INTERVAL_SECONDS,
+    HTTP_PATTERNS,
+    RipgrepHandler,
+    _human_file_size,
+    _scan_target_module,
+)
 from http_handler import MIRRORED_RESULTS_SINK, HttpSearchHandler
 from models import RankRequest, SearchRequest, SearchResponse
 
 import drakkar as dk
 from drakkar.config import load_config
+from drakkar.periodic import PERIODIC_ATTR
 
 # integration/worker/test_handler.py -> integration/worker -> integration -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -102,6 +109,20 @@ def test_scan_target_module_returns_expected_directory_name(file_path: str, expe
 )
 def test_human_file_size_formats_bytes_with_k_and_m_suffixes(num_bytes: int, expected: str) -> None:
     assert _human_file_size(num_bytes) == expected
+
+
+def test_ripgrep_handler_declares_a_cluster_tick_every_30_seconds() -> None:
+    """The cluster-tasks scenario counts one ``harness_cluster_tick`` line per
+    30 s slot, so the tick must be a cluster task on a 30 s interval with the
+    default lease, and its slot line must use the same interval."""
+    meta = getattr(RipgrepHandler.harness_cluster_tick, PERIODIC_ATTR)
+
+    assert CLUSTER_TICK_INTERVAL_SECONDS == 30
+    assert meta.interval == CLUSTER_TICK_INTERVAL_SECONDS
+    assert meta.cron is None
+    assert meta.scope == 'cluster'
+    assert meta.lease_seconds is None
+    assert meta.on_error == 'continue'
 
 
 def test_http_search_handler_declares_search_request_and_response_http_types() -> None:

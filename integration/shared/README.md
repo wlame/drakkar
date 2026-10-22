@@ -21,6 +21,13 @@ shared folder is `/shared` too. The directory holds:
    shares the folder only because it is also the fleet's shared folder.
 5. **Registry cards** — one JSON file per worker in `fleet/workers/`, used
    for the workers list and the cache exchange.
+6. **Cluster task locks** — with the `filesystem` election, one
+   `<task>.lock` file per cluster task in `tasks/<cluster>/`, held by the
+   worker that runs the current slot of that task: `history.archive.lock`
+   (the archive) and `harness_cluster_tick.lock` (the harness handler's
+   cluster tick). The folder also holds the `.clock.<instance>` markers the
+   lock uses to read the file server's clock. The http-worker inherits the
+   tick from the main handler and runs it alone in `tasks/http_cluster/`.
 
 No worker opens another worker's files at the top level. The cache
 exchange propagates cluster/global-scope entries over HTTP: every
@@ -72,10 +79,12 @@ across restarts**.
   into `history/<cluster>/`. In the harness, windows are one hour long and
   due one hour after they close (`history.archive` in
   `worker/drakkar.yaml`; the defaults are 24 hours and 48 hours). The
-  workers worker-2 and worker-3 look for a due window every 20 seconds
-  (`pass_interval_seconds`). worker-1 sets the timer to 0, so it runs a pass
-  only after its hourly rotation. A lock that is not
-  refreshed for 30 seconds is taken over. When a window is due, one worker of
+  archive is a cluster task with a slot every 30 seconds
+  (`history.archive.interval`): at each slot one of worker-2 and worker-3
+  takes the lease and looks for a due window. worker-1 turns the archive off
+  (`DK_HISTORY__ARCHIVE__ENABLED` in `docker-compose.yml`). The lease of a
+  holder that died ends 40 seconds after its last refresh
+  (`history.archive.lease_seconds`). When a window is due, one worker of
   the cluster merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive and
   removes the sealed files it merged. Archives appear in the Debug →
   Databases tab for download.
@@ -108,10 +117,16 @@ shared/
 │   └── http_cluster/
 ├── merged/
 │   └── merged-2026-10-14__09_30_12-5f0c1d2e3a4b6978.db
-└── fleet/
-    └── workers/
-        ├── worker-1.json
-        └── ...
+├── fleet/
+│   └── workers/
+│       ├── worker-1.json
+│       └── ...
+└── tasks/                                           # filesystem election only
+    ├── main_cluster/
+    │   ├── history.archive.lock                     # while a slot holds it
+    │   ├── harness_cluster_tick.lock
+    │   └── .clock.5f0c1d2e3a4b6978
+    └── http_cluster/
 ```
 
 After a clean shutdown, each worker's last live file is sealed and moved
@@ -158,8 +173,9 @@ The same data is also browsable in the Debug UI (`/debug` → Cache tab).
 Stop the workers first.
 
 ```bash
-# Remove everything (recorder + history + merge results + cache + cards)
-rm -rf integration/shared/history integration/shared/merged integration/shared/fleet
+# Remove everything (recorder + history + merge results + cache + cards + task locks)
+rm -rf integration/shared/history integration/shared/merged integration/shared/fleet \
+  integration/shared/tasks
 rm -f integration/shared/*.db integration/shared/*.db-wal integration/shared/*.db-shm \
   integration/shared/*.watchdog
 

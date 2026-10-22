@@ -11,7 +11,8 @@ Shows how to:
 - Handle executor failures with on_error() and retries
 - Handle sink delivery failures with on_delivery_error() and DLQ
 - Simulate random executor failures via --fail flag
-- Use @periodic for recurring background tasks (stats, health checks)
+- Use @periodic for recurring background tasks (stats, health checks), and
+  a cluster task that runs each slot on one worker of the cluster
 - OFFLOAD: run the CPU/syscall-bound window planning (nested loops +
   file stats + cache probes) on the offload pool via self.offload(),
   keeping the event loop responsive (docs/offload.md)
@@ -23,6 +24,7 @@ Shows how to:
 import asyncio
 import os
 import random
+import time
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -69,6 +71,9 @@ FAIL_RATE = '0.05'
 # wiring without flooding the executor pool.
 HTTP_PATTERNS = ['main', 'config']
 HTTP_FILE_PATH = '/tmp/search-corpus'
+
+# Seconds between two slots of the harness cluster task (harness_cluster_tick).
+CLUSTER_TICK_INTERVAL_SECONDS = 30
 
 # ui.timeline demo: byte thresholds for the human-readable file_size label,
 # largest first so the first unit the count clears wins the suffix.
@@ -310,6 +315,23 @@ class RipgrepHandler(
         if not os.path.isdir('/tmp/search-corpus'):
             raise RuntimeError('Search corpus directory missing: /tmp/search-corpus')
         await logger.ainfo('health_check_ok', category='periodic')
+
+    @dk.periodic(CLUSTER_TICK_INTERVAL_SECONDS, scope='cluster')
+    async def harness_cluster_tick(self):
+        """Log one line per slot of a cluster task. Every 30 s of epoch
+        time one worker of the cluster wins the slot and runs this; the
+        cluster-tasks scenario collects the lines of every worker and fails
+        on a slot that ran twice.
+
+        The run starts inside the slot's 10 s acquire window, so the slot is
+        the current time rounded down to the interval (no handler API hands
+        the slot over).
+        """
+        await logger.ainfo(
+            'harness_cluster_tick',
+            category='periodic',
+            slot=int(time.time()) // CLUSTER_TICK_INTERVAL_SECONDS * CLUSTER_TICK_INTERVAL_SECONDS,
+        )
 
     # -------------------------------------------------------------------
 

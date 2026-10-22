@@ -55,9 +55,9 @@ checks.
 |---------|------|-------------|
 | **Kafka** | 9092 | Single-node KRaft broker (no Zookeeper) |
 | **PostgreSQL** | 5432 | `drakkar` database with `search_results` table |
-| **PostgreSQL (fleet)** | 5434 | `drakkar_fleet` database: the main cluster's worker registry and archive election when the harness runs with the `postgres` provider |
-| **Redis (fleet)** | 6380 | Database 3: the main cluster's worker registry and archive election when the harness runs with the `redis` provider. The `default` user is off; the only user is `drakkar` (password `drakkar`) |
-| **Consul (fleet)** | 8500 | A single Consul agent in dev mode: the main cluster's worker registry and archive election when the harness runs with the `consul` provider. ACLs are on and deny by default; the one-shot `consul-fleet-init` creates the workers' token |
+| **PostgreSQL (fleet)** | 5434 | `drakkar_fleet` database: the main cluster's worker registry and periodic election when the harness runs with the `postgres` provider |
+| **Redis (fleet)** | 6380 | Database 3: the main cluster's worker registry and periodic election when the harness runs with the `redis` provider. The `default` user is off; the only user is `drakkar` (password `drakkar`) |
+| **Consul (fleet)** | 8500 | A single Consul agent in dev mode: the main cluster's worker registry and periodic election when the harness runs with the `consul` provider. ACLs are on and deny by default; the one-shot `consul-fleet-init` creates the workers' token |
 | **MongoDB** | 27017 | Document archive |
 | **Redis** | 6379 | Cached search summaries (1h TTL) |
 | **Webhook** | 9000 | HTTP echo server for webhook sink |
@@ -453,7 +453,7 @@ between workers without remembering ports.
 
 The fast workers and the HTTP worker always keep their cards in the
 registry folder in `/shared`. The main cluster (`worker-1`..`worker-3`)
-takes its registry and archive-election provider from the argument of
+takes its registry and periodic-election provider from the argument of
 `just integration-up`:
 
 ```bash
@@ -465,7 +465,9 @@ just integration-up provider=consul      # consul: cards in the KV store of cons
 
 The argument sets `HARNESS_PROVIDER`, which `docker-compose.yml` passes to
 the three workers as `DK_FLEET__REGISTRY__PROVIDER` and
-`DK_HISTORY__ARCHIVE__ELECTION__PROVIDER`. With `postgres`, both use the
+`DK_PERIODIC__ELECTION__PROVIDER`. The periodic election decides which
+worker runs each slot of a cluster task: the archive and the handler's
+`harness_cluster_tick`. With `postgres`, both use the
 [connection](fleet.md#connections) `connections.postgres.main`: its DSN in
 `drakkar.yaml` has no password, and `docker-compose.yml` supplies the
 full DSN through `DK_CONNECTIONS__POSTGRES__MAIN__DSN`. The worker
@@ -507,8 +509,8 @@ deleted. With `consul` a card is not listed offline: the session of the
 card has a TTL of 10 s, and Consul deletes the card with the session about
 20 s after the last publish. Each call to the provider has 2 s and one
 retry, and three failed operations open the
-[circuit breaker](fleet.md#resilience) for 10 s. The archive election uses
-the same resilience block.
+[circuit breaker](fleet.md#resilience) for 10 s. The periodic election
+uses the same resilience block (`periodic.election.resilience`).
 
 ---
 
@@ -553,8 +555,8 @@ is a pass/fail gate, not an invitation to read three dashboards.
 
 ## Provider outage scenarios
 
-Four scripts check how the main cluster's registry behaves when its
-provider, the network or a worker fails. Start the harness with a
+Five scripts check how the main cluster's registry and cluster tasks
+behave when their provider, the network or a worker fails. Start the harness with a
 provider, wait until the workers are healthy, then run the scenarios with
 the same provider:
 
@@ -564,7 +566,7 @@ just integration-scenarios provider=redis
 just integration-down
 ```
 
-`just integration-scenarios` runs the four scripts in the order below and
+`just integration-scenarios` runs the five scripts in the order below and
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
@@ -579,7 +581,8 @@ A run with `postgres`, `redis` or `consul` and the `full` profile takes about tw
 the producer take about 7 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
-scenario does not apply, and the other three take a few minutes.
+scenario does not apply, and the other four take a few minutes each (the
+cluster-tasks scenario watches its slots for about five minutes).
 
 | Script | What it does | What it proves |
 |--------|--------------|----------------|
@@ -587,6 +590,7 @@ scenario does not apply, and the other three take a few minutes.
 | `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres` or `redis`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the provider's service and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `consul`, worker-3 is missing from worker-1's list, or listed offline, within 30 s (the check accepts both): it cannot renew its session, and Consul deletes the card when the session ends. After the reconnect, worker-3 finds that its session has ended and publishes with a new one. With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
 | `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The second half tests the archive election; see [The election half](#the-election-half). |
 | `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token, and the config reference lists the three connections, with `connections.consul.main.token` masked. Runs with every provider. |
+| `scenario-cluster-tasks.sh` | Watches 8 slots of `harness_cluster_tick`, a cluster task of the harness handler with a slot every 30 s of epoch time, and 15 s after the last of them. Each run logs `harness_cluster_tick` with its slot. Then it reads `/api/v1/workers` on worker-2. | No slot ran on two workers, and at least 7 of the 8 slots ran exactly once (a slot whose lease does not come within its 10 s acquire window is skipped, so one missed slot is allowed). worker-2 lists worker-1 with `cluster_tasks_match: false` (worker-1 turns the archive off, so its cluster task definitions differ), and worker-3 and itself with `true`. worker-3 matches only because worker-2 and worker-3 run the archive with the same settings and the same handler: a config change on one of them makes the check fail. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
@@ -601,35 +605,59 @@ because the outage scenario does not apply to `filesystem`.
 
 ### The election half
 
-The second half of `scenario-unclean-exit.sh` tests the archive election
-with the provider of the run. It uses these archive settings of
-`integration/worker/drakkar.yaml` (`history.archive`):
+The second half of `scenario-unclean-exit.sh` tests the election of the
+archive task with the provider of the run. It uses these archive settings
+of `integration/worker/drakkar.yaml` (`history.archive`):
 
 | Key | Value | Effect |
 |-----|-------|--------|
 | `window_hours` | 1 | A window is one hour. |
 | `due_after_hours` | 1 | A window is due one hour after it ends. |
 | `retention_days` | 1 | Archives are kept one day. |
-| `lock_stale_seconds` | 30 | A lock that is not refreshed for 30 s is taken over. |
-| `pass_interval_seconds` | 20 | Worker-2 and worker-3 look for a due window every 20 s. Worker-1 is the observer of every scenario and sets it to 0 in `docker-compose.yml`, so it runs a pass only after its hourly rotation. |
+| `interval` | 30 | An archive slot comes every 30 s of epoch time. At each slot one worker of the cluster wins the lease, looks for due windows and archives them. |
+| `lease_seconds` | 40 | The lease of a holder that died ends 40 s after its last refresh; the next slot after that is won by another worker. |
+
+Worker-1 is the observer of every scenario and sets
+`DK_HISTORY__ARCHIVE__ENABLED: "false"` in `docker-compose.yml`, so it never
+runs the archive and never holds its lock. The lock is in
+`tasks/main_cluster/history.archive.lock` in the shared folder
+(`filesystem`), in the `drakkar.task_locks` table (`postgres`), under the key
+`drakkar:task-locks:main_cluster/history.archive` (`redis`) or under the key
+`drakkar/task-locks/main_cluster/history.archive` (`consul`).
 
 The script plants a window with `integration/plant_history.py`: 50 sealed
 recorder files of the main cluster, with real meta files, in one hour window
 that ended 12 hours ago, so it is due at once. The size is set so that one
-archive pass takes between 8 and 25 s, which is less than the 30 s lease.
-When one of worker-2 and worker-3 holds the lock, the script kills it. It
-then checks that the other worker takes the lock over, publishes the archive
-and deletes every planted file. If the kill comes after the archive is
-published, the script fails and names the planted size.
+archive pass takes between 8 and 25 s, which is less than the 40 s lease.
 
-The script also fails when the holder is not worker-2 or worker-3. The
-rotation pass of worker-1 can take the lock in about 1 % of runs; run the
-scenario again.
+The winner of a slot holds the lock for its whole pass and at least 20 s,
+also when nothing is due. A held lock alone therefore does not show the pass
+of the planted window, and the script times the plant against the slots:
 
-On a Linux host the containers create the history folder as root with mode
-0700, so planting from the host needs write access there (a `sudo chown`
-of `integration/shared/history` is enough). macOS Docker hosts are not
-affected.
+1. It waits until 2 s after a slot boundary S0. The winner of S0 has listed
+   the history folder by then.
+2. It plants the window. When the plant ends later than 2 s before the next
+   boundary S1, the script fails and names the plant's duration: the winner
+   of S1 may have listed a partial window.
+3. At S1 + 1 s it fails when the archive is already published (the winner of
+   S0 acquired late and listed the plant). Otherwise the worker that holds
+   the lock in two polls in a row is the winner of S1, which archives the
+   planted window. It must be worker-2 or worker-3.
+4. It kills that worker at once and checks that the archive is not published
+   yet and every planted file is still there. If the kill comes after the
+   archive is published, the script fails and names the planted size.
+5. Within 150 s of the kill another worker must hold the lock, publish the
+   archive and delete every planted file. The dead holder's lease ends up to
+   40 s after the kill, the next slot comes within 30 s, and the pass takes up
+   to about 40 s under load. With `filesystem` and `postgres` the new holder
+   logs `periodic_lock_taken_over` with its provider and the archive's scope.
+6. No slot of `harness_cluster_tick` ran twice from the plant to the end of
+   the half.
+
+On a Linux host the containers create the history and task folders as root
+with mode 0700, so planting from the host needs write access there (a
+`sudo chown` of `integration/shared/history` is enough; the script does not
+write into `integration/shared/tasks`). macOS Docker hosts are not affected.
 
 ### Run matrix
 
@@ -640,7 +668,7 @@ just integration-matrix profile=quick
 For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
 `integration-down` does not clear), starts the harness with
-`integration-up`, waits with `wait-ready.sh`, runs the four scenarios and
+`integration-up`, waits with `wait-ready.sh`, runs the five scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
 provider and step, and exits non-zero when any step failed. `N/A` means the

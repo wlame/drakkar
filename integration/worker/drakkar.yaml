@@ -475,11 +475,15 @@ fleet:
 # An archive slot comes every 30 s, so the unclean-exit scenario need not
 # wait for an hourly slot. A lease missing for 40 s is stale and another
 # worker takes it over; the holder refreshes it while its pass runs.
+# worker-1 turns the archive off in docker-compose.yml
+# (DK_HISTORY__ARCHIVE__ENABLED), so only worker-2 and worker-3 win archive
+# slots.
 #
 # Periodic election: which worker of the cluster runs each slot of a cluster
-# task (the archive included). DK_PERIODIC__ELECTION__PROVIDER in
-# docker-compose.yml sets the provider to the same value as the registry's,
-# and the resilience block is the same as the registry's.
+# task (the archive and the handler's harness_cluster_tick).
+# DK_PERIODIC__ELECTION__PROVIDER in docker-compose.yml sets the provider to
+# the same value as the registry's, and the resilience block is the same as
+# the registry's.
 history:
   archive:
     window_hours: 1
