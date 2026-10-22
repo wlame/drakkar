@@ -1,15 +1,5 @@
 {
-  "_comment": [
-    "Schedules of cluster periodic tasks, shared by every implementation.",
-    "constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names.",
-    "messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text.",
-    "cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never).",
-    "interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first.",
-    "cron_slots: the first fire time strictly after now truncated to the whole second.",
-    "scopes: the election scope of a task: the sanitized cluster, a slash, the task name.",
-    "scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message.",
-    "hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes."
-  ],
+  "_comment": "Schedules of cluster periodic tasks, shared by every implementation. constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names. messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text. cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never). interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first. cron_slots: the first fire time strictly after now truncated to the whole second. scopes: the election scope of a task: the sanitized cluster, a slash, the task name. scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message. hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes.",
   "constants": {
     "acquire_window_seconds": 10,
     "min_hold_seconds": 20,
@@ -2071,591 +2061,6 @@
       ]
     },
     {
-      "expr": "* * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T00:01:00Z",
-        "2027-01-01T00:02:00Z",
-        "2027-01-01T00:03:00Z",
-        "2027-01-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "* * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T00:01:00Z",
-        "2028-02-29T00:02:00Z",
-        "2028-02-29T00:03:00Z",
-        "2028-02-29T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "* * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T00:01:00Z",
-        "2028-02-29T00:02:00Z",
-        "2028-02-29T00:03:00Z",
-        "2028-02-29T00:04:00Z",
-        "2028-02-29T00:05:00Z"
-      ]
-    },
-    {
-      "expr": "* * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T00:01:00Z",
-        "2027-03-01T00:02:00Z",
-        "2027-03-01T00:03:00Z",
-        "2027-03-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "* * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T00:01:00Z",
-        "2026-05-01T00:02:00Z",
-        "2026-05-01T00:03:00Z",
-        "2026-05-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "0 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T01:00:00Z",
-        "2027-01-01T02:00:00Z",
-        "2027-01-01T03:00:00Z",
-        "2027-01-01T04:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T01:00:00Z",
-        "2028-02-29T02:00:00Z",
-        "2028-02-29T03:00:00Z",
-        "2028-02-29T04:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T01:00:00Z",
-        "2028-02-29T02:00:00Z",
-        "2028-02-29T03:00:00Z",
-        "2028-02-29T04:00:00Z",
-        "2028-02-29T05:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T01:00:00Z",
-        "2027-03-01T02:00:00Z",
-        "2027-03-01T03:00:00Z",
-        "2027-03-01T04:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T01:00:00Z",
-        "2026-05-01T02:00:00Z",
-        "2026-05-01T03:00:00Z",
-        "2026-05-01T04:00:00Z"
-      ]
-    },
-    {
-      "expr": "*/5 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T00:05:00Z",
-        "2027-01-01T00:10:00Z",
-        "2027-01-01T00:15:00Z",
-        "2027-01-01T00:20:00Z"
-      ]
-    },
-    {
-      "expr": "*/5 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T00:05:00Z",
-        "2028-02-29T00:10:00Z",
-        "2028-02-29T00:15:00Z",
-        "2028-02-29T00:20:00Z"
-      ]
-    },
-    {
-      "expr": "*/5 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T00:05:00Z",
-        "2028-02-29T00:10:00Z",
-        "2028-02-29T00:15:00Z",
-        "2028-02-29T00:20:00Z",
-        "2028-02-29T00:25:00Z"
-      ]
-    },
-    {
-      "expr": "*/5 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T00:05:00Z",
-        "2027-03-01T00:10:00Z",
-        "2027-03-01T00:15:00Z",
-        "2027-03-01T00:20:00Z"
-      ]
-    },
-    {
-      "expr": "*/5 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T00:05:00Z",
-        "2026-05-01T00:10:00Z",
-        "2026-05-01T00:15:00Z",
-        "2026-05-01T00:20:00Z"
-      ]
-    },
-    {
-      "expr": "*/7 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T00:07:00Z",
-        "2027-01-01T00:14:00Z",
-        "2027-01-01T00:21:00Z",
-        "2027-01-01T00:28:00Z"
-      ]
-    },
-    {
-      "expr": "*/7 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T00:07:00Z",
-        "2028-02-29T00:14:00Z",
-        "2028-02-29T00:21:00Z",
-        "2028-02-29T00:28:00Z"
-      ]
-    },
-    {
-      "expr": "*/7 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T00:07:00Z",
-        "2028-02-29T00:14:00Z",
-        "2028-02-29T00:21:00Z",
-        "2028-02-29T00:28:00Z",
-        "2028-02-29T00:35:00Z"
-      ]
-    },
-    {
-      "expr": "*/7 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T00:07:00Z",
-        "2027-03-01T00:14:00Z",
-        "2027-03-01T00:21:00Z",
-        "2027-03-01T00:28:00Z"
-      ]
-    },
-    {
-      "expr": "*/7 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T00:07:00Z",
-        "2026-05-01T00:14:00Z",
-        "2026-05-01T00:21:00Z",
-        "2026-05-01T00:28:00Z"
-      ]
-    },
-    {
-      "expr": "*/15 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T00:15:00Z",
-        "2027-01-01T00:30:00Z",
-        "2027-01-01T00:45:00Z",
-        "2027-01-01T01:00:00Z"
-      ]
-    },
-    {
-      "expr": "*/15 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T00:15:00Z",
-        "2028-02-29T00:30:00Z",
-        "2028-02-29T00:45:00Z",
-        "2028-02-29T01:00:00Z"
-      ]
-    },
-    {
-      "expr": "*/15 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T00:15:00Z",
-        "2028-02-29T00:30:00Z",
-        "2028-02-29T00:45:00Z",
-        "2028-02-29T01:00:00Z",
-        "2028-02-29T01:15:00Z"
-      ]
-    },
-    {
-      "expr": "*/15 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T00:15:00Z",
-        "2027-03-01T00:30:00Z",
-        "2027-03-01T00:45:00Z",
-        "2027-03-01T01:00:00Z"
-      ]
-    },
-    {
-      "expr": "*/15 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T00:15:00Z",
-        "2026-05-01T00:30:00Z",
-        "2026-05-01T00:45:00Z",
-        "2026-05-01T01:00:00Z"
-      ]
-    },
-    {
-      "expr": "*/1 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-01T00:01:00Z",
-        "2027-01-01T00:02:00Z",
-        "2027-01-01T00:03:00Z",
-        "2027-01-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "*/1 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-02-29T00:01:00Z",
-        "2028-02-29T00:02:00Z",
-        "2028-02-29T00:03:00Z",
-        "2028-02-29T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "*/1 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T00:01:00Z",
-        "2028-02-29T00:02:00Z",
-        "2028-02-29T00:03:00Z",
-        "2028-02-29T00:04:00Z",
-        "2028-02-29T00:05:00Z"
-      ]
-    },
-    {
-      "expr": "*/1 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-01T00:01:00Z",
-        "2027-03-01T00:02:00Z",
-        "2027-03-01T00:03:00Z",
-        "2027-03-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "*/1 * * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-01T00:01:00Z",
-        "2026-05-01T00:02:00Z",
-        "2026-05-01T00:03:00Z",
-        "2026-05-01T00:04:00Z"
-      ]
-    },
-    {
-      "expr": "0 0 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T00:00:00Z",
-        "2027-01-02T00:00:00Z",
-        "2027-01-03T00:00:00Z",
-        "2027-01-04T00:00:00Z",
-        "2027-01-05T00:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 0 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T00:00:00Z",
-        "2028-03-01T00:00:00Z",
-        "2028-03-02T00:00:00Z",
-        "2028-03-03T00:00:00Z",
-        "2028-03-04T00:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 0 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-03-01T00:00:00Z",
-        "2028-03-02T00:00:00Z",
-        "2028-03-03T00:00:00Z",
-        "2028-03-04T00:00:00Z",
-        "2028-03-05T00:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 0 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T00:00:00Z",
-        "2027-03-02T00:00:00Z",
-        "2027-03-03T00:00:00Z",
-        "2027-03-04T00:00:00Z",
-        "2027-03-05T00:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 0 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T00:00:00Z",
-        "2026-05-02T00:00:00Z",
-        "2026-05-03T00:00:00Z",
-        "2026-05-04T00:00:00Z",
-        "2026-05-05T00:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 12 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T12:00:00Z",
-        "2027-01-02T12:00:00Z",
-        "2027-01-03T12:00:00Z",
-        "2027-01-04T12:00:00Z",
-        "2027-01-05T12:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 12 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T12:00:00Z",
-        "2028-03-01T12:00:00Z",
-        "2028-03-02T12:00:00Z",
-        "2028-03-03T12:00:00Z",
-        "2028-03-04T12:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 12 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T12:00:00Z",
-        "2028-03-01T12:00:00Z",
-        "2028-03-02T12:00:00Z",
-        "2028-03-03T12:00:00Z",
-        "2028-03-04T12:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 12 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T12:00:00Z",
-        "2027-03-02T12:00:00Z",
-        "2027-03-03T12:00:00Z",
-        "2027-03-04T12:00:00Z",
-        "2027-03-05T12:00:00Z"
-      ]
-    },
-    {
-      "expr": "0 12 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T12:00:00Z",
-        "2026-05-02T12:00:00Z",
-        "2026-05-03T12:00:00Z",
-        "2026-05-04T12:00:00Z",
-        "2026-05-05T12:00:00Z"
-      ]
-    },
-    {
-      "expr": "30 23 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-12-31T23:59:59Z",
-      "next": [
-        "2027-01-01T23:30:00Z",
-        "2027-01-02T23:30:00Z",
-        "2027-01-03T23:30:00Z",
-        "2027-01-04T23:30:00Z",
-        "2027-01-05T23:30:00Z"
-      ]
-    },
-    {
-      "expr": "30 23 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-28T23:59:59Z",
-      "next": [
-        "2028-02-29T23:30:00Z",
-        "2028-03-01T23:30:00Z",
-        "2028-03-02T23:30:00Z",
-        "2028-03-03T23:30:00Z",
-        "2028-03-04T23:30:00Z"
-      ]
-    },
-    {
-      "expr": "30 23 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2028-02-29T00:00:00Z",
-      "next": [
-        "2028-02-29T23:30:00Z",
-        "2028-03-01T23:30:00Z",
-        "2028-03-02T23:30:00Z",
-        "2028-03-03T23:30:00Z",
-        "2028-03-04T23:30:00Z"
-      ]
-    },
-    {
-      "expr": "30 23 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2027-02-28T23:59:00Z",
-      "next": [
-        "2027-03-01T23:30:00Z",
-        "2027-03-02T23:30:00Z",
-        "2027-03-03T23:30:00Z",
-        "2027-03-04T23:30:00Z",
-        "2027-03-05T23:30:00Z"
-      ]
-    },
-    {
-      "expr": "30 23 * * *",
-      "accepted": true,
-      "message": null,
-      "start": "2026-04-30T23:59:00Z",
-      "next": [
-        "2026-05-01T23:30:00Z",
-        "2026-05-02T23:30:00Z",
-        "2026-05-03T23:30:00Z",
-        "2026-05-04T23:30:00Z",
-        "2026-05-05T23:30:00Z"
-      ]
-    },
-    {
       "expr": "59 23 31 12 *",
       "accepted": true,
       "message": null,
@@ -2848,6 +2253,591 @@
         "2036-02-29T00:00:00Z",
         "2040-02-29T00:00:00Z",
         "2044-02-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 31 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-31T00:00:00Z",
+        "2027-03-31T00:00:00Z",
+        "2027-05-31T00:00:00Z",
+        "2027-07-31T00:00:00Z",
+        "2027-08-31T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 31 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-03-31T00:00:00Z",
+        "2028-05-31T00:00:00Z",
+        "2028-07-31T00:00:00Z",
+        "2028-08-31T00:00:00Z",
+        "2028-10-31T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 31 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-03-31T00:00:00Z",
+        "2028-05-31T00:00:00Z",
+        "2028-07-31T00:00:00Z",
+        "2028-08-31T00:00:00Z",
+        "2028-10-31T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 31 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-03-31T00:00:00Z",
+        "2027-05-31T00:00:00Z",
+        "2027-07-31T00:00:00Z",
+        "2027-08-31T00:00:00Z",
+        "2027-10-31T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 31 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-05-31T00:00:00Z",
+        "2026-07-31T00:00:00Z",
+        "2026-08-31T00:00:00Z",
+        "2026-10-31T00:00:00Z",
+        "2026-12-31T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 30 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-30T00:00:00Z",
+        "2027-03-30T00:00:00Z",
+        "2027-04-30T00:00:00Z",
+        "2027-05-30T00:00:00Z",
+        "2027-06-30T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 30 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-03-30T00:00:00Z",
+        "2028-04-30T00:00:00Z",
+        "2028-05-30T00:00:00Z",
+        "2028-06-30T00:00:00Z",
+        "2028-07-30T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 30 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-03-30T00:00:00Z",
+        "2028-04-30T00:00:00Z",
+        "2028-05-30T00:00:00Z",
+        "2028-06-30T00:00:00Z",
+        "2028-07-30T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 30 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-03-30T00:00:00Z",
+        "2027-04-30T00:00:00Z",
+        "2027-05-30T00:00:00Z",
+        "2027-06-30T00:00:00Z",
+        "2027-07-30T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 30 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-05-30T00:00:00Z",
+        "2026-06-30T00:00:00Z",
+        "2026-07-30T00:00:00Z",
+        "2026-08-30T00:00:00Z",
+        "2026-09-30T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 29 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-29T00:00:00Z",
+        "2027-03-29T00:00:00Z",
+        "2027-04-29T00:00:00Z",
+        "2027-05-29T00:00:00Z",
+        "2027-06-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 29 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-02-29T00:00:00Z",
+        "2028-03-29T00:00:00Z",
+        "2028-04-29T00:00:00Z",
+        "2028-05-29T00:00:00Z",
+        "2028-06-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 29 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-03-29T00:00:00Z",
+        "2028-04-29T00:00:00Z",
+        "2028-05-29T00:00:00Z",
+        "2028-06-29T00:00:00Z",
+        "2028-07-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 29 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-03-29T00:00:00Z",
+        "2027-04-29T00:00:00Z",
+        "2027-05-29T00:00:00Z",
+        "2027-06-29T00:00:00Z",
+        "2027-07-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 29 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-05-29T00:00:00Z",
+        "2026-06-29T00:00:00Z",
+        "2026-07-29T00:00:00Z",
+        "2026-08-29T00:00:00Z",
+        "2026-09-29T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-02-01T00:00:00Z",
+        "2027-03-01T00:00:00Z",
+        "2027-04-01T00:00:00Z",
+        "2027-05-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-03-01T00:00:00Z",
+        "2028-04-01T00:00:00Z",
+        "2028-05-01T00:00:00Z",
+        "2028-06-01T00:00:00Z",
+        "2028-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-03-01T00:00:00Z",
+        "2028-04-01T00:00:00Z",
+        "2028-05-01T00:00:00Z",
+        "2028-06-01T00:00:00Z",
+        "2028-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-03-01T00:00:00Z",
+        "2027-04-01T00:00:00Z",
+        "2027-05-01T00:00:00Z",
+        "2027-06-01T00:00:00Z",
+        "2027-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 * *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-05-01T00:00:00Z",
+        "2026-06-01T00:00:00Z",
+        "2026-07-01T00:00:00Z",
+        "2026-08-01T00:00:00Z",
+        "2026-09-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * JAN *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-01-02T00:00:00Z",
+        "2027-01-03T00:00:00Z",
+        "2027-01-04T00:00:00Z",
+        "2027-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * JAN *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2029-01-01T00:00:00Z",
+        "2029-01-02T00:00:00Z",
+        "2029-01-03T00:00:00Z",
+        "2029-01-04T00:00:00Z",
+        "2029-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * JAN *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2029-01-01T00:00:00Z",
+        "2029-01-02T00:00:00Z",
+        "2029-01-03T00:00:00Z",
+        "2029-01-04T00:00:00Z",
+        "2029-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * JAN *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2028-01-01T00:00:00Z",
+        "2028-01-02T00:00:00Z",
+        "2028-01-03T00:00:00Z",
+        "2028-01-04T00:00:00Z",
+        "2028-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * JAN *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-01-02T00:00:00Z",
+        "2027-01-03T00:00:00Z",
+        "2027-01-04T00:00:00Z",
+        "2027-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * jan *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-01-02T00:00:00Z",
+        "2027-01-03T00:00:00Z",
+        "2027-01-04T00:00:00Z",
+        "2027-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * jan *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2029-01-01T00:00:00Z",
+        "2029-01-02T00:00:00Z",
+        "2029-01-03T00:00:00Z",
+        "2029-01-04T00:00:00Z",
+        "2029-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * jan *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2029-01-01T00:00:00Z",
+        "2029-01-02T00:00:00Z",
+        "2029-01-03T00:00:00Z",
+        "2029-01-04T00:00:00Z",
+        "2029-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * jan *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2028-01-01T00:00:00Z",
+        "2028-01-02T00:00:00Z",
+        "2028-01-03T00:00:00Z",
+        "2028-01-04T00:00:00Z",
+        "2028-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 * jan *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-01-02T00:00:00Z",
+        "2027-01-03T00:00:00Z",
+        "2027-01-04T00:00:00Z",
+        "2027-01-05T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN-MAR *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-02-01T00:00:00Z",
+        "2027-03-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-02-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN-MAR *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-03-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2029-02-01T00:00:00Z",
+        "2029-03-01T00:00:00Z",
+        "2030-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN-MAR *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-03-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2029-02-01T00:00:00Z",
+        "2029-03-01T00:00:00Z",
+        "2030-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN-MAR *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-03-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-02-01T00:00:00Z",
+        "2028-03-01T00:00:00Z",
+        "2029-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN-MAR *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-02-01T00:00:00Z",
+        "2027-03-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-02-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN,JUL *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-01-01T00:00:00Z",
+        "2027-07-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-07-01T00:00:00Z",
+        "2029-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN,JUL *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-07-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2029-07-01T00:00:00Z",
+        "2030-01-01T00:00:00Z",
+        "2030-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN,JUL *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-07-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2029-07-01T00:00:00Z",
+        "2030-01-01T00:00:00Z",
+        "2030-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN,JUL *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-07-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-07-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2029-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 JAN,JUL *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-07-01T00:00:00Z",
+        "2027-01-01T00:00:00Z",
+        "2027-07-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2028-07-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 DEC *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-12-31T23:59:59Z",
+      "next": [
+        "2027-12-01T00:00:00Z",
+        "2028-12-01T00:00:00Z",
+        "2029-12-01T00:00:00Z",
+        "2030-12-01T00:00:00Z",
+        "2031-12-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 DEC *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-28T23:59:59Z",
+      "next": [
+        "2028-12-01T00:00:00Z",
+        "2029-12-01T00:00:00Z",
+        "2030-12-01T00:00:00Z",
+        "2031-12-01T00:00:00Z",
+        "2032-12-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 DEC *",
+      "accepted": true,
+      "message": null,
+      "start": "2028-02-29T00:00:00Z",
+      "next": [
+        "2028-12-01T00:00:00Z",
+        "2029-12-01T00:00:00Z",
+        "2030-12-01T00:00:00Z",
+        "2031-12-01T00:00:00Z",
+        "2032-12-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 DEC *",
+      "accepted": true,
+      "message": null,
+      "start": "2027-02-28T23:59:00Z",
+      "next": [
+        "2027-12-01T00:00:00Z",
+        "2028-12-01T00:00:00Z",
+        "2029-12-01T00:00:00Z",
+        "2030-12-01T00:00:00Z",
+        "2031-12-01T00:00:00Z"
+      ]
+    },
+    {
+      "expr": "0 0 1 DEC *",
+      "accepted": true,
+      "message": null,
+      "start": "2026-04-30T23:59:00Z",
+      "next": [
+        "2026-12-01T00:00:00Z",
+        "2027-12-01T00:00:00Z",
+        "2028-12-01T00:00:00Z",
+        "2029-12-01T00:00:00Z",
+        "2030-12-01T00:00:00Z"
       ]
     },
     {
@@ -5251,21 +5241,6 @@
       "message": "cron '0  0 * * *' must have 5 fields separated by single spaces"
     },
     {
-      "expr": "0 0 * * 7",
-      "accepted": false,
-      "message": "cron '0 0 * * 7': day of week value '7' is not one of 0-6 or SUN-SAT"
-    },
-    {
-      "expr": "5-5 * * * *",
-      "accepted": false,
-      "message": "cron '5-5 * * * *': minute range '5-5' must go from a lower to a higher value"
-    },
-    {
-      "expr": "5-5/2 * * * *",
-      "accepted": false,
-      "message": "cron '5-5/2 * * * *': minute range '5-5/2' must go from a lower to a higher value"
-    },
-    {
       "expr": "1/2 * * * *",
       "accepted": false,
       "message": "cron '1/2 * * * *': minute element '1/2' is not one of *, */s, v, a-b, a-b/s"
@@ -5292,16 +5267,6 @@
         "2027-01-25T00:00:00Z",
         "2028-01-03T00:00:00Z"
       ]
-    },
-    {
-      "expr": "@hourly",
-      "accepted": false,
-      "message": "cron '@hourly' must have 5 fields separated by single spaces"
-    },
-    {
-      "expr": "0 0 L * *",
-      "accepted": false,
-      "message": "cron '0 0 L * *': day of month element 'L' is not one of *, */s, v, a-b, a-b/s"
     },
     {
       "expr": "*/99999999999999999999 * * * *",
