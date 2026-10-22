@@ -73,7 +73,8 @@ across restarts**.
   due one hour after they close (`history.archive` in
   `worker/drakkar.yaml`; the defaults are 24 hours and 48 hours). The
   workers worker-2 and worker-3 look for a due window every 20 seconds
-  (`pass_interval_seconds`), and worker-1 never does. A lock that is not
+  (`pass_interval_seconds`). worker-1 sets the timer to 0, so it runs a pass
+  only after its hourly rotation. A lock that is not
   refreshed for 30 seconds is taken over. When a window is due, one worker of
   the cluster merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive and
   removes the sealed files it merged. Archives appear in the Debug →

@@ -575,8 +575,8 @@ returns when worker-1 lists worker-2 and worker-3 online, and it fails after
 300 seconds and prints the last list it saw. The scenarios start only after
 that.
 
-A run with `postgres`, `redis` or `consul` and the `full` profile takes about two hours: the producer sends
-for about 20 minutes, and the main cluster then needs an hour or more to
+A run with `postgres`, `redis` or `consul` and the `full` profile takes about two hours: the paced phases of
+the producer take about 7 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
 scenario does not apply, and the other three take a few minutes.
@@ -611,9 +611,9 @@ with the provider of the run. It uses these archive settings of
 | `due_after_hours` | 1 | A window is due one hour after it ends. |
 | `retention_days` | 1 | Archives are kept one day. |
 | `lock_stale_seconds` | 30 | A lock that is not refreshed for 30 s is taken over. |
-| `pass_interval_seconds` | 20 | Worker-2 and worker-3 look for a due window every 20 s. Worker-1 sets it to 0 in `docker-compose.yml`: it is the observer of every scenario and must never hold the lock. |
+| `pass_interval_seconds` | 20 | Worker-2 and worker-3 look for a due window every 20 s. Worker-1 is the observer of every scenario and sets it to 0 in `docker-compose.yml`, so it runs a pass only after its hourly rotation. |
 
-The script plants a window with `integration/plant_history.py`: 20 sealed
+The script plants a window with `integration/plant_history.py`: 50 sealed
 recorder files of the main cluster, with real meta files, in one hour window
 that ended 12 hours ago, so it is due at once. The size is set so that one
 archive pass takes between 8 and 25 s, which is less than the 30 s lease.

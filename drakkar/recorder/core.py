@@ -1384,8 +1384,9 @@ class EventRecorder(EventWriter):
 
         The whole pass — listing, SQLite merges, gzip — is blocking work
         measured in seconds, so it goes to the recorder's own archive thread;
-        the event loop only sees this await, and the rotation loop starts it
-        as a background job so it never waits for it either.
+        the event loop only sees this await. The rotation loop starts it as a
+        background job, or the timer loop does when ``pass_interval_seconds``
+        is set, so neither loop waits for it.
 
         The election provider starts here at the first pass. While it has
         not started, a pass ends at once and the next one tries again.

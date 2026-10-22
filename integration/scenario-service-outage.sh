@@ -87,7 +87,14 @@ ordinal() {
 # either reading could not be taken.
 #   tasks_grew <before> <after>
 tasks_grew() {
-    python3 -c 'import sys; sys.exit(0 if all(a.replace(".","",1).isdigit() for a in sys.argv[1:]) and float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$1" "$2"
+    python3 -c '
+import sys
+try:
+    before, after = float(sys.argv[1]), float(sys.argv[2])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if after > before else 1)
+' "$1" "$2"
 }
 
 # One outage: pause the service, see the breaker open, unpause, see the

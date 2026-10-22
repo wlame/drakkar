@@ -815,7 +815,9 @@ byte-level spec. The short version:
   more than `retention_days` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
 - **Every worker runs the pass** after each rotation tick, in the
-  background, on the history folder of its own cluster only.
+  background, on the history folder of its own cluster only, unless
+  `history.archive.pass_interval_seconds` is set: passes then run on their
+  own timer.
 - **Windows key on file start time, not event time.** A sealed file
   belongs to the window holding its own start timestamp; an archive can
   carry a handful of events timestamped slightly past its own window end.

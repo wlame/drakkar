@@ -1129,6 +1129,7 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
 | `archive.lock_stale_seconds` | `int` | `7200` | >= 1; at most `86400` when `archive.election.provider` is `consul` | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. It is also the lease length of every [election provider](local-databases.md#the-election-provider). |
+| `archive.pass_interval_seconds` | `int` | `0` | `0`, or at least `10` | How often an archive pass starts on its own timer. `0` starts one pass after each recorder rotation. At least `10` starts a pass every that many seconds, whatever the rotation does; the rotation then only seals. A pass never starts while another one still runs. See [Passes on their own timer](local-databases.md#passes-on-their-own-timer). |
 | `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder), `postgres` (a row in a table of the database named by `archive.election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `archive.election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `archive.election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). Every worker of one cluster must use the same provider. |
 | `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
@@ -1143,6 +1144,7 @@ history:
     due_after_hours: 48
     retention_days: 30
     lock_stale_seconds: 7200
+    pass_interval_seconds: 0
     election:
       provider: filesystem
   merged_retention_days: 32

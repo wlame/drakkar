@@ -527,7 +527,9 @@ no matter which worker does the work for a given cluster.
 ### When the pass runs
 
 Every worker runs the pass after each rotation tick, as a background job
-(one at a time), when `history.archive.enabled` is true. A worker that
+(one at a time), when `history.archive.enabled` is true, unless
+`history.archive.pass_interval_seconds` is set: passes then run on their own
+timer (see [Passes on their own timer](#passes-on-their-own-timer)). A worker that
 stops ends its pass after the window in progress and skips expiry and
 pruning; the windows left stay due for the next pass of any worker. The
 [election provider](#the-election-provider) lets one worker of the cluster
@@ -933,8 +935,9 @@ consul](fleet.md#consul) and [Security](security.md#provider-credentials).
   The holder renews the session every third of `lock_stale_seconds`, at
   most every 60 seconds. Consul may end the session as early as its time to
   live, half of `lock_stale_seconds` (at least 10 seconds), after the last
-  renew. The renew interval is always shorter than that, so the lease does
-  not end between two renewals.
+  renew. The renew interval is shorter than that time to live by a margin of
+  a sixth of `lock_stale_seconds` (a third against a half), and by more when
+  the 60-second cap or the 10-second floor applies.
 - **Acquire.** The provider creates the session and writes the body to the key
   with `?acquire=<session>`. Consul grants this only to a session when no other
   session holds the key. When another session holds it, the provider destroys

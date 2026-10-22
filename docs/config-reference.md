@@ -687,6 +687,8 @@ history:
                                    # with postgres and redis it is judged on the server's clock, with consul by the
                                    # time to live of the lease's session (half of this value, at least 10 s).
                                    # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
+    pass_interval_seconds: 0       # 0 = one archive pass after each rotation; or at least 10 = a pass every that many
+                                   # seconds on its own timer. env: DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS
     election:                      # which worker of a cluster builds the archives; see "Resilience block" below
       provider: filesystem         # filesystem | postgres | redis | consul | <plugin name>.
                                    # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>;

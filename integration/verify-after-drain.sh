@@ -22,7 +22,8 @@ SCENARIO=verify-after-drain
 source "$(dirname "${BASH_SOURCE[0]}")/scenario-lib.sh"
 
 TOTAL_MESSAGES=$(harness_total_messages) || fail "cannot read the message total from the producer"
-# The paced producer phases take about 20 minutes for 5000 messages.
+# The paced producer phases take about 7 minutes for 5000 messages; the
+# limit leaves room for a slow start of the producer.
 PRODUCER_DONE_LIMIT_SECONDS=2700
 CONSUMER_GROUP=drakkar-integration
 SOURCE_TOPIC=search-requests

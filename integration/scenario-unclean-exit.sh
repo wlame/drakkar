@@ -33,9 +33,10 @@
 #
 # Archive-election half, with every provider, after worker-2 is back. The
 # harness runs an archive pass every 20 s on worker-2 and worker-3 (worker-1
-# runs none: it is the observer, and its compose environment sets the timer
-# off), with a 30 s lease refreshed every 10 s:
-#   - the history of one hour window three hours back is planted into the
+# is the observer: its compose environment sets the timer to 0, so it runs a
+# pass only after its hourly rotation), with a 30 s lease refreshed every
+# 10 s:
+#   - the history of one hour window twelve hours back is planted into the
 #     shared folder (PLANT_HISTORY_CMD, see scenario-lib.sh), so the window
 #     is due at once; an archive of that window left by an earlier run is a
 #     FAIL before anything is planted,
@@ -46,7 +47,7 @@
 #   - H is killed at once; its archive is not published yet and every
 #     planted file is still there (otherwise FAIL: the planted window is
 #     too small),
-#   - within the lease plus one pass interval plus 40 s of the kill another
+#   - within the lease plus one pass interval plus 60 s of the kill another
 #     worker W holds the lock, the archive of the window exists, W logged
 #     recorder_archive_created for it, and every planted file is gone,
 #   - with filesystem and postgres, W logged recorder_archive_lock_taken_over
@@ -108,7 +109,10 @@ LOCK_POLL_SECONDS=0.2
 # How long the half waits for the first holder, and, from the kill, for the
 # takeover and the published archive.
 HOLDER_LIMIT_SECONDS=$((PASS_INTERVAL_SECONDS + 10))
-ELECTION_TAKEOVER_LIMIT_SECONDS=$((LOCK_STALE_SECONDS + PASS_INTERVAL_SECONDS + 40))
+# The takeover comes at the earliest one lease after the last refresh, at the
+# next timer tick; the 60 s on top cover the pass of the planted window under
+# load (the slowest archive came about 87 s after the kill).
+ELECTION_TAKEOVER_LIMIT_SECONDS=$((LOCK_STALE_SECONDS + PASS_INTERVAL_SECONDS + 60))
 # The workers that run archive passes on a timer: the holder must be one of
 # them.
 TIMER_WORKERS="worker-2 worker-3"
