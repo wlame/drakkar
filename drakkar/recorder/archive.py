@@ -14,23 +14,26 @@ Three ideas carry the design:
   days. A file belongs to the window holding its START timestamp and is
   never split, which is why an archive can carry events slightly past its
   own end — archives partition by file start time, not by event time.
-* **One archiver per cluster folder.** Every worker of the cluster runs the
-  pass; the election (:mod:`drakkar.recorder.election`, by default the task
-  lock ``tasks/<cluster>/history.archive.lock`` of
-  :mod:`drakkar.recorder.task_lock`) lets one of them work at a time.
+* **One archiver per cluster folder.** The pass is the body of the system
+  cluster task ``history.archive`` (:mod:`drakkar.cluster_tasks`): at each
+  slot every worker of the cluster asks the election for the slot's lease
+  (by default the task lock ``tasks/<cluster>/history.archive.lock`` of
+  :mod:`drakkar.recorder.task_lock`), and only the one that gets it runs
+  the pass.
   Every ``*.db`` in the folder is sealed, so the
   pass needs no in-use or settled check and reads sources with
   ``immutable=1``.
 * **Sources die last, and only by the lease holder.** Merge, compress,
   fsync and rename all happen on dot-prefixed work files named with the
-  lease token. Right before publishing, the pass checks the election still
-  holds its lease; a pass that lost it publishes and deletes nothing.
+  lease token. Right before publishing, the pass checks through its fence
+  that the slot's lease is still held; a pass that lost it publishes and
+  deletes nothing.
   Sealed files are deleted only after the archive is in place, so any
   failure costs one tick and no data.
 
 Everything here is synchronous and does real file, SQLite and gzip work.
 Callers on the event loop MUST run :func:`run_archive_pass` in a thread —
-see ``EventRecorder._archive_pass``.
+see ``EventRecorder.archive_cluster_task``.
 """
 
 from __future__ import annotations
@@ -69,7 +72,7 @@ from drakkar.schedule import sanitize_cluster
 
 if TYPE_CHECKING:
     from drakkar.config import HistoryArchiveConfig
-    from drakkar.recorder.election import ElectionLease
+    from drakkar.recorder.election import ThreadFence
 
 logger = structlog.get_logger()
 
@@ -135,7 +138,7 @@ class ArchiveFencedError(RuntimeError):
     """The pass lost its election lease: another worker took it over, or the provider could not confirm it.
 
     ``name`` is the archive the pass was about to publish; ``reason`` is the
-    lease's :attr:`~drakkar.recorder.election.ElectionLease.loss_reason`.
+    fence's :attr:`~drakkar.recorder.election.ThreadFence.loss_reason`.
     """
 
     def __init__(self, name: str, reason: str | None) -> None:
@@ -304,18 +307,17 @@ def run_archive_pass(
     instance: str,
     archive: HistoryArchiveConfig,
     merged_retention_days: int,
-    lease: ElectionLease,
+    fence: ThreadFence,
     stop: threading.Event | None = None,
 ) -> None:
     """Archive every due window of this cluster's history folder, then expire and prune.
 
-    Blocking by nature (stat, SQLite merge, gzip) — run it in a thread,
-    never on the event loop: ``lease`` runs its provider calls on the loop
-    and waits for them. Every worker of the cluster calls it; the lease lets
-    one of them work at a time, and the others return right after refreshing
-    the footprint gauges. A pass that took the lease and did not finish
-    cleanly (a window failed, the lease was lost, an unexpected error)
-    counts in ``drakkar_recorder_archive_failures_total``.
+    The body of a won ``history.archive`` slot: the slot loop took the lease
+    and releases it, and ``fence`` checks it before each publish. Blocking by
+    nature (stat, SQLite merge, gzip) — run it in a thread, never on the
+    event loop: the fence runs its checks on the loop and waits for them. A
+    pass that did not finish cleanly (a window failed, the lease was lost,
+    an unexpected error) counts in ``drakkar_recorder_archive_failures_total``.
 
     ``stop`` ends the pass after the window in progress: a worker that
     shuts down does not wait for a long backlog of windows. Expiry and
@@ -323,12 +325,8 @@ def run_archive_pass(
     """
     folder = history_dir(shared_dir, cluster)
     own_cluster = sanitize_cluster(cluster)
-    # Before the lease: the footprint is most worth reporting on the ticks
-    # where another worker does the archiving.
-    _observe_archive_footprint(folder, own_cluster)
+    _observe_footprint_in(folder, own_cluster)
     if not os.path.isdir(folder):
-        return
-    if not lease.acquire():
         return
     completed = False
     try:
@@ -336,7 +334,7 @@ def run_archive_pass(
             folder,
             own_cluster,
             instance,
-            lease,
+            fence,
             archive,
             merged_dir(shared_dir),
             merged_retention_days,
@@ -346,7 +344,7 @@ def run_archive_pass(
         logger.warning(
             'recorder_archive_fenced',
             category='recorder',
-            provider=lease.provider_name,
+            provider=fence.provider_name,
             reason=exc.reason,
             cluster=own_cluster,
             name=exc.name,
@@ -354,8 +352,6 @@ def run_archive_pass(
             detail=FENCED_DETAILS.get(exc.reason or '', FENCED_DETAILS[LOSS_UNCONFIRMED]),
         )
     finally:
-        # Also ends the refresh thread; the provider frees only our own lease.
-        lease.release()
         if not completed:
             recorder_archive_failures.inc()
 
@@ -364,13 +360,13 @@ def _archive_locked(
     folder: str,
     cluster: str,
     instance: str,
-    lease: ElectionLease,
+    fence: ThreadFence,
     archive: HistoryArchiveConfig,
     merged_folder: str,
     merged_retention_days: int,
     stop: threading.Event,
 ) -> bool:
-    """The pass body, run while holding the lease; False when a window failed."""
+    """The pass body, run while the slot's lease is held; False when a window failed."""
     now = time.time()
     # Ages of files in the shared folder are measured on the file server's
     # clock, whichever provider holds the lease.
@@ -388,7 +384,7 @@ def _archive_locked(
         # pass of any worker of the cluster takes them.
         if stop.is_set():
             return completed
-        completed = _archive_window(folder, cluster, window, lease) and completed
+        completed = _archive_window(folder, cluster, window, fence) and completed
     if stop.is_set():
         return completed
     if archive.retention_days > 0:
@@ -442,15 +438,15 @@ def _sweep(folder: str, cluster: str, now: float, stale_seconds: int) -> None:
         )
 
 
-def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: ElectionLease) -> bool:
+def _archive_window(folder: str, cluster: str, window: ArchiveWindow, fence: ThreadFence) -> bool:
     """Merge, compress and publish one window, then delete its sources; False when it failed.
 
     Order is what makes this safe: everything lands on work files named
     with the lease token, the rename publishes the archive atomically, and
     only then are the sealed files removed. Any failure before the rename
     leaves every source untouched for the next tick. Right before the
-    rename (and before the deletions of the reclaim path) the lease must
-    still be held; otherwise :class:`ArchiveFencedError` stops the whole
+    rename (and before the deletions of the reclaim path) the fence must
+    still confirm the lease; otherwise :class:`ArchiveFencedError` stops the whole
     pass with nothing published and nothing deleted.
 
     Two rules protect data that a naive "merge everything, delete
@@ -471,7 +467,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
     """
     final_name = archive_file_name(cluster, window.start, window.end)
     final_path = os.path.join(folder, final_name)
-    prefix = os.path.join(folder, f'.{final_name}.{lease.token}')
+    prefix = os.path.join(folder, f'.{final_name}.{fence.token}')
     tmp_path = prefix + _COMPRESS_TEMP_SUFFIX
     merged_path = prefix + _MERGE_TEMP_SUFFIX
     previous_path = prefix + _PREVIOUS_TEMP_SUFFIX
@@ -493,7 +489,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
                 # The whole window is already inside the published archive.
                 # Nothing to rewrite — just finish the interrupted cleanup.
                 _remove_with_sidecars(previous_path)
-                _fence(lease, final_name)
+                _fence(fence, final_name)
                 _delete_sources(folder, sources)
                 logger.info(
                     'recorder_archive_sources_reclaimed',
@@ -522,7 +518,7 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
         secure_db_file(merged_path)
         secure_db_file(tmp_path)
         _compress(merged_path, tmp_path)
-        _fence(lease, final_name)
+        _fence(fence, final_name)
         os.rename(tmp_path, final_path)
     except ArchiveFencedError:
         _remove_work_files(merged_path, previous_path, tmp_path)
@@ -562,10 +558,10 @@ def _archive_window(folder: str, cluster: str, window: ArchiveWindow, lease: Ele
     return True
 
 
-def _fence(lease: ElectionLease, name: str) -> None:
-    """Stop the pass when the election no longer confirms our lease (taken over, or not confirmed)."""
-    if not lease.is_held():
-        raise ArchiveFencedError(name, lease.loss_reason)
+def _fence(fence: ThreadFence, name: str) -> None:
+    """Stop the pass when the election no longer confirms the slot's lease (taken over, or not confirmed)."""
+    if not fence.is_held():
+        raise ArchiveFencedError(name, fence.loss_reason)
 
 
 def _remove_work_files(*paths: str) -> None:
@@ -703,8 +699,18 @@ def warn_if_archives_unbounded(archive: HistoryArchiveConfig, folder: str) -> No
     )
 
 
-def _observe_archive_footprint(folder: str, cluster: str) -> None:
-    """Publish this cluster's archive disk footprint as gauges.
+def observe_archive_footprint(shared_dir: str, cluster: str) -> None:
+    """Publish the archive disk footprint of ``cluster`` in ``shared_dir`` as gauges.
+
+    Blocking (it lists the shared history folder): call it in a thread. A
+    worker that does not win an archive slot calls it, so the gauges stay
+    current on every worker; a missing folder reports zero.
+    """
+    _observe_footprint_in(history_dir(shared_dir, cluster), sanitize_cluster(cluster))
+
+
+def _observe_footprint_in(folder: str, cluster: str) -> None:
+    """Publish the archive disk footprint of the sanitized ``cluster`` in its history ``folder`` as gauges.
 
     Names carry the cluster, so the folder is filtered down to this
     worker's own archives — the ones its retention setting governs.

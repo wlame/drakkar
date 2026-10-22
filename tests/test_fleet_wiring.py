@@ -1,4 +1,4 @@
-"""How the worker starts, feeds and stops the registry service and the archive election."""
+"""How the worker starts, feeds and stops the registry service and the election of its cluster tasks."""
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
+from drakkar.cluster_tasks import ClusterElection, archive_task_runs
 from drakkar.config import DrakkarConfig
 from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
@@ -24,12 +25,13 @@ from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import UnknownProviderError
 from drakkar.recorder import core as core_mod
-from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext
+from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext, FilesystemElection
 from drakkar.recorder.election_postgres import PostgresElection
+from drakkar.schedule import ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS
 from drakkar.sources import kafka as kafka_source_module
-from tests.archive_helpers import CLUSTER, due_start, election_calls, history_folder, make_sealed_db
+from tests.archive_helpers import CLUSTER, SteppingClock, due_start, election_calls, history_folder, make_sealed_db
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
-from tests.fleet_fakes import MemoryRegistry, MemoryStore
+from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -220,7 +222,7 @@ def test_election_provider_options_for_a_plugin_name_are_its_plugin_options(tmp_
     assert election_provider_options(config) == {'address': 'consul:8500'}
 
 
-def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):
+def test_the_cluster_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):
     received: list[dict] = []
     _install_plugins(monkeypatch, election={'example-election': lambda options: received.append(dict(options))})
     postgres_app = _app(
@@ -233,22 +235,84 @@ def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path
         periodic={'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}},
     )
 
-    postgres_args = postgres_app._lifecycle._archive_election()
-    plugin_args = plugin_app._lifecycle._archive_election()
+    postgres_election = postgres_app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
+    plugin_election = plugin_app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
 
-    assert isinstance(postgres_args['election'], PostgresElection)
-    assert postgres_args['election']._connection == 'reports_db'
-    assert postgres_args['election_options'] == {'connection': 'reports_db'}
+    assert postgres_election is not None and plugin_election is not None
+    assert isinstance(postgres_election.provider, PostgresElection)
+    assert postgres_election.provider._connection == 'reports_db'
+    assert postgres_election._context.options == {'connection': 'reports_db'}
     assert received == [{'address': 'consul:8500'}]
-    assert plugin_args['election_options'] == {'address': 'consul:8500'}
+    assert plugin_election._context.options == {'address': 'consul:8500'}
 
 
-def test_archive_election_gives_the_filesystem_factory_no_options(tmp_path):
+def test_the_cluster_election_gives_the_filesystem_factory_no_options(tmp_path):
     app = _app(tmp_path, periodic={'election': {'plugin_options': {'unused': 1}}})
 
-    arguments = app._lifecycle._archive_election()
+    election = app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
 
-    assert arguments['election_options'] == {}
+    assert election is not None
+    assert isinstance(election.provider, FilesystemElection)
+    assert election._context.options == {}
+
+
+def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(tmp_path):
+    app = _app(
+        tmp_path,
+        shared={'dir': str(tmp_path / 'shared')},
+        cluster_name=CLUSTER,
+        periodic={'election': {'resilience': {'timeout_seconds': 1.5, 'retries': 0}}},
+    )
+    app._lifecycle._create_connections()
+
+    election = app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
+
+    assert isinstance(election, ClusterElection)
+    ctx = election._context
+    assert (ctx.worker, ctx.instance, ctx.cluster) == ('w-1', app._instance, CLUSTER)
+    assert ctx.shared_dir == str(tmp_path / 'shared')
+    assert ctx.connections is app._connections
+    assert (election.provider_name, election.caller.operation_bound_seconds) == ('filesystem', 1.5)
+    assert election.caller._category == 'periodic'
+
+
+def test_no_cluster_task_builds_no_election(tmp_path, monkeypatch):
+    _install_plugins(monkeypatch)
+    app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}})
+
+    assert app._lifecycle._build_cluster_election([]) is None
+
+
+def test_the_filesystem_election_without_a_shared_folder_fails_startup_naming_the_first_task(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    monkeypatch.setattr(type(app._config), 'resolved_shared_dir', property(lambda self: ''))
+
+    with pytest.raises(ValueError) as raised:
+        app._lifecycle._build_cluster_election(['refresh_rates', 'zz_last'])
+
+    assert str(raised.value) == (
+        "periodic task 'refresh_rates' has scope cluster, but the filesystem election needs a shared folder "
+        '(shared.dir or storage.dir)'
+    )
+
+
+@pytest.mark.parametrize(
+    'overrides',
+    [
+        {'ui': {'enabled': False, 'release': {'enabled': False}}},
+        {'storage': {'dir': ''}},
+        {'history': {'archive': {'enabled': False}}},
+    ],
+    ids=['ui-off', 'memory-only', 'archiving-off'],
+)
+def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, overrides):
+    _install_plugins(monkeypatch)
+    app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}}, **overrides)
+
+    app._lifecycle._create_cluster_election()
+
+    assert not archive_task_runs(app._config)
+    assert app._cluster_election is None
 
 
 async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
@@ -259,15 +323,15 @@ async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
         await app._lifecycle._start_fleet()
 
 
-async def test_an_unknown_election_provider_fails_startup(tmp_path, monkeypatch):
+async def test_unknown_election_provider_fails_startup_when_the_archive_runs(tmp_path, monkeypatch):
     _install_plugins(monkeypatch)
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
     app = _app(tmp_path, periodic={'election': {'provider': 'etcd'}})
 
+    assert archive_task_runs(app._config)
     with pytest.raises(UnknownProviderError, match=re.escape("periodic.election.provider 'etcd' is not known")):
-        await app._lifecycle._start_ui_and_recorder()
+        app._lifecycle._create_cluster_election()
 
-    assert app._recorder is None
+    assert app._cluster_election is None
 
 
 # --- the registry switched off ---
@@ -381,6 +445,8 @@ def _runnable_app(tmp_path, monkeypatch, provider_factory) -> tuple[DrakkarApp, 
     ui_server.stop = AsyncMock(side_effect=lambda: order.append('ui_server.stop'))
     recorder = MagicMock()
     recorder.stop = AsyncMock(side_effect=lambda **_kwargs: order.append('recorder.stop'))
+    # A plain method on the real recorder; no archive task runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=None)
 
     async def start_ui_and_recorder() -> None:
         order.append('ui_and_recorder')
@@ -432,7 +498,7 @@ async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_r
 
     recorder = app._recorder
     assert isinstance(recorder, MagicMock)
-    assert recorder.stop.call_args.kwargs['election_reserve_seconds'] == reserve
+    assert recorder.stop.call_args.kwargs['reserve_seconds'] == reserve
 
 
 async def test_the_registry_gets_the_shared_connections_and_they_close_after_it_inside_the_drain_time(
@@ -680,6 +746,13 @@ MESSAGE_COUNT = 20
 ELECTION_START_LIMIT_SECONDS = 3.0
 # Messages that need no task commit in milliseconds; this is far above that.
 COMMIT_BUDGET_SECONDS = 1.5
+# A whole hour: the first archive slot (every 3600 s by default) of a clock one second before it.
+ARCHIVE_SLOT = 1_800_000_000
+
+
+def _first_archive_slot_clock() -> SteppingClock:
+    """A slot loop clock that reaches the first archive slot at once and parks after its hold."""
+    return SteppingClock(ARCHIVE_SLOT - 1, limit=ARCHIVE_SLOT + MIN_HOLD_SECONDS)
 
 
 async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypatch):
@@ -694,11 +767,10 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     )
     due_source = make_sealed_db(history_folder(tmp_path), 'w-2', due_start(time.time()))
     timeouts_before = election_calls('blocked-election', 'start', 'timeout')
+    app._lifecycle._clock = _first_archive_slot_clock()
 
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
-    assert app._recorder is not None
-    app._recorder._start_archive_pass()
     await wait_for(election.entered.is_set)
     (consumer,) = consumers
     consumer.deliver(
@@ -736,11 +808,10 @@ async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp
         window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
+    app._lifecycle._clock = _first_archive_slot_clock()
     run = asyncio.create_task(app._lifecycle._async_run())
     try:
         await wait_for(lambda: app.is_ready)
-        assert app._recorder is not None
-        app._recorder._start_archive_pass()
         await wait_for(in_window.is_set)
         with capture_logs() as logs:
             app._lifecycle._handle_signal()
@@ -752,6 +823,91 @@ async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp
     # The wait stopped when about the reserve was left of the drain budget.
     assert abandoned['waited_seconds'] <= 0.55
     assert provider.withdrawn
+
+
+class _OrderRecordingElection(MemoryElection):
+    """A memory election that writes each call into a shared ``order``."""
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__(ElectionStore())
+        self.order = order
+
+    async def start(self, ctx: ElectionContext) -> None:
+        self.order.append('election.start')
+        await super().start(ctx)
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        self.order.append('election.acquire')
+        return await super().acquire(scope, token, lease_seconds)
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        self.order.append('election.is_held')
+        return await super().is_held(scope, token)
+
+    async def release(self, scope: str, token: str) -> None:
+        self.order.append('election.release')
+        await super().release(scope, token)
+
+    async def stop(self) -> None:
+        self.order.append('election.stop')
+        await super().stop()
+
+
+class _OrderRecordingRegistry(_RecordingRegistry):
+    """A registry provider that writes its withdraw into a shared ``order``."""
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self.order = order
+
+    async def withdraw(self, worker: str, instance: str) -> None:
+        self.order.append('registry.withdraw')
+        await super().withdraw(worker, instance)
+
+
+async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_registry(tmp_path, monkeypatch):
+    order: list[str] = []
+    election = _OrderRecordingElection(order)
+    _install_plugins(
+        monkeypatch,
+        registry={'recording': lambda _options: _OrderRecordingRegistry(order)},
+        election={'recording-election': lambda _options: election},
+    )
+    app, _consumers = _pipeline_app(
+        tmp_path,
+        monkeypatch,
+        executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': WAIT_FOR_TIMEOUT_SECONDS},
+        fleet={'registry': {'provider': 'recording', 'resilience': {'timeout_seconds': 0.5}}},
+        periodic={'election': {'provider': 'recording-election'}},
+    )
+    in_window = threading.Event()
+
+    def pass_in_a_window(shared_dir, *, fence, stop, **kwargs) -> None:
+        in_window.set()
+        stop.wait(WAIT_FOR_TIMEOUT_SECONDS)
+        # The rest of the window, after the recorder's stop asked the pass to end.
+        time.sleep(0.2)
+        fence.is_held()
+        order.append('pass.end')
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', pass_in_a_window)
+    app._lifecycle._clock = _first_archive_slot_clock()
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    await wait_for(in_window.is_set)
+
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    # The slot loop was cancelled while it held the lease: nothing is released.
+    assert order == [
+        'election.start',
+        'election.acquire',
+        'election.is_held',
+        'pass.end',
+        'election.stop',
+        'registry.withdraw',
+    ]
 
 
 async def _wait_until(condition) -> None:

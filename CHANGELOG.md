@@ -88,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_periodic_cluster_mismatch_peers`. New log events:
   `periodic_slot_skipped` and `periodic_lease_lost`. The `periodic_run` row
   of a cluster run has the metadata keys `scope` and `slot`.
+- **The archive pass is the system cluster task `history.archive`.** It runs
+  at its slots, not after each rotation. The worker owns the election: it
+  builds one election service when it runs a cluster task, here when the
+  UI is on, `history.archive.enabled` is true and `storage.dir` is set. Only
+  then does an unknown `periodic.election.provider` fail startup. The
+  election stops after the recorder and before the registry card is
+  withdrawn. `EventRecorder` no longer takes election arguments, its
+  `stop(election_reserve_seconds=)` is now `stop(reserve_seconds=)`,
+  `run_archive_pass` takes a `fence` instead of a `lease`, and
+  `ElectionLease` is removed. A won slot writes a `periodic_run` row named
+  `history.archive` with `system: true`. A worker that does not win a slot
+  updates the archive footprint gauges. The `provider_started` line of the
+  election is in category `periodic`.
 - **Integration harness profiles.** `just integration-up profile=quick` runs
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario

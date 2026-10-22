@@ -18,15 +18,23 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from drakkar.config import BreakerConfig, ConnectionsConfig, HistoryArchiveConfig, ResilienceConfig
+from drakkar.cluster_tasks import (
+    SLOT_ELECTION_FAILED,
+    SLOT_HELD_ELSEWHERE,
+    SLOT_LATE,
+    SLOT_WON,
+    ClusterElection,
+    SlotContext,
+    SlotLease,
+    run_cluster_task,
+)
+from drakkar.config import HistoryArchiveConfig, ResilienceConfig
 from drakkar.metrics import recorder_archive_failures
-from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import archive as archive_mod
@@ -39,18 +47,19 @@ from drakkar.recorder.archive import (
     run_archive_pass,
     warn_if_archives_unbounded,
 )
-from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
+from drakkar.recorder.election import ElectionContext, FilesystemElection, ThreadFence
 from drakkar.recorder.history import meta_path, task_lock_dir
 from drakkar.recorder.task_lock import LOCK_SUFFIX, TaskLock
-from drakkar.schedule import ARCHIVE_TASK_NAME, task_scope
+from drakkar.schedule import ACQUIRE_WINDOW_SECONDS, ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS, task_scope
 from tests.archive_helpers import (
     CLUSTER,
     DAY,
     HOUR,
+    SteppingClock,
     due_start,
-    election_calls,
     history_folder,
     make_sealed_db,
+    run_won_slot,
     sealed_db_name,
 )
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
@@ -80,34 +89,31 @@ def _other_holder(tmp_path: Path) -> TaskLock:
     )
 
 
-async def make_lease(
-    tmp_path,
-    cluster: str = CLUSTER,
-    *,
-    worker: str = 'worker-1',
-    lease_seconds: float = HistoryArchiveConfig().lease_seconds,
-) -> ElectionLease:
-    """A lease on the filesystem election of ``cluster``, its calls run on the test's event loop."""
-    election = FilesystemElection()
-    await election.start(
-        ElectionContext(
-            worker=worker,
-            instance=INSTANCE,
-            cluster=cluster,
-            shared_dir=str(tmp_path / 'shared'),
-            logger=structlog.get_logger(),
-            options={},
-        )
+def _filesystem_election(tmp_path, cluster: str = CLUSTER, *, worker: str = 'worker-1') -> ClusterElection:
+    """The worker's election service over the filesystem provider of ``<tmp_path>/shared``."""
+    context = ElectionContext(
+        worker=worker,
+        instance=INSTANCE,
+        cluster=cluster,
+        shared_dir=str(tmp_path / 'shared'),
+        logger=structlog.get_logger(),
+        options={},
     )
-    caller = ResilientCaller(ResilienceConfig(), feature='election', provider='filesystem', category='recorder')
-    return ElectionLease(
-        election,
-        caller,
-        asyncio.get_running_loop(),
-        scope=task_scope(cluster, ARCHIVE_TASK_NAME),
-        lease_seconds=lease_seconds,
-        provider_name='filesystem',
-    )
+    caller = ResilientCaller(ResilienceConfig(), feature='election', provider='filesystem', category='periodic')
+    return ClusterElection(FilesystemElection(), caller, provider_name='filesystem', context=context)
+
+
+class _ScriptedFence:
+    """A fence whose checks answer ``held``; with ``held`` False it reads as lost for ``reason``."""
+
+    def __init__(self, *, held: bool, reason: str | None = None, provider_name: str = 'scripted') -> None:
+        self.token = '0123456789abcdef'
+        self.provider_name = provider_name
+        self.loss_reason = reason
+        self._held = held
+
+    def is_held(self) -> bool:
+        return self._held
 
 
 def _make_archive(folder: Path, cluster: str, end: float, *, window: float = DAY) -> Path:
@@ -262,21 +268,48 @@ def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
 # --- archive pass -------------------------------------------------------
 
 
-async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None):
-    """Run one pass in a thread, as the recorder does, so its lease can call the provider on this loop."""
+async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None) -> str:
+    """Run one archive slot as the slot loop does; the slot's outcome.
+
+    The slot takes the lease on the filesystem election; when it wins, the
+    pass runs in a thread behind a fence, so the fence's checks run on this
+    loop. The slot releases the lease at the end.
+    """
     archive = cfg or _make_config()
-    lease = await make_lease(tmp_path, cluster, worker=worker, lease_seconds=archive.lease_seconds)
-    await asyncio.to_thread(
-        functools.partial(
-            run_archive_pass,
-            str(tmp_path / 'shared'),
-            cluster=cluster,
-            instance=INSTANCE,
-            archive=archive,
-            merged_retention_days=merged_retention_days,
-            lease=lease,
-            stop=stop,
-        )
+    election = _filesystem_election(tmp_path, cluster, worker=worker)
+    assert (await election.ensure_started(ACQUIRE_WINDOW_SECONDS)).ok
+    lease = SlotLease(election, scope=task_scope(cluster, ARCHIVE_TASK_NAME), lease_seconds=archive.lease_seconds)
+    outcome, _ = await lease.acquire(ACQUIRE_WINDOW_SECONDS)
+    try:
+        if outcome == SLOT_WON:
+            fence = ThreadFence(lease, election.caller, asyncio.get_running_loop(), provider_name='filesystem')
+            await asyncio.to_thread(
+                functools.partial(
+                    run_archive_pass,
+                    str(tmp_path / 'shared'),
+                    cluster=cluster,
+                    instance=INSTANCE,
+                    archive=archive,
+                    merged_retention_days=merged_retention_days,
+                    fence=fence,
+                    stop=stop,
+                )
+            )
+    finally:
+        await lease.release()
+        await election.stop(None)
+    return outcome
+
+
+def _run_fenced(tmp_path, fence: _ScriptedFence, cfg=None) -> None:
+    """Run one pass directly, its lease checks answered by ``fence``."""
+    run_archive_pass(
+        str(tmp_path / 'shared'),
+        cluster=CLUSTER,
+        instance=INSTANCE,
+        archive=cfg or _make_config(),
+        merged_retention_days=0,
+        fence=fence,  # type: ignore[arg-type]
     )
 
 
@@ -333,7 +366,7 @@ async def test_run_archive_pass_leaves_a_window_that_is_not_due(tmp_path):
 
 
 async def test_run_archive_pass_without_a_history_folder_creates_nothing(tmp_path):
-    await _run(tmp_path)
+    _run_fenced(tmp_path, _ScriptedFence(held=True))
 
     assert not (tmp_path / 'shared').exists()
 
@@ -487,13 +520,13 @@ async def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
 # --- the archive lock ---------------------------------------------------
 
 
-async def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
+async def test_an_archive_slot_held_by_another_worker_runs_no_pass(tmp_path):
     folder = history_folder(tmp_path)
     source = make_sealed_db(folder, 'worker-1', due_start(time.time()))
     holder = _other_holder(tmp_path)
     assert holder.acquire()
     try:
-        await _run(tmp_path)
+        assert await _run(tmp_path) == SLOT_HELD_ELSEWHERE
 
         assert Path(source).exists()
         assert _archives(folder) == []
@@ -635,6 +668,48 @@ async def test_a_pass_whose_lease_cannot_be_confirmed_is_fenced_as_unconfirmed(t
     assert not _lock_path(tmp_path).exists()
 
 
+async def test_run_archive_pass_fenced_logs_recorder_archive_fenced_and_counts_a_failure(tmp_path):
+    folder = history_folder(tmp_path)
+    start = due_start(time.time())
+    source = make_sealed_db(folder, 'worker-1', start)
+    failures_before = recorder_archive_failures._value.get()
+
+    with capture_logs() as cap:
+        _run_fenced(tmp_path, _ScriptedFence(held=False, reason='unconfirmed', provider_name='scripted-fence'))
+
+    (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
+    window_start = (start // DAY) * DAY
+    assert fenced == {
+        'event': 'recorder_archive_fenced',
+        'log_level': 'warning',
+        'category': 'recorder',
+        'provider': 'scripted-fence',
+        'reason': 'unconfirmed',
+        'cluster': CLUSTER,
+        'name': archive_file_name(CLUSTER, window_start, window_start + DAY),
+        'detail': 'the election provider could not confirm the lease; this pass published and deleted nothing',
+    }
+    assert recorder_archive_failures._value.get() == failures_before + 1
+    assert Path(source).exists()
+    assert _archives(folder) == []
+    assert _dotfiles(folder) == []
+
+
+async def test_run_archive_pass_sweeps_with_sweep_after_seconds(tmp_path):
+    folder = history_folder(tmp_path)
+    old_work_file = folder / WORK_FILES[0]
+    young_work_file = folder / WORK_FILES[3]
+    for path in (old_work_file, young_work_file):
+        path.write_bytes(b'left by a dead pass')
+    _age(old_work_file, 700)
+    _age(young_work_file, 500)
+
+    _run_fenced(tmp_path, _ScriptedFence(held=True), _make_config(sweep_after_seconds=600))
+
+    assert not old_work_file.exists()
+    assert young_work_file.exists()
+
+
 async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
     folder = history_folder(tmp_path)
     now = time.time()
@@ -660,10 +735,9 @@ async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp
     assert Path(second_source).exists()
     window_start = (first_start // DAY) * DAY
     assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
-    assert not _lock_path(tmp_path).exists()
 
 
-async def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monkeypatch):
+async def test_a_failed_window_is_logged_and_counted(tmp_path, monkeypatch):
     folder = history_folder(tmp_path)
     source = make_sealed_db(folder, 'worker-1', due_start(time.time()))
 
@@ -676,7 +750,6 @@ async def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path,
     with capture_logs() as cap:
         await _run(tmp_path)
 
-    assert not _lock_path(tmp_path).exists()
     assert Path(source).exists()
     (failure,) = [e for e in cap if e['event'] == 'recorder_archive_failed']
     assert failure['cluster'] == CLUSTER
@@ -716,7 +789,6 @@ async def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypat
     assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
     assert not Path(first_source).exists()
     assert Path(second_source).exists()
-    assert not _lock_path(tmp_path).exists()
     assert recorder_archive_failures._value.get() == failures_before
 
 
@@ -911,22 +983,6 @@ async def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     assert archive_mod.recorder_archive_bytes._value.get() == mine_a.stat().st_size + mine_b.stat().st_size
 
 
-async def test_archive_pass_reports_the_footprint_while_another_worker_holds_the_lock(tmp_path):
-    folder = history_folder(tmp_path)
-    existing = _make_archive(folder, CLUSTER, time.time() - 2 * DAY)
-    archive_mod.recorder_archive_bytes.set(0)
-    archive_mod.recorder_archive_files.set(0)
-    holder = _other_holder(tmp_path)
-    assert holder.acquire()
-    try:
-        await _run(tmp_path, _make_config(retention_days=0))
-    finally:
-        holder.release()
-
-    assert archive_mod.recorder_archive_files._value.get() == 1
-    assert archive_mod.recorder_archive_bytes._value.get() == existing.stat().st_size
-
-
 async def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
     archive_mod.recorder_archive_bytes.set(999)
     archive_mod.recorder_archive_files.set(9)
@@ -963,11 +1019,11 @@ def test_warn_if_archives_unbounded_is_silent_otherwise(cfg):
     assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
 
-# --- recorder wiring ----------------------------------------------------
+# --- the recorder's archive task ----------------------------------------
 
 
-def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None, **election: Any) -> EventRecorder:
-    """A recorder of ``worker-1`` in ``CLUSTER``; ``election`` holds the election keyword arguments."""
+def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> EventRecorder:
+    """A recorder of ``worker-1`` in ``CLUSTER``."""
     (tmp_path / 'storage').mkdir(exist_ok=True)
     config = make_ui_config(enabled=True, flush_interval_seconds=60)
     return EventRecorder(
@@ -979,57 +1035,226 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None, **e
         instance=INSTANCE,
         archive=archive,
         merged_retention_days=7,
-        **election,
     )
 
 
-async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_path, monkeypatch):
+def _memory_election(provider_name: str = 'memory') -> tuple[ClusterElection, MemoryElection]:
+    """The worker's election service over an in-memory provider, and the provider."""
+    provider = MemoryElection(ElectionStore())
+    context = ElectionContext(
+        worker='worker-1', instance=INSTANCE, cluster=CLUSTER, shared_dir='', logger=structlog.get_logger(), options={}
+    )
+    caller = ResilientCaller(ResilienceConfig(), feature='election', provider=provider_name, category='periodic')
+    return ClusterElection(provider, caller, provider_name=provider_name, context=context), provider
+
+
+async def _start_won_archive_slot(rec: EventRecorder, election: ClusterElection) -> asyncio.Task:
+    """Take the archive slot's lease and run its body in a task, as a won slot does; the lease is not released."""
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None
+    assert (await election.ensure_started(ACQUIRE_WINDOW_SECONDS)).ok
+    lease = SlotLease(election, scope=task_scope(CLUSTER, ARCHIVE_TASK_NAME), lease_seconds=archive_task.lease_seconds)
+    assert (await lease.acquire(ACQUIRE_WINDOW_SECONDS))[0] == SLOT_WON
+    return asyncio.create_task(archive_task.run(SlotContext(slot=0, lease=lease)))
+
+
+def test_the_archive_task_is_the_system_cluster_task_history_archive(tmp_path):
+    archive = HistoryArchiveConfig(cron='0 * * * *', lease_seconds=900)
+    archive_task = _make_recorder(tmp_path, archive=archive).archive_cluster_task()
+
+    assert archive_task is not None
+    assert (archive_task.name, archive_task.system, archive_task.on_error) == (ARCHIVE_TASK_NAME, True, 'continue')
+    assert (archive_task.interval, archive_task.cron, archive_task.lease_seconds) == (None, '0 * * * *', 900)
+    assert _make_recorder(tmp_path).archive_cluster_task().interval == 3600
+
+
+@pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
+def test_no_archive_task_when_archiving_is_off(tmp_path, storage):
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=not storage))
+    if not storage:
+        rec._storage_dir = ''
+
+    assert rec.archive_cluster_task() is None
+
+
+async def test_archive_slot_won_runs_the_pass_with_a_fence_and_records_history_archive_row(tmp_path, monkeypatch):
     archive = HistoryArchiveConfig(lease_seconds=900)
     rec = _make_recorder(tmp_path, archive=archive)
+    election, _provider = _memory_election('memory-won')
     seen: dict = {}
+    rows: list[dict] = []
 
     def spy(shared_dir, **kwargs) -> None:
         seen.update(kwargs, shared_dir=shared_dir, thread=threading.current_thread().ident)
+        # Checked from the pass's own thread, as the pass checks before each publish.
+        seen['held'] = kwargs['fence'].is_held()
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
+    monkeypatch.setattr(rec, 'record_periodic_run', lambda *args, **row: rows.append(row))
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None
+    # A whole hour, so the first slot of the 3600 s default is the next second.
+    slot = 1_800_000_000
+    clock = SteppingClock(slot - 1, limit=slot + MIN_HOLD_SECONDS)
 
+    loop_task = asyncio.create_task(
+        run_cluster_task(archive_task, election, cluster=CLUSTER, recorder=rec, clock=clock)
+    )
     try:
-        await rec._archive_pass()
+        await wait_for(lambda: bool(rows))
     finally:
+        loop_task.cancel()
+        await asyncio.wait({loop_task})
         await rec.stop()
 
     assert seen['shared_dir'] == str(tmp_path / 'shared')
     assert (seen['cluster'], seen['instance']) == (CLUSTER, INSTANCE)
     assert seen['archive'] is rec._archive
     assert seen['merged_retention_days'] == 7
+    assert seen['stop'] is rec._archive_stop
     assert seen['thread'] != threading.current_thread().ident
-    lease = seen['lease']
-    assert (lease.scope, lease.lease_seconds, lease.provider_name) == (
-        task_scope(CLUSTER, ARCHIVE_TASK_NAME),
-        900,
-        'filesystem',
-    )
+    fence = seen['fence']
+    assert isinstance(fence, ThreadFence)
+    assert (fence.provider_name, seen['held']) == ('memory-won', True)
+    (row,) = rows
+    assert (row['name'], row['status'], row['system'], row['slot']) == (ARCHIVE_TASK_NAME, 'ok', True, slot)
 
 
-async def test_the_default_lease_keeps_its_lock_in_the_clusters_task_lock_folder(tmp_path, monkeypatch):
+async def test_archive_slot_cancelled_returns_at_once_and_the_pass_goes_on(tmp_path, monkeypatch):
+    in_window = threading.Event()
+    window_may_end = threading.Event()
+
+    def stuck_pass(shared_dir, **kwargs) -> None:
+        in_window.set()
+        window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
     rec = _make_recorder(tmp_path)
-    seen: dict = {}
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: seen.update(kwargs))
-    lock = _lock_path(tmp_path)
-    try:
-        await rec._archive_pass()
-        lease = seen['lease']
+    election, _provider = _memory_election()
+    slot_run = await _start_won_archive_slot(rec, election)
+    await wait_for(in_window.is_set)
 
-        # Before the stop: a stopped filesystem election refuses every call.
-        assert await asyncio.to_thread(lease.acquire) is True
-        try:
-            body = json.loads(lock.read_bytes())
-            assert (body['worker'], body['instance'], body['token']) == ('worker-1', INSTANCE, lease.token)
-        finally:
-            await asyncio.to_thread(lease.release)
+    slot_run.cancel()
+    await asyncio.wait_for(asyncio.wait({slot_run}), timeout=WAIT_FOR_TIMEOUT_SECONDS)
+    pass_future = rec._archive_pass_future
+    try:
+        assert slot_run.cancelled()
+        assert pass_future is not None
+        assert not pass_future.done()
+    finally:
+        window_may_end.set()
+        await rec.stop()
+    assert pass_future.done()
+
+
+@pytest.mark.parametrize('outcome', [SLOT_HELD_ELSEWHERE, SLOT_LATE, SLOT_ELECTION_FAILED])
+async def test_archive_slot_not_won_observes_the_footprint_gauges(tmp_path, outcome):
+    folder = history_folder(tmp_path)
+    existing = _make_archive(folder, CLUSTER, time.time() - 2 * DAY)
+    archive_mod.recorder_archive_bytes.set(0)
+    archive_mod.recorder_archive_files.set(0)
+    rec = _make_recorder(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None and archive_task.on_skip is not None
+
+    archive_task.on_skip(outcome)
+    footprint = rec._footprint_future
+    assert footprint is not None
+    try:
+        await asyncio.wrap_future(footprint)
     finally:
         await rec.stop()
-    assert not lock.exists()
+
+    assert archive_mod.recorder_archive_files._value.get() == 1
+    assert archive_mod.recorder_archive_bytes._value.get() == existing.stat().st_size
+
+
+async def test_archive_footprint_is_not_queued_twice_while_a_pass_runs(tmp_path, monkeypatch):
+    in_window = threading.Event()
+    window_may_end = threading.Event()
+    observing = threading.Event()
+    observation_may_end = threading.Event()
+    observations: list[tuple[str, str]] = []
+
+    def stuck_pass(shared_dir, **kwargs) -> None:
+        in_window.set()
+        window_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
+
+    def slow_observation(shared_dir: str, cluster: str) -> None:
+        observations.append((shared_dir, cluster))
+        observing.set()
+        observation_may_end.wait(WAIT_FOR_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', stuck_pass)
+    monkeypatch.setattr(core_mod, 'observe_archive_footprint', slow_observation)
+    rec = _make_recorder(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None and archive_task.on_skip is not None
+    election, _provider = _memory_election()
+    slot_run = await _start_won_archive_slot(rec, election)
+    await wait_for(in_window.is_set)
+    try:
+        # A pass runs: the skip of another task's slot queues nothing behind it.
+        archive_task.on_skip(SLOT_HELD_ELSEWHERE)
+        assert rec._footprint_future is None
+        window_may_end.set()
+        await slot_run
+        archive_task.on_skip(SLOT_HELD_ELSEWHERE)
+        await wait_for(observing.is_set)
+        # An observation runs: a second skip queues no second one.
+        archive_task.on_skip(SLOT_LATE)
+    finally:
+        window_may_end.set()
+        observation_may_end.set()
+        await rec.stop()
+
+    assert observations == [(str(tmp_path / 'shared'), CLUSTER)]
+
+
+async def test_a_failed_footprint_observation_is_logged(tmp_path, monkeypatch):
+    def broken_observation(shared_dir: str, cluster: str) -> None:
+        raise OSError('the mount went away')
+
+    monkeypatch.setattr(core_mod, 'observe_archive_footprint', broken_observation)
+    rec = _make_recorder(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None and archive_task.on_skip is not None
+
+    with capture_logs() as logs:
+        archive_task.on_skip(SLOT_HELD_ELSEWHERE)
+        footprint = rec._footprint_future
+        assert footprint is not None
+        await wait_for(footprint.done)
+        await rec.stop()
+
+    (failed,) = [entry for entry in logs if entry['event'] == 'recorder_background_job_failed']
+    assert (failed['job'], failed['error']) == ('archive_footprint', 'the mount went away')
+
+
+async def test_no_footprint_observation_after_the_recorder_stopped(tmp_path):
+    rec = _make_recorder(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None and archive_task.on_skip is not None
+    await rec.stop()
+
+    archive_task.on_skip(SLOT_HELD_ELSEWHERE)
+
+    assert rec._footprint_future is None
+
+
+async def test_an_archive_slot_won_after_the_recorder_stopped_runs_no_pass(tmp_path, monkeypatch):
+    passes: list[dict] = []
+    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: passes.append(kwargs))
+    rec = _make_recorder(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None
+    election, _provider = _memory_election()
+    await rec.stop()
+
+    await run_won_slot(archive_task, election)
+
+    assert passes == []
+    assert rec._archive_executor is None
 
 
 async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_path):
@@ -1040,10 +1265,14 @@ async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_
     one_thread = ThreadPoolExecutor(max_workers=1)
     asyncio.get_running_loop().set_default_executor(one_thread)
     rec = _make_recorder(tmp_path)
+    election = _filesystem_election(tmp_path)
+    archive_task = rec.archive_cluster_task()
+    assert archive_task is not None
     try:
-        await asyncio.wait_for(rec._archive_pass(), timeout=WAIT_FOR_TIMEOUT_SECONDS)
+        await asyncio.wait_for(run_won_slot(archive_task, election), timeout=WAIT_FOR_TIMEOUT_SECONDS)
     finally:
         await rec.stop()
+        await election.stop(None)
         one_thread.shutdown(wait=True)
 
     assert len(_archives(folder)) == 1
@@ -1051,74 +1280,11 @@ async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_
     assert not _lock_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
-async def test_archive_pass_does_nothing_when_off(tmp_path, monkeypatch, storage):
-    election = MemoryElection(ElectionStore())
-    rec = _make_recorder(
-        tmp_path,
-        archive=HistoryArchiveConfig(enabled=not storage),
-        election=election,
-        election_provider_name='memory-off',
-    )
-    if not storage:
-        rec._storage_dir = ''
-    calls = 0
-
-    def spy(*args, **kwargs) -> None:
-        nonlocal calls
-        calls += 1
-
-    monkeypatch.setattr(core_mod, 'run_archive_pass', spy)
-    counted_before = {op: election_calls('memory-off', op, 'not_started') for op in ('acquire', 'stop')}
-
-    try:
-        await rec._archive_pass()
-    finally:
-        await rec.stop()
-
-    assert calls == 0
-    # The election is not in use: it never starts and no skipped call is counted.
-    assert election.calls == {}
-    assert {op: election_calls('memory-off', op, 'not_started') for op in ('acquire', 'stop')} == counted_before
-
-
-async def test_a_blocked_archive_pass_never_holds_up_rotation(tmp_path, monkeypatch):
-    names = iter(range(1, 100))
-    monkeypatch.setattr(
-        core_mod,
-        'make_db_path',
-        lambda folder, worker: os.path.join(folder, f'{worker}-2026-10-14__08_00_{next(names):02d}.db'),
-    )
-    unblock = threading.Event()
-    passes = 0
-
-    def blocked_pass(*args, **kwargs) -> None:
-        nonlocal passes
-        passes += 1
-        unblock.wait(10)
-
-    monkeypatch.setattr(core_mod, 'run_archive_pass', blocked_pass)
-    rec = _make_recorder(tmp_path)
-    rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.02 / 3600})
-    await rec.start()
-    try:
-        first = rec.db_path
-        await wait_for(lambda: passes == 1)
-        seen = {first}
-        await wait_for(lambda: seen.add(rec.db_path) or len(seen) >= 4)
-
-        assert passes == 1
-    finally:
-        unblock.set()
-        await rec.stop()
-
-
 class _FakeClock:
     """A replacement for the recorder's sleep: each sleep waits for a tick the test gives.
 
-    Sleeps are keyed by their length, so the rotation loop and the pass timer
-    can be driven apart. ``entered`` counts the sleeps begun, which tells a
-    test that the loop has handled the last tick and is waiting again.
+    ``entered`` counts the sleeps begun, which tells a test that the loop has
+    handled the last tick and is waiting again.
     """
 
     def __init__(self) -> None:
@@ -1137,8 +1303,7 @@ class _FakeClock:
         await wait_for(lambda: self.entered[seconds] > before)
 
 
-def _ticking_recorder(tmp_path, monkeypatch):
-    """A recorder driven by a fake clock, with rotation, sealing and the pass start counted."""
+async def test_rotation_starts_no_archive_pass(tmp_path, monkeypatch):
     clock = _FakeClock()
     rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=True))
     rec._sleep = clock.sleep
@@ -1149,21 +1314,15 @@ def _ticking_recorder(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rec, '_rotate', rotate)
     monkeypatch.setattr(rec, '_start_sealing', lambda: counts.__setitem__('sealing', counts['sealing'] + 1))
-    monkeypatch.setattr(rec, '_start_archive_pass', lambda: counts.__setitem__('passes', counts['passes'] + 1))
-    return rec, clock, counts
-
-
-def _rotation_seconds(rec) -> float:
-    return rec._store.rotation_interval_hours * 3600
-
-
-async def test_each_rotation_seals_and_starts_an_archive_pass(tmp_path, monkeypatch):
-    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        core_mod, 'run_archive_pass', lambda *a, **k: counts.__setitem__('passes', counts['passes'] + 1)
+    )
     await rec.start()
     try:
-        await clock.tick(_rotation_seconds(rec))
+        await clock.tick(rec._store.rotation_interval_hours * 3600)
 
-        assert counts == {'rotations': 1, 'sealing': 1, 'passes': 1}
+        assert counts == {'rotations': 1, 'sealing': 1, 'passes': 0}
+        assert rec._archive_executor is None
     finally:
         await rec.stop()
 
@@ -1180,243 +1339,20 @@ async def test_a_recorder_stop_asks_a_running_archive_pass_to_end(tmp_path, monk
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', watching_pass)
     rec = _make_recorder(tmp_path)
+    election, _provider = _memory_election()
     await rec.start()
+    slot_run = await _start_won_archive_slot(rec, election)
     try:
-        rec._start_archive_pass()
         await wait_for(started.is_set)
     finally:
         await rec.stop()
+    await asyncio.wait_for(slot_run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
     assert seen['stop'] is not None
     assert seen['stop'].is_set()
 
 
-# --- the recorder's election ----------------------------------------------
-
-
-class _FailingStartElection(MemoryElection):
-    """A memory election whose first ``failures`` starts raise."""
-
-    def __init__(self, failures: int) -> None:
-        super().__init__(ElectionStore())
-        self._failures = failures
-
-    async def start(self, ctx: ElectionContext) -> None:
-        self.calls['start'] += 1
-        if self.calls['start'] <= self._failures:
-            raise RuntimeError('election service unavailable')
-        self.started_with = ctx
-
-
-class _HangingElection(MemoryElection):
-    """A memory election whose ``start`` or ``stop`` hangs until cancelled."""
-
-    def __init__(self, *, hang_in: str) -> None:
-        super().__init__(ElectionStore())
-        self._hang_in = hang_in
-        self.hanging = asyncio.Event()
-
-    async def _hang(self) -> None:
-        self.hanging.set()
-        await asyncio.Event().wait()
-
-    async def start(self, ctx: ElectionContext) -> None:
-        await super().start(ctx)
-        if self._hang_in == 'start':
-            await self._hang()
-
-    async def stop(self) -> None:
-        await super().stop()
-        if self._hang_in == 'stop':
-            await self._hang()
-
-
-async def test_the_recorder_starts_its_election_once_with_the_worker_context(tmp_path, monkeypatch):
-    election = MemoryElection(ElectionStore())
-    connections = Connections(ConnectionsConfig())
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
-    rec = _make_recorder(
-        tmp_path,
-        election=election,
-        election_provider_name='memory-once',
-        election_options={'address': 'consul:8500'},
-        connections=connections,
-    )
-
-    with capture_logs() as logs:
-        try:
-            await rec._archive_pass()
-            await rec._archive_pass()
-        finally:
-            await rec.stop()
-
-    assert election.calls['start'] == 1
-    ctx = election.started_with
-    assert ctx is not None
-    assert (ctx.worker, ctx.instance, ctx.cluster) == ('worker-1', INSTANCE, CLUSTER)
-    assert ctx.shared_dir == str(tmp_path / 'shared')
-    assert ctx.options == {'address': 'consul:8500'}
-    assert ctx.connections is connections
-    started = [entry for entry in logs if entry['event'] == 'provider_started']
-    assert started == [
-        {
-            'event': 'provider_started',
-            'log_level': 'info',
-            'category': 'recorder',
-            'feature': 'election',
-            'provider': 'memory-once',
-        }
-    ]
-
-
-async def test_a_failed_election_start_skips_the_pass_and_the_next_pass_retries(tmp_path, monkeypatch):
-    election = _FailingStartElection(failures=1)
-    leases: list[ElectionLease] = []
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: leases.append(kwargs['lease']))
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-retry')
-    skipped_before = election_calls('memory-retry', 'acquire', 'not_started')
-
-    try:
-        await rec._archive_pass()
-        assert leases == []
-        assert election_calls('memory-retry', 'acquire', 'not_started') == skipped_before + 1
-        await rec._archive_pass()
-    finally:
-        await rec.stop()
-
-    assert election.calls['start'] == 2
-    assert [lease.provider_name for lease in leases] == ['memory-retry']
-    assert election.calls['stop'] == 1
-
-
-async def test_the_election_breaker_spans_archive_passes(tmp_path, monkeypatch):
-    election = _FailingStartElection(failures=99)
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
-    resilience = ResilienceConfig(retries=0, breaker=BreakerConfig(failure_threshold=1, cooldown_seconds=3600))
-    caller = ResilientCaller(resilience, feature='election', provider='memory-breaker', category='recorder')
-    rec = _make_recorder(tmp_path, election=election, election_caller=caller, election_provider_name='memory-breaker')
-    skipped_before = election_calls('memory-breaker', 'start', 'skipped_open')
-
-    try:
-        await rec._archive_pass()
-        await rec._archive_pass()
-    finally:
-        await rec.stop()
-
-    assert election.calls['start'] == 1
-    assert caller.breaker_open
-    assert election_calls('memory-breaker', 'start', 'skipped_open') == skipped_before + 1
-
-
-async def test_stop_never_stops_an_election_that_did_not_start(tmp_path):
-    election = MemoryElection(ElectionStore())
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-unstarted')
-    skipped_before = election_calls('memory-unstarted', 'stop', 'not_started')
-
-    await rec.start()
-    await rec.stop()
-
-    assert election.calls['stop'] == 0
-    assert election_calls('memory-unstarted', 'stop', 'not_started') == skipped_before + 1
-
-
-async def test_a_stop_while_the_election_start_hangs_ends_at_once_and_skips_the_provider_stop(tmp_path):
-    election = _HangingElection(hang_in='start')
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-hanging-start')
-    await rec.start()
-    rec._start_archive_pass()
-    await wait_for(election.hanging.is_set)
-
-    await asyncio.wait_for(rec.stop(), timeout=WAIT_FOR_TIMEOUT_SECONDS)
-
-    assert election.calls['stop'] == 0
-
-
-async def test_the_election_stop_gets_one_attempt_inside_the_shutdown_time_left(tmp_path, monkeypatch):
-    election = _HangingElection(hang_in='stop')
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-hanging-stop')
-    timeouts_before = election_calls('memory-hanging-stop', 'stop', 'timeout')
-    await rec.start()
-    await rec._archive_pass()
-
-    started = time.monotonic()
-    await rec.stop(timeout=1.0)
-
-    # The default per-attempt limit is 5 s; the shutdown time left cuts it.
-    assert time.monotonic() - started < 4
-    assert election.calls['stop'] == 1
-    assert election_calls('memory-hanging-stop', 'stop', 'timeout') == timeouts_before + 1
-
-
-@pytest.mark.parametrize('started', [True, False], ids=['started', 'never-started'])
-async def test_a_second_stop_neither_stops_the_election_nor_counts_a_stop(tmp_path, monkeypatch, started):
-    election = MemoryElection(ElectionStore())
-    monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: None)
-    name = f'memory-second-stop-{started}'
-    rec = _make_recorder(tmp_path, election=election, election_provider_name=name)
-    await rec.start()
-    if started:
-        await rec._archive_pass()
-    await rec.stop()
-    counted = {outcome: election_calls(name, 'stop', outcome) for outcome in ('ok', 'not_started')}
-
-    await rec.stop()
-
-    assert election.calls['stop'] == (1 if started else 0)
-    assert {outcome: election_calls(name, 'stop', outcome) for outcome in ('ok', 'not_started')} == counted
-
-
-class _OrderRecordingElection(MemoryElection):
-    """A memory election that also records the order of its calls."""
-
-    def __init__(self) -> None:
-        super().__init__(ElectionStore())
-        self.order: list[str] = []
-
-    async def start(self, ctx: ElectionContext) -> None:
-        self.order.append('start')
-        await super().start(ctx)
-
-    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
-        self.order.append('acquire')
-        return await super().acquire(scope, token, lease_seconds)
-
-    async def is_held(self, scope: str, token: str) -> bool:
-        self.order.append('is_held')
-        return await super().is_held(scope, token)
-
-    async def release(self, scope: str, token: str) -> None:
-        self.order.append('release')
-        await super().release(scope, token)
-
-    async def stop(self) -> None:
-        self.order.append('stop')
-        await super().stop()
-
-
-async def test_the_election_stops_only_after_the_pass_in_progress_made_its_last_call(tmp_path, monkeypatch):
-    election = _OrderRecordingElection()
-    in_window = threading.Event()
-
-    def pass_in_a_window(shared_dir, *, lease, stop, **kwargs) -> None:
-        lease.acquire()
-        in_window.set()
-        stop.wait(WAIT_FOR_TIMEOUT_SECONDS)
-        # The rest of the window, after stop() asked the pass to end.
-        time.sleep(0.2)
-        lease.is_held()
-        lease.release()
-
-    monkeypatch.setattr(core_mod, 'run_archive_pass', pass_in_a_window)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-ordered')
-    await rec.start()
-    rec._start_archive_pass()
-    await wait_for(in_window.is_set)
-
-    await rec.stop(timeout=WAIT_FOR_TIMEOUT_SECONDS)
-
-    assert election.order == ['start', 'acquire', 'is_held', 'release', 'stop']
+# --- the stop's wait for a pass in progress ------------------------------
 
 
 async def test_a_pass_that_fails_after_stop_asked_it_to_end_is_logged(tmp_path, monkeypatch):
@@ -1428,45 +1364,20 @@ async def test_a_pass_that_fails_after_stop_asked_it_to_end_is_logged(tmp_path, 
         raise RuntimeError('window merge failed')
 
     monkeypatch.setattr(core_mod, 'run_archive_pass', failing_pass)
-    rec = _make_recorder(tmp_path, election=MemoryElection(ElectionStore()), election_provider_name='memory-failing')
+    rec = _make_recorder(tmp_path)
+    election, _provider = _memory_election()
     await rec.start()
-    rec._start_archive_pass()
+    slot_run = await _start_won_archive_slot(rec, election)
     await wait_for(in_window.is_set)
+    # The worker cancels its slot loops before it stops the recorder.
+    slot_run.cancel()
+    await asyncio.wait({slot_run})
 
     with capture_logs() as logs:
         await rec.stop(timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
     (failed,) = [entry for entry in logs if entry['event'] == 'recorder_background_job_failed']
     assert (failed['job'], failed['error']) == ('archive', 'window merge failed')
-
-
-async def test_a_pass_that_outlives_the_shutdown_time_is_left_and_the_provider_stop_skipped(tmp_path, monkeypatch):
-    election = MemoryElection(ElectionStore())
-    in_window = threading.Event()
-
-    def slow_pass(shared_dir, **kwargs) -> None:
-        in_window.set()
-        # A window that does not end when stop() asks.
-        time.sleep(1.0)
-
-    monkeypatch.setattr(core_mod, 'run_archive_pass', slow_pass)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-slow-pass')
-    timeouts_before = election_calls('memory-slow-pass', 'stop', 'timeout')
-    await rec.start()
-    rec._start_archive_pass()
-    await wait_for(in_window.is_set)
-
-    started = time.monotonic()
-    await rec.stop(timeout=0.3)
-
-    assert time.monotonic() - started < 0.9
-    # No shutdown time is left for the provider stop: it is counted, not made.
-    assert election.calls['stop'] == 0
-    assert election_calls('memory-slow-pass', 'stop', 'timeout') == timeouts_before + 1
-    # The abandoned pass's thread must not outlive the test.
-    pass_future = rec._archive_pass_future
-    assert pass_future is not None
-    await wait_for(pass_future.done)
 
 
 def _stuck_pass_in_window(monkeypatch) -> tuple[threading.Event, threading.Event]:
@@ -1486,20 +1397,45 @@ def _stuck_pass_in_window(monkeypatch) -> tuple[threading.Event, threading.Event
     return in_window, window_may_end
 
 
-async def test_the_stop_waits_for_a_pass_in_progress_until_only_the_reserve_is_left_and_still_stops_the_election(
-    tmp_path, monkeypatch
-):
-    election = MemoryElection(ElectionStore())
+async def _recorder_with_a_stuck_pass(tmp_path, monkeypatch) -> tuple[EventRecorder, threading.Event]:
+    """A started recorder whose archive pass is stuck in a window and whose slot loop is cancelled, as at shutdown."""
     in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-stuck-pass')
+    rec = _make_recorder(tmp_path)
+    election, _provider = _memory_election()
     await rec.start()
-    rec._start_archive_pass()
+    slot_run = await _start_won_archive_slot(rec, election)
     await wait_for(in_window.is_set)
+    slot_run.cancel()
+    await asyncio.wait({slot_run})
+    return rec, window_may_end
+
+
+async def test_a_pass_that_outlives_the_shutdown_time_is_left_and_logged(tmp_path, monkeypatch):
+    rec, window_may_end = await _recorder_with_a_stuck_pass(tmp_path, monkeypatch)
 
     try:
         started = time.monotonic()
         with capture_logs() as logs:
-            await rec.stop(timeout=1.0, election_reserve_seconds=0.5)
+            await rec.stop(timeout=0.3)
+        stop_seconds = time.monotonic() - started
+    finally:
+        window_may_end.set()
+
+    assert stop_seconds < 0.9
+    assert [entry['event'] for entry in logs].count('recorder_archive_pass_abandoned') == 1
+    # The abandoned pass's thread must not outlive the test.
+    pass_future = rec._archive_pass_future
+    assert pass_future is not None
+    await wait_for(pass_future.done)
+
+
+async def test_the_stop_waits_for_a_pass_in_progress_until_only_the_reserve_is_left(tmp_path, monkeypatch):
+    rec, window_may_end = await _recorder_with_a_stuck_pass(tmp_path, monkeypatch)
+
+    try:
+        started = time.monotonic()
+        with capture_logs() as logs:
+            await rec.stop(timeout=1.0, reserve_seconds=0.5)
         stop_seconds = time.monotonic() - started
     finally:
         window_may_end.set()
@@ -1511,47 +1447,32 @@ async def test_the_stop_waits_for_a_pass_in_progress_until_only_the_reserve_is_l
     # At most the time left less the reserve; the seal before the wait took a little of it.
     assert 0.2 <= abandoned['waited_seconds'] <= 0.55
     assert abandoned['detail'] == 'the pass is fenced at its next check and its lease expires on its own'
-    # The provider stop still made its attempt with the time that was left.
-    assert election.calls['stop'] == 1
     pass_future = rec._archive_pass_future
     assert pass_future is not None
     await wait_for(pass_future.done)
 
 
-async def test_a_reserve_larger_than_the_time_left_abandons_the_pass_at_once_and_still_stops_the_election(
-    tmp_path, monkeypatch
-):
-    election = MemoryElection(ElectionStore())
-    in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-reserve-too-large')
-    await rec.start()
-    rec._start_archive_pass()
-    await wait_for(in_window.is_set)
+async def test_a_reserve_larger_than_the_time_left_abandons_the_pass_at_once(tmp_path, monkeypatch):
+    rec, window_may_end = await _recorder_with_a_stuck_pass(tmp_path, monkeypatch)
 
     try:
         with capture_logs() as logs:
-            await rec.stop(timeout=1.0, election_reserve_seconds=5.0)
+            await rec.stop(timeout=1.0, reserve_seconds=5.0)
     finally:
         window_may_end.set()
 
     (abandoned,) = [entry for entry in logs if entry['event'] == 'recorder_archive_pass_abandoned']
     assert abandoned['waited_seconds'] < 0.1
-    assert election.calls['stop'] == 1
     pass_future = rec._archive_pass_future
     assert pass_future is not None
     await wait_for(pass_future.done)
 
 
 async def test_a_stop_without_a_deadline_waits_until_the_pass_in_progress_ends(tmp_path, monkeypatch):
-    election = _OrderRecordingElection()
-    in_window, window_may_end = _stuck_pass_in_window(monkeypatch)
-    rec = _make_recorder(tmp_path, election=election, election_provider_name='memory-no-deadline')
-    await rec.start()
-    rec._start_archive_pass()
-    await wait_for(in_window.is_set)
+    rec, window_may_end = await _recorder_with_a_stuck_pass(tmp_path, monkeypatch)
 
     with capture_logs() as logs:
-        stopping = asyncio.create_task(rec.stop(election_reserve_seconds=5.0))
+        stopping = asyncio.create_task(rec.stop(reserve_seconds=5.0))
         await asyncio.sleep(0.3)
         # Still waiting for the window: no deadline, so no reserve to keep.
         assert not stopping.done()
@@ -1559,62 +1480,8 @@ async def test_a_stop_without_a_deadline_waits_until_the_pass_in_progress_ends(t
         await asyncio.wait_for(stopping, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
     assert 'recorder_archive_pass_abandoned' not in [entry['event'] for entry in logs]
-    assert election.order[-1] == 'stop'
-
-
-class _FailingStartFilesystemElection(FilesystemElection):
-    """The filesystem election whose first ``failures`` starts raise."""
-
-    def __init__(self, failures: int) -> None:
-        super().__init__()
-        self._failures = failures
-        self.starts = 0
-
-    async def start(self, ctx: ElectionContext) -> None:
-        self.starts += 1
-        if self.starts <= self._failures:
-            raise RuntimeError('election service unavailable')
-        await super().start(ctx)
-
-
-async def test_an_election_back_after_its_breaker_opened_archives_without_a_restart(tmp_path):
-    folder = history_folder(tmp_path)
-    source = make_sealed_db(folder, 'worker-2', due_start(time.time()))
-    clock = [1_000.0]
-    resilience = ResilienceConfig(retries=0, breaker=BreakerConfig(failure_threshold=2, cooldown_seconds=30))
-    caller = ResilientCaller(
-        resilience,
-        feature='election',
-        provider='flaky-filesystem',
-        category='recorder',
-        now_monotonic=lambda: clock[0],
-    )
-    election = _FailingStartFilesystemElection(failures=2)
-    rec = _make_recorder(tmp_path, election=election, election_caller=caller, election_provider_name='flaky-filesystem')
-    refused_before = election_calls('flaky-filesystem', 'start', 'skipped_open')
-
-    try:
-        # Two failed starts open the breaker; the third pass is refused without a call.
-        for _ in range(3):
-            await rec._archive_pass()
-        assert (election.starts, caller.breaker_open) == (2, True)
-        assert election_calls('flaky-filesystem', 'start', 'skipped_open') == refused_before + 1
-        assert _archives(folder) == []
-        clock[0] += 31
-        with capture_logs() as logs:
-            await rec._archive_pass()
-    finally:
-        await rec.stop()
-
-    # The probe start succeeded, and the same pass took the lock and archived.
-    assert (election.starts, caller.breaker_open) == (3, False)
-    assert [entry['event'] for entry in logs if entry['event'].startswith('provider_')] == [
-        'provider_breaker_closed',
-        'provider_started',
-    ]
-    assert len(_archives(folder)) == 1
-    assert not Path(source).exists()
-    assert not _lock_path(tmp_path).exists()
+    pass_future = rec._archive_pass_future
+    assert pass_future is not None and pass_future.done()
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):

@@ -473,6 +473,8 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
     lifecycle = app._lifecycle
 
     recorder = AsyncMock()
+    # A plain method on the real recorder; no archive task runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=None)
     cache_engine = AsyncMock()
     # ``features`` is a plain method on the real engine; the registry reads it at every publish.
     cache_engine.features = MagicMock(return_value={})

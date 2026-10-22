@@ -11,15 +11,15 @@ and releases it at the end. A holder that dies stops refreshing, and once
 provider keeps its leases in one family keyed by the scope; a provider may
 treat the scope as an opaque string.
 
-The provider is asynchronous and runs on the worker's event loop; the archive
-pass (the system task ``history.archive``) is synchronous and runs in a
-thread. :class:`ElectionLease` joins the
-two: the thread calls it, and it runs every provider call on the loop through
-a :class:`~drakkar.providers.resilience.ResilientCaller`, waiting at most the
-call's bound. A hung provider therefore holds up the archive thread for a
-bounded time and never the loop. :class:`ThreadFence` gives a thread the same
-bounded check of a cluster task's slot lease
-(:class:`~drakkar.cluster_tasks.SlotLease`).
+The provider is asynchronous and runs on the worker's event loop, where the
+slot loop of every cluster task takes, refreshes and releases its lease
+(:class:`~drakkar.cluster_tasks.SlotLease`). The archive pass (the system
+task ``history.archive``) is synchronous and runs in a thread;
+:class:`ThreadFence` gives it a bounded check of its slot's lease: the check
+runs on the loop through the election's
+:class:`~drakkar.providers.resilience.ResilientCaller`, and the thread waits
+at most the call's bound. A hung provider therefore holds up the archive
+thread for a bounded time and never the loop.
 
 A third-party provider is a class with the six async methods of
 :class:`ElectionProvider` plus a factory ``(options) -> provider`` that its
@@ -32,9 +32,7 @@ import asyncio
 import concurrent.futures
 import math
 import os
-import secrets
-import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -60,16 +58,15 @@ ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
 # The feature label of the election's provider calls, metrics and log lines.
 ELECTION_FEATURE = 'election'
 
-REFRESH_THREAD_NAME = 'drakkar-election-refresh'
 # The filesystem provider's file-call thread: this prefix plus the sanitized worker name.
 ELECTION_THREAD_PREFIX = 'drakkar-election-files-'
 
-# Why a lease is no longer held (``ElectionLease.loss_reason``): the provider
+# Why a lease is no longer held (``SlotLease.loss_reason``): the provider
 # answered that another token holds the scope, or no call could confirm it.
 LOSS_TAKEN_OVER = 'taken_over'
 LOSS_UNCONFIRMED = 'unconfirmed'
 
-# How much longer than a call's own bound the archive thread waits for it, so
+# How much longer than a check's own bound the archive thread waits for it, so
 # the caller's own timeout, not the thread's wait, normally ends a slow call.
 BRIDGE_SLACK_SECONDS = 1.0
 # The longest gap between two refreshes of a lease, whatever its length.
@@ -207,7 +204,7 @@ class FilesystemElection:
         await self._run(self._lock(scope, token).release)
 
     async def stop(self) -> None:
-        """Let the provider thread exit; no lease is released, each archive pass releases its own.
+        """Let the provider thread exit; no lease is released, each slot releases its own.
 
         A call after the stop raises at once, so a pass that outlived the
         stop is fenced at its next check instead of waiting for a thread
@@ -275,136 +272,6 @@ BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {
 def lease_refresh_seconds(lease_seconds: float) -> float:
     """Seconds between two refreshes of a lease: a third of its length, at most :data:`MAX_REFRESH_SECONDS`."""
     return min(MAX_REFRESH_SECONDS, lease_seconds / REFRESHES_PER_LEASE)
-
-
-class ElectionLease:
-    """The archive thread's synchronous handle on one lease of one scope; one lease serves one pass.
-
-    Every method blocks the calling thread and must never be called on the
-    event loop's own thread: it runs the provider call on ``loop`` through
-    ``caller`` and waits at most the caller's operation bound plus
-    :data:`BRIDGE_SLACK_SECONDS`. A call that does not finish in that time,
-    or does not succeed (``ok`` False), reads as not held.
-
-    While held, a daemon thread refreshes the lease every ``refresh_seconds``
-    (default: :func:`lease_refresh_seconds` of the lease length).
-    It ends on :meth:`release`, and on a refresh that does not answer True;
-    from then on :meth:`is_held` answers False without a provider call.
-    :attr:`loss_reason` says why a lease reads as not held.
-    """
-
-    def __init__(
-        self,
-        provider: ElectionProvider,
-        caller: ResilientCaller,
-        loop: asyncio.AbstractEventLoop,
-        *,
-        scope: str,
-        lease_seconds: float,
-        provider_name: str,
-        refresh_seconds: float | None = None,
-        token: str | None = None,
-    ) -> None:
-        self.token = token if token is not None else secrets.token_hex(8)
-        self.provider_name = provider_name
-        self.scope = scope
-        self.lease_seconds = lease_seconds
-        self._provider = provider
-        self._caller = caller
-        self._loop = loop
-        self._refresh_seconds = lease_refresh_seconds(lease_seconds) if refresh_seconds is None else refresh_seconds
-        self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
-        self._acquired_once = False
-        # True once the provider answered True to the acquire.
-        self._held = False
-        self._stop_refreshing = threading.Event()
-        self._lost = threading.Event()
-        self._loss_reason: str | None = None
-        self._refresher: threading.Thread | None = None
-
-    @property
-    def loss_reason(self) -> str | None:
-        """Why the last check read as not held: :data:`LOSS_TAKEN_OVER` or :data:`LOSS_UNCONFIRMED`; ``None`` before."""
-        return self._loss_reason
-
-    def acquire(self) -> bool:
-        """Take the lease; on success start the refresh thread. A second call raises ``RuntimeError``.
-
-        When the outcome is unclear (the call failed or did not answer in
-        time), the provider may still have taken the lease, so the lease is
-        released at once rather than left without a refresh until it expires.
-        """
-        if self._acquired_once:
-            raise RuntimeError('an election lease serves one pass; make a new one for the next pass')
-        self._acquired_once = True
-        result = self._run('acquire', lambda: self._provider.acquire(self.scope, self.token, self.lease_seconds))
-        if result is None or not result.ok:
-            self._run('release', lambda: self._provider.release(self.scope, self.token))
-            return False
-        if result.value is not True:
-            return False
-        self._held = True
-        self._refresher = threading.Thread(target=self._refresh_loop, name=REFRESH_THREAD_NAME, daemon=True)
-        self._refresher.start()
-        return True
-
-    def is_held(self) -> bool:
-        """True while the provider confirms the lease is still this pass's (the fencing check)."""
-        if self._lost.is_set():
-            return False
-        reason = lease_loss_reason(self._run('is_held', lambda: self._provider.is_held(self.scope, self.token)))
-        if reason is None:
-            return True
-        self._loss_reason = reason
-        return False
-
-    def release(self) -> None:
-        """Stop the refresh thread, then release the lease at the provider while it may still be this pass's.
-
-        No release is sent when the provider answered clearly that the lease
-        is not this pass's: the acquire was refused, or a refresh or a check
-        found another holder (:data:`LOSS_TAKEN_OVER`). An unclear acquire
-        has already released at once. A lease lost as
-        :data:`LOSS_UNCONFIRMED` may still be held, so it is released.
-        """
-        self._stop_refreshing.set()
-        if self._refresher is not None:
-            # A refresh in progress finishes within its own wait.
-            self._refresher.join(self._wait_seconds)
-            self._refresher = None
-        if not self._held or self._loss_reason == LOSS_TAKEN_OVER:
-            return
-        self._run('release', lambda: self._provider.release(self.scope, self.token))
-
-    def _refresh_loop(self) -> None:
-        # Event.wait returns True once release has been called.
-        while not self._stop_refreshing.wait(self._refresh_seconds):
-            reason = lease_loss_reason(self._run('refresh', lambda: self._provider.refresh(self.scope, self.token)))
-            if reason is not None:
-                # The reason is written before the event, so a reader that sees the event sees it too.
-                self._loss_reason = reason
-                self._lost.set()
-                return
-
-    def _run(self, op: str, make_call: Callable[[], Awaitable[Any]]) -> CallResult | None:
-        """Run one operation on the loop; ``None`` when the loop is closed or does not answer in time."""
-        if _running_loop() is self._loop:
-            # Waiting here would stop the loop from ever running the call.
-            raise RuntimeError('an election lease is called from a worker thread, never on its event loop')
-        operation = self._caller.call(op, make_call)
-        try:
-            future = asyncio.run_coroutine_threadsafe(operation, self._loop)
-        except RuntimeError:
-            # The loop is closed (the worker is shutting down).
-            operation.close()
-            return None
-        try:
-            return future.result(timeout=self._wait_seconds)
-        except TimeoutError:
-            future.cancel()
-            return None
-        except concurrent.futures.CancelledError:
-            return None
 
 
 class ThreadFence:

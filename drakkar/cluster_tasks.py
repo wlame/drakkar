@@ -55,6 +55,7 @@ from drakkar.schedule import (
 )
 
 if TYPE_CHECKING:
+    from drakkar.config import DrakkarConfig
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
@@ -69,6 +70,15 @@ SLOT_ELECTION_FAILED = 'election_failed'
 _ALREADY_STARTED = CallResult(ok=True, value=None, outcome=OUTCOME_OK, attempts=0)
 # The answer of ensure_started after stop: a provider is single-use and is not started again.
 _STOPPED = CallResult(ok=False, value=None, outcome=OUTCOME_NOT_STARTED, attempts=0)
+
+
+def archive_task_runs(config: DrakkarConfig) -> bool:
+    """Whether this worker runs the system cluster task ``history.archive``.
+
+    It needs the recorder (``ui.enabled``), archiving on, and a storage
+    folder whose sealed files reach the shared history folder.
+    """
+    return config.ui.enabled and config.history.archive.enabled and bool(config.storage.dir)
 
 
 class ClusterElection:

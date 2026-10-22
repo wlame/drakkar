@@ -1,4 +1,4 @@
-"""How the worker gives the recorder its folders and its archive election, and when it seals."""
+"""How the worker gives the recorder its folders, runs its archive task under the worker's election, and when it seals."""
 
 import asyncio
 import time
@@ -10,7 +10,8 @@ from drakkar.metrics import provider_calls
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
-from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP
+from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ThreadFence
+from tests.archive_helpers import run_won_slot
 from tests.conftest import wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 from tests.test_lifecycle_sources import StubSource
@@ -50,10 +51,11 @@ async def test_the_recorder_seals_into_the_shared_history_folder_with_the_proces
         await app._recorder.stop()
 
 
-async def test_the_recorder_runs_the_configured_election_with_its_options_resilience_and_connections(
+async def test_the_archive_task_runs_under_the_configured_election_with_its_options_resilience_and_connections(
     tmp_path, monkeypatch
 ):
-    election = MemoryElection(ElectionStore())
+    store = ElectionStore()
+    election = MemoryElection(store)
     received: dict = {}
 
     def factory(options):
@@ -77,13 +79,19 @@ async def test_the_recorder_runs_the_configured_election_with_its_options_resili
     started_before = started_ok._value.get()
 
     app._lifecycle._create_connections()
+    app._lifecycle._create_cluster_election()
     await app._lifecycle._start_ui_and_recorder()
+    cluster_election = app._cluster_election
     assert app._recorder is not None
+    assert cluster_election is not None
+    archive_task = app._recorder.archive_cluster_task()
+    assert archive_task is not None
     try:
-        await app._recorder._archive_pass()
-        assert app._recorder._election_caller.operation_bound_seconds == 1.5
+        token = await run_won_slot(archive_task, cluster_election, cluster='search')
+        assert cluster_election.caller.operation_bound_seconds == 1.5
     finally:
         await app._recorder.stop()
+        await cluster_election.stop(None)
 
     assert received['options'] == {'address': 'consul:8500'}
     ctx = election.started_with
@@ -92,8 +100,10 @@ async def test_the_recorder_runs_the_configured_election_with_its_options_resili
     assert ctx.shared_dir == str(tmp_path / 'shared')
     assert ctx.options == {'address': 'consul:8500'}
     assert ctx.connections is app._connections
-    lease = received['lease']
-    assert (lease.provider_name, lease.scope) == ('example-election', 'search/history.archive')
+    fence = received['fence']
+    assert isinstance(fence, ThreadFence)
+    assert (fence.provider_name, fence.token) == ('example-election', token)
+    assert store.leases == {}
     assert started_ok._value.get() == started_before + 1
     assert election.calls['stop'] == 1
 
@@ -112,6 +122,8 @@ def _runnable_app(tmp_path, monkeypatch) -> tuple[DrakkarApp, MagicMock, list[st
 
     recorder = MagicMock()
     recorder.stop = AsyncMock()
+    # A plain method on the real recorder; no archive task runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=None)
     recorder.start_leftover_sealing = MagicMock(side_effect=lambda: order.append('leftover_sealing'))
     real_start_sources = app._lifecycle._start_sources
 

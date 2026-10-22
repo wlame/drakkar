@@ -35,6 +35,7 @@ import asyncio
 import os
 import signal
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,7 @@ from drakkar.app import (
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
+from drakkar.cluster_tasks import ClusterElection, archive_task_runs, run_cluster_task
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.plugins import resolve_provider_factory
@@ -67,14 +69,27 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.periodic import discover_periodic_tasks, run_periodic_task
+from drakkar.periodic import (
+    STARTUP_NO_SHARED_FOLDER,
+    SYSTEM_CLOCK,
+    Clock,
+    discover_periodic_tasks,
+    run_periodic_task,
+)
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import resolve_factory
 from drakkar.providers.resilience import ResilientCaller, describe_error
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
-from drakkar.recorder.election import BUILTIN_ELECTIONS, ELECTION_ENTRY_POINT_GROUP, ELECTION_FEATURE
+from drakkar.recorder.election import (
+    BUILTIN_ELECTIONS,
+    ELECTION_ENTRY_POINT_GROUP,
+    ELECTION_FEATURE,
+    ElectionContext,
+)
 from drakkar.recorder.history import history_dir
+from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
+from drakkar.schedule import ARCHIVE_TASK_NAME
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -165,6 +180,9 @@ class AppLifecycle:
         # the resolved data directory; held here so tests can reach it
         # via ``app._lifecycle._watchdog``.
         self._watchdog: WatchdogFile | None = None
+        # The clock of the cluster periodic tasks' slot loops; tests replace it
+        # so no test waits for a real slot.
+        self._clock: Clock = SYSTEM_CLOCK
 
     async def _run_on_startup(self) -> None:
         """Run the handler's ``on_startup`` and adopt the config it returned.
@@ -242,6 +260,7 @@ class AppLifecycle:
             await self._build_executor_pool()
             await self._start_observability()
             self._create_connections()
+            self._create_cluster_election()
             await self._start_ui_and_recorder()
             await self._start_fleet()
             self._start_runtime_health()
@@ -514,7 +533,6 @@ class AppLifecycle:
                 instance=app._instance,
                 archive=app._config.history.archive,
                 merged_retention_days=app._config.history.merged_retention_days,
-                **self._archive_election(),
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()
@@ -539,40 +557,66 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
-    def _archive_election(self) -> dict[str, Any]:
-        """The recorder's election arguments: the configured provider, its caller, options and the connections.
+    def _create_cluster_election(self) -> None:
+        """Make the worker's election of the cluster periodic tasks, when it runs one.
 
-        Resolved whenever archiving is on, so an unknown provider name fails
-        startup. That includes memory-only mode (no ``storage.dir``), where no
-        archive pass runs: a typo in the name fails at once instead of on the
-        day a folder is added. With archiving off, or with the UI off (no
-        recorder), any name is accepted, as the registry accepts any name
-        while it is off. The recorder then keeps its default, which never runs.
+        The only cluster task is the system task ``history.archive``, which
+        runs when :func:`~drakkar.cluster_tasks.archive_task_runs` says so.
         """
         app = self._app
-        archive = app._config.history.archive
-        if not archive.enabled:
-            return {}
-        election = app._config.periodic.election
+        names = [ARCHIVE_TASK_NAME] if archive_task_runs(app._config) else []
+        app._cluster_election = self._build_cluster_election(names)
+
+    def _build_cluster_election(self, cluster_task_names: Sequence[str]) -> ClusterElection | None:
+        """The election service of ``cluster_task_names``; ``None`` when the worker runs no cluster task.
+
+        With at least one task the configured provider is resolved, so an
+        unknown name fails startup; with none, any name is accepted, as the
+        registry accepts any name while it is off. The ``filesystem``
+        provider needs a shared folder; without one startup fails, naming
+        the first task. The provider is made here and starts at the first
+        slot that needs it.
+
+        Raises:
+            UnknownProviderError: no built-in or plugin election has the configured name.
+            ValueError: the ``filesystem`` provider and no shared folder.
+        """
+        if not cluster_task_names:
+            return None
+        app = self._app
+        config = app._config
+        election = config.periodic.election
         factory = resolve_factory(
             ELECTION_ENTRY_POINT_GROUP,
             BUILTIN_ELECTIONS,
             election.provider,
             config_path='periodic.election.provider',
         )
-        options = election_provider_options(app._config)
-        return {
-            'election': factory(options),
-            'election_caller': ResilientCaller(
-                election.resilience,
-                feature=ELECTION_FEATURE,
-                provider=election.provider,
-                category='recorder',
-            ),
-            'election_provider_name': election.provider,
-            'election_options': options,
-            'connections': app._connections,
-        }
+        if election.provider == FILESYSTEM_PROVIDER and not config.resolved_shared_dir:
+            raise ValueError(STARTUP_NO_SHARED_FOLDER.format(name=cluster_task_names[0]))
+        options = election_provider_options(config)
+        context = ElectionContext(
+            worker=app._worker_id,
+            instance=app._instance,
+            cluster=app._cluster_name,
+            shared_dir=config.resolved_shared_dir,
+            logger=logger,
+            options=options,
+            connections=app._connections,
+        )
+        caller = ResilientCaller(
+            election.resilience,
+            feature=ELECTION_FEATURE,
+            provider=election.provider,
+            category='periodic',
+        )
+        return ClusterElection(
+            factory(options),
+            caller,
+            provider_name=election.provider,
+            context=context,
+            clock=self._clock,
+        )
 
     def _create_connections(self) -> None:
         """Make the resolver of the named shared connections; it opens nothing until a provider asks.
@@ -882,6 +926,27 @@ class AppLifecycle:
                 name=f'periodic:{name}',
             )
             app._periodic_tasks.append(task)
+        self._start_archive_task()
+
+    def _start_archive_task(self) -> None:
+        """Start the slot loop of the system cluster task ``history.archive``, when the worker runs it."""
+        app = self._app
+        if app._cluster_election is None or app._recorder is None:
+            return
+        archive_task = app._recorder.archive_cluster_task()
+        if archive_task is None:
+            return
+        task = asyncio.create_task(
+            run_cluster_task(
+                archive_task,
+                app._cluster_election,
+                cluster=app._cluster_name,
+                recorder=app._recorder,
+                clock=self._clock,
+            ),
+            name=f'periodic:{archive_task.name}',
+        )
+        app._periodic_tasks.append(task)
 
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.
@@ -1201,7 +1266,7 @@ class AppLifecycle:
                     # one registry call for the card withdraw below.
                     await app._recorder.stop(
                         timeout=max(deadline - time.monotonic(), 0.0),
-                        election_reserve_seconds=self._registry_stop_reserve_seconds(),
+                        reserve_seconds=self._registry_stop_reserve_seconds(),
                     )
                 except Exception as exc:
                     await log.awarning(
@@ -1210,6 +1275,13 @@ class AppLifecycle:
                         error=str(exc),
                         exc_info=True,
                     )
+
+            # The election stops once the cluster task loops are cancelled (at
+            # the top of the shutdown) and the archive pass that still checked
+            # its lease has ended or been left: one attempt in the time left.
+            # Its caller counts and logs a failure; it does not raise.
+            if app._cluster_election is not None:
+                await app._cluster_election.stop(max(deadline - time.monotonic(), 0.0))
 
             # Withdraw the registry card after the recorder's last write and
             # before the UI server goes: until the card is gone, peers may

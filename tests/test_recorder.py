@@ -4734,8 +4734,8 @@ class TestBackgroundLoopResilience:
         assert len(failures) == 1
         assert failures[0]['error_type'] == 'OSError'
 
-    async def test_rotation_loop_archives_after_every_rotation(self, tmp_path):
-        """The archive pass rides the rotation tick, after the swap."""
+    async def test_rotation_loop_starts_the_sealing_job_after_every_rotation(self, tmp_path):
+        """The sealing job rides the rotation tick, after the swap; no archive pass does."""
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME, storage_dir=str(tmp_path))
         rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
@@ -4746,22 +4746,20 @@ class TestBackgroundLoopResilience:
         async def fake_rotate() -> None:
             order.append('rotate')
 
-        async def fake_archive() -> None:
-            order.append('archive')
-
         rec._rotate = fake_rotate  # type: ignore[method-assign]
-        rec._archive_pass = fake_archive  # type: ignore[method-assign]
+        rec._start_sealing = lambda: order.append('seal')  # type: ignore[method-assign]
 
         loop_task = asyncio.create_task(rec._rotation_loop())
         try:
-            await wait_for(lambda: order.count('archive') >= 2)
+            await wait_for(lambda: order.count('seal') >= 2)
         finally:
             rec._running = False
             loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await loop_task
 
-        assert order[:4] == ['rotate', 'archive', 'rotate', 'archive']
+        assert order[:4] == ['rotate', 'seal', 'rotate', 'seal']
+        assert rec._archive_pass_future is None
 
     async def test_state_sync_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)

@@ -40,7 +40,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import HistoryArchiveConfig, ResilienceConfig, UIConfig
+from drakkar.config import HistoryArchiveConfig, UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -61,16 +61,8 @@ from drakkar.metrics import (
     recorder_seal_failures,
     recorder_unsealed_files,
 )
-from drakkar.providers.connections import Connections
-from drakkar.providers.resilience import OUTCOME_NOT_STARTED, ResilientCaller
-from drakkar.recorder.archive import run_archive_pass
-from drakkar.recorder.election import (
-    ELECTION_FEATURE,
-    ElectionContext,
-    ElectionLease,
-    ElectionProvider,
-    FilesystemElection,
-)
+from drakkar.recorder.archive import observe_archive_footprint, run_archive_pass
+from drakkar.recorder.election import ThreadFence
 from drakkar.recorder.helpers import (
     BUSY_TIMEOUT_MS,
     close_quietly,
@@ -100,12 +92,12 @@ from drakkar.recorder.sealing import (
     seal_closed_file,
     seal_connection,
 )
-from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
 from drakkar.recorder.writer import EventWriter
-from drakkar.schedule import ARCHIVE_TASK_NAME, task_scope
+from drakkar.schedule import ARCHIVE_TASK_NAME
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
+    from drakkar.cluster_tasks import ClusterTask, SlotContext
     from drakkar.config import DrakkarConfig
 
 logger = structlog.get_logger()
@@ -168,6 +160,25 @@ def _time_left(deadline: float | None) -> float | None:
     return None if deadline is None else max(deadline - time.monotonic(), 0.0)
 
 
+def _is_running(future: Future[None] | None) -> bool:
+    """True while ``future`` is queued or running in its executor."""
+    return future is not None and not future.done()
+
+
+def _log_job_failure(job: str, future: Future[None]) -> None:
+    """Log a job of the archive thread that raised, when nothing awaits its result."""
+    if future.cancelled() or (exc := future.exception()) is None:
+        return
+    logger.error(
+        'recorder_background_job_failed',
+        category='recorder',
+        job=job,
+        error=str(exc),
+        error_type=type(exc).__name__,
+        exc_info=exc,
+    )
+
+
 def _last_breath_flush_all() -> None:
     """The single atexit hook: salvage every still-live recorder's buffer."""
     for rec in list(_LIVE_RECORDERS):
@@ -211,11 +222,6 @@ class EventRecorder(EventWriter):
         instance: str = '',
         archive: HistoryArchiveConfig | None = None,
         merged_retention_days: int = 0,
-        election: ElectionProvider | None = None,
-        election_caller: ResilientCaller | None = None,
-        election_provider_name: str = FILESYSTEM_PROVIDER,
-        election_options: Mapping[str, Any] | None = None,
-        connections: Connections | None = None,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -228,12 +234,9 @@ class EventRecorder(EventWriter):
         omitted. ``merged_retention_days`` is how long the archive pass keeps
         UI merge results (0 keeps them).
 
-        ``election`` decides which worker of the cluster archives, named
-        ``election_provider_name`` in metrics and logs; it defaults to the
-        ``filesystem`` provider. ``election_caller`` makes its calls; it
-        defaults to one with the default resilience settings. The
-        provider starts at the first archive pass, with ``election_options``
-        and ``connections`` in its context, and stops in :meth:`stop`.
+        The archive pass runs as the cluster task
+        :meth:`archive_cluster_task` returns; the worker's election decides
+        which worker of the cluster runs each slot.
         """
         super().__init__(config)
         self._worker_name = worker_name
@@ -243,26 +246,6 @@ class EventRecorder(EventWriter):
         self._instance = instance or secrets.token_hex(8)
         self._archive = archive if archive is not None else HistoryArchiveConfig()
         self._merged_retention_days = merged_retention_days
-        # One provider and one caller serve every archive pass, so the
-        # breaker and the rate-limited failure log span the passes.
-        self._election: ElectionProvider = election if election is not None else FilesystemElection()
-        self._election_provider_name = election_provider_name
-        self._election_caller = (
-            election_caller
-            if election_caller is not None
-            else ResilientCaller(
-                ResilienceConfig(),
-                feature=ELECTION_FEATURE,
-                provider=election_provider_name,
-                category='recorder',
-            )
-        )
-        self._election_options = dict(election_options or {})
-        self._connections = connections
-        # True once a provider ``start`` succeeded; only then is it stopped.
-        self._election_started = False
-        # Set by the first stop(): the provider is stopped, or counted as not started, once.
-        self._election_stop_done = False
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -308,22 +291,24 @@ class EventRecorder(EventWriter):
         # background sealing job and the leftover task each take a path
         # here first, so no file is ever sealed or moved twice at once.
         self._in_hand: set[str] = set()
-        # Moves into the history folder and the archive pass touch the
-        # shared mount, which can hang, so they run as background jobs that
-        # never hold up the next rotation. One of each runs at a time.
+        # Moves into the history folder touch the shared mount, which can
+        # hang, so they run as background jobs that never hold up the next
+        # rotation. One of each runs at a time.
         self._sealing_task: asyncio.Task | None = None
-        self._archive_task: asyncio.Task | None = None
         self._leftover_task: asyncio.Task | None = None
-        # Set by stop(). Cancelling the archive job only stops the await;
+        # Set by stop(). Cancelling an archive slot only stops its await;
         # the pass itself runs on in its thread, so it checks this between
         # windows and ends early instead of holding the process exit.
         self._archive_stop = threading.Event()
         # The pass gets a thread of its own, not one of the default executor:
         # it waits on election calls and log writes that run there, and could
-        # otherwise hold the last free thread they need.
+        # otherwise hold the last free thread they need. The footprint
+        # observation of a slot this worker did not win runs there too.
         self._archive_executor: ThreadPoolExecutor | None = None
         # The pass the executor runs or last ran, for stop() to wait on.
         self._archive_pass_future: Future[None] | None = None
+        # The footprint observation the executor runs or last ran.
+        self._footprint_future: Future[None] | None = None
         # How long a leftover must be untouched before it is sealed; an
         # attribute so tests can shorten it.
         self._leftover_floor_seconds = LEFTOVER_FLOOR_SECONDS
@@ -855,7 +840,7 @@ class EventRecorder(EventWriter):
         )
         await self._db.commit()
 
-    async def stop(self, timeout: float | None = None, *, election_reserve_seconds: float = 0.0) -> None:
+    async def stop(self, timeout: float | None = None, *, reserve_seconds: float = 0.0) -> None:
         """Flush, then seal the live file and move it into the history folder.
 
         ``timeout`` is the shutdown time left (``None``: no limit). The seal
@@ -863,11 +848,10 @@ class EventRecorder(EventWriter):
         into the history folder runs only while time remains, so a slow
         network mount cannot hold the stop past the deadline. A file that
         is not moved stays in ``storage.dir`` and the next start with the
-        same worker name seals it. A started election provider is stopped
-        last, with one attempt inside the time left, after the archive pass in
-        progress. The wait for that pass keeps ``election_reserve_seconds`` of
-        the time left for the shutdown steps after the recorder (the registry
-        withdraw); see :meth:`_wait_for_archive_pass`.
+        same worker name seals it. Last, the stop waits for an archive pass
+        still running in its thread, keeping ``reserve_seconds`` of the time
+        left for the shutdown steps after the recorder (the election stop and
+        the registry withdraw); see :meth:`_wait_for_archive_pass`.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         self._running = False
@@ -879,7 +863,6 @@ class EventRecorder(EventWriter):
             self._host_sample_task,
             self._leftover_task,
             self._sealing_task,
-            self._archive_task,
         ):
             if task:
                 task.cancel()
@@ -889,7 +872,7 @@ class EventRecorder(EventWriter):
                     pass
         if self._archive_executor is not None:
             # Not waited for here: a pass in progress ends after its window and
-            # its lease still needs this loop. The election stop at the end
+            # its fence still needs this loop. The wait at the end of the stop
             # waits for it, inside the shutdown time left.
             self._archive_executor.shutdown(wait=False)
             self._archive_executor = None
@@ -935,9 +918,9 @@ class EventRecorder(EventWriter):
             meta = await self._seal(path, seal_connection(writer, db_path=path, **self._seal_identity()))
             if meta is not None:
                 await self._publish_until(path, meta, deadline)
-        # Last: an archive pass still running in its thread releases its
-        # lease through the provider, so the provider stops after that pass.
-        await self._stop_election(deadline, election_reserve_seconds)
+        # Last: an archive pass still running in its thread checks its lease
+        # through the election, which the worker stops after this wait.
+        await self._wait_for_archive_pass(deadline, reserve_seconds)
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.
@@ -1360,39 +1343,47 @@ class EventRecorder(EventWriter):
                     exc_info=exc,
                 )
             # Whatever the rotation did, files sealed earlier still wait for
-            # their move, and due windows still wait for the archive pass.
+            # their move. Due windows wait for the next archive slot.
             self._start_sealing()
-            self._start_archive_pass()
 
-    async def _archive_pass(self) -> None:
-        """Archive due windows of this cluster's history folder, in a thread.
+    def archive_cluster_task(self) -> ClusterTask | None:
+        """The system cluster task ``history.archive``; ``None`` unless archiving is on and there is a storage folder.
 
-        The whole pass — listing, SQLite merges, gzip — is blocking work
-        measured in seconds, so it goes to the recorder's own archive thread;
-        the event loop only sees this await. The rotation loop starts it as a
-        background job, so the loop does not wait for it.
-
-        The election provider starts here at the first pass. While it has
-        not started, a pass ends at once and the next one tries again.
+        A won slot runs the archive pass on the recorder's own archive
+        thread and waits for it; the pass checks the slot's lease through a
+        :class:`~drakkar.recorder.election.ThreadFence` before each publish.
+        When the slot loop is cancelled (shutdown) the wait ends at once and
+        the pass goes on until :meth:`stop` ends it between windows. A slot
+        this worker does not win refreshes the footprint gauges on the same
+        thread, without waiting, when that thread is idle.
         """
         if not self._archives():
-            return
-        if not await self._ensure_election_started():
-            self._election_caller.skip('acquire', OUTCOME_NOT_STARTED)
-            return
-        lease = ElectionLease(
-            self._election,
-            self._election_caller,
-            asyncio.get_running_loop(),
-            scope=task_scope(self._cluster_name, ARCHIVE_TASK_NAME),
+            return None
+        # Function-local: drakkar.cluster_tasks imports the recorder package.
+        from drakkar.cluster_tasks import ClusterTask
+
+        return ClusterTask(
+            name=ARCHIVE_TASK_NAME,
+            run=self._run_archive_slot,
+            interval=self._archive.effective_interval,
+            cron=self._archive.cron,
             lease_seconds=self._archive.lease_seconds,
-            provider_name=self._election_provider_name,
+            on_error='continue',
+            system=True,
+            on_skip=self._observe_footprint_when_idle,
         )
-        if self._archive_executor is None:
-            self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
+
+    async def _run_archive_slot(self, ctx: SlotContext) -> None:
+        """Run one archive pass for a won slot in the archive thread, fenced by the slot's lease."""
+        if self._archive_stop.is_set():
+            return
+        election = ctx.lease.election
+        fence = ThreadFence(
+            ctx.lease, election.caller, asyncio.get_running_loop(), provider_name=election.provider_name
+        )
         # Kept so stop() can wait for a pass that runs on in its thread after
-        # this job is cancelled, before it stops the provider the pass calls.
-        self._archive_pass_future = self._archive_executor.submit(
+        # the slot loop is cancelled, before the worker stops the election.
+        self._archive_pass_future = self._archive_thread().submit(
             functools.partial(
                 run_archive_pass,
                 self._shared_dir,
@@ -1400,71 +1391,44 @@ class EventRecorder(EventWriter):
                 instance=self._instance,
                 archive=self._archive,
                 merged_retention_days=self._merged_retention_days,
-                lease=lease,
+                fence=fence,
                 stop=self._archive_stop,
             )
         )
-        await asyncio.wrap_future(self._archive_pass_future)
+        running = self._archive_pass_future
+        try:
+            await asyncio.wrap_future(running)
+        except asyncio.CancelledError:
+            # The slot loop is cancelled (shutdown) and nothing awaits the pass
+            # any more, so its failure is logged when it ends.
+            running.add_done_callback(functools.partial(_log_job_failure, 'archive'))
+            raise
+
+    def _observe_footprint_when_idle(self, outcome: str) -> None:
+        """Refresh the archive footprint gauges in the archive thread, unless a pass or an observation runs there."""
+        if self._archive_stop.is_set() or _is_running(self._archive_pass_future) or _is_running(self._footprint_future):
+            return
+        self._footprint_future = self._archive_thread().submit(
+            observe_archive_footprint, self._shared_dir, self._cluster_name
+        )
+        self._footprint_future.add_done_callback(functools.partial(_log_job_failure, 'archive_footprint'))
+
+    def _archive_thread(self) -> ThreadPoolExecutor:
+        """The recorder's one archive thread, made on first use."""
+        if self._archive_executor is None:
+            self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
+        return self._archive_executor
 
     def _archives(self) -> bool:
         """Whether archive passes run at all: archiving is on and there is a storage folder."""
         return self._archive.enabled and bool(self._storage_dir)
 
-    async def _ensure_election_started(self) -> bool:
-        """Start the election provider unless it has started; True when it is started.
-
-        The call goes through the election caller: a time limit per attempt,
-        retries, the breaker, and at most one failure line a minute.
-        """
-        if self._election_started:
-            return True
-        ctx = ElectionContext(
-            worker=self._worker_name,
-            instance=self._instance,
-            cluster=self._cluster_name,
-            shared_dir=self._shared_dir,
-            logger=logger,
-            options=self._election_options,
-            connections=self._connections,
-        )
-        result = await self._election_caller.call('start', lambda: self._election.start(ctx))
-        if not result.ok:
-            return False
-        # Set before the log await: a cancellation there must not leave a
-        # started provider that stop() would never stop.
-        self._election_started = True
-        await logger.ainfo(
-            'provider_started',
-            category='recorder',
-            feature=ELECTION_FEATURE,
-            provider=self._election_provider_name,
-        )
-        return True
-
-    async def _stop_election(self, deadline: float | None, reserve_seconds: float = 0.0) -> None:
-        """Stop the election provider once, after the archive pass in progress, with one attempt inside ``deadline``.
-
-        The wait for the pass keeps ``reserve_seconds`` of the time left (see
-        :meth:`_wait_for_archive_pass`); the provider stop then gets all the
-        time that is left. A provider that never started is counted as a
-        skipped stop. Without archive passes the election is not in use, and
-        nothing is counted; a second call counts nothing either.
-        """
-        if self._election_stop_done or not self._archives():
-            return
-        self._election_stop_done = True
-        await self._wait_for_archive_pass(deadline, reserve_seconds)
-        if not self._election_started:
-            self._election_caller.skip('stop', OUTCOME_NOT_STARTED)
-            return
-        await self._election_caller.call('stop', self._election.stop, attempts=1, deadline_seconds=_time_left(deadline))
-
     async def _wait_for_archive_pass(self, deadline: float | None, reserve_seconds: float) -> None:
         """Wait for an archive pass still running in its thread, until only ``reserve_seconds`` of ``deadline`` are left.
 
         ``stop()`` has asked the pass to end after its current window; until
-        then it still calls the election provider. A pass ends only between
-        windows, so the wait is not capped at a fixed time: a fixed cap would
+        then its fence still calls the election provider. A pass ends only
+        between windows, so the wait is not capped at a fixed time: a fixed cap would
         abandon a window that the shutdown time could still let finish. It
         ends when the time left is down to ``reserve_seconds`` (the time the
         shutdown steps after the recorder need), or at once when less is
@@ -1472,7 +1436,7 @@ class EventRecorder(EventWriter):
         outlives the wait is left to finish on its own and logged as
         ``recorder_archive_pass_abandoned``. It is fenced at its next check,
         because a provider refuses every call after its ``stop`` (and every
-        lease call fails once the loop is closed), and its lease runs out.
+        check fails once the loop is closed), and its lease runs out.
         """
         running = self._archive_pass_future
         if running is None or running.done():
@@ -1491,17 +1455,9 @@ class EventRecorder(EventWriter):
                 detail=ARCHIVE_PASS_ABANDONED_DETAIL,
             )
             return
-        if waiting.cancelled() or (exc := waiting.exception()) is None:
-            return
-        # The archive job was cancelled, so nothing else reports how the pass ended.
-        await logger.aerror(
-            'recorder_background_job_failed',
-            category='recorder',
-            job='archive',
-            error=str(exc),
-            error_type=type(exc).__name__,
-            exc_info=exc,
-        )
+        # Marks the error read; the slot whose loop was cancelled logs it (see _run_archive_slot).
+        if not waiting.cancelled():
+            waiting.exception()
 
     async def _rotate(self) -> None:
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.
@@ -1757,12 +1713,6 @@ class EventRecorder(EventWriter):
         if not self._storage_dir or (self._sealing_task is not None and not self._sealing_task.done()):
             return
         self._sealing_task = asyncio.create_task(self._run_job('sealing', self._seal_pending()))
-
-    def _start_archive_pass(self) -> None:
-        """Start the background archive pass unless one still runs."""
-        if not self._storage_dir or (self._archive_task is not None and not self._archive_task.done()):
-            return
-        self._archive_task = asyncio.create_task(self._run_job('archive', self._archive_pass()))
 
     async def _run_job(self, job: str, work: Coroutine[Any, Any, None]) -> None:
         """Run one background job; a failure is logged and the next tick runs the job again."""

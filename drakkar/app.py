@@ -28,6 +28,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
+from drakkar.cluster_tasks import ClusterElection
 from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinksConfig, load_config
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
@@ -311,6 +312,10 @@ class DrakkarApp:
         # Named shared connections, made by the lifecycle before the first
         # provider starts and closed after the last one stops.
         self._connections: Connections | None = None
+        # The election of the cluster periodic tasks, made by the lifecycle
+        # when the worker runs at least one; it starts at the first slot and
+        # stops after the recorder.
+        self._cluster_election: ClusterElection | None = None
         self._ui_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None

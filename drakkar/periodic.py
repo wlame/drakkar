@@ -52,6 +52,11 @@ RULE_SWEEP_AFTER = 'sweep_after_seconds must be at least 60'
 RULE_DOT_NAME = 'a name with a dot is a system task; configure it in its own section (cache.*, history.archive)'
 # Filled with ``str.replace``, not ``format``: the text carries a literal ``{}``.
 OVERRIDE_NULL = 'periodic.tasks.{name} has no value; write {} to keep the declared settings'
+# The startup check of a cluster task with the filesystem election and no shared folder.
+STARTUP_NO_SHARED_FOLDER = (
+    "periodic task '{name}' has scope cluster, but the filesystem election needs a shared folder "
+    '(shared.dir or storage.dir)'
+)
 
 _TASK_NAME = re.compile(TASK_NAME_PATTERN)
 
