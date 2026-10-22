@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -87,11 +86,13 @@ class ClusterElection:
         *,
         provider_name: str,
         context: ElectionContext,
+        clock: Clock = SYSTEM_CLOCK,
     ) -> None:
         self.provider = provider
         self.caller = caller
         self.provider_name = provider_name
         self._context = context
+        self._clock = clock
         self._start_lock = asyncio.Lock()
         self._started = False
         self._stopped = False
@@ -104,13 +105,13 @@ class ClusterElection:
         After :meth:`stop` the provider is not started again (outcome
         ``not_started``, nothing counted).
         """
-        entered = time.monotonic()
+        entered = self._clock.time()
         async with self._start_lock:
             if self._started:
                 return _ALREADY_STARTED
             if self._stopped:
                 return _STOPPED
-            time_left = deadline_seconds - (time.monotonic() - entered)
+            time_left = deadline_seconds - (self._clock.time() - entered)
             result = await self.caller.call(
                 'start', lambda: self.provider.start(self._context), deadline_seconds=time_left
             )
@@ -147,6 +148,10 @@ class SlotLease:
     the first refresh that does not answer True marks the lease lost
     (:attr:`loss_reason`), calls ``on_lost`` once and stops refreshing. The
     run is not cancelled: a coroutine cannot be stopped safely in the middle.
+
+    ``taken_over`` is final: once a refresh or a check found another holder,
+    the lease is lost for good, nothing refreshes it, no later failure turns
+    the reason into ``unconfirmed``, and no release is sent.
     """
 
     def __init__(
@@ -165,10 +170,16 @@ class SlotLease:
         self._clock = clock
         # True once the provider answered True to the acquire.
         self._held = False
-        # True once a refresh did not answer True; from then on is_held answers False without a call.
+        # True once the lease is lost for good (a refresh did not answer True,
+        # or a check found another holder); is_held then answers False without a call.
         self._lost = False
         self._loss_reason: str | None = None
         self._refresher: asyncio.Task[None] | None = None
+        # True while the refresher is in a refresh call or its loss report: a
+        # release waits for it then, so the answer and the log line are not lost.
+        self._refresher_busy = False
+        # Set when the refresher is asked to end; it ends after the call in progress.
+        self._refresh_stop_requested = False
 
     @property
     def election(self) -> ClusterElection:
@@ -218,7 +229,11 @@ class SlotLease:
         reason = lease_loss_reason(result)
         if reason is None:
             return True
-        self._loss_reason = reason
+        self._record_loss(reason)
+        if reason == LOSS_TAKEN_OVER:
+            # Another token holds the scope: refreshing it again is pointless.
+            self._lost = True
+            self._end_refresher()
         return False
 
     async def release(self) -> None:
@@ -229,8 +244,7 @@ class SlotLease:
         found another holder (``taken_over``). A lease lost as
         ``unconfirmed`` may still be held, so it is released.
         """
-        refresher = self._refresher
-        self.stop_refreshing()
+        refresher = self._end_refresher()
         if refresher is not None:
             # asyncio.wait, not await: a cancellation of this release must still reach its caller.
             await asyncio.wait({refresher})
@@ -240,23 +254,47 @@ class SlotLease:
         await self._election.caller.call('release', lambda: self._election.provider.release(self.scope, self.token))
 
     def stop_refreshing(self) -> None:
-        """Stop the refresh task, releasing nothing (shutdown: the lease ends by itself)."""
+        """Stop the refresh task at once, releasing nothing (shutdown: the lease ends by itself)."""
         if self._refresher is not None:
             self._refresher.cancel()
             self._refresher = None
 
+    def _end_refresher(self) -> asyncio.Task[None] | None:
+        """Ask the refresher to end and return its task: cancelled while it sleeps, else after its call and report."""
+        refresher, self._refresher = self._refresher, None
+        if refresher is not None:
+            self._refresh_stop_requested = True
+            if not self._refresher_busy:
+                refresher.cancel()
+        return refresher
+
+    def _record_loss(self, reason: str) -> None:
+        """Keep why the lease is lost; a confirmed ``taken_over`` is never replaced."""
+        self._loss_reason = LOSS_TAKEN_OVER if LOSS_TAKEN_OVER in (self._loss_reason, reason) else reason
+
     async def _refresh_loop(self, on_lost: Callable[[str], Awaitable[None]]) -> None:
+        try:
+            await self._refresh_until_lost(on_lost)
+        except Exception as exc:
+            # Nothing awaits this task's result, so its error is logged here or never.
+            await logger.aexception(
+                'periodic_lease_refresh_failed', category='periodic', scope=self.scope, exc_info=exc
+            )
+
+    async def _refresh_until_lost(self, on_lost: Callable[[str], Awaitable[None]]) -> None:
         refresh_seconds = lease_refresh_seconds(self.lease_seconds)
         caller = self._election.caller
         provider = self._election.provider
-        while True:
+        while not self._refresh_stop_requested:
+            self._refresher_busy = False
             await self._clock.sleep(refresh_seconds)
+            self._refresher_busy = True
             reason = lease_loss_reason(await caller.call('refresh', lambda: provider.refresh(self.scope, self.token)))
             if reason is not None:
                 # Written before the callback, so the run sees the loss as soon as it is reported.
-                self._loss_reason = reason
+                self._record_loss(reason)
                 self._lost = True
-                await on_lost(reason)
+                await on_lost(self._loss_reason or reason)
                 return
 
 
@@ -368,7 +406,18 @@ async def _skip_slot(
     """Count and log a slot this worker does not run, and tell the task's ``on_skip`` hook."""
     periodic_cluster_slots.labels(name=task.name, outcome=outcome).inc()
     if task.on_skip is not None:
-        task.on_skip(outcome)
+        try:
+            task.on_skip(outcome)
+        except Exception as exc:
+            # A failing hook must not end the task's loop; the slot is skipped either way.
+            await logger.aexception(
+                'periodic_skip_hook_failed',
+                category='periodic',
+                name=task.name,
+                slot=slot,
+                outcome=outcome,
+                exc_info=exc,
+            )
     fields: dict[str, Any] = {'category': 'periodic', 'name': task.name, 'slot': slot, 'outcome': outcome}
     if outcome == SLOT_HELD_ELSEWHERE:
         # The normal case on every worker but one: no warning, no rate limit.

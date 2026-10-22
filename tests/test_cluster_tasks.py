@@ -150,8 +150,10 @@ class ScriptedElection(MemoryElection):
 
     ``start_error`` makes every start raise. ``acquire`` and ``refresh`` list
     the answers of the first calls (a bool, or an exception to raise); later
-    calls answer as the memory election does. ``start_yields`` makes a start
-    give the event loop that many turns before it answers.
+    calls answer as the memory election does. ``start_yields``,
+    ``refresh_yields`` and ``is_held_yields`` make a call give the event loop
+    that many turns before it answers; ``start_seconds`` makes a start take
+    that long on the clock.
     """
 
     def __init__(
@@ -162,6 +164,9 @@ class ScriptedElection(MemoryElection):
         acquire: tuple[bool | Exception, ...] = (),
         refresh: tuple[bool | Exception, ...] = (),
         start_yields: int = 0,
+        refresh_yields: int = 0,
+        is_held_yields: int = 0,
+        start_seconds: float = 0.0,
     ) -> None:
         super().__init__(ElectionStore())
         self._clock = clock
@@ -169,6 +174,9 @@ class ScriptedElection(MemoryElection):
         self._acquire = list(acquire)
         self._refresh = list(refresh)
         self._start_yields = start_yields
+        self._refresh_yields = refresh_yields
+        self._is_held_yields = is_held_yields
+        self._start_seconds = start_seconds
         self.at: defaultdict[str, list[float]] = defaultdict(list)
 
     @property
@@ -182,6 +190,8 @@ class ScriptedElection(MemoryElection):
         self._note('start')
         for _ in range(self._start_yields):
             await asyncio.sleep(0)
+        if self._start_seconds and self._clock is not None:
+            await self._clock.sleep(self._start_seconds)
         if self._start_error is not None:
             self.calls['start'] += 1
             raise self._start_error
@@ -195,9 +205,16 @@ class ScriptedElection(MemoryElection):
 
     async def refresh(self, scope: str, token: str) -> bool:
         self._note('refresh')
+        for _ in range(self._refresh_yields):
+            await asyncio.sleep(0)
         if self._refresh:
             return self._scripted('refresh', self._refresh.pop(0))
         return await super().refresh(scope, token)
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        for _ in range(self._is_held_yields):
+            await asyncio.sleep(0)
+        return await super().is_held(scope, token)
 
     async def release(self, scope: str, token: str) -> None:
         self._note('release')
@@ -256,12 +273,15 @@ def make_caller(logger: Any = None, provider: str = PROVIDER, **resilience: Any)
     )
 
 
-def make_election(provider: Any, logger: Any = None, provider_name: str = PROVIDER) -> ClusterElection:
+def make_election(
+    provider: Any, logger: Any = None, provider_name: str = PROVIDER, clock: Any = None
+) -> ClusterElection:
     return ClusterElection(
         provider,
         make_caller(logger, provider=provider_name),
         provider_name=provider_name,
         context=CONTEXT,
+        **({} if clock is None else {'clock': clock}),
     )
 
 
@@ -438,14 +458,29 @@ async def test_cluster_slot_after_a_clock_step_back_never_runs_the_same_slot_twi
 async def test_cluster_slot_acquire_deadline_is_s_plus_w_minus_now(logs):
     clock = VirtualClock(NOW, drift=(-3.25,))
     provider = ScriptedElection(clock)
-    election = make_election(provider, logs)
+    election = make_election(provider, logs, clock=clock)
     task = make_task('deadline', sleeping_body(clock, 1, []))
 
     await run_until(clock, run_cluster_task(task, election, cluster=CLUSTER, clock=clock), SLOT + 5)
 
     deadlines = dict(election.caller.deadlines)
-    assert math.isclose(deadlines['start'], 6.75, abs_tol=0.05)
+    assert deadlines['start'] == 6.75
     assert deadlines['acquire'] == 6.75
+
+
+async def test_cluster_election_start_after_waiting_on_the_lock_gets_the_time_left(logs):
+    clock = VirtualClock(NOW)
+    # Each start takes 4 s on the clock and fails; the second task waits for the first one's.
+    provider = ScriptedElection(clock, start_error=ConnectionError('election service unreachable'), start_seconds=4)
+    election = make_election(provider, logs, clock=clock)
+    tasks = [make_task(name, sleeping_body(clock, 1, [])) for name in ('waits_a', 'waits_b')]
+
+    async def both() -> None:
+        await asyncio.gather(*(run_cluster_task(task, election, cluster=CLUSTER, clock=clock) for task in tasks))
+
+    await run_until(clock, both(), SLOT + 9)
+
+    assert [deadline for op, deadline in election.caller.deadlines if op == 'start'] == [10.0, 6.0]
 
 
 async def test_cluster_slot_unclear_acquire_releases_and_counts_election_failed(logs):
@@ -582,6 +617,143 @@ async def test_slot_lease_refresh_false_logs_lease_lost_once_and_run_goes_on(log
     assert sample('drakkar_periodic_task_runs_total', name='lease_taken_over', status='ok') == 1
 
 
+async def test_slot_lease_taken_over_found_by_a_check_is_final(logs):
+    clock = VirtualClock(NOW)
+    # A refresh would fail; the takeover the check found must stay the reason.
+    provider = ScriptedElection(clock, refresh=(ConnectionError('election service unreachable'),))
+    leases: list[SlotLease] = []
+    checks: list[bool] = []
+
+    async def body(ctx: SlotContext) -> None:
+        leases.append(ctx.lease)
+        provider.store.leases[ctx.lease.scope] = ('another-token', math.inf, 60)
+        checks.append(await ctx.lease.is_held())
+        await clock.sleep(50)
+        checks.append(await ctx.lease.is_held())
+
+    task = make_task('check_taken_over', body)
+
+    await run_until(
+        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 55
+    )
+
+    assert checks == [False, False]
+    assert leases[0].loss_reason == LOSS_TAKEN_OVER
+    # The refresher ended with the check: no refresh, no lost line with another reason, no release.
+    assert provider.calls['refresh'] == 0
+    assert provider.calls['is_held'] == 1
+    assert logs.named('periodic_lease_lost') == []
+    assert provider.calls['release'] == 0
+
+
+async def test_slot_lease_failed_refresh_never_replaces_a_takeover_found_meanwhile(logs):
+    clock = VirtualClock(NOW)
+    # At SLOT + 20 the check and the refresh run side by side; the check answers first.
+    provider = ScriptedElection(
+        clock, refresh=(ConnectionError('election service unreachable'),), refresh_yields=5, is_held_yields=1
+    )
+
+    async def body(ctx: SlotContext) -> None:
+        await clock.sleep(20)
+        provider.store.leases[ctx.lease.scope] = ('another-token', math.inf, 60)
+        await ctx.lease.is_held()
+        await clock.sleep(10)
+
+    task = make_task('refresh_after_check', body)
+
+    await run_until(
+        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 35
+    )
+
+    assert provider.at['refresh'] == [SLOT + 20]
+    assert [line['reason'] for line in logs.named('periodic_lease_lost')] == [LOSS_TAKEN_OVER]
+    assert provider.calls['release'] == 0
+
+
+async def test_slot_lease_release_waits_for_a_refresh_in_progress_and_keeps_its_answer(logs):
+    clock = VirtualClock(NOW)
+    # The refresh and the end of the hold both fall on SLOT + 20; the refresh is still in its call.
+    provider = ScriptedElection(clock, refresh=(False,), refresh_yields=3)
+    task = make_task('release_waits', sleeping_body(clock, 1, []))
+
+    await run_until(
+        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 25
+    )
+
+    assert provider.at['refresh'] == [SLOT + 20]
+    assert [line['reason'] for line in logs.named('periodic_lease_lost')] == [LOSS_TAKEN_OVER]
+    assert provider.calls['release'] == 0
+
+
+async def test_slot_lease_release_after_a_successful_refresh_in_progress_still_releases(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock, refresh_yields=3)
+    task = make_task('release_after_refresh', sleeping_body(clock, 1, []))
+
+    await run_until(
+        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 25
+    )
+
+    assert provider.at['refresh'] == [SLOT + 20]
+    assert provider.at['release'] == [SLOT + 20]
+    assert logs.named('periodic_lease_lost') == []
+
+
+class _UncheckableElection(ScriptedElection):
+    """A provider whose checks fail; every other call answers."""
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        raise ConnectionError('election service unreachable')
+
+
+async def test_slot_lease_check_that_fails_is_unconfirmed_not_final():
+    provider = _UncheckableElection()
+    lease = SlotLease(make_election(provider), scope=task_scope(CLUSTER, 'check_fails'), lease_seconds=60)
+    assert await lease.acquire(10) == (SLOT_WON, None)
+
+    assert await lease.is_held() is False
+    assert lease.loss_reason == LOSS_UNCONFIRMED
+    # Not final: the next check asks again, and the lease may still be held, so it is released.
+    assert await lease.is_held() is False
+    await lease.release()
+    assert provider.calls['release'] == 1
+
+
+def test_slot_lease_stop_refreshing_without_a_refresher_does_nothing():
+    lease = SlotLease(make_election(ScriptedElection()), scope=task_scope(CLUSTER, 'never_refreshed'), lease_seconds=60)
+
+    lease.stop_refreshing()
+
+    assert lease.loss_reason is None
+
+
+async def test_slot_lease_refresher_error_is_logged_not_left_on_the_task(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock, refresh=(False,))
+    lease = SlotLease(
+        make_election(provider, logs), scope=task_scope(CLUSTER, 'refresher_error'), lease_seconds=60, clock=clock
+    )
+    assert await lease.acquire(10) == (SLOT_WON, None)
+    refreshers: list[asyncio.Task] = []
+
+    async def failing_report(reason: str) -> None:
+        raise RuntimeError('log sink is gone')
+
+    async def scenario() -> None:
+        lease.start_refreshing(failing_report)
+        refreshers.append(lease._refresher)  # type: ignore[arg-type]
+        await clock.sleep(30)
+        await lease.release()
+
+    await run_until(clock, scenario(), NOW + 35)
+
+    [failed] = logs.named('periodic_lease_refresh_failed')
+    assert failed['scope'] == task_scope(CLUSTER, 'refresher_error')
+    assert failed['log_level'] == 'error'
+    assert refreshers[0].done() and refreshers[0].exception() is None
+    assert provider.calls['release'] == 0
+
+
 async def test_slot_lease_refresh_failure_reason_unconfirmed_still_releases(logs):
     clock = VirtualClock(NOW)
     provider = ScriptedElection(clock, refresh=(ConnectionError('election service unreachable'),))
@@ -716,6 +888,28 @@ async def test_on_skip_hook_gets_every_non_won_outcome(logs):
     )
 
     assert seen == [SLOT_LATE, SLOT_HELD_ELSEWHERE, SLOT_ELECTION_FAILED]
+
+
+async def test_failing_on_skip_hook_is_logged_and_the_loop_goes_on(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock, acquire=(False, False))
+
+    def failing_hook(outcome: str) -> None:
+        raise ValueError('footprint executor is gone')
+
+    task = make_task('failing_hook', sleeping_body(clock, 1, []), on_skip=failing_hook)
+
+    await run_until(
+        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 35
+    )
+
+    assert slots('failing_hook', SLOT_HELD_ELSEWHERE) == 2
+    lines = logs.named('periodic_skip_hook_failed')
+    assert [(line['slot'], line['outcome'], line['log_level']) for line in lines] == [
+        (SLOT, SLOT_HELD_ELSEWHERE, 'error'),
+        (SLOT + 30, SLOT_HELD_ELSEWHERE, 'error'),
+    ]
+    assert len(logs.named('periodic_slot_skipped')) == 2
 
 
 def test_cluster_task_definition_carries_name_schedule_and_lease():
@@ -890,3 +1084,16 @@ def test_thread_fence_that_gets_no_answer_in_time_reads_as_unconfirmed(monkeypat
 
         assert fence.is_held() is False
         assert fence.loss_reason == LOSS_UNCONFIRMED
+
+        # The loop is free again; give the next check time to answer. The lease
+        # was never acquired, so the provider answers that another token holds it.
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
+        fence._wait_seconds = 5.0
+        assert fence.is_held() is False
+        assert fence.loss_reason == LOSS_TAKEN_OVER
+
+        # A later check with no answer does not hide the confirmed takeover.
+        fence._wait_seconds = 0.01
+        loop.call_soon_threadsafe(time.sleep, 0.2)
+        assert fence.is_held() is False
+        assert fence.loss_reason == LOSS_TAKEN_OVER

@@ -431,8 +431,8 @@ class ThreadFence:
         self._lease = lease
         self._loop = loop
         self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
-        # Set when a check got no answer; the lease's own reason covers every other loss.
-        self._no_answer_reason: str | None = None
+        # True when the last check got no answer; the lease's own reason covers every other loss.
+        self._last_check_unanswered = False
 
     @property
     def token(self) -> str:
@@ -441,10 +441,17 @@ class ThreadFence:
 
     @property
     def loss_reason(self) -> str | None:
-        """Why the last check read as not held: :data:`LOSS_TAKEN_OVER` or :data:`LOSS_UNCONFIRMED`; ``None`` before."""
-        if self._no_answer_reason is not None:
-            return self._no_answer_reason
-        return self._lease.loss_reason
+        """Why a check read as not held: :data:`LOSS_TAKEN_OVER` or :data:`LOSS_UNCONFIRMED`; ``None`` before.
+
+        A takeover the provider confirmed wins over a check that got no
+        answer, whichever came last.
+        """
+        lease_reason = self._lease.loss_reason
+        if lease_reason == LOSS_TAKEN_OVER:
+            return LOSS_TAKEN_OVER
+        if self._last_check_unanswered:
+            return LOSS_UNCONFIRMED
+        return lease_reason
 
     def is_held(self) -> bool:
         """True while the provider confirms the slot's lease (blocking; never call it on ``loop``'s thread)."""
@@ -459,13 +466,15 @@ class ThreadFence:
             check.close()
             return self._no_answer()
         try:
-            return future.result(timeout=self._wait_seconds)
+            held = future.result(timeout=self._wait_seconds)
         except (TimeoutError, concurrent.futures.CancelledError):
             future.cancel()
             return self._no_answer()
+        self._last_check_unanswered = False
+        return held
 
     def _no_answer(self) -> bool:
-        self._no_answer_reason = LOSS_UNCONFIRMED
+        self._last_check_unanswered = True
         return False
 
 
