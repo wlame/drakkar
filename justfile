@@ -201,8 +201,8 @@ release-notes version:
 drakkar-ui *args:
     uv run drakkar-ui {{ args }}
 
-# Start the integration environment; provider: filesystem, postgres, redis or consul (just integration-up provider=consul)
-integration-up provider='filesystem':
+# Start the integration environment; provider: filesystem, postgres, redis or consul; profile: full or quick (just integration-up provider=consul profile=quick)
+integration-up provider='filesystem' profile='full':
     #!/usr/bin/env bash
     set -euo pipefail
     # The main cluster's registry and archive-election provider; read by
@@ -215,6 +215,17 @@ integration-up provider='filesystem':
         *) echo "unknown provider '$provider': expected filesystem, postgres, redis or consul" >&2; exit 2 ;;
     esac
     export HARNESS_PROVIDER="$provider"
+    # The profile sets the size of the run; read by docker-compose.yml. A
+    # value already in the caller's environment wins (CI sets a small total).
+    profile="{{ profile }}"
+    profile="${profile#profile=}"
+    case "$profile" in
+        full)  profile_total=5000; profile_scale=1.0 ;;
+        quick) profile_total=1000; profile_scale=0.2 ;;
+        *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
+    esac
+    export TOTAL_MESSAGES="${TOTAL_MESSAGES:-$profile_total}"
+    export REPEAT_SCALE="${REPEAT_SCALE:-$profile_scale}"
     # A non-default interpreter image means a release candidate, which means no
     # confluent-kafka wheel: the service images compile it from source and need
     # librdkafka headers newer than any distro package. Build that base once

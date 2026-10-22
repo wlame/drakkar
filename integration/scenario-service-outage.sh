@@ -27,8 +27,7 @@
 # Not applicable with the filesystem provider: it has no service to pause.
 #
 # Usage: HARNESS_PROVIDER=consul integration/scenario-service-outage.sh
-# Export TOTAL_MESSAGES when the producer ran with a value other than the
-# compose default (5000).
+# The message total is read from the running producer container.
 # ============================================================================
 
 # Some functions below run only through trap or wait_until.
@@ -52,7 +51,8 @@ REGISTRY_LABELS="feature=\"registry\",provider=\"${HARNESS_PROVIDER}\""
 BREAKER_OPEN_LIMIT_SECONDS=40
 OUTAGE_SECONDS=90
 RECOVERY_LIMIT_SECONDS=60
-TOTAL_MESSAGES="${TOTAL_MESSAGES:-5000}"
+TOTAL_MESSAGES=$(harness_total_messages) || fail "cannot read the message total from the producer"
+TASKS_METRIC=drakkar_executor_tasks_total
 # The paced producer phases take about 20 minutes for 5000 messages.
 PRODUCER_DONE_LIMIT_SECONDS=2700
 CONSUMER_GROUP=drakkar-integration
@@ -112,13 +112,30 @@ drained() {
     [ "$lag" = 0 ]
 }
 
+# 1st, 2nd, 3rd for the outage number $1.
+ordinal() {
+    case "$1" in
+        1) echo 1st ;;
+        2) echo 2nd ;;
+        3) echo 3rd ;;
+        *) echo "${1}th" ;;
+    esac
+}
+
+# True when the counter reading $2 is larger than the reading $1; false when
+# either reading could not be taken.
+#   tasks_grew <before> <after>
+tasks_grew() {
+    python3 -c 'import sys; sys.exit(0 if all(a.replace(".","",1).isdigit() for a in sys.argv[1:]) and float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$1" "$2"
+}
+
 # One outage: pause the service, see the breaker open, unpause, see the
 # breaker close and the peers online, and check that no worker restarted.
 # Appends "<opened>s/<recovered>s" for the verdict to OUTAGE_TIMINGS.
 #   pause_and_recover <outage number>
 OUTAGE_TIMINGS=""
 pause_and_recover() {
-    local outage=$1 before after paused_at opened_after recovered_after
+    local outage=$1 before after tasks_before tasks_after paused_at opened_after recovered_after
 
     breaker_is 0 || fail "outage ${outage}: the registry breaker is not closed before the pause (value: $(metric "$WORKER_1_METRICS_PORT" "$BREAKER_METRIC" "$REGISTRY_LABELS"))"
     peers_online || fail "outage ${outage}: worker-1 does not list worker-2 and worker-3 online before the pause"
@@ -126,6 +143,7 @@ pause_and_recover() {
     ok "outage ${outage}: breaker closed, worker-2 and worker-3 online"
 
     log "outage ${outage}: pausing ${PAUSED_SERVICE}"
+    tasks_before=$(metric_sum "$WORKER_1_METRICS_PORT" "$TASKS_METRIC")
     "${COMPOSE[@]}" pause "$PAUSED_SERVICE"
     is_paused=true
     paused_at=$SECONDS
@@ -136,6 +154,10 @@ pause_and_recover() {
     ok "outage ${outage}: registry breaker open after ${opened_after}s"
 
     sleep_until_elapsed "$paused_at" "$OUTAGE_SECONDS"
+    tasks_after=$(metric_sum "$WORKER_1_METRICS_PORT" "$TASKS_METRIC")
+    tasks_grew "$tasks_before" "$tasks_after" \
+        || fail "the pipeline did not process tasks during the $(ordinal "$outage") outage (${TASKS_METRIC}: ${tasks_before} before, ${tasks_after} after)"
+    ok "outage ${outage}: worker-1 processed $(python3 -c 'import sys; print(int(float(sys.argv[2]) - float(sys.argv[1])))' "$tasks_before" "$tasks_after") tasks during the pause"
     log "outage ${outage}: unpausing ${PAUSED_SERVICE} after $((SECONDS - paused_at))s"
     "${COMPOSE[@]}" unpause "$PAUSED_SERVICE"
     is_paused=false

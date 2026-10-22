@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Integration harness profiles.** `just integration-up profile=quick` runs
+  a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
+  `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario
+  scripts read the message total from the running producer.
+
 - **`history.archive.pass_interval_seconds`.** At least `10` starts archive
   passes on a timer of their own, so archiving does not wait for a rotation.
   `0` (default) keeps one pass after each rotation.

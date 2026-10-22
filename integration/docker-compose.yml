@@ -514,6 +514,9 @@ services:
       # job verifies delivery end to end and does not need 5000 messages
       # to do it. Request ids are 1..TOTAL_MESSAGES either way.
       TOTAL_MESSAGES: "${TOTAL_MESSAGES:-5000}"
+      # Scales both ranges of the per-message repeat count (see just
+      # integration-up profile=quick).
+      REPEAT_SCALE: "${REPEAT_SCALE:-1.0}"
       # Mirror ~1% of generated messages to the HTTP-only worker so its
       # search-results-http topic gets a trickle of the same requests the
       # Kafka path processes (read by the producer in a later task).

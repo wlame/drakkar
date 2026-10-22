@@ -141,6 +141,43 @@ metric_equals() {
     python3 -c 'import sys; sys.exit(0 if sys.argv[1] not in ("absent", "unreachable") and float(sys.argv[1]) == float(sys.argv[2]) else 1)' "$value" "$4"
 }
 
+# The sum of every series of the counter $2 on the metrics page of host
+# port $1 (a counter may carry labels). Prints `unreachable` when the page
+# could not be read, 0 when no series exists yet.
+#   metric_sum <port> <name>
+metric_sum() {
+    local page
+    page=$(curl -sf --connect-timeout 2 --max-time 3 "http://localhost:$1/metrics") || { echo unreachable; return 0; }
+    METRIC_NAME="$2" python3 -c '
+import os, re, sys
+SAMPLE = re.compile(r"^(\w+)(?:\{.*\})?\s+(\S+)")
+total = 0.0
+for line in sys.stdin:
+    match = SAMPLE.match(line)
+    if match and match.group(1) == os.environ["METRIC_NAME"]:
+        total += float(match.group(2))
+print(total)
+' <<<"$page"
+}
+
+# The number of messages the running producer was started with. Reading it
+# from the container keeps every check in step with the profile the harness
+# was brought up with.
+harness_total_messages() {
+    local id total
+    id=$(container_id producer)
+    if [ -z "$id" ] || [ "$(docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null)" != true ]; then
+        echo "the producer container is not running; start the harness with just integration-up" >&2
+        return 1
+    fi
+    total=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$id" | sed -n 's/^TOTAL_MESSAGES=//p')
+    if [ -z "$total" ]; then
+        echo "the producer container has no TOTAL_MESSAGES in its environment" >&2
+        return 1
+    fi
+    echo "$total"
+}
+
 # The container id of compose service $1.
 container_id() {
     "${COMPOSE[@]}" ps -aq "$1"
