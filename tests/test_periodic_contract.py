@@ -23,6 +23,7 @@ from drakkar.periodic import (
     RULE_ONE_SCHEDULE,
     RULE_SCOPE,
     RULE_WORKER_INTERVAL,
+    STARTUP_NO_SHARED_FOLDER,
     PeriodicRuleError,
     periodic,
 )
@@ -58,6 +59,7 @@ MESSAGE_CONSTANTS = {
     'rule_cluster_interval': RULE_CLUSTER_INTERVAL,
     'rule_lease_scope': RULE_LEASE_SCOPE,
     'rule_lease_bounds': RULE_LEASE_BOUNDS,
+    'startup_no_shared_folder': STARTUP_NO_SHARED_FOLDER,
 }
 
 
