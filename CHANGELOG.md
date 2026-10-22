@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`history.archive.pass_interval_seconds`.** At least `10` starts archive
+  passes on a timer of their own, so archiving does not wait for a rotation.
+  `0` (default) keeps one pass after each rotation.
+
 - **Provider framework.** The worker registry and the archive election share
   one set of rules for their calls to a provider. The blocks
   `fleet.registry.resilience` and `history.archive.election.resilience` set

@@ -290,6 +290,10 @@ class EventRecorder(EventWriter):
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
         self._rotation_task: asyncio.Task | None = None
+        self._pass_timer_task: asyncio.Task | None = None
+        # The sleep of the rotation loop and the pass timer; tests replace it so no
+        # test waits for a real interval.
+        self._sleep = asyncio.sleep
         self._state_task: asyncio.Task | None = None
         self._host_sample_task: asyncio.Task | None = None
         # Own files closed but not yet in the history folder. ``_backlog``
@@ -554,6 +558,9 @@ class EventRecorder(EventWriter):
                 self._watch_background_task(self._flush_task, 'flush')
             self._rotation_task = asyncio.create_task(self._rotation_loop())
             self._watch_background_task(self._rotation_task, 'rotation')
+            if self._runs_pass_timer():
+                self._pass_timer_task = asyncio.create_task(self._pass_timer_loop())
+                self._watch_background_task(self._pass_timer_task, 'archive_pass_timer')
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
                 self._watch_background_task(self._state_task, 'state_sync')
@@ -871,6 +878,7 @@ class EventRecorder(EventWriter):
         for task in (
             self._flush_task,
             self._rotation_task,
+            self._pass_timer_task,
             self._state_task,
             self._host_sample_task,
             self._leftover_task,
@@ -1340,7 +1348,7 @@ class EventRecorder(EventWriter):
 
     async def _rotation_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._store.rotation_interval_hours * 3600)
+            await self._sleep(self._store.rotation_interval_hours * 3600)
             # Same guard as ``_flush_loop``: one failed rotation must cost a
             # single interval, not every rotation from here on.
             try:
@@ -1358,6 +1366,17 @@ class EventRecorder(EventWriter):
             # Whatever the rotation did, files sealed earlier still wait for
             # their move, and due windows still wait for the archive pass.
             self._start_sealing()
+            if not self._runs_pass_timer():
+                self._start_archive_pass()
+
+    def _runs_pass_timer(self) -> bool:
+        """Whether archive passes start on their own timer instead of after each rotation."""
+        return self._archives() and self._archive.pass_interval_seconds > 0
+
+    async def _pass_timer_loop(self) -> None:
+        """Start an archive pass every ``pass_interval_seconds``; a pass still running is not doubled."""
+        while self._running:
+            await self._sleep(self._archive.pass_interval_seconds)
             self._start_archive_pass()
 
     async def _archive_pass(self) -> None:

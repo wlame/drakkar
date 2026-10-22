@@ -40,7 +40,7 @@ def _load(case: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Drakka
 
 
 def test_fixture_case_names_are_unique():
-    for section in ('moved_keys', 'summary', 'validation'):
+    for section in ('moved_keys', 'summary', 'load_values', 'validation'):
         names = _case_ids(FIXTURE[section])
         assert len(names) == len(set(names)), section
 
@@ -58,6 +58,16 @@ def test_summary_case_matches_the_contract_line(case, tmp_path, monkeypatch):
     config = _load(case, tmp_path, monkeypatch)
 
     assert config.config_summary(worker_id=case['worker'], cluster_name=case['cluster']) == case['line']
+
+
+@pytest.mark.parametrize('case', FIXTURE['load_values'], ids=_case_ids(FIXTURE['load_values']))
+def test_load_value_case_loads_with_the_contract_value(case, tmp_path, monkeypatch):
+    config = _load(case, tmp_path, monkeypatch)
+
+    value = config
+    for part in case['path'].split('.'):
+        value = getattr(value, part)
+    assert value == case['value']
 
 
 @pytest.mark.parametrize('case', FIXTURE['validation'], ids=_case_ids(FIXTURE['validation']))

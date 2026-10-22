@@ -22,6 +22,11 @@ DEFAULT_ARCHIVE_RETENTION_DAYS = 30
 # The consul election sets the TTL of the lease's session to half of the lease, and Consul accepts a
 # TTL of 24 hours at most, so a lease could be twice as long. One day is the documented limit.
 CONSUL_MAX_LOCK_STALE_SECONDS = 86_400
+MIN_PASS_INTERVAL_SECONDS = 10
+PASS_INTERVAL_MESSAGE = (
+    'history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least '
+    f'{MIN_PASS_INTERVAL_SECONDS}'
+)
 
 
 class StorageConfig(BaseModel):
@@ -130,10 +135,26 @@ class HistoryArchiveConfig(BaseModel):
             f'of every election provider; with consul it must be <= {CONSUL_MAX_LOCK_STALE_SECONDS}.'
         ),
     )
+    pass_interval_seconds: int = Field(
+        default=0,
+        description=(
+            'How often an archive pass starts on its own timer. 0 = one pass after each recorder '
+            f'rotation. At least {MIN_PASS_INTERVAL_SECONDS} = a pass every that many seconds, '
+            'whatever the rotation does; sealing stays with the rotation. A pass never starts '
+            'while another one still runs.'
+        ),
+    )
     election: ElectionConfig = Field(
         default_factory=ElectionConfig,
         description='How the one archiving worker of a cluster is chosen.',
     )
+
+    @model_validator(mode='after')
+    def _validate_pass_interval(self) -> 'HistoryArchiveConfig':
+        """Refuse an interval too short to be useful: 1 to 9 seconds and negative values."""
+        if 0 < self.pass_interval_seconds < MIN_PASS_INTERVAL_SECONDS or self.pass_interval_seconds < 0:
+            raise ValueError(PASS_INTERVAL_MESSAGE)
+        return self
 
     @model_validator(mode='after')
     def _validate_retention_vs_due(self) -> 'HistoryArchiveConfig':

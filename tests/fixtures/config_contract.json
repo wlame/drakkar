@@ -985,6 +985,48 @@
         }
       },
       "message": "connections.postgres.main.schema 'Drakkar' must be a lower-case identifier ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "archive_pass_interval_too_short",
+      "yaml": {
+        "history": {
+          "archive": {
+            "pass_interval_seconds": 5
+          }
+        }
+      },
+      "message": "history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least 10"
+    },
+    {
+      "name": "archive_pass_interval_negative",
+      "yaml": {
+        "history": {
+          "archive": {
+            "pass_interval_seconds": -1
+          }
+        }
+      },
+      "message": "history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least 10"
+    }
+  ],
+  "load_values": [
+    {
+      "name": "archive_pass_interval_default_zero",
+      "yaml": {},
+      "path": "history.archive.pass_interval_seconds",
+      "value": 0
+    },
+    {
+      "name": "archive_pass_interval_twenty_loads",
+      "yaml": {
+        "history": {
+          "archive": {
+            "pass_interval_seconds": 20
+          }
+        }
+      },
+      "path": "history.archive.pass_interval_seconds",
+      "value": 20
     }
   ]
 }

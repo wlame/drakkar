@@ -2099,6 +2099,16 @@
           "group": "history"
         },
         {
+          "path": "history.archive.pass_interval_seconds",
+          "env": "DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS",
+          "description": "How often an archive pass starts on its own timer.",
+          "full_description": "How often an archive pass starts on its own timer. 0 = one pass after each recorder rotation. At least 10 = a pass every that many seconds, whatever the rotation does; sealing stays with the rotation. A pass never starts while another one still runs.",
+          "type": "integer",
+          "default": 0,
+          "secret": false,
+          "group": "history"
+        },
+        {
           "path": "history.archive.election.provider",
           "env": "DK_HISTORY__ARCHIVE__ELECTION__PROVIDER",
           "description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by history.archive.election.connection), redis (a key on the Redis server named by history.archive.election.connection), consul (a key of the Consul agent named by history.archive.election.connection, held by a session), or the name of a provider plugin.",

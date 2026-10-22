@@ -107,6 +107,7 @@ These keys are new. Their defaults work for most deployments.
 | `shared.dir` | `''` | The folder all workers see. `''` = `storage.dir`. |
 | `history.archive.due_after_hours` | `48` | A window is archived this many hours after it ends. |
 | `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. |
+| `history.archive.pass_interval_seconds` | `0` | `0` = an archive pass after each rotation. At least `10` = a pass every that many seconds. |
 | `history.merged_retention_days` | `32` | UI merge results older than this are deleted. `0` = never. |
 | `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `static`, `none`, or a plugin. Needs `ui.enabled`. |
 | `fleet.registry.heartbeat_seconds` | `10` | How often a worker publishes its card. |

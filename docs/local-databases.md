@@ -566,6 +566,26 @@ With `ui.recorder.rotation_interval_hours: 1` and `history.archive`
   a `.db.gz` file, and the worker logs a `recorder_archives_unbounded`
   warning at startup saying so.
 
+### Passes on their own timer
+
+By default an archive pass starts after each rotation, so the pass cadence
+follows `ui.recorder.rotation_interval_hours`. Set
+`history.archive.pass_interval_seconds` to a value of at least `10` to start
+a pass every that many seconds instead. The rotation then only rotates and
+seals; it starts no pass. `0` (the default) keeps one pass after each
+rotation. Values from 1 to 9 and negative values fail the load. With
+`history.archive.enabled: false` no timer runs.
+
+A tick that comes while a pass still runs starts nothing; the next tick
+after the pass ends starts one. Set the key when archiving must not wait for
+a rotation, for example when workers restart more often than they rotate.
+
+```yaml
+history:
+  archive:
+    pass_interval_seconds: 300   # a pass every 5 minutes; 0 = after each rotation
+```
+
 Steady state: up to three windows' worth of sealed `.db` files per worker in
 the history folder at any time — the window currently being written plus
 the two most recently closed ones, until the oldest of those finishes

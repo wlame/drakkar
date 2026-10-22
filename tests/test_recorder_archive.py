@@ -1068,6 +1068,125 @@ async def test_a_blocked_archive_pass_never_holds_up_rotation(tmp_path, monkeypa
         await rec.stop()
 
 
+class _FakeClock:
+    """A replacement for the recorder's sleep: each sleep waits for a tick the test gives.
+
+    Sleeps are keyed by their length, so the rotation loop and the pass timer
+    can be driven apart. ``entered`` counts the sleeps begun, which tells a
+    test that the loop has handled the last tick and is waiting again.
+    """
+
+    def __init__(self) -> None:
+        self._gates: dict[float, asyncio.Queue] = {}
+        self.entered: dict[float, int] = {}
+
+    async def sleep(self, seconds: float) -> None:
+        self.entered[seconds] = self.entered.get(seconds, 0) + 1
+        await self._gates.setdefault(seconds, asyncio.Queue()).get()
+
+    async def tick(self, seconds: float) -> None:
+        """Wake one sleep of this length and wait until its loop sleeps again."""
+        await wait_for(lambda: self.entered.get(seconds, 0) >= 1)
+        before = self.entered[seconds]
+        self._gates.setdefault(seconds, asyncio.Queue()).put_nowait(None)
+        await wait_for(lambda: self.entered[seconds] > before)
+
+
+def _ticking_recorder(tmp_path, monkeypatch, *, pass_interval_seconds: int, enabled: bool = True):
+    """A recorder driven by a fake clock, with rotation, sealing and the pass start counted."""
+    clock = _FakeClock()
+    rec = _make_recorder(
+        tmp_path,
+        archive=HistoryArchiveConfig(enabled=enabled, pass_interval_seconds=pass_interval_seconds),
+    )
+    rec._sleep = clock.sleep
+    counts = {'rotations': 0, 'sealing': 0, 'passes': 0}
+
+    async def rotate() -> None:
+        counts['rotations'] += 1
+
+    monkeypatch.setattr(rec, '_rotate', rotate)
+    monkeypatch.setattr(rec, '_start_sealing', lambda: counts.__setitem__('sealing', counts['sealing'] + 1))
+    monkeypatch.setattr(rec, '_start_archive_pass', lambda: counts.__setitem__('passes', counts['passes'] + 1))
+    return rec, clock, counts
+
+
+def _rotation_seconds(rec) -> float:
+    return rec._store.rotation_interval_hours * 3600
+
+
+async def test_pass_interval_zero_starts_a_pass_after_each_rotation(tmp_path, monkeypatch):
+    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=0)
+    await rec.start()
+    try:
+        await clock.tick(_rotation_seconds(rec))
+
+        assert counts == {'rotations': 1, 'sealing': 1, 'passes': 1}
+        assert rec._pass_timer_task is None
+    finally:
+        await rec.stop()
+
+
+async def test_pass_interval_starts_passes_on_its_own_timer(tmp_path, monkeypatch):
+    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=20)
+    await rec.start()
+    try:
+        await clock.tick(20)
+        await clock.tick(20)
+        assert counts['passes'] == 2
+        assert counts['rotations'] == 0
+
+        await clock.tick(_rotation_seconds(rec))
+
+        # The rotation still rotates and seals; it starts no pass.
+        assert counts == {'rotations': 1, 'sealing': 1, 'passes': 2}
+    finally:
+        await rec.stop()
+
+
+async def test_pass_interval_tick_during_a_running_pass_starts_no_second_pass(tmp_path, monkeypatch):
+    unblock = threading.Event()
+    passes = 0
+
+    def blocked_pass(*args, **kwargs) -> None:
+        nonlocal passes
+        passes += 1
+        unblock.wait(10)
+
+    monkeypatch.setattr(core_mod, 'run_archive_pass', blocked_pass)
+    clock = _FakeClock()
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(pass_interval_seconds=20))
+    rec._sleep = clock.sleep
+    await rec.start()
+    try:
+        await clock.tick(20)
+        await wait_for(lambda: passes == 1)
+        await clock.tick(20)
+        await clock.tick(20)
+        assert passes == 1
+
+        unblock.set()
+        await wait_for(lambda: rec._archive_task.done())
+        await clock.tick(20)
+        await wait_for(lambda: passes == 2)
+    finally:
+        unblock.set()
+        await rec.stop()
+
+
+async def test_pass_interval_with_archive_disabled_runs_no_timer(tmp_path, monkeypatch):
+    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=20, enabled=False)
+    await rec.start()
+    try:
+        await clock.tick(_rotation_seconds(rec))
+
+        assert rec._pass_timer_task is None
+        assert 20 not in clock.entered
+        assert counts['passes'] == 1
+    finally:
+        await rec.stop()
+
+
 async def test_a_recorder_stop_asks_a_running_archive_pass_to_end(tmp_path, monkeypatch):
     started = threading.Event()
     seen: dict = {}
