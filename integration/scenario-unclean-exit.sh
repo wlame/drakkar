@@ -338,17 +338,20 @@ log_has() {
         | python3 -c '
 import json, sys
 wanted = dict(pair.split("=", 1) for pair in sys.argv[1:])
+found = False
+# Reads to the end even after a match: an early exit breaks the pipe of
+# docker compose logs, which then exits 255 and fails the pipeline.
 for line in sys.stdin:
     start = line.find("{")
-    if start < 0:
+    if found or start < 0:
         continue
     try:
         record = json.loads(line[start:])
     except ValueError:
         continue
     if isinstance(record, dict) and all(str(record.get(key)) == value for key, value in wanted.items()):
-        sys.exit(0)
-sys.exit(1)
+        found = True
+sys.exit(0 if found else 1)
 ' "$@"
 }
 
