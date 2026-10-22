@@ -130,9 +130,9 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     """The options mapping the configured election provider's factory receives.
 
     The built-ins take their settings from their own config keys; any other
-    name is a plugin and gets ``history.archive.election.plugin_options``.
+    name is a plugin and gets ``periodic.election.plugin_options``.
     """
-    election = config.history.archive.election
+    election = config.periodic.election
     builders = {
         'filesystem': dict,
         'postgres': lambda: _connection_only(election),
@@ -553,12 +553,12 @@ class AppLifecycle:
         archive = app._config.history.archive
         if not archive.enabled:
             return {}
-        election = archive.election
+        election = app._config.periodic.election
         factory = resolve_factory(
             ELECTION_ENTRY_POINT_GROUP,
             BUILTIN_ELECTIONS,
             election.provider,
-            config_path='history.archive.election.provider',
+            config_path='periodic.election.provider',
         )
         options = election_provider_options(app._config)
         return {

@@ -117,6 +117,7 @@ class TestShape:
             'storage',
             'shared',
             'history',
+            'periodic',
             'fleet',
             'connections',
         ]
@@ -268,14 +269,14 @@ class TestMasking:
         config = DrakkarConfig(
             sources={'kafka': {'enabled': True}},
             fleet={'registry': {'plugin_options': options}},
-            history={'archive': {'election': {'plugin_options': options}}},
+            periodic={'election': {'plugin_options': options}},
         )
         config.executor.env = dict(options)
         body = await get_config_reference(config)
         env_value = entries_by_path(body, 'executor.env')[0]['value']
 
         assert env_value == {'token': '***', 'url': 'redis://***:***@h/0'}
-        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+        for path in ('fleet.registry.plugin_options', 'periodic.election.plugin_options'):
             assert entries_by_path(body, path)[0]['value'] == env_value
         assert ':pw@' not in body_as_text(body)
 
@@ -291,11 +292,11 @@ class TestMasking:
         config = DrakkarConfig(
             sources={'kafka': {'enabled': True}},
             fleet={'registry': {'plugin_options': options}},
-            history={'archive': {'election': {'plugin_options': options}}},
+            periodic={'election': {'plugin_options': options}},
         )
         body = await get_config_reference(config)
 
-        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+        for path in ('fleet.registry.plugin_options', 'periodic.election.plugin_options'):
             assert entries_by_path(body, path)[0]['value'] == {
                 'pool': {'password': '***', 'user': 'svc', 'size': 4},
                 # Everything below a secret-looking key is masked, whatever its own key.
@@ -321,11 +322,11 @@ class TestMasking:
         config = DrakkarConfig(
             sources={'kafka': {'enabled': True}},
             fleet={'registry': {'plugin_options': options}},
-            history={'archive': {'election': {'plugin_options': options}}},
+            periodic={'election': {'plugin_options': options}},
         )
         body = await get_config_reference(config)
 
-        for path in ('fleet.registry.plugin_options', 'history.archive.election.plugin_options'):
+        for path in ('fleet.registry.plugin_options', 'periodic.election.plugin_options'):
             assert entries_by_path(body, path)[0]['value'] == {
                 'token': '***',
                 'enabled': True,

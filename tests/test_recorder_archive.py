@@ -63,7 +63,7 @@ async def make_lease(
     cluster: str = CLUSTER,
     *,
     worker: str = 'worker-1',
-    lease_seconds: float = HistoryArchiveConfig().lock_stale_seconds,
+    lease_seconds: float = HistoryArchiveConfig().lease_seconds,
 ) -> ElectionLease:
     """A lease on the filesystem election of ``cluster``, its calls run on the test's event loop."""
     election = FilesystemElection()
@@ -243,7 +243,7 @@ def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
 async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None):
     """Run one pass in a thread, as the recorder does, so its lease can call the provider on this loop."""
     archive = cfg or _make_config()
-    lease = await make_lease(tmp_path, cluster, worker=worker, lease_seconds=archive.lock_stale_seconds)
+    lease = await make_lease(tmp_path, cluster, worker=worker, lease_seconds=archive.lease_seconds)
     await asyncio.to_thread(
         functools.partial(
             run_archive_pass,
@@ -485,7 +485,7 @@ async def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path
     source = make_sealed_db(folder, 'worker-1', due_start(time.time()))
     lock = folder / LOCK_NAME
     lock.write_text(json.dumps({'acquired_at': '', 'instance': 'dead', 'token': 'dead', 'worker': 'worker-2'}))
-    _age(lock, HistoryArchiveConfig().lock_stale_seconds + 60)
+    _age(lock, HistoryArchiveConfig().lease_seconds + 60)
 
     await _run(tmp_path)
 
@@ -729,27 +729,27 @@ WORK_FILES = [
 
 
 @pytest.mark.parametrize('name', WORK_FILES)
-async def test_the_sweep_removes_a_work_file_older_than_the_stale_age(tmp_path, name):
+async def test_the_sweep_removes_a_work_file_older_than_the_sweep_age(tmp_path, name):
     folder = history_folder(tmp_path)
     work_file = folder / name
     work_file.write_bytes(b'left by a dead pass')
     _age(work_file, 101)
 
     with capture_logs() as cap:
-        await _run(tmp_path, _make_config(lock_stale_seconds=100))
+        await _run(tmp_path, _make_config(sweep_after_seconds=100))
 
     assert not work_file.exists()
     assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [name]
 
 
 @pytest.mark.parametrize('name', WORK_FILES)
-async def test_the_sweep_keeps_a_work_file_younger_than_the_stale_age(tmp_path, name):
+async def test_the_sweep_keeps_a_work_file_younger_than_the_sweep_age(tmp_path, name):
     folder = history_folder(tmp_path)
     work_file = folder / name
     work_file.write_bytes(b'still being written')
     _age(work_file, 50)
 
-    await _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after_seconds=100))
 
     assert work_file.exists()
 
@@ -760,7 +760,7 @@ async def test_the_sweep_removes_an_old_meta_file_whose_database_is_missing(tmp_
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 101)
 
-    await _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after_seconds=100))
 
     assert not orphan.exists()
 
@@ -772,7 +772,7 @@ async def test_the_sweep_keeps_a_fresh_meta_file_whose_database_is_still_on_its_
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 50)
 
-    await _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after_seconds=100))
 
     assert orphan.exists()
 
@@ -782,7 +782,7 @@ async def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
     source = make_sealed_db(folder, 'worker-1', time.time() - HOUR)
     _age(Path(meta_path(source)), 101)
 
-    await _run(tmp_path, _make_config(lock_stale_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after_seconds=100))
 
     assert Path(meta_path(source)).exists()
 
@@ -943,7 +943,7 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None, **e
 
 
 async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_path, monkeypatch):
-    archive = HistoryArchiveConfig(lock_stale_seconds=900)
+    archive = HistoryArchiveConfig(lease_seconds=900)
     rec = _make_recorder(tmp_path, archive=archive)
     seen: dict = {}
 
@@ -1092,13 +1092,10 @@ class _FakeClock:
         await wait_for(lambda: self.entered[seconds] > before)
 
 
-def _ticking_recorder(tmp_path, monkeypatch, *, pass_interval_seconds: int, enabled: bool = True):
+def _ticking_recorder(tmp_path, monkeypatch):
     """A recorder driven by a fake clock, with rotation, sealing and the pass start counted."""
     clock = _FakeClock()
-    rec = _make_recorder(
-        tmp_path,
-        archive=HistoryArchiveConfig(enabled=enabled, pass_interval_seconds=pass_interval_seconds),
-    )
+    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=True))
     rec._sleep = clock.sleep
     counts = {'rotations': 0, 'sealing': 0, 'passes': 0}
 
@@ -1115,74 +1112,13 @@ def _rotation_seconds(rec) -> float:
     return rec._store.rotation_interval_hours * 3600
 
 
-async def test_pass_interval_zero_starts_a_pass_after_each_rotation(tmp_path, monkeypatch):
-    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=0)
+async def test_each_rotation_seals_and_starts_an_archive_pass(tmp_path, monkeypatch):
+    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch)
     await rec.start()
     try:
         await clock.tick(_rotation_seconds(rec))
 
         assert counts == {'rotations': 1, 'sealing': 1, 'passes': 1}
-        assert rec._pass_timer_task is None
-    finally:
-        await rec.stop()
-
-
-async def test_pass_interval_starts_passes_on_its_own_timer(tmp_path, monkeypatch):
-    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=20)
-    await rec.start()
-    try:
-        await clock.tick(20)
-        await clock.tick(20)
-        assert counts['passes'] == 2
-        assert counts['rotations'] == 0
-
-        await clock.tick(_rotation_seconds(rec))
-
-        # The rotation still rotates and seals; it starts no pass.
-        assert counts == {'rotations': 1, 'sealing': 1, 'passes': 2}
-    finally:
-        await rec.stop()
-
-
-async def test_pass_interval_tick_during_a_running_pass_starts_no_second_pass(tmp_path, monkeypatch):
-    unblock = threading.Event()
-    passes = 0
-
-    def blocked_pass(*args, **kwargs) -> None:
-        nonlocal passes
-        passes += 1
-        unblock.wait(10)
-
-    monkeypatch.setattr(core_mod, 'run_archive_pass', blocked_pass)
-    clock = _FakeClock()
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(pass_interval_seconds=20))
-    rec._sleep = clock.sleep
-    await rec.start()
-    try:
-        await clock.tick(20)
-        await wait_for(lambda: passes == 1)
-        await clock.tick(20)
-        await clock.tick(20)
-        assert passes == 1
-
-        unblock.set()
-        await wait_for(lambda: rec._archive_task.done())
-        await clock.tick(20)
-        await wait_for(lambda: passes == 2)
-    finally:
-        unblock.set()
-        await rec.stop()
-
-
-async def test_pass_interval_with_archive_disabled_runs_no_timer(tmp_path, monkeypatch):
-    rec, clock, counts = _ticking_recorder(tmp_path, monkeypatch, pass_interval_seconds=20, enabled=False)
-    await rec.start()
-    try:
-        await clock.tick(_rotation_seconds(rec))
-
-        assert rec._pass_timer_task is None
-        assert 20 not in clock.entered
-        assert counts['passes'] == 1
     finally:
         await rec.stop()
 

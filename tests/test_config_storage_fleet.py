@@ -14,6 +14,7 @@ from drakkar.config import (
     FleetRegistryConfig,
     HistoryArchiveConfig,
     HistoryConfig,
+    PeriodicConfig,
     SharedConfig,
     StaticPeerConfig,
     StorageConfig,
@@ -51,7 +52,10 @@ def test_history_defaults():
     assert history.archive.window_hours == 24
     assert history.archive.due_after_hours == 48
     assert history.archive.retention_days == 30
-    assert history.archive.lock_stale_seconds == 7200
+    assert history.archive.interval is None
+    assert history.archive.cron is None
+    assert history.archive.lease_seconds == 60
+    assert history.archive.sweep_after_seconds == 7200
     assert history.merged_retention_days == 32
 
 
@@ -91,7 +95,7 @@ def test_consul_registry_service_name_must_not_be_empty():
 
 
 def test_election_defaults():
-    election = HistoryArchiveConfig().election
+    election = PeriodicConfig().election
 
     assert (election.provider, election.connection, election.resilience.retries, election.plugin_options) == (
         'filesystem',
@@ -176,9 +180,13 @@ def test_direct_construction_rejects_a_moved_key():
         _config(ui={'recorder': {'db_dir': '/data'}})
 
 
-def test_the_registry_timeout_key_is_the_last_moved_key():
-    assert MOVED_CONFIG_KEYS[-1].path == 'fleet.registry.timeout_seconds'
-    assert MOVED_CONFIG_KEYS[-1].line == ('fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds')
+def test_the_archive_keys_are_the_last_moved_keys():
+    assert [key.path for key in MOVED_CONFIG_KEYS[-4:]] == [
+        'fleet.registry.timeout_seconds',
+        'history.archive.election',
+        'history.archive.lock_stale_seconds',
+        'history.archive.pass_interval_seconds',
+    ]
 
 
 # --- derived values ------------------------------------------------------
@@ -239,7 +247,7 @@ def test_fleet_summary(sections, expected):
 )
 def test_election_summary_is_silent_for_the_filesystem_provider(provider, expected):
     config = _config(
-        history={'archive': {'election': {'provider': provider}}},
+        periodic={'election': {'provider': provider}},
         connections={'consul': {'main': {}}},
     )
 
@@ -259,7 +267,7 @@ def test_registry_and_election_load_when_the_named_connection_is_declared(provid
 
     config = _config(
         fleet={'registry': {'provider': provider, 'connection': 'cluster-a'}},
-        history={'archive': {'election': {'provider': provider, 'connection': 'cluster-a'}}},
+        periodic={'election': {'provider': provider, 'connection': 'cluster-a'}},
         connections=connections,
     )
 
@@ -274,9 +282,9 @@ def test_providers_that_use_no_connection_ignore_the_connection_name(provider):
 
 
 def test_election_plugin_provider_ignores_the_connection_name():
-    config = _config(history={'archive': {'election': {'provider': 'my-plugin', 'connection': 'not-declared'}}})
+    config = _config(periodic={'election': {'provider': 'my-plugin', 'connection': 'not-declared'}})
 
-    assert config.history.archive.election.connection == 'not-declared'
+    assert config.periodic.election.connection == 'not-declared'
 
 
 def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():
@@ -372,36 +380,32 @@ def test_consul_registry_in_catalog_mode_reports_the_mode_before_the_offline_cap
     assert 'must be <= 86400' not in text
 
 
-def test_consul_lock_stale_seconds_at_the_session_limit_loads():
+@pytest.mark.parametrize('provider', ['filesystem', 'consul', 'redis', 'postgres'])
+def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider):
     config = _config(
-        history={'archive': {'lock_stale_seconds': 86_400, 'election': {'provider': 'consul'}}},
-        connections={'consul': {'main': {}}},
+        history={'archive': {'lease_seconds': 86_400}},
+        periodic={'election': {'provider': provider}},
+        connections={
+            'consul': {'main': {}},
+            'redis': {'main': {}},
+            'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}},
+        },
     )
 
-    assert config.history.archive.lock_stale_seconds == 86_400
-
-
-@pytest.mark.parametrize('provider', ['filesystem', 'redis', 'postgres'])
-def test_lock_stale_seconds_over_the_consul_limit_loads_for_other_providers(provider):
-    config = _config(
-        history={'archive': {'lock_stale_seconds': 90_000, 'election': {'provider': provider}}},
-        connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
-    )
-
-    assert config.history.archive.lock_stale_seconds == 90_000
+    assert config.history.archive.lease_seconds == 86_400
 
 
 def test_resilience_blocks_load_from_env_names(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
     monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS', '2.5')
-    monkeypatch.setenv('DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__RETRIES', '0')
+    monkeypatch.setenv('DK_PERIODIC__ELECTION__RESILIENCE__RETRIES', '0')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
     config = load_config(None)
 
     assert config.fleet.registry.resilience.timeout_seconds == 2.5
-    assert config.history.archive.election.resilience.retries == 0
+    assert config.periodic.election.resilience.retries == 0
 
 
 # --- env names -----------------------------------------------------------

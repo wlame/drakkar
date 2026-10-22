@@ -49,7 +49,7 @@ INPUTS = EXAMPLE['inputs']
 REQUESTS = EXAMPLE['requests']
 FIRST, SECOND = INPUTS['sessions']['first'], INPUTS['sessions']['second']
 
-# The kit's lease argument is the configured lease (lock_stale_seconds): the session's TTL is half of it,
+# The kit's lease argument is the configured lease (lease_seconds): the session's TTL is half of it,
 # and the fake ends a session twice its TTL after the last renew, so a lease ends exactly at this age.
 LEASE_SECONDS = 600.0
 SESSION_TTL_SECONDS = 300

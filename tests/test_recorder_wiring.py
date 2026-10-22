@@ -71,7 +71,7 @@ async def test_the_recorder_runs_the_configured_election_with_its_options_resili
         'plugin_options': {'address': 'consul:8500'},
         'resilience': {'timeout_seconds': 1.5, 'retries': 0},
     }
-    app = _app(tmp_path, history={'archive': {'election': election_config}})
+    app = _app(tmp_path, periodic={'election': election_config})
     (tmp_path / 'storage').mkdir()
     started_ok = provider_calls.labels(feature='election', provider='example-election', op='start', outcome='ok')
     started_before = started_ok._value.get()

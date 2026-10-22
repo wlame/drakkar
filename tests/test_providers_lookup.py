@@ -11,7 +11,7 @@ from drakkar.providers import lookup
 from drakkar.providers.lookup import UnknownProviderError, resolve_factory
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ELECTION_ENTRY_POINT_GROUP
 
-ELECTION_PATH = 'history.archive.election.provider'
+ELECTION_PATH = 'periodic.election.provider'
 
 
 class _BrokenEntryPoint:
@@ -41,7 +41,7 @@ def test_resolve_factory_names_the_election_path(no_election_plugins):
 
     assert (
         str(raised.value)
-        == "history.archive.election.provider 'nope' is not known; known providers: consul, filesystem, postgres, redis"
+        == "periodic.election.provider 'nope' is not known; known providers: consul, filesystem, postgres, redis"
     )
 
 

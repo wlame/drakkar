@@ -73,7 +73,7 @@ class ElectionContext:
     ``shared_dir`` is the worker's shared folder (``shared.dir``); the
     ``filesystem`` provider keeps its locks in its history folders, others
     ignore it. ``options`` is the provider's own settings mapping (for a
-    plugin, ``history.archive.election.plugin_options``). ``connections``
+    plugin, ``periodic.election.plugin_options``). ``connections``
     resolves the worker's named shared connections; it is ``None`` when the
     election runs outside a worker, as in a test.
     """

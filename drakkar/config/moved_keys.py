@@ -61,6 +61,17 @@ MOVED_CONFIG_KEYS: tuple[MovedKey, ...] = (
         'fleet.registry.timeout_seconds',
         'fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds',
     ),
+    MovedKey('history.archive.election', 'history.archive.election -> periodic.election'),
+    MovedKey(
+        'history.archive.lock_stale_seconds',
+        'history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and '
+        'history.archive.sweep_after_seconds (the age of work files to sweep)',
+    ),
+    MovedKey(
+        'history.archive.pass_interval_seconds',
+        'history.archive.pass_interval_seconds -> history.archive.interval (a slot schedule; no pass after each '
+        'rotation)',
+    ),
 )
 
 MOVED_KEYS_HEADER = (

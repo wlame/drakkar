@@ -39,6 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValueError`) that names the method. `run_periodic_task` takes `interval=`
   or `cron=` as keywords. A worker cron task skips the fire times that pass
   during a run.
+- **The election moved to `periodic.election`, and the archive has a slot
+  schedule.** `history.archive.election` is now `periodic.election` (env
+  `DK_PERIODIC__ELECTION__*`). `history.archive.lock_stale_seconds` is
+  replaced by `history.archive.lease_seconds` (the lease, default 60, from 40
+  to 86400) and `history.archive.sweep_after_seconds` (the age of work files
+  to sweep, default 7200, at least 60). `history.archive.pass_interval_seconds`
+  is replaced by `history.archive.interval` (seconds, at least 30) or
+  `history.archive.cron` (five-field UTC cron); give at most one, and with
+  neither the archive slot comes every 3600 seconds. The old keys fail the
+  load with the moved-key message. The consul-only limit on the lease is gone:
+  the general bound of 86400 covers every provider. New section
+  `periodic.tasks.<name>` overrides `enabled`, `interval`, `cron` and
+  `lease_seconds` of a declared task; a name with a dot fails the load.
 
 ### Added
 
@@ -63,9 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker takes the lock over and publishes the archive, with every election
   provider. The harness runs one-hour windows, a 30 s lease and a 20 s pass
   timer on worker-2 and worker-3.
-- **`history.archive.pass_interval_seconds`.** At least `10` starts archive
-  passes on a timer of their own, so archiving does not wait for a rotation.
-  `0` (default) keeps one pass after each rotation.
 
 - **Provider framework.** The worker registry and the archive election share
   one set of rules for their calls to a provider. The blocks

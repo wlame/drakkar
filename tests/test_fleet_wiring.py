@@ -195,9 +195,7 @@ def test_election_provider_options_for_redis_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'redis': {'locks': {'url': 'redis://user:secret@cache:6379/0'}}},
-        history={
-            'archive': {'election': {'provider': 'redis', 'connection': 'locks', 'plugin_options': {'unused': 1}}}
-        },
+        periodic={'election': {'provider': 'redis', 'connection': 'locks', 'plugin_options': {'unused': 1}}},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
@@ -207,9 +205,7 @@ def test_election_provider_options_for_consul_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'consul': {'locks': {}}},
-        history={
-            'archive': {'election': {'provider': 'consul', 'connection': 'locks', 'plugin_options': {'unused': 1}}}
-        },
+        periodic={'election': {'provider': 'consul', 'connection': 'locks', 'plugin_options': {'unused': 1}}},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
@@ -218,9 +214,7 @@ def test_election_provider_options_for_consul_names_the_connection(tmp_path):
 def test_election_provider_options_for_a_plugin_name_are_its_plugin_options(tmp_path):
     config = _config(
         tmp_path,
-        history={
-            'archive': {'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}}
-        },
+        periodic={'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}},
     )
 
     assert election_provider_options(config) == {'address': 'consul:8500'}
@@ -232,17 +226,11 @@ def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path
     postgres_app = _app(
         tmp_path,
         connections={'postgres': {'reports_db': {'dsn': 'postgresql://user:secret@db/x'}}},
-        history={
-            'archive': {
-                'election': {'provider': 'postgres', 'connection': 'reports_db', 'plugin_options': {'unused': 1}}
-            }
-        },
+        periodic={'election': {'provider': 'postgres', 'connection': 'reports_db', 'plugin_options': {'unused': 1}}},
     )
     plugin_app = _app(
         tmp_path,
-        history={
-            'archive': {'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}}
-        },
+        periodic={'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}},
     )
 
     postgres_args = postgres_app._lifecycle._archive_election()
@@ -256,7 +244,7 @@ def test_archive_election_passes_the_connection_to_the_postgres_factory(tmp_path
 
 
 def test_archive_election_gives_the_filesystem_factory_no_options(tmp_path):
-    app = _app(tmp_path, history={'archive': {'election': {'plugin_options': {'unused': 1}}}})
+    app = _app(tmp_path, periodic={'election': {'plugin_options': {'unused': 1}}})
 
     arguments = app._lifecycle._archive_election()
 
@@ -274,9 +262,9 @@ async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
 async def test_an_unknown_election_provider_fails_startup(tmp_path, monkeypatch):
     _install_plugins(monkeypatch)
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
-    app = _app(tmp_path, history={'archive': {'election': {'provider': 'etcd'}}})
+    app = _app(tmp_path, periodic={'election': {'provider': 'etcd'}})
 
-    with pytest.raises(UnknownProviderError, match=re.escape("history.archive.election.provider 'etcd' is not known")):
+    with pytest.raises(UnknownProviderError, match=re.escape("periodic.election.provider 'etcd' is not known")):
         await app._lifecycle._start_ui_and_recorder()
 
     assert app._recorder is None
@@ -702,7 +690,7 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     app, consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
-        history={'archive': {'election': {'provider': 'blocked-election', 'resilience': resilience}}},
+        periodic={'election': {'provider': 'blocked-election', 'resilience': resilience}},
     )
     due_source = make_sealed_db(history_folder(tmp_path), 'w-2', due_start(time.time()))
     timeouts_before = election_calls('blocked-election', 'start', 'timeout')

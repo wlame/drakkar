@@ -3,15 +3,29 @@
 ``storage.dir`` holds this worker's own live files; only this worker opens
 them. ``shared.dir`` is the folder every worker of a fleet sees: registry
 cards, sealed history, archives and merge results. ``history.*`` decides
-how sealed recorder files become daily archives and how long archives and
-merge results are kept.
+how sealed recorder files become daily archives, when the archive slots come
+(the ``history.archive`` cluster task), and how long archives and merge
+results are kept.
 """
 
-from typing import Any
+import time
 
 from pydantic import BaseModel, Field, model_validator
 
-from drakkar.config.resilience import ResilienceConfig, validate_resilience
+from drakkar.cronexpr import validate_cron
+from drakkar.periodic import (
+    PREFIX_ARCHIVE,
+    RULE_ARCHIVE_INTERVAL,
+    RULE_AT_MOST_ONE,
+    RULE_LEASE_BOUNDS,
+    RULE_SWEEP_AFTER,
+)
+from drakkar.schedule import (
+    DEFAULT_LEASE_SECONDS,
+    MAX_LEASE_SECONDS,
+    MIN_CLUSTER_INTERVAL_SECONDS,
+    MIN_LEASE_SECONDS,
+)
 
 # Archives are the only recorder artifact nothing else reclaims, so the
 # default has to be a horizon rather than "forever": a worker left alone
@@ -19,14 +33,10 @@ from drakkar.config.resilience import ResilienceConfig, validate_resilience
 # keeps a month of history queryable.
 DEFAULT_ARCHIVE_RETENTION_DAYS = 30
 
-# The consul election sets the TTL of the lease's session to half of the lease, and Consul accepts a
-# TTL of 24 hours at most, so a lease could be twice as long. One day is the documented limit.
-CONSUL_MAX_LOCK_STALE_SECONDS = 86_400
-MIN_PASS_INTERVAL_SECONDS = 10
-PASS_INTERVAL_MESSAGE = (
-    'history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least '
-    f'{MIN_PASS_INTERVAL_SECONDS}'
-)
+# The archive pass runs once an hour unless history.archive gives an interval or a cron.
+DEFAULT_ARCHIVE_INTERVAL_SECONDS = 3600
+DEFAULT_SWEEP_AFTER_SECONDS = 7200
+MIN_SWEEP_AFTER_SECONDS = 60
 
 
 class StorageConfig(BaseModel):
@@ -53,44 +63,6 @@ class SharedConfig(BaseModel):
             'same folder as storage.dir, which is right for workers on one host.'
         ),
     )
-
-
-class ElectionConfig(BaseModel):
-    """Which provider decides the one worker of a cluster that builds the archives."""
-
-    provider: str = Field(
-        default='filesystem',
-        min_length=1,
-        description=(
-            'Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table '
-            'of the database named by history.archive.election.connection), redis (a key on the '
-            'Redis server named by history.archive.election.connection), consul (a key of the '
-            'Consul agent named by history.archive.election.connection, held by a session), or the '
-            'name of a provider plugin. Every worker of a cluster must use the same provider.'
-        ),
-    )
-    connection: str = Field(
-        default='main',
-        min_length=1,
-        description=(
-            'Name of the entry under connections.<provider> that the consul, postgres and redis '
-            'providers use. The other providers ignore it.'
-        ),
-    )
-    resilience: ResilienceConfig = Field(
-        default_factory=ResilienceConfig,
-        description='Time limit, retries and circuit breaker for the calls to the election provider.',
-    )
-    plugin_options: dict[str, Any] = Field(
-        default_factory=dict,
-        description='Options passed unchanged to a provider plugin, which validates them itself.',
-    )
-
-    @model_validator(mode='after')
-    def _validate_resilience(self) -> 'ElectionConfig':
-        """Check the rules of the resilience block that span fields, naming it by its YAML path."""
-        validate_resilience('history.archive.election.resilience', self.resilience)
-        return self
 
 
 class HistoryArchiveConfig(BaseModel):
@@ -126,34 +98,51 @@ class HistoryArchiveConfig(BaseModel):
             f'(retention_days * 24 >= due_after_hours + window_hours).'
         ),
     )
-    lock_stale_seconds: int = Field(
-        default=7200,
-        ge=1,
+    interval: int | None = Field(
+        default=None,
         description=(
-            'An archive lock or archive work file older than this many seconds belongs to a dead '
-            'archiver: the lock is taken over and the work file is removed. It is the lease length '
-            f'of every election provider; with consul it must be <= {CONSUL_MAX_LOCK_STALE_SECONDS}.'
+            'Seconds between archive slots, aligned to the epoch, a whole number of at least '
+            f'{MIN_CLUSTER_INTERVAL_SECONDS}. Give at most one of interval and cron; with neither, a '
+            f'slot every {DEFAULT_ARCHIVE_INTERVAL_SECONDS} seconds. At each slot one worker of the '
+            'cluster runs an archive pass.'
         ),
     )
-    pass_interval_seconds: int = Field(
-        default=0,
+    cron: str | None = Field(
+        default=None,
         description=(
-            'How often an archive pass starts on its own timer. 0 = one pass after each recorder '
-            f'rotation. At least {MIN_PASS_INTERVAL_SECONDS} = a pass every that many seconds, '
-            'whatever the rotation does; sealing stays with the rotation. A pass never starts '
-            'while another one still runs.'
+            'Five-field UTC cron expression for the archive slots, instead of interval. Give at most '
+            'one of interval and cron.'
         ),
     )
-    election: ElectionConfig = Field(
-        default_factory=ElectionConfig,
-        description='How the one archiving worker of a cluster is chosen.',
+    lease_seconds: int = Field(
+        default=DEFAULT_LEASE_SECONDS,
+        description=(
+            'Lease of the archive slot in seconds, a whole number from '
+            f'{MIN_LEASE_SECONDS} to {MAX_LEASE_SECONDS}. The holder refreshes it while its pass runs; '
+            'a lease that nobody refreshed for this long is taken over.'
+        ),
+    )
+    sweep_after_seconds: int = Field(
+        default=DEFAULT_SWEEP_AFTER_SECONDS,
+        description=(
+            'An archive work file older than this many seconds belongs to a dead archiver and is '
+            f'removed. At least {MIN_SWEEP_AFTER_SECONDS}.'
+        ),
     )
 
+    @property
+    def effective_interval(self) -> int | None:
+        """The interval of the archive slots: ``None`` with a cron, else ``interval``, else the default."""
+        if self.cron is not None:
+            return None
+        return self.interval if self.interval is not None else DEFAULT_ARCHIVE_INTERVAL_SECONDS
+
     @model_validator(mode='after')
-    def _validate_pass_interval(self) -> 'HistoryArchiveConfig':
-        """Refuse an interval too short to be useful: 1 to 9 seconds and negative values."""
-        if 0 < self.pass_interval_seconds < MIN_PASS_INTERVAL_SECONDS or self.pass_interval_seconds < 0:
-            raise ValueError(PASS_INTERVAL_MESSAGE)
+    def _validate_schedule(self) -> 'HistoryArchiveConfig':
+        """Check the schedule, the lease and the sweep age; defined first, so it runs before the retention check."""
+        message = _archive_rule(self, now_epoch=int(time.time()))
+        if message is not None:
+            raise ValueError(PREFIX_ARCHIVE + message)
         return self
 
     @model_validator(mode='after')
@@ -179,6 +168,27 @@ class HistoryArchiveConfig(BaseModel):
                 f'history.archive.window_hours ({self.window_hours}).{default_note}'
             )
         return self
+
+
+def _archive_rule(archive: HistoryArchiveConfig, *, now_epoch: int) -> str | None:
+    """The first schedule rule ``archive`` breaks, without prefix, or ``None``.
+
+    Order: at most one schedule, the cron check, the interval, the lease
+    bounds, the sweep age. A given ``0`` and a given empty cron count as given.
+    """
+    if archive.interval is not None and archive.cron is not None:
+        return RULE_AT_MOST_ONE
+    if archive.cron is not None:
+        message = validate_cron(archive.cron, now_epoch=now_epoch)
+        if message is not None:
+            return message
+    if archive.interval is not None and archive.interval < MIN_CLUSTER_INTERVAL_SECONDS:
+        return RULE_ARCHIVE_INTERVAL
+    if not MIN_LEASE_SECONDS <= archive.lease_seconds <= MAX_LEASE_SECONDS:
+        return RULE_LEASE_BOUNDS
+    if archive.sweep_after_seconds < MIN_SWEEP_AFTER_SECONDS:
+        return RULE_SWEEP_AFTER
+    return None
 
 
 class HistoryConfig(BaseModel):

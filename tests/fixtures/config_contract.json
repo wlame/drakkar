@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, election and connections). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, periodic, election and connections). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "sources": {
       "kafka": {
@@ -92,10 +92,19 @@
           "registry": {
             "timeout_seconds": 5
           }
+        },
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "redis"
+            },
+            "lock_stale_seconds": 7200,
+            "pass_interval_seconds": 20
+          }
         }
       },
       "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds\n  history.archive.election -> periodic.election\n  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)\n  history.archive.pass_interval_seconds -> history.archive.interval (a slot schedule; no pass after each rotation)"
     },
     {
       "name": "env_only_old_key",
@@ -126,6 +135,52 @@
         "DK_FLEET__REGISTRY__TIMEOUT_SECONDS": "5"
       },
       "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
+    },
+    {
+      "name": "archive_election_moved",
+      "yaml": {
+        "history": {
+          "archive": {
+            "election": {
+              "provider": "redis"
+            }
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.election -> periodic.election"
+    },
+    {
+      "name": "archive_election_moved_by_env",
+      "yaml": {},
+      "env": {
+        "DK_HISTORY__ARCHIVE__ELECTION__PROVIDER": "redis"
+      },
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.election -> periodic.election"
+    },
+    {
+      "name": "lock_stale_moved",
+      "yaml": {
+        "history": {
+          "archive": {
+            "lock_stale_seconds": 7200
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)"
+    },
+    {
+      "name": "pass_interval_moved",
+      "yaml": {
+        "history": {
+          "archive": {
+            "pass_interval_seconds": 0
+          }
+        }
+      },
+      "env": {},
+      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.pass_interval_seconds -> history.archive.interval (a slot schedule; no pass after each rotation)"
     }
   ],
   "summary": [
@@ -229,11 +284,9 @@
     {
       "name": "election_consul",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "consul"
-            }
+        "periodic": {
+          "election": {
+            "provider": "consul"
           }
         },
         "connections": {
@@ -249,11 +302,9 @@
     {
       "name": "election_postgres",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "postgres"
-            }
+        "periodic": {
+          "election": {
+            "provider": "postgres"
           }
         },
         "connections": {
@@ -271,11 +322,9 @@
     {
       "name": "election_redis",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "redis"
-            }
+        "periodic": {
+          "election": {
+            "provider": "redis"
           }
         },
         "connections": {
@@ -353,11 +402,9 @@
     {
       "name": "election_filesystem_is_silent",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "filesystem"
-            }
+        "periodic": {
+          "election": {
+            "provider": "filesystem"
           }
         }
       },
@@ -657,17 +704,6 @@
       "path": "history.archive.retention_days"
     },
     {
-      "name": "lock_stale_zero",
-      "yaml": {
-        "history": {
-          "archive": {
-            "lock_stale_seconds": 0
-          }
-        }
-      },
-      "path": "history.archive.lock_stale_seconds"
-    },
-    {
       "name": "heartbeat_zero",
       "yaml": {
         "fleet": {
@@ -809,34 +845,13 @@
     {
       "name": "election_connection_missing",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "redis"
-            }
+        "periodic": {
+          "election": {
+            "provider": "redis"
           }
         }
       },
-      "message": "history.archive.election.connection 'main' is not defined under connections.redis"
-    },
-    {
-      "name": "consul_lock_stale_too_long",
-      "yaml": {
-        "history": {
-          "archive": {
-            "lock_stale_seconds": 90000,
-            "election": {
-              "provider": "consul"
-            }
-          }
-        },
-        "connections": {
-          "consul": {
-            "main": {}
-          }
-        }
-      },
-      "message": "history.archive.lock_stale_seconds (90000) must be <= 86400 when history.archive.election.provider is consul"
+      "message": "periodic.election.connection 'main' is not defined under connections.redis"
     },
     {
       "name": "consul_catalog_mode_reserved",
@@ -892,18 +907,16 @@
     {
       "name": "election_resilience_backoff_max_below_base",
       "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "resilience": {
-                "backoff_seconds": 2,
-                "backoff_max_seconds": 1
-              }
+        "periodic": {
+          "election": {
+            "resilience": {
+              "backoff_seconds": 2,
+              "backoff_max_seconds": 1
             }
           }
         }
       },
-      "message": "history.archive.election.resilience.backoff_max_seconds (1) must be >= history.archive.election.resilience.backoff_seconds (2)"
+      "message": "periodic.election.resilience.backoff_max_seconds (1) must be >= periodic.election.resilience.backoff_seconds (2)"
     },
     {
       "name": "postgres_pool_max_below_min",
@@ -987,46 +1000,228 @@
       "message": "connections.postgres.main.schema 'Drakkar' must be a lower-case identifier ([a-z_][a-z0-9_]*)"
     },
     {
-      "name": "archive_pass_interval_too_short",
+      "name": "archive_interval_and_cron",
       "yaml": {
         "history": {
           "archive": {
-            "pass_interval_seconds": 5
+            "interval": 600,
+            "cron": "0 * * * *"
           }
         }
       },
-      "message": "history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least 10"
+      "message": "history.archive: give at most one of interval and cron"
     },
     {
-      "name": "archive_pass_interval_negative",
+      "name": "archive_interval_too_short",
       "yaml": {
         "history": {
           "archive": {
-            "pass_interval_seconds": -1
+            "interval": 29
           }
         }
       },
-      "message": "history.archive.pass_interval_seconds must be 0 (a pass after each rotation) or at least 10"
+      "message": "history.archive: interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "archive_interval_zero",
+      "yaml": {
+        "history": {
+          "archive": {
+            "interval": 0
+          }
+        }
+      },
+      "message": "history.archive: interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "archive_cron_bad_syntax",
+      "yaml": {
+        "history": {
+          "archive": {
+            "cron": "61 * * * *"
+          }
+        }
+      },
+      "message": "history.archive: cron '61 * * * *': minute value '61' is not one of 0-59"
+    },
+    {
+      "name": "archive_cron_never_fires",
+      "yaml": {
+        "history": {
+          "archive": {
+            "cron": "0 0 30 2 *"
+          }
+        }
+      },
+      "message": "history.archive: cron '0 0 30 2 *' never fires"
+    },
+    {
+      "name": "archive_lease_too_short",
+      "yaml": {
+        "history": {
+          "archive": {
+            "lease_seconds": 39
+          }
+        }
+      },
+      "message": "history.archive: lease_seconds must be a whole number from 40 to 86400"
+    },
+    {
+      "name": "archive_lease_too_long",
+      "yaml": {
+        "history": {
+          "archive": {
+            "lease_seconds": 86401
+          }
+        }
+      },
+      "message": "history.archive: lease_seconds must be a whole number from 40 to 86400"
+    },
+    {
+      "name": "archive_sweep_too_short",
+      "yaml": {
+        "history": {
+          "archive": {
+            "sweep_after_seconds": 59
+          }
+        }
+      },
+      "message": "history.archive: sweep_after_seconds must be at least 60"
+    },
+    {
+      "name": "override_interval_and_cron",
+      "yaml": {
+        "periodic": {
+          "tasks": {
+            "refresh_rates": {
+              "interval": 60,
+              "cron": "*/5 * * * *"
+            }
+          }
+        }
+      },
+      "message": "periodic.tasks.refresh_rates: give at most one of interval and cron"
+    },
+    {
+      "name": "override_bad_cron",
+      "yaml": {
+        "periodic": {
+          "tasks": {
+            "refresh_rates": {
+              "cron": "*/0 * * * *"
+            }
+          }
+        }
+      },
+      "message": "periodic.tasks.refresh_rates: cron '*/0 * * * *': minute step '0' must be from 1 to 59"
+    },
+    {
+      "name": "override_lease_too_short",
+      "yaml": {
+        "periodic": {
+          "tasks": {
+            "refresh_rates": {
+              "lease_seconds": 39
+            }
+          }
+        }
+      },
+      "message": "periodic.tasks.refresh_rates: lease_seconds must be a whole number from 40 to 86400"
+    },
+    {
+      "name": "override_dot_name",
+      "yaml": {
+        "periodic": {
+          "tasks": {
+            "cache.flush": {
+              "interval": 60
+            }
+          }
+        }
+      },
+      "message": "periodic.tasks.cache.flush: a name with a dot is a system task; configure it in its own section (cache.*, history.archive)"
+    },
+    {
+      "name": "override_null",
+      "yaml": {
+        "periodic": {
+          "tasks": {
+            "refresh_rates": null
+          }
+        }
+      },
+      "message": "periodic.tasks.refresh_rates has no value; write {} to keep the declared settings"
     }
   ],
   "load_values": [
     {
-      "name": "archive_pass_interval_default_zero",
+      "name": "archive_interval_default_null",
       "yaml": {},
-      "path": "history.archive.pass_interval_seconds",
-      "value": 0
+      "path": "history.archive.interval",
+      "value": null
     },
     {
-      "name": "archive_pass_interval_twenty_loads",
+      "name": "archive_cron_default_null",
+      "yaml": {},
+      "path": "history.archive.cron",
+      "value": null
+    },
+    {
+      "name": "archive_lease_default_60",
+      "yaml": {},
+      "path": "history.archive.lease_seconds",
+      "value": 60
+    },
+    {
+      "name": "archive_sweep_default_7200",
+      "yaml": {},
+      "path": "history.archive.sweep_after_seconds",
+      "value": 7200
+    },
+    {
+      "name": "archive_interval_600_loads",
       "yaml": {
         "history": {
           "archive": {
-            "pass_interval_seconds": 20
+            "interval": 600
           }
         }
       },
-      "path": "history.archive.pass_interval_seconds",
-      "value": 20
+      "path": "history.archive.interval",
+      "value": 600
+    },
+    {
+      "name": "archive_cron_loads",
+      "yaml": {
+        "history": {
+          "archive": {
+            "cron": "0 * * * *"
+          }
+        }
+      },
+      "path": "history.archive.cron",
+      "value": "0 * * * *"
+    },
+    {
+      "name": "election_provider_default_filesystem",
+      "yaml": {},
+      "path": "periodic.election.provider",
+      "value": "filesystem"
+    },
+    {
+      "name": "election_provider_by_env",
+      "yaml": {
+        "connections": {
+          "redis": {
+            "main": {}
+          }
+        }
+      },
+      "env": {
+        "DK_PERIODIC__ELECTION__PROVIDER": "redis"
+      },
+      "path": "periodic.election.provider",
+      "value": "redis"
     }
   ]
 }

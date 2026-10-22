@@ -50,7 +50,7 @@ class ConsulElection:
     writes the lock body to the scope's key with ``?acquire=<session>``, which
     the agent grants only while no other session holds the key. The lease is
     the session's time to live on the server: half the lease length
-    (``history.archive.lock_stale_seconds``, at least 10 s), because the agent
+    (``history.archive.lease_seconds``, at least 10 s), because the agent
     ends a session only about twice its TTL after the last renew, so Consul
     ends a dead holder's lease by that limit. ``refresh`` renews the session.
     No host's clock enters the judgement; the lock body's ``acquired_at``

@@ -1,6 +1,6 @@
 """The archive lock file: one archiver per cluster history folder.
 
-Protocol: exclusive create; a stale lock (older than lock_stale_seconds on
+Protocol: exclusive create; a stale lock (older than the lease on
 the file server's clock) is taken over once; the holder refreshes the
 lock's mtime; a holder checks the lock still holds its token right before
 each publish (fencing); release deletes only its own lock.

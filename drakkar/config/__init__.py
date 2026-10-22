@@ -4,7 +4,7 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 The models are split per domain across this package — ``kafka``, ``sinks``,
-``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``fleet``, ``connections``, ``webapp``
+``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
 — and assembled by ``root``.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
@@ -30,6 +30,7 @@ from drakkar.config.fleet import (
     StaticRegistryConfig,
 )
 from drakkar.config.kafka import KafkaConfig
+from drakkar.config.periodic import ElectionConfig, PeriodicConfig, PeriodicTaskOverride
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
 from drakkar.config.runtime import (
@@ -56,7 +57,6 @@ from drakkar.config.sinks import (
 from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
 from drakkar.config.storage import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
-    ElectionConfig,
     HistoryArchiveConfig,
     HistoryConfig,
     SharedConfig,
@@ -122,6 +122,8 @@ __all__ = [
     'MongoSinkConfig',
     'MongoStatementConfig',
     'OffloadConfig',
+    'PeriodicConfig',
+    'PeriodicTaskOverride',
     'PostgresConnectionConfig',
     'PostgresRegistryConfig',
     'PostgresSinkConfig',

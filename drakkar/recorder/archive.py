@@ -85,7 +85,7 @@ _MERGE_TEMP_SUFFIX = '.merge.db'
 _COMPRESS_TEMP_SUFFIX = '.tmp'
 _PREVIOUS_TEMP_SUFFIX = '.previous.db'
 
-# What the sweep removes once it is older than ``lock_stale_seconds``: dot
+# What the sweep removes once it is older than ``sweep_after_seconds``: dot
 # files ending in one of these (a pass's work files, a sealing copy in
 # progress) or starting with one of these (an age-check marker, a lock set
 # aside by a takeover), together with their SQLite sidecars.
@@ -370,7 +370,7 @@ def _archive_locked(
     # Ages of files in the shared folder are measured on the file server's
     # clock, whichever provider holds the lease.
     server_now = folder_server_now(folder, instance)
-    _sweep(folder, cluster, server_now, archive.lock_stale_seconds)
+    _sweep(folder, cluster, server_now, archive.sweep_after_seconds)
     windows = assign_windows(
         list_sealed(folder),
         archive.window_hours * 3600,

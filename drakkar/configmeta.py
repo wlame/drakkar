@@ -39,6 +39,7 @@ from drakkar.config import (
     LoggingConfig,
     MetricsConfig,
     OffloadConfig,
+    PeriodicConfig,
     RuntimeHealthConfig,
     SharedConfig,
     SinksConfig,
@@ -149,6 +150,7 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('storage', 'Own storage (storage:)', 'own-storage-storage', StorageConfig),
     ('shared', 'Shared folder (shared:)', 'shared-folder-shared', SharedConfig),
     ('history', 'History and archives (history:)', 'history-and-archives-history', HistoryConfig),
+    ('periodic', 'Periodic tasks (periodic:)', 'periodic-tasks-periodic', PeriodicConfig),
     ('fleet', 'Fleet registry and cache exchange (fleet:)', 'fleet-registry-and-cache-exchange-fleet', FleetConfig),
     ('connections', 'Connections (connections:)', 'connections-connections', ConnectionsConfig),
 ]

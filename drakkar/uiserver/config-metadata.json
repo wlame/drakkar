@@ -2089,112 +2089,42 @@
           "group": "history"
         },
         {
-          "path": "history.archive.lock_stale_seconds",
-          "env": "DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS",
-          "description": "An archive lock or archive work file older than this many seconds belongs to a dead archiver: the lock is taken over and the work file is removed.",
-          "full_description": "An archive lock or archive work file older than this many seconds belongs to a dead archiver: the lock is taken over and the work file is removed. It is the lease length of every election provider; with consul it must be <= 86400.",
+          "path": "history.archive.interval",
+          "env": "DK_HISTORY__ARCHIVE__INTERVAL",
+          "description": "Seconds between archive slots, aligned to the epoch, a whole number of at least 30.",
+          "full_description": "Seconds between archive slots, aligned to the epoch, a whole number of at least 30. Give at most one of interval and cron; with neither, a slot every 3600 seconds. At each slot one worker of the cluster runs an archive pass.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.archive.cron",
+          "env": "DK_HISTORY__ARCHIVE__CRON",
+          "description": "Five-field UTC cron expression for the archive slots, instead of interval.",
+          "full_description": "Five-field UTC cron expression for the archive slots, instead of interval. Give at most one of interval and cron.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.archive.lease_seconds",
+          "env": "DK_HISTORY__ARCHIVE__LEASE_SECONDS",
+          "description": "Lease of the archive slot in seconds, a whole number from 40 to 86400.",
+          "full_description": "Lease of the archive slot in seconds, a whole number from 40 to 86400. The holder refreshes it while its pass runs; a lease that nobody refreshed for this long is taken over.",
+          "type": "integer",
+          "default": 60,
+          "secret": false,
+          "group": "history"
+        },
+        {
+          "path": "history.archive.sweep_after_seconds",
+          "env": "DK_HISTORY__ARCHIVE__SWEEP_AFTER_SECONDS",
+          "description": "An archive work file older than this many seconds belongs to a dead archiver and is removed.",
+          "full_description": "An archive work file older than this many seconds belongs to a dead archiver and is removed. At least 60.",
           "type": "integer",
           "default": 7200,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.pass_interval_seconds",
-          "env": "DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS",
-          "description": "How often an archive pass starts on its own timer.",
-          "full_description": "How often an archive pass starts on its own timer. 0 = one pass after each recorder rotation. At least 10 = a pass every that many seconds, whatever the rotation does; sealing stays with the rotation. A pass never starts while another one still runs.",
-          "type": "integer",
-          "default": 0,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.provider",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__PROVIDER",
-          "description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by history.archive.election.connection), redis (a key on the Redis server named by history.archive.election.connection), consul (a key of the Consul agent named by history.archive.election.connection, held by a session), or the name of a provider plugin.",
-          "full_description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by history.archive.election.connection), redis (a key on the Redis server named by history.archive.election.connection), consul (a key of the Consul agent named by history.archive.election.connection, held by a session), or the name of a provider plugin. Every worker of a cluster must use the same provider.",
-          "type": "string",
-          "default": "filesystem",
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.connection",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__CONNECTION",
-          "description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use.",
-          "full_description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use. The other providers ignore it.",
-          "type": "string",
-          "default": "main",
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.timeout_seconds",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS",
-          "description": "Time limit for one attempt of a provider operation.",
-          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "number",
-          "default": 5.0,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.retries",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__RETRIES",
-          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
-          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
-          "type": "integer",
-          "default": 2,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.backoff_seconds",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_SECONDS",
-          "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to backoff_max_seconds.",
-          "type": "number",
-          "default": 0.2,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.backoff_max_seconds",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS",
-          "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff_seconds.",
-          "type": "number",
-          "default": 5.0,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.breaker.failure_threshold",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD",
-          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.resilience.breaker.cooldown_seconds",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS",
-          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "history"
-        },
-        {
-          "path": "history.archive.election.plugin_options",
-          "env": "DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS",
-          "description": "Options passed unchanged to a provider plugin, which validates them itself.",
-          "full_description": "Options passed unchanged to a provider plugin, which validates them itself.",
-          "type": "object",
-          "default": {},
           "secret": false,
           "group": "history"
         },
@@ -2207,6 +2137,143 @@
           "default": 32,
           "secret": false,
           "group": "history"
+        }
+      ]
+    },
+    {
+      "key": "periodic",
+      "title": "Periodic tasks (periodic:)",
+      "doc_anchor": "periodic-tasks-periodic",
+      "entries": [
+        {
+          "path": "periodic.election.provider",
+          "env": "DK_PERIODIC__ELECTION__PROVIDER",
+          "description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session), or the name of a provider plugin.",
+          "full_description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session), or the name of a provider plugin. Every worker of a cluster must use the same provider.",
+          "type": "string",
+          "default": "filesystem",
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.connection",
+          "env": "DK_PERIODIC__ELECTION__CONNECTION",
+          "description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use.",
+          "full_description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use. The other providers ignore it.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.timeout_seconds",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT_SECONDS",
+          "description": "Time limit for one attempt of a provider operation.",
+          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
+          "type": "number",
+          "default": 5.0,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.retries",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__RETRIES",
+          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
+          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.backoff_seconds",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_SECONDS",
+          "description": "Wait before the first retry.",
+          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to backoff_max_seconds.",
+          "type": "number",
+          "default": 0.2,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.backoff_max_seconds",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS",
+          "description": "Longest wait between two attempts.",
+          "full_description": "Longest wait between two attempts. Must be >= backoff_seconds.",
+          "type": "number",
+          "default": 5.0,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.breaker.failure_threshold",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD",
+          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
+          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
+          "type": "integer",
+          "default": 5,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.resilience.breaker.cooldown_seconds",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS",
+          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.election.plugin_options",
+          "env": "DK_PERIODIC__ELECTION__PLUGIN_OPTIONS",
+          "description": "Options passed unchanged to a provider plugin, which validates them itself.",
+          "full_description": "Options passed unchanged to a provider plugin, which validates them itself.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.tasks.*.enabled",
+          "env": null,
+          "description": "false = the task does not run on this worker (and leaves the cluster definitions).",
+          "full_description": "false = the task does not run on this worker (and leaves the cluster definitions).",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.tasks.*.interval",
+          "env": null,
+          "description": "New interval in seconds; replaces the declared interval or cron.",
+          "full_description": "New interval in seconds; replaces the declared interval or cron. Give at most one of interval and cron. A cluster task needs a whole number of at least 30.",
+          "type": "number",
+          "default": null,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.tasks.*.cron",
+          "env": null,
+          "description": "New five-field UTC cron expression; replaces the declared interval or cron.",
+          "full_description": "New five-field UTC cron expression; replaces the declared interval or cron. Give at most one of interval and cron.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "periodic"
+        },
+        {
+          "path": "periodic.tasks.*.lease_seconds",
+          "env": null,
+          "description": "New lease of a cluster task in seconds, a whole number from 40 to 86400.",
+          "full_description": "New lease of a cluster task in seconds, a whole number from 40 to 86400. Only cluster tasks take a lease.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "periodic"
         }
       ]
     },

@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import HistoryArchiveConfig, UIConfig
+from drakkar.config import HistoryArchiveConfig, ResilienceConfig, UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -231,7 +231,7 @@ class EventRecorder(EventWriter):
         ``election`` decides which worker of the cluster archives, named
         ``election_provider_name`` in metrics and logs; it defaults to the
         ``filesystem`` provider. ``election_caller`` makes its calls; it
-        defaults to one built from ``archive.election.resilience``. The
+        defaults to one with the default resilience settings. The
         provider starts at the first archive pass, with ``election_options``
         and ``connections`` in its context, and stops in :meth:`stop`.
         """
@@ -251,7 +251,7 @@ class EventRecorder(EventWriter):
             election_caller
             if election_caller is not None
             else ResilientCaller(
-                self._archive.election.resilience,
+                ResilienceConfig(),
                 feature=ELECTION_FEATURE,
                 provider=election_provider_name,
                 category='recorder',
@@ -291,9 +291,8 @@ class EventRecorder(EventWriter):
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
         self._rotation_task: asyncio.Task | None = None
-        self._pass_timer_task: asyncio.Task | None = None
-        # The sleep of the rotation loop and the pass timer; tests replace it so no
-        # test waits for a real interval.
+        # The sleep of the rotation loop; tests replace it so no test waits for a
+        # real interval.
         self._sleep = asyncio.sleep
         self._state_task: asyncio.Task | None = None
         self._host_sample_task: asyncio.Task | None = None
@@ -559,9 +558,6 @@ class EventRecorder(EventWriter):
                 self._watch_background_task(self._flush_task, 'flush')
             self._rotation_task = asyncio.create_task(self._rotation_loop())
             self._watch_background_task(self._rotation_task, 'rotation')
-            if self._runs_pass_timer():
-                self._pass_timer_task = asyncio.create_task(self._pass_timer_loop())
-                self._watch_background_task(self._pass_timer_task, 'archive_pass_timer')
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
                 self._watch_background_task(self._state_task, 'state_sync')
@@ -879,7 +875,6 @@ class EventRecorder(EventWriter):
         for task in (
             self._flush_task,
             self._rotation_task,
-            self._pass_timer_task,
             self._state_task,
             self._host_sample_task,
             self._leftover_task,
@@ -1367,17 +1362,6 @@ class EventRecorder(EventWriter):
             # Whatever the rotation did, files sealed earlier still wait for
             # their move, and due windows still wait for the archive pass.
             self._start_sealing()
-            if not self._runs_pass_timer():
-                self._start_archive_pass()
-
-    def _runs_pass_timer(self) -> bool:
-        """Whether archive passes start on their own timer instead of after each rotation."""
-        return self._archives() and self._archive.pass_interval_seconds > 0
-
-    async def _pass_timer_loop(self) -> None:
-        """Start an archive pass every ``pass_interval_seconds``; a pass still running is not doubled."""
-        while self._running:
-            await self._sleep(self._archive.pass_interval_seconds)
             self._start_archive_pass()
 
     async def _archive_pass(self) -> None:
@@ -1386,8 +1370,7 @@ class EventRecorder(EventWriter):
         The whole pass — listing, SQLite merges, gzip — is blocking work
         measured in seconds, so it goes to the recorder's own archive thread;
         the event loop only sees this await. The rotation loop starts it as a
-        background job, or the timer loop does when ``pass_interval_seconds``
-        is set, so neither loop waits for it.
+        background job, so the loop does not wait for it.
 
         The election provider starts here at the first pass. While it has
         not started, a pass ends at once and the next one tries again.
@@ -1402,7 +1385,7 @@ class EventRecorder(EventWriter):
             self._election_caller,
             asyncio.get_running_loop(),
             scope=sanitize_cluster(self._cluster_name),
-            lease_seconds=self._archive.lock_stale_seconds,
+            lease_seconds=self._archive.lease_seconds,
             provider_name=self._election_provider_name,
         )
         if self._archive_executor is None:

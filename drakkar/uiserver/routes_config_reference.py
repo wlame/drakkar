@@ -219,7 +219,7 @@ _DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
     'dlq.client_config': _mask_env_dict,
     'sinks.kafka.*.client_config': _mask_env_dict,
     'fleet.registry.plugin_options': _mask_plugin_options,
-    'history.archive.election.plugin_options': _mask_plugin_options,
+    'periodic.election.plugin_options': _mask_plugin_options,
 }
 
 

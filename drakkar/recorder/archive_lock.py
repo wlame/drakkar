@@ -4,7 +4,7 @@ This is the lock of the ``filesystem`` election provider
 (:class:`drakkar.recorder.election.FilesystemElection`).
 ``history/<cluster>/.archive.lock`` is created with an exclusive create, so
 exactly one worker of the cluster holds it. The holder refreshes the lock's
-mtime while its pass runs. A lock nobody refreshed for ``lock_stale_seconds``
+mtime while its pass runs. A lock nobody refreshed for ``stale_seconds`` (the lease)
 belongs to a dead archiver: the next worker renames it aside (one rename
 wins), deletes it, and creates its own. Right before each publish the holder
 re-reads the lock and stops if the token is no longer its own (fencing), so

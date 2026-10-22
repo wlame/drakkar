@@ -682,32 +682,45 @@ history:
                                    # env: DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS
     retention_days: 30             # delete archives older than this; 0 = keep forever. Must cover
                                    # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
-    lock_stale_seconds: 7200       # archive lock / work files older than this belong to a dead archiver; also the
-                                   # lease length of every election provider (<= 86400 with provider consul);
-                                   # with postgres and redis it is judged on the server's clock, with consul by the
-                                   # time to live of the lease's session (half of this value, at least 10 s).
-                                   # env: DK_HISTORY__ARCHIVE__LOCK_STALE_SECONDS
-    pass_interval_seconds: 0       # 0 = one archive pass after each rotation; or at least 10 = a pass every that many
-                                   # seconds on its own timer. env: DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS
-    election:                      # which worker of a cluster builds the archives; see "Resilience block" below
-      provider: filesystem         # filesystem | postgres | redis | consul | <plugin name>.
-                                   # postgres keeps the lease in the table archive_locks of connections.postgres.<connection>;
-                                   # redis keeps it in one key per cluster on the server of connections.redis.<connection>;
-                                   # consul keeps it in one key per cluster, held by a session, on the agent of connections.consul.<connection>.
-                                   # Every worker of one cluster uses the same provider. env: DK_HISTORY__ARCHIVE__ELECTION__PROVIDER
-      connection: main             # entry of connections.<provider>; read by postgres, redis and consul.
-                                   # env: DK_HISTORY__ARCHIVE__ELECTION__CONNECTION
-      resilience:                  # same keys and defaults as fleet.registry.resilience
-        timeout_seconds: 5.0       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__TIMEOUT_SECONDS
-        retries: 2                 # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__RETRIES
-        backoff_seconds: 0.2       # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_SECONDS
-        backoff_max_seconds: 5.0   # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS
-        breaker:
-          failure_threshold: 5     # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
-          cooldown_seconds: 30.0   # env: DK_HISTORY__ARCHIVE__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
-      plugin_options: {}           # passed unchanged to a provider plugin; values masked in the config reference.
-                                   # env: one key per variable, DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>
+    interval: null                 # seconds between archive slots, aligned to the epoch; at least 30. With neither
+                                   # interval nor cron, a slot every 3600 s. env: DK_HISTORY__ARCHIVE__INTERVAL
+    cron: null                     # five-field UTC cron for the archive slots instead of interval; give at most one.
+                                   # env: DK_HISTORY__ARCHIVE__CRON
+    lease_seconds: 60              # lease of an archive slot, 40 to 86400; refreshed while the pass runs, taken over
+                                   # when nobody refreshed it this long. env: DK_HISTORY__ARCHIVE__LEASE_SECONDS
+    sweep_after_seconds: 7200      # archive work files older than this belong to a dead archiver and are removed;
+                                   # at least 60. env: DK_HISTORY__ARCHIVE__SWEEP_AFTER_SECONDS
   merged_retention_days: 32        # delete UI merge results older than this; 0 = never. env: DK_HISTORY__MERGED_RETENTION_DAYS
+```
+
+---
+
+## Periodic tasks (`periodic:`)
+
+📚 [Periodic tasks](handler.md#periodic-tasks)
+
+```yaml
+periodic:
+  election:                        # which worker of a cluster runs each slot of a cluster task (history.archive
+                                   # included); see "Resilience block" below
+    provider: filesystem           # filesystem | postgres | redis | consul | <plugin name>.
+                                   # Every worker of one cluster uses the same provider. env: DK_PERIODIC__ELECTION__PROVIDER
+    connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
+                                   # env: DK_PERIODIC__ELECTION__CONNECTION
+    resilience:                    # same keys and defaults as fleet.registry.resilience
+      timeout_seconds: 5.0         # env: DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT_SECONDS
+      retries: 2                   # env: DK_PERIODIC__ELECTION__RESILIENCE__RETRIES
+      backoff_seconds: 0.2         # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_SECONDS
+      backoff_max_seconds: 5.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS
+      breaker:
+        failure_threshold: 5       # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
+        cooldown_seconds: 30.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
+    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
+                                   # env: one key per variable, DK_PERIODIC__ELECTION__PLUGIN_OPTIONS__<KEY>
+  tasks: {}                        # overrides of declared @periodic tasks, keyed by method name:
+                                   #   refresh_rates: {enabled: true, interval: 600, cron: null, lease_seconds: null}
+                                   # give at most one of interval and cron; a name the handler does not declare
+                                   # fails startup. env: DK_PERIODIC__TASKS__<NAME>__<KEY>
 ```
 
 ---
@@ -718,7 +731,7 @@ history:
 
 How workers find each other and exchange cache rows. Peers pull `cluster`/`global` cache rows over HTTP from the URL on each registry card. The pipeline itself does not depend on it.
 
-**Resilience block.** `fleet.registry.resilience` and `history.archive.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff_seconds` up to `backoff_max_seconds`), and a circuit breaker that skips the provider after `failure_threshold` failed operations in a row and lets one probe through after `cooldown_seconds`. The semantics are on [Fleet registry](fleet.md#resilience).
+**Resilience block.** `fleet.registry.resilience` and `periodic.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff_seconds` up to `backoff_max_seconds`), and a circuit breaker that skips the provider after `failure_threshold` failed operations in a row and lets one probe through after `cooldown_seconds`. The semantics are on [Fleet registry](fleet.md#resilience).
 
 ```yaml
 fleet:
@@ -774,7 +787,7 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `history.archive.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`. A provider plugin can use any entry through `ctx.connections`.
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `periodic.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`. A provider plugin can use any entry through `ctx.connections`.
 
 ```yaml
 connections:
