@@ -508,15 +508,27 @@ What it keeps and does:
   same call.
 - **The session's time to live.** It is half of `offline_after_seconds`,
   rounded up, and at least 10 seconds, which is the least that Consul
-  accepts. With the default of 60 it is 30 seconds. Consul ends a session at
-  most twice its time to live after the last renew, so the card of a dead
-  worker leaves the list by `offline_after_seconds`, or by 20 seconds when
-  `offline_after_seconds` is below 20. A live worker renews at every
+  accepts. With the default of 60 it is 30 seconds. Consul ends a session no
+  earlier than its time to live after the last renew, and at most twice its
+  time to live after it. So the card of a dead worker leaves the list by
+  `offline_after_seconds`, one second later when that value is odd (the time
+  to live is rounded up), and by 20 seconds when the value is below 20 (this
+  also holds for an odd value below 20). A live worker renews at every
   heartbeat. If a session ends under a live worker (a heartbeat came late, or
   the agent lost its state), the next publish meets `404` on the renew, creates
   a new session and writes the card again. With this provider
   `offline_after_seconds` is at most 86400; a larger value fails the load
   with `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`.
+- **Heartbeat margin.** With this provider, keep `offline_after_seconds` at
+  least `4 * heartbeat_seconds`; the defaults (10 and 60) do. The time to live
+  is then at least twice the heartbeat, so a heartbeat that comes a little
+  late still renews the session in time. The load accepts
+  `offline_after_seconds = 2 * heartbeat_seconds`, but then the time to live
+  equals the heartbeat (for a heartbeat of 10 seconds or more), and Consul
+  may end a session as early as its time to live after the last renew: a
+  renew that comes a little late can find the session ended, and the card
+  is missing from the list until that publish creates a new session and
+  writes the card again.
 - **List.** One read of every key under `<key_prefix>/fleet/workers/`. A key
   that cannot be a card key is skipped without a log line: the folder key
   itself, which a Consul UI creates, and a key nested deeper. A card is
@@ -744,7 +756,8 @@ The `consul` provider gives an `online` verdict and no age. A card is online
 while a session holds its key and offline when its key has no session. Consul
 ends the session of a worker that stopped renewing, and the card goes with it.
 So `offline_after_seconds` is compared with no age for these cards: it sets the
-time to live of the session (see [`consul`](#consul)).
+time to live of the session (see [`consul`](#consul)), and with this provider
+it should be at least four times `heartbeat_seconds`, not only twice.
 
 Each refresh (every `refresh_seconds`, default 15) keeps the age of every
 card at the moment it was listed. The workers list adds the time since that
@@ -899,7 +912,8 @@ the shutdown longer than that budget. A card that was not withdrawn stays
 in the store until `prune_after_seconds`, and peers show the worker as
 offline once the card is older than `offline_after_seconds`. With `consul`, the
 session ends by its time to live and Consul deletes the card with it, so the
-card leaves the list by `offline_after_seconds`.
+card leaves the list by `offline_after_seconds` (one second later for an odd
+value, and by 20 seconds for a value below 20; see [`consul`](#consul)).
 
 ## Failures
 

@@ -124,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time to live of a session is half of the limit (`offline_after_seconds`
   for a card, `lock_stale_seconds` for a lease), and at least 10 seconds.
   Consul can end a session up to twice its time to live after the last
-  renew, so a dead worker's card or lease ends by the limit. A card is
+  renew, so a dead worker's card or lease ends by the limit, one second
+  later for an odd limit, and by 20 seconds when the limit is below 20. With
+  the `consul` registry, keep `offline_after_seconds` at least four times
+  `heartbeat_seconds`, because Consul may also end a session as early as its
+  time to live. A card is
   online while a session holds its key, and the workers list shows no age
   for it. A key that no session holds is listed as offline. A worker that
   restarts under its old name takes its card over at once. Like the redis

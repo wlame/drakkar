@@ -281,7 +281,7 @@ below applies to the entries you declare and to any provider that uses them.
   certificates) or `SSL_CERT_DIR` (a directory of them): either replaces the
   bundle. The client sends no client certificate, so an agent that requires one
   on its HTTPS port cannot be used. The proxy environment variables
-  (`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`) apply to the requests: add the
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`) apply to the requests: add the
   agent to `NO_PROXY` when it must not go through a proxy.
   The client follows no redirect.
 - **Give the providers a Redis user of their own.** The `redis` providers

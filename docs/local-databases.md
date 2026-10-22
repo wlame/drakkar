@@ -835,10 +835,12 @@ redis](fleet.md#redis) and [Security](security.md#provider-credentials).
   ends. Every key of the providers has a time to live, so any `volatile-*`
   and any `allkeys-*` `maxmemory` policy can evict the key. A database number
   of its own does not protect it, because the memory limit and eviction cover
-  the whole server. The holder's next refresh then answers `False`, or its
-  fencing check finds no key, and the pass stops without publishing or
-  deleting. It logs `recorder_archive_fenced` with `reason` `taken_over`,
-  whose detail says that another worker took the archive lock over, although
+  the whole server. The holder's next refresh then answers `False`, which
+  ends the refreshing but does not stop the pass by itself. The fencing check
+  before the next publish or delete answers "not held" (it finds no key, or
+  the refresh has already answered `False`), and that check stops the pass
+  without publishing or deleting. It logs `recorder_archive_fenced` with
+  `reason` `taken_over`, whose detail says that another worker took the archive lock over, although
   no worker did: the provider can only answer that the pass no longer holds
   the lease. The next pass takes the scope. Under the default policy,
   `noeviction`, a full server evicts nothing and answers a script that needs
@@ -898,15 +900,19 @@ consul](fleet.md#consul) and [Security](security.md#provider-credentials).
   and `LockDelay: 0s`. Its time to live is half of
   `history.archive.lock_stale_seconds`, rounded up, and at least 10 seconds
   (Consul accepts no less): 3600 seconds with the default. Consul ends a
-  session at most twice its time to live after the last renew, so the lease of
-  a dead holder ends by `lock_stale_seconds`, or by 20 seconds when that value
-  is below 20. Consul keeps the time, so no worker's wall clock is compared
+  session no earlier than its time to live after the last renew, and at most
+  twice its time to live after it. So the lease of a dead holder ends by
+  `lock_stale_seconds`, one second later when that value is odd (the time to
+  live is rounded up), and by 20 seconds when the value is below 20 (this also
+  holds for an odd value below 20). Consul keeps the time, so no worker's wall clock is compared
   with another's. With the `consul` provider `lock_stale_seconds` is at most
   86400; a larger value fails the load with
   `history.archive.lock_stale_seconds (<n>) must be <= 86400 when history.archive.election.provider is consul`.
-  The holder renews the session every 60 seconds, so keep
-  `lock_stale_seconds` well above 120: a shorter lease can end between two
-  renewals.
+  The holder renews the session every 60 seconds, and Consul may end the
+  session as early as its time to live, half of `lock_stale_seconds`, after
+  the last renew. So keep `lock_stale_seconds` well above 120: with 120 or
+  less the time to live is 60 seconds or less, and the lease can end between
+  two renewals.
 - **Acquire.** The provider creates the session and writes the body to the key
   with `?acquire=<session>`. Consul grants this only to a session when no other
   session holds the key. When another session holds it, the provider destroys
@@ -930,10 +936,12 @@ consul](fleet.md#consul) and [Security](security.md#provider-credentials).
 - **A lost lease.** A session can end before the lease length: the agent
   restarts without its data, the health check of the agent's node fails (Consul
   then ends every session of the node), or the holder could not renew within
-  twice the time to live. The holder's next refresh then answers `False`, or its
-  fencing check finds no key, and the pass stops without publishing or
-  deleting. It logs `recorder_archive_fenced` with `reason` `taken_over`, whose
-  detail says that another worker took the archive lock over, although no
+  twice the time to live. The holder's next refresh then answers `False`,
+  which ends the refreshing but does not stop the pass by itself. The fencing
+  check before the next publish or delete answers "not held" (it finds no
+  key, or the refresh has already answered `False`), and that check stops the
+  pass without publishing or deleting. It logs
+  `recorder_archive_fenced` with `reason` `taken_over`, whose detail says that another worker took the archive lock over, although no
   worker did: the provider can only answer that the pass no longer holds the
   lease. The next pass takes the scope.
 - **An outage** is handled as for the registry: timeouts, connection errors and
