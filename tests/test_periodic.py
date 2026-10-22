@@ -7,7 +7,9 @@ import warnings
 from datetime import UTC, datetime
 
 import pytest
+from structlog.testing import capture_logs
 
+from drakkar.cronexpr import CRON_FIELDS_MESSAGE
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.periodic import (
     PERIODIC_ATTR,
@@ -103,8 +105,8 @@ def test_periodic_rule_error_is_a_value_error():
             pass
 
 
-def test_periodic_checks_nothing_before_the_function_is_known():
-    """The rules need the method name, so a bad declaration fails only when it decorates."""
+def test_periodic_raises_the_rule_error_only_when_it_decorates():
+    """The rules need the method name, so periodic(...) itself accepts a bad declaration."""
     decorate = periodic(-5)
 
     async def my_task(self):
@@ -112,6 +114,26 @@ def test_periodic_checks_nothing_before_the_function_is_known():
 
     with pytest.raises(PeriodicRuleError):
         decorate(my_task)
+
+
+def test_periodic_empty_cron_counts_as_given_and_is_refused():
+    with pytest.raises(PeriodicRuleError) as caught:
+
+        @periodic(cron='')
+        async def my_task(self):
+            pass
+
+    assert str(caught.value) == "periodic task 'my_task': " + CRON_FIELDS_MESSAGE.format(expr='')
+
+
+def test_periodic_cron_that_is_not_text_is_refused():
+    with pytest.raises(PeriodicRuleError) as caught:
+
+        @periodic(cron=5)  # type: ignore[arg-type]
+        async def my_task(self):
+            pass
+
+    assert str(caught.value) == "periodic task 'my_task': " + CRON_FIELDS_MESSAGE.format(expr=5)
 
 
 def test_check_periodic_rules_accepts_a_whole_number_float_cluster_interval():
@@ -534,6 +556,80 @@ async def test_worker_cron_task_never_runs_a_fire_time_twice_when_the_clock_step
         await run_periodic_task('step_back', body, cron='* * * * *', on_error='continue', clock=clock)
 
     assert starts == [at('2026-11-01T00:01:00'), at('2026-11-01T00:02:00')]
+
+
+class RecorderThatFailsOnOk:
+    """A recorder whose ok row raises, to check that a failing count is a failed run."""
+
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+
+    def record_periodic_run(self, name, duration, status, error='', system=False):
+        self.statuses.append(status)
+        if status == 'ok':
+            raise RuntimeError('recorder is full')
+
+
+@pytest.mark.parametrize(
+    ('on_error', 'expected_statuses'), [('continue', ['ok', 'error'] * 2), ('stop', ['ok', 'error'])]
+)
+async def test_recorder_error_on_the_ok_path_is_a_failed_run(on_error, expected_statuses):
+    from drakkar.metrics import periodic_task_runs
+
+    clock = FakeClock(now=1000.0)
+    recorder = RecorderThatFailsOnOk()
+    errors = periodic_task_runs.labels(name='recorder_fails', status='error')
+    errors_before = errors._value.get()
+    runs = 0
+
+    async def body():
+        nonlocal runs
+        runs += 1
+        if runs == 3:
+            raise asyncio.CancelledError
+
+    loop = run_periodic_task(
+        'recorder_fails',
+        body,
+        interval=10,
+        on_error=on_error,
+        recorder=recorder,
+        clock=clock,  # type: ignore[arg-type]
+    )
+    if on_error == 'stop':
+        await loop
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await loop
+
+    assert recorder.statuses == expected_statuses
+    assert errors._value.get() == errors_before + len(expected_statuses) // 2
+
+
+@pytest.mark.parametrize(
+    ('schedule', 'expected'),
+    [({'interval': 10}, {'interval_seconds': 10}), ({'cron': '*/5 * * * *'}, {'cron': '*/5 * * * *'})],
+)
+async def test_periodic_task_started_carries_scope_and_schedule(schedule, expected):
+    clock = FakeClock(now=1000.0)
+
+    async def body():
+        raise asyncio.CancelledError
+
+    with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
+        await run_periodic_task('started_line', body, on_error='continue', clock=clock, **schedule)
+
+    started = [entry for entry in logs if entry['event'] == 'periodic_task_started']
+    assert started == [
+        {
+            'event': 'periodic_task_started',
+            'log_level': 'info',
+            'category': 'periodic',
+            'scope': 'worker',
+            'periodic_task': 'started_line',
+            **expected,
+        }
+    ]
 
 
 # --- Integration with handler class ---

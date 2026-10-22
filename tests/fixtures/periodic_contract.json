@@ -1,5 +1,5 @@
 {
-  "_comment": "Schedules of cluster periodic tasks, shared by every implementation. constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names. messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text. cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never). interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first. cron_slots: the first fire time strictly after now truncated to the whole second. scopes: the election scope of a task: the sanitized cluster, a slash, the task name. scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message. hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes. decorator_validation: one task declaration each (name, interval, cron, scope, lease_seconds; null when not given); message is the full text of the first refusal (prefix_decorator, then the rule), in the order rule_name, rule_scope, rule_one_schedule, then rule_worker_interval or rule_cluster_interval or the cron texts, then rule_lease_scope, rule_lease_bounds; null when the declaration is accepted. No case uses 0 for interval or lease_seconds.",
+  "_comment": "Schedules of cluster periodic tasks, shared by every implementation. constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names. messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text. cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never). interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first. cron_slots: the first fire time strictly after now truncated to the whole second. scopes: the election scope of a task: the sanitized cluster, a slash, the task name. scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message. hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes. decorator_validation: one task declaration each (name, interval, cron, scope, lease_seconds; null when not given); message is the full text of the first refusal (prefix_decorator, then the rule), in the order rule_name, rule_scope, rule_one_schedule, then rule_worker_interval or rule_cluster_interval or the cron texts, then rule_lease_scope, rule_lease_bounds; null when the declaration is accepted. No case uses 0 for interval or lease_seconds, or an empty cron.",
   "constants": {
     "acquire_window_seconds": 10,
     "min_hold_seconds": 20,
@@ -5723,17 +5723,6 @@
         "lease_seconds": null
       },
       "message": "periodic task 'refresh_rates': cron '*/5 * * * * *' must have 5 fields separated by single spaces"
-    },
-    {
-      "name": "cron_empty",
-      "task": {
-        "name": "refresh_rates",
-        "interval": null,
-        "cron": "",
-        "scope": "worker",
-        "lease_seconds": null
-      },
-      "message": "periodic task 'refresh_rates': cron '' must have 5 fields separated by single spaces"
     },
     {
       "name": "lease_on_worker_task",

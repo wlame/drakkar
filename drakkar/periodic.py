@@ -15,11 +15,11 @@ import re
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
 import structlog
 
-from drakkar.cronexpr import next_cron_fire, validate_cron
+from drakkar.cronexpr import CRON_FIELDS_MESSAGE, next_cron_fire, validate_cron
 from drakkar.metrics import periodic_task_duration, periodic_task_runs
 from drakkar.schedule import MAX_LEASE_SECONDS, MIN_CLUSTER_INTERVAL_SECONDS, MIN_LEASE_SECONDS, TASK_NAME_PATTERN
 
@@ -32,7 +32,7 @@ PERIODIC_ATTR = '_periodic_meta'
 
 PeriodicScope = Literal['worker', 'cluster']
 OnErrorPolicy = Literal['continue', 'stop']
-PERIODIC_SCOPES: tuple[str, ...] = ('worker', 'cluster')
+PERIODIC_SCOPES: tuple[str, ...] = get_args(PeriodicScope)
 
 PREFIX_DECORATOR = "periodic task '{name}': "
 RULE_NAME = 'the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit'
@@ -132,7 +132,9 @@ def check_periodic_rules(
     Order: the name, the scope, exactly one schedule, then the interval rule
     of the scope or the cron check (one fire-time lookup from ``now_epoch``),
     then the lease rules. A given ``0`` counts as given: ``interval=0`` breaks
-    the interval rule and ``lease_seconds=0`` the lease rules.
+    the interval rule and ``lease_seconds=0`` the lease rules. A given empty
+    ``cron`` is checked like any other text, and a ``cron`` that is not text
+    gets the field-count message.
     """
     if not isinstance(name, str) or _TASK_NAME.fullmatch(name) is None:
         return RULE_NAME
@@ -140,7 +142,12 @@ def check_periodic_rules(
         return RULE_SCOPE
     if (interval is None) == (cron is None):
         return RULE_ONE_SCHEDULE
-    message = _check_interval(interval, scope) if cron is None else validate_cron(cron, now_epoch=now_epoch)
+    if cron is None:
+        message = _check_interval(interval, scope)
+    elif not isinstance(cron, str):
+        message = CRON_FIELDS_MESSAGE.format(expr=cron)
+    else:
+        message = validate_cron(cron, now_epoch=now_epoch)
     if message is not None:
         return message
     if lease_seconds is not None:
@@ -228,10 +235,19 @@ async def _run_once(
     recorder: EventRecorder | None,
     system: bool,
 ) -> Exception | None:
-    """Run the task once, count it in the metrics and the recorder; return the error it raised."""
+    """Run the task once, count it in the metrics and the recorder; return the error it raised.
+
+    The ok-path metrics and recorder row are inside the ``try``: an error
+    while counting a run is counted as a failed run, like an error of the task.
+    """
     start = time.monotonic()
     try:
         await coro_fn()
+        duration = time.monotonic() - start
+        periodic_task_runs.labels(name=name, status='ok').inc()
+        periodic_task_duration.labels(name=name).observe(duration)
+        if recorder:
+            recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok', system=system)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -247,11 +263,6 @@ async def _run_once(
                 system=system,
             )
         return exc
-    duration = time.monotonic() - start
-    periodic_task_runs.labels(name=name, status='ok').inc()
-    periodic_task_duration.labels(name=name).observe(duration)
-    if recorder:
-        recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok', system=system)
     return None
 
 
