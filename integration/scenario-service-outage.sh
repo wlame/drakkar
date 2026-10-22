@@ -19,10 +19,9 @@
 #     lists worker-2 and worker-3 online,
 #   - no worker container restarted.
 # Then it proves that:
-#   - every request still reached the sinks (just verify-delivery, after the
-#     producer printed PRODUCER_DONE and the consumer group's lag is 0; the
-#     producer keeps running after PRODUCER_DONE, so its exit is not the
-#     signal, and the workers drain the backlog long after it).
+#   - every request still reached the sinks (verify-after-drain.sh: the
+#     producer printed PRODUCER_DONE, the consumer group's lag is 0, and
+#     just verify-delivery passes).
 #
 # Not applicable with the filesystem provider: it has no service to pause.
 #
@@ -51,16 +50,7 @@ REGISTRY_LABELS="feature=\"registry\",provider=\"${HARNESS_PROVIDER}\""
 BREAKER_OPEN_LIMIT_SECONDS=40
 OUTAGE_SECONDS=90
 RECOVERY_LIMIT_SECONDS=60
-TOTAL_MESSAGES=$(harness_total_messages) || fail "cannot read the message total from the producer"
 TASKS_METRIC=drakkar_executor_tasks_total
-# The paced producer phases take about 20 minutes for 5000 messages.
-PRODUCER_DONE_LIMIT_SECONDS=2700
-CONSUMER_GROUP=drakkar-integration
-SOURCE_TOPIC=search-requests
-# The flood phase sends every id again, and the main cluster works the
-# backlog off for an hour or more after the producer is done.
-DRAIN_LIMIT_SECONDS=7200
-DRAIN_POLL_SECONDS=30
 
 is_paused=false
 # Never leave the service paused, also when a check fails half way.
@@ -81,35 +71,6 @@ peers_online() {
 
 recovered() {
     breaker_is 0 && peers_online
-}
-
-# The distinct request ids of the producer's PRODUCER_DONE line; empty
-# while it is still sending.
-producer_done_count() {
-    "${COMPOSE[@]}" logs --no-color producer 2>/dev/null \
-        | sed -n 's/.*PRODUCER_DONE distinct_request_ids=\([0-9]*\).*/\1/p' | tail -n 1
-}
-
-producer_done() {
-    [ -n "$(producer_done_count)" ]
-}
-
-# The summed lag of the main cluster's consumer group on the source topic;
-# `unknown` while the group is rebalancing or a partition has no committed
-# offset yet.
-consumer_lag() {
-    "${COMPOSE[@]}" exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server=localhost:9092 --describe --group="$CONSUMER_GROUP" 2>/dev/null \
-        | awk -v topic="$SOURCE_TOPIC" '
-            $2 == topic { rows++; if ($6 ~ /^[0-9]+$/) lag += $6; else unknown = 1 }
-            END { if (rows == 0 || unknown) print "unknown"; else print lag + 0 }'
-}
-
-drained() {
-    local lag
-    lag=$(consumer_lag)
-    log "consumer lag of ${CONSUMER_GROUP}: ${lag}"
-    [ "$lag" = 0 ]
 }
 
 # 1st, 2nd, 3rd for the outage number $1.
@@ -178,21 +139,10 @@ step "Scenario: service outage (${PAUSED_SERVICE} paused twice for ${OUTAGE_SECO
 pause_and_recover 1
 pause_and_recover 2
 
-log "waiting for the producer to print PRODUCER_DONE"
-wait_until "$PRODUCER_DONE_LIMIT_SECONDS" producer_done \
-    || fail "the producer did not print PRODUCER_DONE within ${PRODUCER_DONE_LIMIT_SECONDS}s"
-produced=$(producer_done_count)
-[ "$produced" = "$TOTAL_MESSAGES" ] || fail "the producer sent ${produced} distinct request ids, expected ${TOTAL_MESSAGES}"
-ok "producer done: ${produced} distinct request ids"
+# The drain wait and the delivery check are one script, run in its own
+# process: it prints its own verdict line, and a failure there is this
+# scenario's failure.
+log "running verify-after-drain.sh"
+"$SCENARIO_DIR/verify-after-drain.sh" || fail "verify-after-drain.sh failed (see its verdict above)"
 
-log "waiting for the main cluster to drain the backlog"
-POLL_SECONDS=$DRAIN_POLL_SECONDS wait_until "$DRAIN_LIMIT_SECONDS" drained \
-    || fail "the consumer lag of ${CONSUMER_GROUP} is not 0 after ${DRAIN_LIMIT_SECONDS}s (lag: $(consumer_lag))"
-drained_after=$WAITED
-ok "backlog drained ${drained_after}s after PRODUCER_DONE"
-
-log "verifying delivery of ${TOTAL_MESSAGES} requests"
-(cd "$REPO_DIR" && just verify-delivery "$TOTAL_MESSAGES") || fail "just verify-delivery failed"
-ok "verify-delivery passed"
-
-pass "${OUTAGE_TIMINGS}, no restart, drained ${drained_after}s after PRODUCER_DONE, delivery verified"
+pass "${OUTAGE_TIMINGS}, no restart, delivery verified after the drain"

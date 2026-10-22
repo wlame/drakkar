@@ -65,6 +65,7 @@ just cover              # the gate: 95% line+branch floor — an untested error 
 just ci                 # exactly what CI runs: fmt-check, lint, typecheck, cover, docs-build
 just check              # ci + the dependency CVE scan
 just integration-up     # docker harness (Kafka, all sinks, workers + load gen)
+just integration-matrix # the harness for every provider, with a summary table
 just drakkar-ui where   # UI-bundle cache CLI
 ```
 

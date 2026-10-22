@@ -69,9 +69,13 @@ across restarts**.
 ## Rotation
 
 - **Recorder**: rotates automatically. Files rotate hourly and are sealed
-  into `history/<cluster>/`. Once a 24h window's data is old enough (48
-  hours after the window closes, by default), one worker of the cluster
-  merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive and
+  into `history/<cluster>/`. In the harness, windows are one hour long and
+  due one hour after they close (`history.archive` in
+  `worker/drakkar.yaml`; the defaults are 24 hours and 48 hours). The
+  workers worker-2 and worker-3 look for a due window every 20 seconds
+  (`pass_interval_seconds`), and worker-1 never does. A lock that is not
+  refreshed for 30 seconds is taken over. When a window is due, one worker of
+  the cluster merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive and
   removes the sealed files it merged. Archives appear in the Debug →
   Databases tab for download.
 - **Cache**: does not rotate. Entries are pruned inline by the cache's

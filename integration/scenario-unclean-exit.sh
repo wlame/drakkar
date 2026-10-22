@@ -96,7 +96,9 @@ LOCK_STALE_SECONDS=30
 # at most 25 s on the harness (below the 30 s lease).
 PLANTED_FILES=20
 PLANTED_EVENTS_PER_FILE=1000
-PLANTED_HOURS_AGO=3
+# Twelve hours back stays clear of the files the workers seal themselves in
+# the first hours of an uptime; retention_days: 1 still covers it.
+PLANTED_HOURS_AGO=12
 SHARED_DIR="$SCENARIO_DIR/shared"
 # Seconds between two reads of the lock holder.
 LOCK_POLL_SECONDS=0.2
@@ -142,7 +144,10 @@ start_on_exit() {
     for service in ${killed_services[@]+"${killed_services[@]}"}; do
         "${COMPOSE[@]}" start "$service" >/dev/null 2>&1 || true
     done
+    rm -f "$HOLDER_ERROR_FILE"
 }
+# Error output of the last lock read (see read_holder), removed on exit.
+HOLDER_ERROR_FILE=$(mktemp)
 trap start_on_exit EXIT
 
 back_with_new_instance() {
@@ -308,9 +313,18 @@ planted_gone() {
     done
 }
 
-# The holder, or nothing when no lock is held or the read failed.
+# The holder, or nothing when no lock is held or the read failed. The error
+# output of the last failed read is kept in HOLDER_ERROR_FILE.
 read_holder() {
-    lock_holder 2>/dev/null || true
+    lock_holder 2>"$HOLDER_ERROR_FILE" || true
+}
+
+# The error output of the last lock read, or "none" when it was empty, so a
+# failing read is not reported as "no holder".
+last_holder_error() {
+    local text
+    text=$(tr '\n' ' ' <"$HOLDER_ERROR_FILE" | cut -c1-300)
+    echo "${text:-none}"
 }
 
 # True when the JSON log of service $1 since $2 has a line whose fields
@@ -371,12 +385,12 @@ while true; do
     fi
     previous=$current
     [ "$SECONDS" -lt "$holder_deadline" ] \
-        || fail "no worker held the archive lock in two polls in a row within ${HOLDER_LIMIT_SECONDS}s of the plant (archive published: $(archive_exists && echo yes || echo no))"
+        || fail "no worker held the archive lock in two polls in a row within ${HOLDER_LIMIT_SECONDS}s of the plant (archive published: $(archive_exists && echo yes || echo no); last lock read error: $(last_holder_error))"
     sleep "$LOCK_POLL_SECONDS"
 done
 case " ${TIMER_WORKERS} " in
     *" ${holder} "*) ;;
-    *) fail "the archive lock is held by ${holder}, expected one of ${TIMER_WORKERS}: worker-1 must run no archive timer (DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS: \"0\" in docker-compose.yml)" ;;
+    *) fail "the archive lock is held by ${holder}, expected one of ${TIMER_WORKERS}: either worker-1 runs an archive timer (check DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS: \"0\" in docker-compose.yml) or worker-1's hourly rotation pass took the lock (about 1% of runs; run the scenario again)" ;;
 esac
 ok "${holder} holds the archive lock"
 
@@ -409,7 +423,7 @@ while true; do
         fail "the archive ${archive} was published, but no worker other than ${holder} was seen holding the lock (holder now: '${current}')"
     fi
     before_deadline \
-        || fail "no worker took the archive lock of ${holder} over within ${ELECTION_TAKEOVER_LIMIT_SECONDS}s of the kill (holder now: '${current}')"
+        || fail "no worker took the archive lock of ${holder} over within ${ELECTION_TAKEOVER_LIMIT_SECONDS}s of the kill (holder now: '${current}'; last lock read error: $(last_holder_error))"
     sleep "$LOCK_POLL_SECONDS"
 done
 taken_over_at=$(epoch_now)

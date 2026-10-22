@@ -470,7 +470,7 @@ fleet:
     timeout_seconds: 5.0
 
 # Archive: one-hour windows, due one hour after they end, so a window that
-# integration/plant_history.py writes three hours back is due at once.
+# integration/plant_history.py writes twelve hours back is due at once.
 # Archives are kept one day (it must cover the due delay plus one window).
 # A pass runs every 20 s on its own timer instead of after each rotation,
 # so the unclean-exit scenario need not wait for an hourly rotation; worker-1

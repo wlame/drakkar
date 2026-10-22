@@ -17,7 +17,7 @@ database). The file name carries the time the archive pass reads, so
 
 Usage:
     uv run python integration/plant_history.py --shared-dir=integration/shared \\
-        --cluster='main cluster' --files=40 --events-per-file=2000 --hours-ago=3
+        --cluster='main cluster' --files=40 --events-per-file=2000 --hours-ago=12
 
 Prints one line:
     PLANTED scope=<sanitized cluster> window_start=<epoch> window_end=<epoch> files=<n> archive=<file name>
@@ -155,8 +155,9 @@ def plant(*, shared_dir: str, cluster: str, files: int, events_per_file: int, ho
         raise AlreadyPlantedError(f'{len(taken)} files to plant already exist in {folder}, first {taken[0]}')
 
     # Every file is written and sealed before the first one is published, so
-    # an archive pass that starts while this runs sees the whole window or
-    # none of it. The staging folder is a dot folder inside the shared folder:
+    # a pass never sees a half-written file. The publishes themselves are
+    # separate renames, not one atomic step: a pass that starts while they
+    # run can see only some of the files. The staging folder is a dot folder inside the shared folder:
     # on the same filesystem each publish is a rename, and no worker reads it.
     sealed: list[tuple[str, dict[str, Any]]] = []
     sources: list[str] = []

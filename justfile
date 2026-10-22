@@ -279,7 +279,7 @@ chaos:
 # Needs the harness up with the same provider. Stops at the first failing
 # scenario; each script prints one verdict line.
 #
-# Run the four provider outage scenarios (just integration-scenarios provider=postgres)
+# Wait for the workers, then run the four provider outage scenarios (just integration-scenarios provider=postgres)
 integration-scenarios provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -290,9 +290,88 @@ integration-scenarios provider='filesystem':
         *) echo "unknown provider '$provider': expected filesystem, postgres, redis or consul" >&2; exit 2 ;;
     esac
     export HARNESS_PROVIDER="$provider"
+    integration/wait-ready.sh
     for scenario in service-outage worker-cut-off unclean-exit secrets; do
         integration/scenario-${scenario}.sh
     done
+
+# Run the harness for every provider (filesystem, postgres, redis, consul) and print a PASS/FAIL/N/A table; profile: full or quick (just integration-matrix profile=quick)
+integration-matrix profile='quick':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="{{ profile }}"
+    profile="${profile#profile=}"
+    case "$profile" in
+        full|quick) ;;
+        *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
+    esac
+    providers=(filesystem postgres redis consul)
+    steps=(service-outage worker-cut-off unclean-exit secrets drain-delivery)
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    any_failed=false
+
+    # Run one harness script, keep its output on screen and in a file, and
+    # record PASS, FAIL or N/A for the provider and step. A scenario prints
+    # one VERDICT line; "not applicable" in it means N/A, not FAIL.
+    #   run_step <provider> <step> <script>
+    run_step() {
+        local provider=$1 step=$2 script=$3 log_file status verdict
+        log_file="$scratch/${provider}-${step}.log"
+        set +e
+        HARNESS_PROVIDER="$provider" "$script" 2>&1 | tee "$log_file"
+        status=${PIPESTATUS[0]}
+        set -e
+        verdict=PASS
+        if [ "$status" -ne 0 ]; then
+            verdict=FAIL
+            any_failed=true
+        elif grep -q 'VERDICT .*: not applicable' "$log_file"; then
+            verdict=N/A
+        fi
+        echo "$verdict" >"$scratch/${provider}-${step}.verdict"
+    }
+
+    for provider in "${providers[@]}"; do
+        echo "=== matrix: ${provider} (profile ${profile}) ==="
+        # The shared folder is a bind mount that `integration-down` does not
+        # clear: one provider's archive, lock or work file must not reach the next.
+        find integration/shared -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+        if ! just integration-up "provider=${provider}" "profile=${profile}"; then
+            echo "integration-up failed for ${provider}" >&2
+            any_failed=true
+            for step in "${steps[@]}"; do echo FAIL >"$scratch/${provider}-${step}.verdict"; done
+            just integration-down || true
+            continue
+        fi
+        if integration/wait-ready.sh; then
+            for step in service-outage worker-cut-off unclean-exit secrets; do
+                run_step "$provider" "$step" "integration/scenario-${step}.sh"
+            done
+            run_step "$provider" drain-delivery integration/verify-after-drain.sh
+        else
+            echo "the workers of ${provider} were not ready" >&2
+            any_failed=true
+            for step in "${steps[@]}"; do echo FAIL >"$scratch/${provider}-${step}.verdict"; done
+        fi
+        just integration-down || true
+    done
+
+    echo
+    echo "=== matrix summary (profile ${profile}) ==="
+    printf '%-12s' provider
+    for step in "${steps[@]}"; do printf '%-16s' "$step"; done
+    echo
+    for provider in "${providers[@]}"; do
+        printf '%-12s' "$provider"
+        for step in "${steps[@]}"; do printf '%-16s' "$(cat "$scratch/${provider}-${step}.verdict")"; done
+        echo
+    done
+    if [ "$any_failed" = true ]; then
+        echo "matrix: at least one step failed" >&2
+        exit 1
+    fi
+    echo "matrix: every step passed or does not apply"
 
 # Replay dead-lettered records (docs/sinks.md#dlq-replay); script flags pass through
 replay-dlq *args:

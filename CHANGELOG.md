@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario
   scripts read the message total from the running producer.
+- **Integration harness run matrix.** `just integration-matrix` runs the
+  harness for each provider and prints a PASS, FAIL or N/A table.
+  `integration/wait-ready.sh` waits for the workers before the scenarios.
 
 - **Archive election in the unclean-exit scenario.** The scenario now plants
   a due history window (`integration/plant_history.py`), kills the worker

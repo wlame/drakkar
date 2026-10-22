@@ -27,6 +27,24 @@ To stop everything:
 docker-compose down -v
 ```
 
+### Profiles
+
+`just integration-up` takes a profile that sets the size of the run:
+
+| Profile | Messages | Use it for |
+|---------|----------|------------|
+| `full` (default) | 5000, repeat counts as given | The long soak. A run with a service-backed provider takes about two hours. |
+| `quick` | 1000, repeat counts scaled by 0.2 (`REPEAT_SCALE=0.2`) | Development checks and the run matrix. Every producer phase stays, with less work in each. |
+
+```bash
+just integration-up provider=redis profile=quick
+```
+
+A value of `TOTAL_MESSAGES` or `REPEAT_SCALE` that is already in your
+environment wins over the profile. The scenario scripts read the message
+total from the running producer, so a profile cannot disagree with the
+checks.
+
 ---
 
 ## Services & Ports
@@ -552,7 +570,12 @@ exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
 `HARNESS_PROVIDER=redis integration/scenario-secrets.sh`.
 
-A run with `postgres`, `redis` or `consul` takes about two hours: the producer sends
+`just integration-scenarios` first runs `integration/wait-ready.sh`. It
+returns when worker-1 lists worker-2 and worker-3 online, and it fails after
+300 seconds and prints the last list it saw. The scenarios start only after
+that.
+
+A run with `postgres`, `redis` or `consul` and the `full` profile takes about two hours: the producer sends
 for about 20 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
@@ -562,11 +585,66 @@ scenario does not apply, and the other three take a few minutes.
 |--------|--------------|----------------|
 | `scenario-service-outage.sh` | Pauses the service of the provider (`postgres-fleet`, `redis-fleet` or `consul-fleet`) for 90 s, twice: the second pause starts after the recovery from the first. A paused container keeps its connections open and answers nothing. When `consul-fleet` resumes, it ends at once every session whose TTL ran out during the pause, so the workers create new sessions. | For each pause: within 40 s the registry breaker of worker-1 opens (`drakkar_provider_breaker_open{feature="registry",provider="<provider>"}` is 1), within 60 s of the unpause it is closed and worker-1 lists worker-2 and worker-3 online, and no worker restarts. The second pause shows that the first one left nothing behind that keeps the next calls from reaching their time limit. Once the producer has printed `PRODUCER_DONE` and the main cluster has worked off its backlog (consumer lag 0, an hour or more after the flood phase), `just verify-delivery` passes. With `filesystem` it does not apply: there is no service to pause. |
 | `scenario-worker-cut-off.sh` | Disconnects worker-3 from the Compose network for 90 s. | With `postgres` or `redis`, worker-1 lists worker-3 offline within 30 s, because worker-3 cannot reach the provider's service and its card gets old. (The check waits for the verdict: a card 30 s old is deleted, and worker-3 would then be missing from the list rather than offline.) With `consul`, worker-3 is missing from worker-1's list, or listed offline, within 30 s (the check accepts both): it cannot renew its session, and Consul deletes the card when the session ends. After the reconnect, worker-3 finds that its session has ended and publishes with a new one. With `filesystem` worker-3 stays online, because its card goes through the shared folder and not the network. worker-3's completed-task counter does not go down, worker-3 is online again within 20 s of the reconnect, and no worker restarts. |
-| `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The takeover of an archive lock is skipped: the archive pass runs only after a recorder rotation, which is at least one hour; the election test kit covers it. |
+| `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The second half tests the archive election; see [The election half](#the-election-half). |
 | `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token, and the config reference lists the three connections, with `connections.consul.main.token` masked. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
+
+### Drain and delivery check
+
+`integration/verify-after-drain.sh` waits until the producer printed
+`PRODUCER_DONE` and the consumer lag of the main cluster is 0. Then it runs
+`just verify-delivery` with the message total of the producer. The outage
+scenario calls it at its end. The run matrix calls it for every provider,
+because the outage scenario does not apply to `filesystem`.
+
+### The election half
+
+The second half of `scenario-unclean-exit.sh` tests the archive election
+with the provider of the run. It uses these archive settings of
+`integration/worker/drakkar.yaml` (`history.archive`):
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `window_hours` | 1 | A window is one hour. |
+| `due_after_hours` | 1 | A window is due one hour after it ends. |
+| `retention_days` | 1 | Archives are kept one day. |
+| `lock_stale_seconds` | 30 | A lock that is not refreshed for 30 s is taken over. |
+| `pass_interval_seconds` | 20 | Worker-2 and worker-3 look for a due window every 20 s. Worker-1 sets it to 0 in `docker-compose.yml`: it is the observer of every scenario and must never hold the lock. |
+
+The script plants a window with `integration/plant_history.py`: 20 sealed
+recorder files of the main cluster, with real meta files, in one hour window
+that ended 12 hours ago, so it is due at once. The size is set so that one
+archive pass takes between 8 and 25 s, which is less than the 30 s lease.
+When one of worker-2 and worker-3 holds the lock, the script kills it. It
+then checks that the other worker takes the lock over, publishes the archive
+and deletes every planted file. If the kill comes after the archive is
+published, the script fails and names the planted size.
+
+The script also fails when the holder is not worker-2 or worker-3. The
+rotation pass of worker-1 can take the lock in about 1 % of runs; run the
+scenario again.
+
+On a Linux host the containers create the history folder as root with mode
+0700, so planting from the host needs write access there (a `sudo chown`
+of `integration/shared/history` is enough). macOS Docker hosts are not
+affected.
+
+### Run matrix
+
+```bash
+just integration-matrix profile=quick
+```
+
+For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
+clears `integration/shared/` (except `README.md`; it is a bind mount that
+`integration-down` does not clear), starts the harness with
+`integration-up`, waits with `wait-ready.sh`, runs the four scenarios and
+`verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
+goes on after a failing step, prints a table with PASS, FAIL or N/A for each
+provider and step, and exits non-zero when any step failed. `N/A` means the
+scenario does not apply to the provider.
 
 ---
 
