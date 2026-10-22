@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.23"
+  version: "1.24"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -1663,6 +1663,16 @@ components:
         state: {type: string, enum: [starting, running, draining]}
         started_at: {type: string}
         instance: {type: string}
+        # v1.24, optional: hash of the worker's cluster periodic task
+        # definitions (16 lowercase hex characters). The peer's value comes
+        # from its registry card; null when the card carries none in that
+        # form. Absent on older backends: treat as unknown.
+        cluster_tasks_hash: {type: [string, 'null']}
+        # v1.24, optional: true for the current worker; for a peer, whether
+        # its hash equals the current worker's. null when either hash is
+        # unknown or the peer is in another cluster. Absent on older
+        # backends: treat as unknown.
+        cluster_tasks_match: {type: [boolean, 'null']}
       required: [worker_name, url, is_current]
 
     ProcessorsReport:
@@ -2042,6 +2052,10 @@ components:
         last_status: {type: [string, 'null']}
         last_error: {type: [string, 'null']}
         system: {type: boolean}
+        # v1.24, optional: cluster when the latest recorded run was a
+        # cluster-scope slot run, else worker. Absent on older backends:
+        # treat as worker.
+        scope: {type: string, enum: [worker, cluster]}
         total_ok: {type: integer}
         total_error: {type: integer}
         recent:

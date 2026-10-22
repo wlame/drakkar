@@ -445,6 +445,76 @@ async def test_archives_payload_matches_schema(tmp_path):
     }
 
 
+async def test_workers_payload_matches_schema():
+    """Validates GET /api/v1/workers against the vendored Worker schema.
+
+    One peer carries a cluster task hash in its card and one carries none, so
+    both the string and the null form of ``cluster_tasks_hash`` and every
+    verdict value of ``cluster_tasks_match`` that a card can give are checked
+    against the schema, next to the current worker's own row.
+    """
+    from datetime import UTC, datetime
+
+    from drakkar.fleet.card import WorkerIdentity
+    from drakkar.fleet.service import PeerView
+
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+    own_hash = '0123456789abcdef'
+
+    def peer(worker: str, cluster: str, features: dict) -> PeerView:
+        card = {
+            'schema': 1,
+            'worker': worker,
+            'cluster': cluster,
+            'url': f'http://{worker}:8080/',
+            'features': features,
+        }
+        return PeerView(card=card, age_seconds=5.0, online=True, last_seen_ts=time.time() - 5.0)
+
+    class StubFleet:
+        def peer_views(self) -> list[PeerView]:
+            return [
+                peer('w-same', 'search', {'periodic': {'cluster_hash': own_hash}}),
+                peer('w-unknown', 'search', {'cache': {}}),
+            ]
+
+    cfg = make_ui_config(enabled=True, port=8080)
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'schema-worker'
+    app._cluster_name = 'search'
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app.lifecycle_state = 'running'
+    app.cluster_tasks_hash = own_hash
+    app.fleet = StubFleet()
+    app.worker_identity = WorkerIdentity(
+        worker='schema-worker',
+        instance='abcdef0123456789',
+        cluster='search',
+        url='http://10.0.0.1:8080/',
+        backend='python',
+        version='9.9.9',
+        started_at=datetime(2026, 11, 1, 9, 0, tzinfo=UTC),
+    )
+
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        workers = (await client.get('/api/v1/workers')).json()
+
+    worker_schema = _resolve_schema(schemas, 'Worker')
+    assert len(workers) == 3
+    for row in workers:
+        jsonschema.validate(row, worker_schema, cls=jsonschema.Draft202012Validator)
+    verdicts = {row['worker_name']: (row['cluster_tasks_hash'], row['cluster_tasks_match']) for row in workers}
+    assert verdicts == {
+        'schema-worker': (own_hash, True),
+        'w-same': (own_hash, True),
+        'w-unknown': (None, None),
+    }
+
+
 async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch):
     """A recorder read that cannot answer must still return a RecentTasks object.
 
