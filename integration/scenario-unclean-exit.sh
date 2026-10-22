@@ -93,9 +93,11 @@ AGENT_LOG_SINCE=5m
 PASS_INTERVAL_SECONDS=20
 LOCK_STALE_SECONDS=30
 # The planted window: its size makes one archive pass take at least 8 s and
-# at most 25 s on the harness (below the 30 s lease). Measured: 60 files of
-# 1000 events (about 90 MB) take about 14 s; 40 files take about 9 s.
-PLANTED_FILES=60
+# at most 25 s on the harness (below the 30 s lease). Measured: 50 files of
+# 1000 events (about 78 MB) take about 12 to 21 s on an idle harness, and
+# longer while the workers are busy; 60 files took up to 24 s idle and more
+# than the lease under load.
+PLANTED_FILES=50
 PLANTED_EVENTS_PER_FILE=1000
 # Twelve hours back stays clear of the files the workers seal themselves in
 # the first hours of an uptime; retention_days: 1 still covers it.
