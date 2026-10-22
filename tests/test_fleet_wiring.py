@@ -896,9 +896,12 @@ async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_regi
     await wait_for(lambda: app.is_ready)
     await wait_for(in_window.is_set)
 
-    app._lifecycle._handle_signal()
-    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+    with capture_logs() as logs:
+        app._lifecycle._handle_signal()
+        await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
+    # A cancelled slot is not a failed run.
+    assert 'periodic_task_failed' not in [entry['event'] for entry in logs]
     # The slot loop was cancelled while it held the lease: nothing is released.
     assert order == [
         'election.start',
