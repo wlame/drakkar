@@ -280,6 +280,11 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+      # No archive timer on worker-1: it runs a pass only after a rotation.
+      # worker-1 is the observer of every scenario, so it must never hold
+      # the archive lock that the unclean-exit scenario kills; worker-2 and
+      # worker-3 keep the 20 s timer of drakkar.yaml.
+      DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS: "0"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the

@@ -31,9 +31,28 @@
 #
 # With every style, worker-1 and worker-3 did not restart.
 #
-# The archive-election half of this scenario is skipped: the takeover of a
-# dead worker's archive lock needs an archive pass, which runs only after a
-# rotation (at least one hour).
+# Archive-election half, with every provider, after worker-2 is back. The
+# harness runs an archive pass every 20 s on worker-2 and worker-3 (worker-1
+# runs none: it is the observer, and its compose environment sets the timer
+# off), with a 30 s lease refreshed every 10 s:
+#   - the history of one hour window three hours back is planted into the
+#     shared folder (PLANT_HISTORY_CMD, see scenario-lib.sh), so the window
+#     is due at once; an archive of that window left by an earlier run is a
+#     FAIL before anything is planted,
+#   - within one pass interval plus 10 s a worker H holds the archive lock
+#     in two polls in a row (each timer tick takes and releases the lock for
+#     a moment even with nothing due; the pass of the planted window holds
+#     it for seconds), and H is worker-2 or worker-3,
+#   - H is killed at once; its archive is not published yet and every
+#     planted file is still there (otherwise FAIL: the planted window is
+#     too small),
+#   - within the lease plus one pass interval plus 40 s of the kill another
+#     worker W holds the lock, the archive of the window exists, W logged
+#     recorder_archive_created for it, and every planted file is gone,
+#   - with filesystem and postgres, W logged recorder_archive_lock_taken_over
+#     with its provider (redis and consul write no such line),
+#   - H, started again, is listed online by worker-1; worker-1 and W did not
+#     restart.
 #
 # Usage: HARNESS_PROVIDER=consul integration/scenario-unclean-exit.sh
 # ============================================================================
@@ -51,7 +70,6 @@ WORKER_1_UI_PORT=8081
 OFFLINE_LIMIT_SECONDS=20
 PRUNE_LIMIT_SECONDS=45
 RESTART_LIMIT_SECONDS=20
-ELECTION_SKIP="skipped: the archive lock takeover needs an archive pass, which runs only after a rotation (at least one hour); covered by the election test kit"
 
 # The registry timings of worker/drakkar.yaml.
 HEARTBEAT_SECONDS=2
@@ -65,12 +83,30 @@ TAKEOVER_LIMIT_SECONDS=$((HEARTBEAT_SECONDS + REFRESH_SECONDS + 5))
 # only explain a failure; the agent log decides how the session ended.
 EARLIEST_TTL_END_SECONDS=$((2 * SESSION_TTL_SECONDS - HEARTBEAT_SECONDS))
 LATEST_TTL_END_SECONDS=$((2 * SESSION_TTL_SECONDS))
-# The agent's HTTP API on the host, and the card key of the killed worker
-# (connections.consul.main.key_prefix is "drakkar").
-CONSUL_HOST_URL=http://localhost:8500
+# The card key of the killed worker (connections.consul.main.key_prefix is
+# "drakkar").
 CONSUL_CARD_PATH="/v1/kv/drakkar/fleet/workers/${KILLED_WORKER}"
 # The agent log read at the end covers this much time before the read.
 AGENT_LOG_SINCE=5m
+
+# The archive settings of worker/drakkar.yaml (history.archive).
+PASS_INTERVAL_SECONDS=20
+LOCK_STALE_SECONDS=30
+# The planted window: its size makes one archive pass take at least 8 s and
+# at most 25 s on the harness (below the 30 s lease).
+PLANTED_FILES=20
+PLANTED_EVENTS_PER_FILE=1000
+PLANTED_HOURS_AGO=3
+SHARED_DIR="$SCENARIO_DIR/shared"
+# Seconds between two reads of the lock holder.
+LOCK_POLL_SECONDS=0.2
+# How long the half waits for the first holder, and, from the kill, for the
+# takeover and the published archive.
+HOLDER_LIMIT_SECONDS=$((PASS_INTERVAL_SECONDS + 10))
+ELECTION_TAKEOVER_LIMIT_SECONDS=$((LOCK_STALE_SECONDS + PASS_INTERVAL_SECONDS + 40))
+# The workers that run archive passes on a timer: the holder must be one of
+# them.
+TIMER_WORKERS="worker-2 worker-3"
 
 step "Scenario: unclean exit of ${KILLED_WORKER}"
 
@@ -83,42 +119,35 @@ esac
 before=$(restart_snapshot worker-1 worker-3)
 ok "${KILLED_WORKER} online with instance ${instance_before}"
 
-# Start the worker again when a check fails before the start below.
-is_killed=false
+# Every service this scenario killed and has not started again; the EXIT
+# trap starts them, so a failed check leaves no worker down for the next
+# scenario.
+killed_services=()
+
+mark_killed() {
+    killed_services+=("$1")
+}
+
+mark_started() {
+    local service remaining=()
+    # The ${a[@]+...} form keeps an empty array legal under set -u in bash 3.
+    for service in ${killed_services[@]+"${killed_services[@]}"}; do
+        [ "$service" = "$1" ] || remaining+=("$service")
+    done
+    killed_services=(${remaining[@]+"${remaining[@]}"})
+}
+
 start_on_exit() {
-    if [ "$is_killed" = true ]; then
-        "${COMPOSE[@]}" start "$KILLED_WORKER" >/dev/null 2>&1 || true
-    fi
+    local service
+    for service in ${killed_services[@]+"${killed_services[@]}"}; do
+        "${COMPOSE[@]}" start "$service" >/dev/null 2>&1 || true
+    done
 }
 trap start_on_exit EXIT
 
 back_with_new_instance() {
     peer_online_is "$WORKER_1_UI_PORT" "$KILLED_WORKER" true \
         && [ "$(peer_field "$WORKER_1_UI_PORT" "$KILLED_WORKER" instance)" != "$instance_before" ]
-}
-
-# The current time in seconds since the epoch, to the millisecond.
-epoch_now() {
-    python3 -c 'import time; print(f"{time.time():.3f}")'
-}
-
-# The seconds from the epoch time $1 to the epoch time $2, to 0.1 s.
-seconds_between() {
-    python3 -c 'import sys; print(f"{float(sys.argv[2]) - float(sys.argv[1]):.1f}")' "$1" "$2"
-}
-
-# The management token of consul-fleet, read from docker-compose.yml so the
-# harness value lives in one file.
-consul_management_token() {
-    "${COMPOSE[@]}" config --format=json \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["consul-fleet-init"]["environment"]["CONSUL_HTTP_TOKEN"])'
-}
-
-# GET one path of the agent's API with the management token $1:
-#   consul_get <token> <path>
-consul_get() {
-    # curl's long options take no `=`, so they keep the space form here.
-    curl -sf --connect-timeout 2 --max-time 3 -H "X-Consul-Token: $1" "${CONSUL_HOST_URL}$2"
 }
 
 # The session that holds the card key of the killed worker; empty when the
@@ -145,7 +174,7 @@ container_address() {
 offline_flow() {
     log "killing ${KILLED_WORKER}"
     "${COMPOSE[@]}" kill "$KILLED_WORKER"
-    is_killed=true
+    mark_killed "$KILLED_WORKER"
     killed_at=$SECONDS
 
     wait_until "$OFFLINE_LIMIT_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$KILLED_WORKER" false \
@@ -160,7 +189,7 @@ offline_flow() {
 
     log "starting ${KILLED_WORKER}"
     "${COMPOSE[@]}" start "$KILLED_WORKER"
-    is_killed=false
+    mark_started "$KILLED_WORKER"
 
     wait_until "$RESTART_LIMIT_SECONDS" back_with_new_instance \
         || fail "worker-1 does not list ${KILLED_WORKER} online with a new instance ${RESTART_LIMIT_SECONDS}s after the start (online: $(peer_field "$WORKER_1_UI_PORT" "$KILLED_WORKER" online), instance: $(peer_field "$WORKER_1_UI_PORT" "$KILLED_WORKER" instance))"
@@ -186,7 +215,7 @@ takeover_flow() {
     # no later than the kill itself.
     kill_at=$(epoch_now)
     "${COMPOSE[@]}" kill "$KILLED_WORKER"
-    is_killed=true
+    mark_killed "$KILLED_WORKER"
 
     predecessor=$(card_session "$token") || fail "the card key of ${KILLED_WORKER} could not be read after the kill"
     [ -n "$predecessor" ] || fail "the card key of ${KILLED_WORKER} is held by no session after the kill"
@@ -203,7 +232,7 @@ takeover_flow() {
     # that is left of the predecessor's session.
     docker start "$(container_id "$KILLED_WORKER")" >/dev/null
     start_done_at=$(epoch_now)
-    is_killed=false
+    mark_started "$KILLED_WORKER"
     timings="start issued $(seconds_between "$kill_at" "$start_at")s after the kill, returned after $(seconds_between "$start_at" "$start_done_at")s"
 
     POLL_SECONDS=1 wait_until "$TAKEOVER_LIMIT_SECONDS" back_with_new_instance \
@@ -242,5 +271,187 @@ after=$(restart_snapshot worker-1 worker-3)
 [ "$before" = "$after" ] || fail "another worker restarted: before [${before}] after [${after}]"
 ok "worker-1 and worker-3 did not restart"
 
-warn "$ELECTION_SKIP"
-pass "${outcome}; election half ${ELECTION_SKIP}"
+# ---------------------------------------------------------------------------
+# Archive-election half: kill the holder of the archive lock in the middle
+# of a pass, and see another worker take the lock over and publish.
+# ---------------------------------------------------------------------------
+
+step "Archive election: the holder of the archive lock dies during a pass"
+
+# The value of field $1 in the PLANTED line $2.
+planted_field() {
+    sed -n "s/.* $1=\([^ ]*\).*/\1/p" <<<"$2"
+}
+
+# True when the archive of the planted window exists.
+archive_exists() {
+    [ -e "${history_folder}/${archive}" ]
+}
+
+# Print the planted files that are still in the history folder, one per line.
+planted_left() {
+    local name
+    for name in "${planted_names[@]}"; do
+        if [ -e "${history_folder}/${name}" ]; then
+            echo "$name"
+        fi
+    done
+}
+
+# Print the planted files that are no longer in the history folder.
+planted_gone() {
+    local name
+    for name in "${planted_names[@]}"; do
+        if [ ! -e "${history_folder}/${name}" ]; then
+            echo "$name"
+        fi
+    done
+}
+
+# The holder, or nothing when no lock is held or the read failed.
+read_holder() {
+    lock_holder 2>/dev/null || true
+}
+
+# True when the JSON log of service $1 since $2 has a line whose fields
+# match every key=value pair after it:
+#   log_has <service> <since> event=<name> [<key>=<value>...]
+log_has() {
+    local service=$1 since=$2
+    shift 2
+    "${COMPOSE[@]}" logs --no-color --no-log-prefix --since="$since" "$service" 2>/dev/null \
+        | python3 -c '
+import json, sys
+wanted = dict(pair.split("=", 1) for pair in sys.argv[1:])
+for line in sys.stdin:
+    start = line.find("{")
+    if start < 0:
+        continue
+    try:
+        record = json.loads(line[start:])
+    except ValueError:
+        continue
+    if isinstance(record, dict) and all(str(record.get(key)) == value for key, value in wanted.items()):
+        sys.exit(0)
+sys.exit(1)
+' "$@"
+}
+
+lock_holder_prepare || fail "the admin settings of the ${HARNESS_PROVIDER} lock could not be read from docker-compose.yml"
+election_before=$(restart_snapshot worker-1 worker-2 worker-3)
+plant_since=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+# The generator refuses, writing nothing, when the window's archive already
+# exists: a leftover of an earlier run would make the checks below lie.
+planted=$("${PLANT_HISTORY_CMD[@]}" --shared-dir="$SHARED_DIR" --cluster="main cluster" \
+    --files="$PLANTED_FILES" --events-per-file="$PLANTED_EVENTS_PER_FILE" --hours-ago="$PLANTED_HOURS_AGO" 2>&1) \
+    || fail "the history window could not be planted: ${planted}"
+planted=$(grep '^PLANTED ' <<<"$planted") || fail "the history generator printed no PLANTED line"
+archive=$(planted_field archive "$planted")
+history_folder="${SHARED_DIR}/history/$(planted_field scope "$planted")"
+planted_names=()
+while IFS= read -r name; do
+    planted_names+=("$name")
+done < <(cd "$history_folder" && ls -- planted-*.db)
+[ "${#planted_names[@]}" -eq "$PLANTED_FILES" ] \
+    || fail "the history folder holds ${#planted_names[@]} planted files, expected ${PLANTED_FILES} (a leftover of an earlier run?)"
+ok "planted ${PLANTED_FILES} files of ${PLANTED_EVENTS_PER_FILE} events, window $(planted_field window_start "$planted")-$(planted_field window_end "$planted"), archive ${archive}"
+
+# A holder seen in two polls in a row is the pass of the planted window: a
+# timer tick with nothing due holds the lock for milliseconds only.
+log "waiting up to ${HOLDER_LIMIT_SECONDS}s for a worker to hold the archive lock"
+holder=""
+previous=""
+holder_deadline=$((SECONDS + HOLDER_LIMIT_SECONDS))
+while true; do
+    current=$(read_holder)
+    if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+        holder=$current
+        break
+    fi
+    previous=$current
+    [ "$SECONDS" -lt "$holder_deadline" ] \
+        || fail "no worker held the archive lock in two polls in a row within ${HOLDER_LIMIT_SECONDS}s of the plant (archive published: $(archive_exists && echo yes || echo no))"
+    sleep "$LOCK_POLL_SECONDS"
+done
+case " ${TIMER_WORKERS} " in
+    *" ${holder} "*) ;;
+    *) fail "the archive lock is held by ${holder}, expected one of ${TIMER_WORKERS}: worker-1 must run no archive timer (DK_HISTORY__ARCHIVE__PASS_INTERVAL_SECONDS: \"0\" in docker-compose.yml)" ;;
+esac
+ok "${holder} holds the archive lock"
+
+log "killing ${holder}"
+election_kill_at=$(epoch_now)
+"${COMPOSE[@]}" kill "$holder"
+mark_killed "$holder"
+
+if archive_exists; then
+    fail "the pass of ${holder} finished before the kill; raise the planted size (files=${PLANTED_FILES}, events=${PLANTED_EVENTS_PER_FILE})"
+fi
+missing=$(planted_gone)
+[ -z "$missing" ] \
+    || fail "planted files are gone after the kill but the archive ${archive} is not published: $(tr '\n' ' ' <<<"$missing")"
+ok "${holder} killed during its pass: no archive yet, every planted file still there"
+
+log "waiting up to ${ELECTION_TAKEOVER_LIMIT_SECONDS}s from the kill for another worker to take the lock over"
+takeover_deadline=$(python3 -c 'import sys; print(float(sys.argv[1]) + int(sys.argv[2]))' "$election_kill_at" "$ELECTION_TAKEOVER_LIMIT_SECONDS")
+before_deadline() {
+    python3 -c 'import sys, time; sys.exit(0 if time.time() < float(sys.argv[1]) else 1)' "$takeover_deadline"
+}
+taker=""
+while true; do
+    current=$(read_holder)
+    if [ -n "$current" ] && [ "$current" != "$holder" ]; then
+        taker=$current
+        break
+    fi
+    if archive_exists; then
+        fail "the archive ${archive} was published, but no worker other than ${holder} was seen holding the lock (holder now: '${current}')"
+    fi
+    before_deadline \
+        || fail "no worker took the archive lock of ${holder} over within ${ELECTION_TAKEOVER_LIMIT_SECONDS}s of the kill (holder now: '${current}')"
+    sleep "$LOCK_POLL_SECONDS"
+done
+taken_over_at=$(epoch_now)
+takeover_after=$(seconds_between "$election_kill_at" "$taken_over_at")
+ok "${taker} holds the archive lock ${takeover_after}s after the kill"
+
+until archive_exists && [ -z "$(planted_left)" ]; do
+    if ! before_deadline; then
+        if ! archive_exists; then
+            fail "${taker} took the lock over, but the archive ${archive} is not published ${ELECTION_TAKEOVER_LIMIT_SECONDS}s after the kill"
+        fi
+        fail "the archive ${archive} is published, but planted files are left ${ELECTION_TAKEOVER_LIMIT_SECONDS}s after the kill: $(planted_left | tr '\n' ' ')"
+    fi
+    sleep "$LOCK_POLL_SECONDS"
+done
+published_after=$(seconds_between "$election_kill_at" "$(epoch_now)")
+ok "archive ${archive} published and every planted file deleted ${published_after}s after the kill"
+
+log_has "$taker" "$plant_since" event=recorder_archive_created name="$archive" \
+    || fail "the log of ${taker} has no recorder_archive_created line for ${archive}"
+ok "${taker} logged recorder_archive_created for ${archive}"
+case "$HARNESS_PROVIDER" in
+    filesystem | postgres)
+        log_has "$taker" "$plant_since" event=recorder_archive_lock_taken_over provider="$HARNESS_PROVIDER" \
+            || fail "the log of ${taker} has no recorder_archive_lock_taken_over line with provider=${HARNESS_PROVIDER}"
+        ok "${taker} logged recorder_archive_lock_taken_over with provider=${HARNESS_PROVIDER}"
+        ;;
+    *) log "${HARNESS_PROVIDER} writes no recorder_archive_lock_taken_over line (the contract); not looked for" ;;
+esac
+
+log "starting ${holder}"
+"${COMPOSE[@]}" start "$holder"
+mark_started "$holder"
+wait_until "$RESTART_LIMIT_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$holder" true \
+    || fail "worker-1 does not list ${holder} online ${RESTART_LIMIT_SECONDS}s after the start (online: $(peer_field "$WORKER_1_UI_PORT" "$holder" online))"
+ok "${holder} online ${WAITED}s after the start"
+
+election_after=$(restart_snapshot worker-1 worker-2 worker-3)
+for service in worker-1 "$taker"; do
+    [ "$(grep "^${service} " <<<"$election_before")" = "$(grep "^${service} " <<<"$election_after")" ] \
+        || fail "${service} restarted during the election half: before [$(grep "^${service} " <<<"$election_before")] after [$(grep "^${service} " <<<"$election_after")]"
+done
+ok "worker-1 and ${taker} did not restart"
+
+pass "${outcome}; archive lock of ${holder} taken over by ${taker} ${takeover_after}s after the kill, archive published ${published_after}s after the kill"

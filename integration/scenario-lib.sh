@@ -253,3 +253,157 @@ sleep_until_elapsed() {
         sleep "$left"
     fi
 }
+
+# The current time in seconds since the epoch, to the millisecond.
+epoch_now() {
+    python3 -c 'import time; print(f"{time.time():.3f}")'
+}
+
+# The seconds from the epoch time $1 to the epoch time $2, to 0.1 s.
+seconds_between() {
+    python3 -c 'import sys; print(f"{float(sys.argv[2]) - float(sys.argv[1]):.1f}")' "$1" "$2"
+}
+
+# The agent's HTTP API of consul-fleet on the host.
+CONSUL_HOST_URL=http://localhost:8500
+
+# The management token of consul-fleet, read from docker-compose.yml so the
+# harness value lives in one file.
+consul_management_token() {
+    "${COMPOSE[@]}" config --format=json \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["consul-fleet-init"]["environment"]["CONSUL_HTTP_TOKEN"])'
+}
+
+# GET one path of the agent's API with the management token $1:
+#   consul_get <token> <path>
+consul_get() {
+    # curl's long options take no `=`, so they keep the space form here.
+    curl -sf --connect-timeout 2 --max-time 3 -H "X-Consul-Token: $1" "${CONSUL_HOST_URL}$2"
+}
+
+# The command that plants an already-due history window into a shared
+# folder (integration/plant_history.py). It takes --shared-dir, --cluster,
+# --files, --events-per-file and --hours-ago, and prints one line:
+#   PLANTED scope=<s> window_start=<epoch> window_end=<epoch> files=<n> archive=<name>
+PLANT_HISTORY_CMD=(uv run --project "$REPO_DIR" python "$REPO_DIR/integration/plant_history.py")
+
+# The archive lock of the main cluster ("main cluster" sanitized), and where
+# each provider keeps it (the connections of worker/drakkar.yaml).
+LOCK_SCOPE=main_cluster
+LOCK_FILE="$SCENARIO_DIR/shared/history/${LOCK_SCOPE}/.archive.lock"
+LOCK_POSTGRES_TABLE=drakkar.archive_locks
+LOCK_REDIS_DATABASE=3
+LOCK_REDIS_KEY="drakkar:archive-locks:${LOCK_SCOPE}"
+LOCK_CONSUL_PATH="/v1/kv/drakkar/archive-locks/${LOCK_SCOPE}"
+
+# Read the admin settings that lock_holder needs from the compose config,
+# once, into LOCK_ADMIN_USER, LOCK_ADMIN_PASSWORD, LOCK_ADMIN_DATABASE and
+# LOCK_ADMIN_TOKEN. Call it in the scenario's own shell before polling
+# lock_holder: lock_holder runs in a subshell and cannot keep what it reads.
+lock_holder_prepare() {
+    local config settings
+    case "$HARNESS_PROVIDER" in
+        filesystem) return 0 ;;
+        consul)
+            LOCK_ADMIN_TOKEN=$(consul_management_token) || return 1
+            [ -n "$LOCK_ADMIN_TOKEN" ] || { echo "docker-compose.yml gives consul-fleet-init no CONSUL_HTTP_TOKEN" >&2; return 1; }
+            return 0
+            ;;
+    esac
+    config=$("${COMPOSE[@]}" config --format=json) || return 1
+    # Postgres: the user and database of postgres-fleet's environment.
+    # Redis: the first user of redis-fleet's command that is on and has a
+    # password (">password"); the default user is off.
+    settings=$(PROVIDER="$HARNESS_PROVIDER" python3 -c '
+import json, os, sys
+services = json.load(sys.stdin)["services"]
+if os.environ["PROVIDER"] == "postgres":
+    env = services["postgres-fleet"]["environment"]
+    print(env["POSTGRES_USER"], env["POSTGRES_DB"])
+else:
+    words = services["redis-fleet"]["command"]
+    starts = [i for i, word in enumerate(words) if word == "--user"] + [len(words)]
+    for begin, end in zip(starts, starts[1:]):
+        rules = words[begin + 1 : end]
+        passwords = [rule[1:] for rule in rules[1:] if rule.startswith(">")]
+        if "on" in rules[1:] and passwords:
+            print(rules[0], passwords[0])
+            break
+    else:
+        sys.exit("redis-fleet has no user that is on and has a password")
+' <<<"$config") || return 1
+    case "$HARNESS_PROVIDER" in
+        postgres) read -r LOCK_ADMIN_USER LOCK_ADMIN_DATABASE <<<"$settings" ;;
+        redis) read -r LOCK_ADMIN_USER LOCK_ADMIN_PASSWORD <<<"$settings" ;;
+    esac
+}
+
+# The `worker` field of a lock body (JSON on stdin); nothing for no body.
+lock_body_worker() {
+    python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+if text:
+    print(json.loads(text)["worker"])
+'
+}
+
+# Print the worker that holds the archive lock of the main cluster, or
+# nothing when no lock is held. Returns 1 when the lock could not be read.
+# Needs lock_holder_prepare first (filesystem excepted).
+#   filesystem - the body of history/main_cluster/.archive.lock in the
+#                shared folder;
+#   postgres   - the row of the scope in drakkar.archive_locks;
+#   redis      - the lock key's body on database 3 of redis-fleet;
+#   consul     - the lock key's body, only while a session holds the key.
+# A lock that its holder left behind when it died stays until another
+# worker takes it over (filesystem, postgres) or it expires (redis: the
+# key's PX; consul: the session's TTL).
+lock_holder() {
+    local response status
+    case "$HARNESS_PROVIDER" in
+        filesystem)
+            # The holder writes the body right after it creates the file,
+            # so a read can see an empty file for a moment: no holder yet.
+            LOCK_FILE="$LOCK_FILE" python3 -c '
+import json, os
+try:
+    with open(os.environ["LOCK_FILE"], encoding="utf-8") as body:
+        text = body.read().strip()
+except FileNotFoundError:
+    text = ""
+if text:
+    print(json.loads(text)["worker"])
+'
+            ;;
+        postgres)
+            "${COMPOSE[@]}" exec -T postgres-fleet psql -q -t -A -v ON_ERROR_STOP=1 \
+                -U "$LOCK_ADMIN_USER" -d "$LOCK_ADMIN_DATABASE" \
+                -c "SELECT worker FROM ${LOCK_POSTGRES_TABLE} WHERE cluster = '${LOCK_SCOPE}'"
+            ;;
+        redis)
+            response=$("${COMPOSE[@]}" exec -T redis-fleet redis-cli --user "$LOCK_ADMIN_USER" \
+                --pass "$LOCK_ADMIN_PASSWORD" --no-auth-warning -n "$LOCK_REDIS_DATABASE" \
+                GET "$LOCK_REDIS_KEY") || return 1
+            lock_body_worker <<<"$response"
+            ;;
+        consul)
+            # Not consul_get: a key that does not exist answers 404, which
+            # here means no lock, not a failed read.
+            response=$(curl -s --connect-timeout 2 --max-time 3 -H "X-Consul-Token: ${LOCK_ADMIN_TOKEN}" \
+                -w '\n%{http_code}' "${CONSUL_HOST_URL}${LOCK_CONSUL_PATH}") || return 1
+            status=${response##*$'\n'}
+            case "$status" in
+                404) return 0 ;;
+                200) ;;
+                *) echo "GET ${LOCK_CONSUL_PATH} answered ${status}" >&2; return 1 ;;
+            esac
+            python3 -c '
+import base64, json, sys
+entry = json.load(sys.stdin)[0]
+if entry.get("Session") and entry.get("Value"):
+    print(json.loads(base64.b64decode(entry["Value"]))["worker"])
+' <<<"${response%$'\n'*}"
+            ;;
+    esac
+}

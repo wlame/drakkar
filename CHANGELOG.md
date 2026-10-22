@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario
   scripts read the message total from the running producer.
 
+- **Archive election in the unclean-exit scenario.** The scenario now plants
+  a due history window (`integration/plant_history.py`), kills the worker
+  that holds the archive lock during its pass, and checks that another
+  worker takes the lock over and publishes the archive, with every election
+  provider. The harness runs one-hour windows, a 30 s lease and a 20 s pass
+  timer on worker-2 and worker-3.
+
 - **`history.archive.pass_interval_seconds`.** At least `10` starts archive
   passes on a timer of their own, so archiving does not wait for a rotation.
   `0` (default) keeps one pass after each rotation.

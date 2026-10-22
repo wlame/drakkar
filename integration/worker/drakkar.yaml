@@ -469,12 +469,27 @@ fleet:
     page_size: 500
     timeout_seconds: 5.0
 
-# Archive election: which worker of the cluster writes the archive after a
-# rotation. DK_HISTORY__ARCHIVE__ELECTION__PROVIDER in docker-compose.yml
-# sets the provider to the same value as the registry's, and the
-# resilience block is the same as the registry's.
+# Archive: one-hour windows, due one hour after they end, so a window that
+# integration/plant_history.py writes three hours back is due at once.
+# Archives are kept one day (it must cover the due delay plus one window).
+# A pass runs every 20 s on its own timer instead of after each rotation,
+# so the unclean-exit scenario need not wait for an hourly rotation; worker-1
+# sets pass_interval_seconds back to 0 in docker-compose.yml, because it is
+# the scenarios' observer and must never hold the lock they kill. A lease
+# missing for 30 s is stale and another worker takes it over; the holder
+# refreshes it every 10 s while its pass runs.
+#
+# Archive election: which worker of the cluster writes the archive.
+# DK_HISTORY__ARCHIVE__ELECTION__PROVIDER in docker-compose.yml sets the
+# provider to the same value as the registry's, and the resilience block is
+# the same as the registry's.
 history:
   archive:
+    window_hours: 1
+    due_after_hours: 1
+    retention_days: 1
+    lock_stale_seconds: 30
+    pass_interval_seconds: 20
     election:
       resilience:
         timeout_seconds: 2
