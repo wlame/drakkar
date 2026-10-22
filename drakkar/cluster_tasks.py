@@ -16,19 +16,25 @@ and cannot run it a second time.
 The worker owns one :class:`ClusterElection`: one provider and one resilient
 caller for every cluster task, so the breaker and the rate-limited failure
 log span the tasks. The provider starts at the first slot that needs it.
+
+Each worker publishes the hash of its cluster task definitions in its
+registry card (``features.periodic.cluster_hash``); :class:`ClusterHashChecker`
+compares it with the online peers of the worker's cluster after each
+registry refresh.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from drakkar.metrics import periodic_cluster_slots
+from drakkar.metrics import periodic_cluster_mismatch_peers, periodic_cluster_slots
 from drakkar.periodic import SYSTEM_CLOCK, Clock, OnErrorPolicy, run_task_once, sleep_until
 from drakkar.providers.resilience import (
     OUTCOME_NOT_STARTED,
@@ -56,6 +62,7 @@ from drakkar.schedule import (
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
+    from drakkar.fleet.service import PeerView
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
@@ -65,6 +72,9 @@ SLOT_WON = 'won'
 SLOT_HELD_ELSEWHERE = 'held_elsewhere'
 SLOT_LATE = 'late'
 SLOT_ELECTION_FAILED = 'election_failed'
+
+# A peer's definition hash counts only in this exact form; anything else is unknown.
+_CLUSTER_HASH = re.compile(r'[0-9a-f]{16}')
 
 # The answer of ensure_started once the provider runs: no call was made.
 _ALREADY_STARTED = CallResult(ok=True, value=None, outcome=OUTCOME_OK, attempts=0)
@@ -476,3 +486,68 @@ async def _run_won_slot(
         raise
     await lease.release()
     return must_stop
+
+
+def card_cluster_hash(card: Mapping[str, Any]) -> str | None:
+    """The cluster task hash a registry card publishes, or ``None`` when it publishes none in the contract form.
+
+    The hash is ``features.periodic.cluster_hash``: 16 lowercase hex
+    characters. A card without ``features``, a ``features`` or ``periodic``
+    that is not an object, or a hash of another form gives ``None``
+    (unknown), never an error.
+    """
+    features = card.get('features')
+    if not isinstance(features, Mapping):
+        return None
+    periodic = features.get('periodic')
+    if not isinstance(periodic, Mapping):
+        return None
+    cluster_hash = periodic.get('cluster_hash')
+    if not isinstance(cluster_hash, str) or _CLUSTER_HASH.fullmatch(cluster_hash) is None:
+        return None
+    return cluster_hash
+
+
+class ClusterHashChecker:
+    """Compares this worker's cluster task hash with the online peers of its cluster.
+
+    :meth:`check` runs after each registry refresh. A peer counts when the
+    registry calls it online, its card names exactly this worker's cluster,
+    and its card carries a hash (:func:`card_cluster_hash`); a peer whose
+    hash is unknown is not a mismatch. Each check sets
+    ``drakkar_periodic_cluster_mismatch_peers`` to the count of peers whose
+    hash differs and logs ``periodic_cluster_mismatch`` once per peer and
+    peer hash.
+    """
+
+    def __init__(self, own_hash: str, own_cluster: str, logger: Any = None) -> None:
+        self._own_hash = own_hash
+        self._own_cluster = own_cluster
+        self._logger = logger if logger is not None else structlog.get_logger()
+        # (peer worker name, peer hash) pairs already logged.
+        self._reported: set[tuple[str, str]] = set()
+
+    async def check(self, views: Sequence[PeerView]) -> None:
+        """Count and report the peers of this worker's cluster that run other cluster task definitions."""
+        mismatched: list[tuple[str, str]] = []
+        for view in views:
+            if view.online is not True or view.card.get('cluster') != self._own_cluster:
+                continue
+            peer_hash = card_cluster_hash(view.card)
+            if peer_hash is not None and peer_hash != self._own_hash:
+                mismatched.append((view.card['worker'], peer_hash))
+        periodic_cluster_mismatch_peers.set(len(mismatched))
+        # Kept to the peers still listed, so the set stays as small as the cluster.
+        listed = {view.card.get('worker') for view in views}
+        self._reported = {pair for pair in self._reported if pair[0] in listed}
+        for peer, peer_hash in mismatched:
+            if (peer, peer_hash) in self._reported:
+                continue
+            self._reported.add((peer, peer_hash))
+            await self._logger.awarning(
+                'periodic_cluster_mismatch',
+                category='periodic',
+                peer=peer,
+                own_hash=self._own_hash,
+                peer_hash=peer_hash,
+            )

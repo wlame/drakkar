@@ -169,7 +169,7 @@ class _StartsWhenAllowed(_Recording):
         await super().start(ctx)
 
 
-def _service(provider, clock: _Clock | None = None, features=None, **config) -> FleetRegistry:
+def _service(provider, clock: _Clock | None = None, features=None, on_refresh=None, **config) -> FleetRegistry:
     clock = clock or _Clock()
     registry_config = _config(**config)
     return FleetRegistry(
@@ -178,6 +178,7 @@ def _service(provider, clock: _Clock | None = None, features=None, **config) -> 
         config=registry_config,
         identity=OWN,
         features=features,
+        on_refresh=on_refresh,
         now_monotonic=lambda: clock.monotonic,
         now_epoch=lambda: clock.epoch,
         caller=ResilientCaller(
@@ -968,3 +969,44 @@ async def test_stop_still_withdraws_after_a_loop_died(monkeypatch):
     assert provider.calls[-1] == ('withdraw', 'w-1', OWN.instance)
     (failure,) = [entry for entry in logs if entry['event'] == 'fleet_registry_loop_failed']
     assert 'loop bug' in failure['error']
+
+
+# --- the refresh callback ---
+
+
+async def test_on_refresh_gets_the_peer_views_after_each_good_refresh_only():
+    clock = _Clock()
+    provider = _Listing([PeerCard(card=_peer('w-2'), age_seconds=1.0)])
+    seen: list[list] = []
+
+    async def on_refresh(views) -> None:
+        seen.append(views)
+
+    service = _service(provider, clock, on_refresh=on_refresh)
+    service._provider_started.set()
+
+    await service._refresh_tick()
+    provider.list = _Failing().list  # type: ignore[method-assign]
+    await service._refresh_tick()
+
+    (views,) = seen
+    assert [(view.card['worker'], view.online) for view in views] == [('w-2', True)]
+
+
+async def test_an_on_refresh_error_is_a_failed_refresh_iteration_and_keeps_the_snapshot():
+    provider = _Listing([PeerCard(card=_peer('w-2'), age_seconds=1.0)])
+
+    async def on_refresh(views) -> None:
+        raise RuntimeError('hash check broke')
+
+    service = _service(provider, on_refresh=on_refresh)
+    service._provider_started.set()
+    errors_before = _sample('drakkar_fleet_registry_errors_total', {'op': 'list'})
+
+    with capture_logs() as logs:
+        await service._refresh_tick()
+
+    (failure,) = [entry for entry in logs if entry['event'] == 'fleet_registry_iteration_failed']
+    assert (failure['loop'], failure['error']) == ('refresh', 'hash check broke')
+    assert _sample('drakkar_fleet_registry_errors_total', {'op': 'list'}) == errors_before + 1
+    assert [entry.card['worker'] for entry in service.snapshot().peers] == ['w-2']

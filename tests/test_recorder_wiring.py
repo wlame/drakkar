@@ -79,7 +79,7 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
     started_before = started_ok._value.get()
 
     app._lifecycle._create_connections()
-    app._lifecycle._create_cluster_election()
+    app._lifecycle._build_periodic_roster()
     await app._lifecycle._start_ui_and_recorder()
     cluster_election = app._cluster_election
     assert app._recorder is not None

@@ -10,10 +10,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
+from drakkar import cluster_tasks as cluster_tasks_module
 from drakkar.app import DrakkarApp
-from drakkar.cluster_tasks import ClusterElection, archive_task_runs
+from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_task_runs
 from drakkar.config import DrakkarConfig
 from drakkar.fleet import plugins
 from drakkar.fleet.plugins import UnknownRegistryProviderError
@@ -21,17 +23,19 @@ from drakkar.fleet.provider import PeerCardList, RegistryContext
 from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
 from drakkar.lifecycle import election_provider_options, registry_provider_options
 from drakkar.models import SourceMessage
+from drakkar.periodic import periodic
 from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import UnknownProviderError
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext, FilesystemElection
 from drakkar.recorder.election_postgres import PostgresElection
-from drakkar.schedule import ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS
+from drakkar.schedule import ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS, ClusterTaskDefinition, cluster_tasks_hash
 from drakkar.sources import kafka as kafka_source_module
 from tests.archive_helpers import CLUSTER, SteppingClock, due_start, election_calls, history_folder, make_sealed_db
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore
+from tests.test_cluster_tasks import NOW, SLOT, RecordingLogger, VirtualClock
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -50,8 +54,12 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
     return DrakkarConfig(**values)
 
 
-def _app(tmp_path, **overrides) -> DrakkarApp:
-    return DrakkarApp(handler=KafkaOnlyHandler(), config=_config(tmp_path, **overrides), worker_id='w-1')
+def _app(tmp_path, handler: object | None = None, **overrides) -> DrakkarApp:
+    return DrakkarApp(
+        handler=handler if handler is not None else KafkaOnlyHandler(),
+        config=_config(tmp_path, **overrides),
+        worker_id='w-1',
+    )
 
 
 def _install_plugins(monkeypatch, *, registry: dict | None = None, election: dict | None = None) -> None:
@@ -309,7 +317,7 @@ def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, ove
     _install_plugins(monkeypatch)
     app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}}, **overrides)
 
-    app._lifecycle._create_cluster_election()
+    app._lifecycle._build_periodic_roster()
 
     assert not archive_task_runs(app._config)
     assert app._cluster_election is None
@@ -329,7 +337,7 @@ async def test_unknown_election_provider_fails_startup_when_the_archive_runs(tmp
 
     assert archive_task_runs(app._config)
     with pytest.raises(UnknownProviderError, match=re.escape("periodic.election.provider 'etcd' is not known")):
-        app._lifecycle._create_cluster_election()
+        app._lifecycle._build_periodic_roster()
 
     assert app._cluster_election is None
 
@@ -428,9 +436,11 @@ class _RecordingRegistry(StaticRegistry):
         self.withdrawn = True
 
 
-def _runnable_app(tmp_path, monkeypatch, provider_factory) -> tuple[DrakkarApp, StubSource, list[str]]:
+def _runnable_app(
+    tmp_path, monkeypatch, provider_factory, handler: object | None = None
+) -> tuple[DrakkarApp, StubSource, list[str]]:
     """A worker with stub sources, no real UI server or recorder, and a registry from ``provider_factory``."""
-    app = _app(tmp_path)
+    app = _app(tmp_path, handler=handler)
     source = StubSource('kafka')
     app.sources = [source]
     order: list[str] = []
@@ -601,7 +611,7 @@ async def test_the_card_carries_the_cache_marks_once_the_cache_engine_runs(tmp_p
     await wait_for(lambda: app.is_ready)
     # The first card can go out before the cache engine starts; a later
     # publish (the running state) carries the features.
-    await wait_for(lambda: store.cards.get('w-1', ({},))[0].get('features') == {'cache': {}})
+    await wait_for(lambda: store.cards.get('w-1', ({},))[0].get('features', {}).get('cache') == {})
     app._lifecycle._handle_signal()
     await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
@@ -916,3 +926,200 @@ async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_regi
 async def _wait_until(condition) -> None:
     while not condition():
         await asyncio.sleep(0.01)
+
+
+# --- the user cluster tasks and their definition hash ---
+
+
+class _ClusterTaskHandler(KafkaOnlyHandler):
+    """A handler with one cluster task."""
+
+    @periodic(60, scope='cluster')
+    async def rebuild_index(self) -> None:
+        return None
+
+
+class _CardRecording(StaticRegistry):
+    """A provider that keeps every published card and notes the withdraw."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.cards: list[dict] = []
+        self.withdrawn = False
+
+    async def publish(self, card: dict) -> None:
+        self.cards.append(card)
+
+    async def withdraw(self, worker: str, instance: str) -> None:
+        self.withdrawn = True
+
+
+def _parked_clock() -> VirtualClock:
+    """A slot-loop clock whose sleepers never wake: no slot comes during the test."""
+    clock = VirtualClock(NOW)
+    clock.limit = NOW
+    return clock
+
+
+async def _run_until_ready_then_stop(app: DrakkarApp, until_ready=None) -> None:
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    if until_ready is not None:
+        await wait_for(until_ready)
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+
+async def test_first_published_card_carries_the_cluster_hash(tmp_path, monkeypatch):
+    provider = _CardRecording()
+    app, _source, _order = _runnable_app(
+        tmp_path, monkeypatch, lambda _options: provider, handler=_ClusterTaskHandler()
+    )
+    app._lifecycle._clock = _parked_clock()
+
+    await _run_until_ready_then_stop(app, lambda: provider.cards)
+
+    expected = cluster_tasks_hash(
+        [
+            ClusterTaskDefinition(name='rebuild_index', interval=60, cron=None, lease_seconds=60),
+            ClusterTaskDefinition(name=ARCHIVE_TASK_NAME, interval=3600, cron=None, lease_seconds=60),
+        ]
+    )
+    assert app.cluster_tasks_hash == expected
+    assert provider.cards[0]['state'] == 'starting'
+    assert provider.cards[0]['features'] == {'periodic': {'cluster_hash': expected}}
+    checker = getattr(app._fleet._on_refresh, '__self__', None)
+    assert isinstance(checker, ClusterHashChecker)
+
+
+async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, monkeypatch):
+    app, _source, order = _runnable_app(
+        tmp_path, monkeypatch, lambda _options: _CardRecording(), handler=_ClusterTaskHandler()
+    )
+    app._lifecycle._clock = _parked_clock()
+    lifecycle = app._lifecycle
+    build_roster, create_connections, start_fleet = (
+        lifecycle._build_periodic_roster,
+        lifecycle._create_connections,
+        lifecycle._start_fleet,
+    )
+
+    def recorded_roster() -> None:
+        order.append('roster')
+        build_roster()
+
+    def recorded_connections() -> None:
+        order.append('connections')
+        create_connections()
+
+    async def recorded_fleet() -> None:
+        order.append('fleet')
+        await start_fleet()
+
+    monkeypatch.setattr(lifecycle, '_build_periodic_roster', recorded_roster)
+    monkeypatch.setattr(lifecycle, '_create_connections', recorded_connections)
+    monkeypatch.setattr(lifecycle, '_start_fleet', recorded_fleet)
+    monkeypatch.setattr(app._sink_manager, 'connect_all', AsyncMock(side_effect=lambda: order.append('sinks')))
+
+    await _run_until_ready_then_stop(app)
+
+    assert order[:5] == ['connections', 'roster', 'ui_and_recorder', 'fleet', 'sinks']
+
+
+@pytest.mark.parametrize(
+    ('handler', 'provider', 'logged'),
+    [
+        (_ClusterTaskHandler, 'none', True),
+        (KafkaOnlyHandler, 'none', False),
+        (_ClusterTaskHandler, 'filesystem', False),
+    ],
+    ids=['registry-off', 'no-cluster-task', 'registry-on'],
+)
+async def test_check_off_logged_once_when_the_registry_is_off_and_cluster_tasks_exist(
+    tmp_path, handler, provider, logged
+):
+    overrides = {} if handler is _ClusterTaskHandler else {'history': {'archive': {'enabled': False}}}
+    app = _app(tmp_path, handler=handler(), fleet={'registry': {'provider': provider}}, **overrides)
+    app._lifecycle._build_periodic_roster()
+
+    with capture_logs() as logs:
+        await app._lifecycle._start_fleet()
+    if app._fleet is not None:
+        await app._fleet.stop()
+
+    lines = [entry for entry in logs if entry['event'] == 'periodic_cluster_check_off']
+    expected = [
+        {
+            'event': 'periodic_cluster_check_off',
+            'log_level': 'info',
+            'category': 'periodic',
+            'cluster_tasks': 2,
+            'reason': 'the worker registry is off',
+        }
+    ]
+    assert lines == (expected if logged else [])
+
+
+class _PipelineGuardHandler(KafkaOnlyHandler):
+    @periodic(30, scope='cluster')
+    async def pipeline_guard(self) -> None:
+        return None
+
+
+class _DownElection(MemoryElection):
+    """An election whose service is down: every start raises."""
+
+    async def start(self, ctx: ElectionContext) -> None:
+        raise ConnectionError('election service unreachable')
+
+
+async def test_startup_with_failing_election_start_still_runs_the_pipeline(tmp_path, monkeypatch):
+    logs = RecordingLogger()
+    monkeypatch.setattr(cluster_tasks_module, 'logger', logs)
+    registry = _CardRecording()
+    app, source, _order = _runnable_app(
+        tmp_path, monkeypatch, lambda _options: registry, handler=_PipelineGuardHandler()
+    )
+    _install_plugins(
+        monkeypatch,
+        registry={'filesystem': lambda _options: registry},
+        election={'down-election': lambda _options: _DownElection(ElectionStore())},
+    )
+    app._config.periodic.election.provider = 'down-election'
+    app._config.periodic.election.resilience.retries = 0
+    clock = VirtualClock(NOW)
+    # Two slots of the task, SLOT and SLOT + 30, both within one minute.
+    clock.limit = SLOT + 45
+    app._lifecycle._clock = clock
+    failed_before = REGISTRY.get_sample_value(
+        'drakkar_periodic_cluster_slots_total', {'name': 'pipeline_guard', 'outcome': 'election_failed'}
+    )
+
+    await _run_until_ready_then_stop(app, clock.parked.is_set)
+
+    assert source.has_run
+    failed = REGISTRY.get_sample_value(
+        'drakkar_periodic_cluster_slots_total', {'name': 'pipeline_guard', 'outcome': 'election_failed'}
+    )
+    assert failed - (failed_before or 0.0) == 2
+    warnings = [line for line in logs.named('periodic_slot_skipped') if line['name'] == 'pipeline_guard']
+    assert [(line['slot'], line['error'], line['suppressed']) for line in warnings] == [(SLOT, 'start error', 0)]
+
+
+async def test_an_election_stop_that_raises_is_logged_and_the_card_is_still_withdrawn(tmp_path, monkeypatch):
+    provider = _CardRecording()
+    app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: provider, handler=_ClusterTaskHandler())
+    app._lifecycle._clock = _parked_clock()
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await wait_for(lambda: app.is_ready)
+    assert app._cluster_election is not None
+    app._cluster_election.stop = AsyncMock(side_effect=RuntimeError('election stop broke'))
+
+    with capture_logs() as logs:
+        app._lifecycle._handle_signal()
+        await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
+
+    (failure,) = [entry for entry in logs if entry['event'] == 'periodic_election_stop_failed']
+    assert (failure['category'], failure['error']) == ('periodic', 'election stop broke')
+    assert provider.withdrawn
+    assert 'ui_server.stop' in order

@@ -601,7 +601,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """Return periodic task run history from the flight recorder.
 
         Groups events by task name and returns the latest run, total counts,
-        and recent history for each task.
+        and recent history for each task. A group's ``scope`` is ``cluster``
+        when its latest row was a cluster task's run, else ``worker``.
         """
         query = f"""
             SELECT ts, task_id, duration, exit_code, metadata
@@ -650,6 +651,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                     'last_status': status,
                     'last_error': error,
                     'system': is_system,
+                    'scope': 'cluster' if meta.get('scope') == 'cluster' else 'worker',
                     'total_ok': 0,
                     'total_error': 0,
                     'recent': [],

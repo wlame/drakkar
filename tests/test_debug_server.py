@@ -41,6 +41,10 @@ TEST_IDENTITY = WorkerIdentity(
 )
 
 
+# The cluster task hash of the worker that serves the routes in these tests.
+OWN_CLUSTER_TASKS_HASH = '0123456789abcdef'
+
+
 class StubFleet:
     """The one registry call the workers route makes."""
 
@@ -158,6 +162,7 @@ def mock_app():
     app.fleet = None
     app.lifecycle_state = 'running'
     app.worker_identity = TEST_IDENTITY
+    app.cluster_tasks_hash = OWN_CLUSTER_TASKS_HASH
     app._start_time = time.monotonic() - 120
     app.processors = {}
     app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
@@ -1350,6 +1355,8 @@ async def test_api_workers_current_worker_row_has_every_contract_field(client):
         'state': 'running',
         'started_at': '2026-10-14T09:00:00.000000Z',
         'instance': 'abcdef0123456789',
+        'cluster_tasks_hash': OWN_CLUSTER_TASKS_HASH,
+        'cluster_tasks_match': True,
     }
 
 
@@ -1392,6 +1399,8 @@ async def test_api_workers_peer_row_comes_from_the_card(client, mock_app):
         'is_current': False,
         'last_seen_ts': 1_760_000_000.0 - 4.0,
         'online': True,
+        'cluster_tasks_hash': None,
+        'cluster_tasks_match': None,
         'backend': 'python',
         'version': '2.4.0',
         'state': 'draining',

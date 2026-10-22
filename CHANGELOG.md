@@ -101,6 +101,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `history.archive` with `system: true`. A worker that does not win a slot
   updates the archive footprint gauges. The `provider_started` line of the
   election is in category `periodic`.
+- **Handler cluster tasks run, and workers compare their definitions.** A
+  `@periodic(scope='cluster')` task now runs on one worker of the cluster at
+  each slot. The worker resolves its periodic tasks at startup, before the
+  registry starts and before a sink connects. Each `periodic.tasks.<name>`
+  must name a declared task, and the task must still pass the decorator
+  rules after the override (an override with `enabled: false` is checked
+  too). The registry card carries `features.periodic.cluster_hash`, the hash
+  of the worker's cluster task definitions (`history.archive` included when
+  it runs). After each registry refresh the worker compares it with the
+  online peers of its cluster and logs `periodic_cluster_mismatch` once per
+  peer and hash; the gauge `drakkar_periodic_cluster_mismatch_peers` counts
+  them. Without a registry the worker logs `periodic_cluster_check_off` once.
+  `/api/v1/workers` rows have `cluster_tasks_hash` and `cluster_tasks_match`,
+  and `/api/v1/debug/periodic` groups have `scope`. An election stop that
+  fails at shutdown logs `periodic_election_stop_failed`.
 - **Integration harness profiles.** `just integration-up profile=quick` runs
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario

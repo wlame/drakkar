@@ -41,10 +41,12 @@ from drakkar.logging import setup_logging
 from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
+from drakkar.periodic_roster import PeriodicRoster
 from drakkar.probe import build_layout, referenced_bases
 from drakkar.providers.connections import Connections
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.helpers import detect_worker_ip
+from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
@@ -316,6 +318,9 @@ class DrakkarApp:
         # when the worker runs at least one; it starts at the first slot and
         # stops after the recorder.
         self._cluster_election: ClusterElection | None = None
+        # The handler's periodic tasks after the config overrides, built by
+        # the lifecycle before the registry starts; None until then.
+        self._periodic_roster: PeriodicRoster | None = None
         self._ui_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
@@ -522,6 +527,13 @@ class DrakkarApp:
             version=backend_version(),
             started_at=self._started_at,
         )
+
+    @property
+    def cluster_tasks_hash(self) -> str:
+        """The hash of this worker's cluster task definitions; the hash of none before the roster is built."""
+        if self._periodic_roster is None:
+            return cluster_tasks_hash(())
+        return self._periodic_roster.cluster_hash
 
     @property
     def sink_manager(self) -> SinkManager:

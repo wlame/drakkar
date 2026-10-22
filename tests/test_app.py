@@ -2192,6 +2192,7 @@ async def test_start_consumer_schedules_declared_periodic_tasks(test_config):
     app = DrakkarApp(handler=handler, config=test_config)
     _setup_app_sinks(app)
 
+    app._lifecycle._build_periodic_roster()
     await app._lifecycle._run_on_ready_and_periodics()
 
     try:
@@ -2203,9 +2204,9 @@ async def test_start_consumer_schedules_declared_periodic_tasks(test_config):
         await asyncio.gather(*app._periodic_tasks, return_exceptions=True)
 
 
-async def test_start_consumer_starts_worker_cron_tasks_and_leaves_cluster_tasks(test_config):
+async def test_start_consumer_starts_worker_cron_tasks_and_cluster_task_slot_loops(test_config):
     """A worker-scope cron task is scheduled like an interval task; a
-    cluster-scope task is not started by the worker loop and raises nothing."""
+    cluster-scope task gets its slot loop."""
     from drakkar.periodic import periodic
 
     class MixedHandler(SimpleHandler):
@@ -2220,10 +2221,11 @@ async def test_start_consumer_starts_worker_cron_tasks_and_leaves_cluster_tasks(
     app = DrakkarApp(handler=MixedHandler(), config=test_config)
     _setup_app_sinks(app)
 
+    app._lifecycle._build_periodic_roster()
     await app._lifecycle._run_on_ready_and_periodics()
 
     try:
-        assert [task.get_name() for task in app._periodic_tasks] == ['periodic:nightly']
+        assert [task.get_name() for task in app._periodic_tasks] == ['periodic:nightly', 'periodic:shared_refresh']
     finally:
         for task in app._periodic_tasks:
             task.cancel()
@@ -2487,3 +2489,9 @@ def test_app_is_ready_tracks_sources_and_stopping(test_config):
 
     app._stopping = True
     assert app.is_ready is False
+
+
+def test_cluster_tasks_hash_before_the_roster_is_the_hash_of_no_tasks(test_config):
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+
+    assert app.cluster_tasks_hash == '4f53cda18c2baa0c'

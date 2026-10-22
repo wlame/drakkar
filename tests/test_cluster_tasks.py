@@ -31,12 +31,15 @@ from drakkar.cluster_tasks import (
     SLOT_LATE,
     SLOT_WON,
     ClusterElection,
+    ClusterHashChecker,
     ClusterTask,
     SlotContext,
     SlotLease,
+    card_cluster_hash,
     run_cluster_task,
 )
 from drakkar.config.resilience import ResilienceConfig
+from drakkar.fleet.service import PeerView
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED, ElectionContext, ThreadFence
@@ -1097,3 +1100,147 @@ def test_thread_fence_that_gets_no_answer_in_time_reads_as_unconfirmed(monkeypat
         loop.call_soon_threadsafe(time.sleep, 0.2)
         assert fence.is_held() is False
         assert fence.loss_reason == LOSS_TAKEN_OVER
+
+
+# --- an open breaker recovers without a restart ---
+
+
+class _FailsFirstStarts(ScriptedElection):
+    """A memory election whose first ``failures`` starts raise, like a service that comes back."""
+
+    def __init__(self, clock: VirtualClock, failures: int) -> None:
+        super().__init__(clock)
+        self.failures = failures
+
+    async def start(self, ctx: ElectionContext) -> None:
+        if self.failures:
+            self.failures -= 1
+            self._note('start')
+            raise ConnectionError('election service unreachable')
+        await super().start(ctx)
+
+
+async def test_cluster_slots_recover_after_the_breaker_cooldown_without_a_restart(logs):
+    clock = VirtualClock(NOW)
+    provider = _FailsFirstStarts(clock, failures=2)
+    caller = ResilientCaller(
+        ResilienceConfig(retries=0, breaker={'failure_threshold': 2, 'cooldown_seconds': 40}),
+        feature='election',
+        provider='recovering',
+        category='periodic',
+        logger=RecordingLogger(),
+        now_monotonic=clock.time,
+        sleep=_no_sleep,
+    )
+    election = ClusterElection(provider, caller, provider_name='recovering', context=CONTEXT, clock=clock)
+    starts: list[tuple[float, int]] = []
+    skipped: list[str] = []
+    task = make_task('recovers', sleeping_body(clock, 1, starts), on_skip=skipped.append)
+
+    # Two failed starts open the breaker at SLOT + 30; SLOT + 60 is inside its
+    # cooldown; the probe start at SLOT + 90 succeeds and the slot is won.
+    await run_until(clock, run_cluster_task(task, election, cluster=CLUSTER, clock=clock), SLOT + 115)
+
+    assert provider.at['start'] == [SLOT, SLOT + 30, SLOT + 90]
+    assert skipped == [SLOT_ELECTION_FAILED] * 3
+    errors = [(line['slot'], line['error']) for line in logs.named('periodic_slot_skipped')]
+    assert errors == [(SLOT, 'start error'), (SLOT + 60, 'start skipped_open')]
+    assert starts == [(SLOT + 90, SLOT + 90)]
+    assert slots('recovers', SLOT_WON) == 1
+
+
+# --- the definition hash of peers ---
+
+OWN_HASH = 'b5557e3108585ea3'
+OTHER_HASH = '0123456789abcdef'
+
+
+def peer(worker: str, *, online: bool | None = True, cluster: str = CLUSTER, features: Any = None) -> PeerView:
+    card: dict[str, Any] = {'schema': 1, 'worker': worker, 'cluster': cluster, 'url': f'http://{worker}:8080/'}
+    if features is not None:
+        card['features'] = features
+    return PeerView(card=card, age_seconds=1.0, online=online, last_seen_ts=None)
+
+
+def hashed(value: Any) -> dict:
+    return {'cache': {}, 'periodic': {'cluster_hash': value}}
+
+
+MALFORMED_FEATURES = {
+    'no_features': None,
+    'features_not_an_object': ['periodic'],
+    'periodic_not_an_object': {'periodic': 'b5557e3108585ea3'},
+    'hash_too_short': hashed('b5557e3108585ea'),
+    'hash_upper_case': hashed('B5557E3108585EA3'),
+    'hash_not_a_string': hashed(1234567890123456),
+}
+
+
+@pytest.mark.parametrize('features', MALFORMED_FEATURES.values(), ids=MALFORMED_FEATURES.keys())
+def test_card_cluster_hash_reads_a_malformed_card_as_unknown(features):
+    assert card_cluster_hash(peer('w-2', features=features).card) is None
+
+
+def test_card_cluster_hash_reads_the_contract_form():
+    assert card_cluster_hash(peer('w-2', features=hashed(OTHER_HASH)).card) == OTHER_HASH
+
+
+def mismatch_gauge() -> float:
+    return REGISTRY.get_sample_value('drakkar_periodic_cluster_mismatch_peers') or 0.0
+
+
+async def test_mismatch_logged_once_per_peer_and_hash_and_gauge_counts_online_peers():
+    log = RecordingLogger()
+    checker = ClusterHashChecker(OWN_HASH, CLUSTER, log)
+    views = [
+        peer('w-2', features=hashed(OTHER_HASH)),
+        peer('w-3', features=hashed(OTHER_HASH)),
+        peer('w-4', features=hashed(OWN_HASH)),
+    ]
+
+    await checker.check(views)
+    await checker.check(views)
+    assert mismatch_gauge() == 2
+    newer = 'fedcba9876543210'
+    await checker.check([peer('w-2', features=hashed(newer)), *views[1:]])
+
+    lines = [(line['peer'], line['peer_hash']) for line in log.named('periodic_cluster_mismatch')]
+    assert lines == [('w-2', OTHER_HASH), ('w-3', OTHER_HASH), ('w-2', newer)]
+    assert log.named('periodic_cluster_mismatch')[0] == {
+        'event': 'periodic_cluster_mismatch',
+        'log_level': 'warning',
+        'category': 'periodic',
+        'peer': 'w-2',
+        'own_hash': OWN_HASH,
+        'peer_hash': OTHER_HASH,
+    }
+    await checker.check([peer('w-4', features=hashed(OWN_HASH))])
+    assert mismatch_gauge() == 0
+
+
+async def test_mismatch_ignores_offline_peers_other_clusters_and_malformed_features():
+    log = RecordingLogger()
+    checker = ClusterHashChecker(OWN_HASH, CLUSTER, log)
+    views = [
+        peer('w-offline', online=False, features=hashed(OTHER_HASH)),
+        peer('w-unknown', online=None, features=hashed(OTHER_HASH)),
+        peer('w-elsewhere', cluster='other-fleet', features=hashed(OTHER_HASH)),
+        *(peer(f'w-{name}', features=features) for name, features in MALFORMED_FEATURES.items()),
+    ]
+
+    await checker.check(views)
+
+    assert log.named('periodic_cluster_mismatch') == []
+    assert mismatch_gauge() == 0
+
+
+async def test_mismatch_logs_again_for_a_peer_that_left_the_listing_and_came_back():
+    log = RecordingLogger()
+    checker = ClusterHashChecker(OWN_HASH, CLUSTER, log)
+    returning = peer('w-2', features=hashed(OTHER_HASH))
+
+    await checker.check([returning])
+    await checker.check([])
+    await checker.check([returning])
+
+    assert len(log.named('periodic_cluster_mismatch')) == 2

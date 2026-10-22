@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from drakkar.cluster_tasks import card_cluster_hash
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
 from drakkar.timefmt import format_rfc3339_micro
@@ -142,9 +143,17 @@ def _docs_wire(cfg: UIDocsConfig) -> dict[str, object] | None:
 _OPTIONAL_PEER_FIELDS = ('backend', 'version', 'state', 'started_at', 'instance')
 
 
-def peer_worker_row(view: PeerView) -> dict[str, Any]:
-    """One ``/api/v1/workers`` row for a registry peer."""
+def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[str, Any]:
+    """One ``/api/v1/workers`` row for a registry peer.
+
+    ``cluster_tasks_hash`` is the peer's cluster task hash when its card
+    carries one in the contract form, else ``None``. ``cluster_tasks_match``
+    compares it with ``own_hash`` for a peer of ``own_cluster``; it is
+    ``None`` for a peer of another cluster or with no hash.
+    """
     card = view.card
+    peer_hash = card_cluster_hash(card)
+    same_cluster = card['cluster'] == own_cluster
     row: dict[str, Any] = {
         'worker_name': card['worker'],
         'cluster_name': card['cluster'] or None,
@@ -157,6 +166,8 @@ def peer_worker_row(view: PeerView) -> dict[str, Any]:
         'is_current': False,
         'last_seen_ts': view.last_seen_ts,
         'online': view.online,
+        'cluster_tasks_hash': peer_hash,
+        'cluster_tasks_match': peer_hash == own_hash if peer_hash is not None and same_cluster else None,
     }
     for key in _OPTIONAL_PEER_FIELDS:
         if key in card:
@@ -553,6 +564,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'state': drakkar_app.lifecycle_state,
             'started_at': format_rfc3339_micro(identity.started_at),
             'instance': identity.instance,
+            'cluster_tasks_hash': drakkar_app.cluster_tasks_hash,
+            'cluster_tasks_match': True,
         }
 
     @router.get('/api/v1/workers')
@@ -566,7 +579,13 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         unclustered last (by name).
         """
         fleet = drakkar_app.fleet
-        workers = [peer_worker_row(view) for view in fleet.peer_views()] if fleet is not None else []
+        own_cluster = drakkar_app.worker_identity.cluster
+        own_hash = drakkar_app.cluster_tasks_hash
+        workers = (
+            [peer_worker_row(view, own_cluster=own_cluster, own_hash=own_hash) for view in fleet.peer_views()]
+            if fleet is not None
+            else []
+        )
         workers.append(_current_worker_row())
         workers.sort(key=lambda w: (0 if w['cluster'] else 1, w['cluster'], w['worker_name']))
         return JSONResponse(workers)

@@ -11,6 +11,7 @@ Covers:
 
 import time
 import typing
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import quote
 
@@ -26,6 +27,8 @@ from drakkar.config import (
     UIDocsConfig,
     UITimelineConfig,
 )
+from drakkar.fleet.card import WorkerIdentity
+from drakkar.fleet.service import PeerView
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
@@ -57,6 +60,7 @@ def mock_app():
     app = MagicMock()
     app._worker_id = 'test-worker'
     app._cluster_name = ''
+    app.cluster_tasks_hash = '0123456789abcdef'
     app._start_time = time.monotonic() - 120
     app.processors = {}
     app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
@@ -1305,3 +1309,108 @@ async def test_probe_endpoint_sheds_excess_waiters_with_429(debug_config, mock_r
     assert resp.headers['Retry-After'] == '1'
     # The error names the condition rather than leaking internals.
     assert 'queued' in body['error']
+
+
+# ---------------------------------------------------------------------------
+# Cluster task hash in the workers list, scope in the periodic groups
+# ---------------------------------------------------------------------------
+
+OWN_HASH = '0123456789abcdef'
+PEER_HASH = 'b5557e3108585ea3'
+
+
+def _hashed(value: object) -> dict:
+    return {'periodic': {'cluster_hash': value}}
+
+
+class _StubFleet:
+    """The one registry call the workers route makes."""
+
+    def __init__(self, *views: PeerView) -> None:
+        self._views = list(views)
+
+    def peer_views(self) -> list[PeerView]:
+        return list(self._views)
+
+
+def peer_view(worker: str, *, cluster: str, age: float = 5.0, features: dict) -> PeerView:
+    card = {'schema': 1, 'worker': worker, 'cluster': cluster, 'url': f'http://{worker}:8080/', 'features': features}
+    return PeerView(card=card, age_seconds=age, online=age <= 30, last_seen_ts=1_760_000_000.0 - age)
+
+
+async def test_workers_rows_carry_hash_and_match(client, mock_app):
+    mock_app.lifecycle_state = 'running'
+    mock_app.worker_identity = WorkerIdentity(
+        worker='test-worker',
+        instance='abcdef0123456789',
+        cluster='search',
+        url='http://10.0.0.1:8080/',
+        backend='python',
+        version='9.9.9',
+        started_at=datetime(2026, 10, 14, 9, 0, tzinfo=UTC),
+    )
+    mock_app.fleet = _StubFleet(
+        peer_view('w-same', cluster='search', features=_hashed(OWN_HASH)),
+        peer_view('w-differs', cluster='search', features=_hashed(PEER_HASH)),
+        peer_view('w-offline', cluster='search', age=95.0, features=_hashed(PEER_HASH)),
+        peer_view('w-elsewhere', cluster='other', features=_hashed(OWN_HASH)),
+        peer_view('w-unknown', cluster='search', features={'cache': {}}),
+        peer_view('w-malformed', cluster='search', features=_hashed('B5557E3108585EA3')),
+    )
+
+    rows = {row['worker_name']: row for row in (await client.get('/api/v1/workers')).json()}
+
+    verdicts = {name: (row['cluster_tasks_hash'], row['cluster_tasks_match']) for name, row in rows.items()}
+    assert verdicts == {
+        'test-worker': (OWN_HASH, True),
+        'w-same': (OWN_HASH, True),
+        'w-differs': (PEER_HASH, False),
+        'w-offline': (PEER_HASH, False),
+        'w-elsewhere': (OWN_HASH, None),
+        'w-unknown': (None, None),
+        'w-malformed': (None, None),
+    }
+
+
+async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_recorder, mock_app):
+    import aiosqlite
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    db = await aiosqlite.connect(str(tmp_path / 'periodic-scope.db'))
+    await db.executescript(SCHEMA_EVENTS)
+    rows = [
+        (100.0, 'rebuild_index', '{"status": "ok", "scope": "cluster", "slot": 60}'),
+        (90.0, 'sweep', '{"status": "ok"}'),
+        (80.0, 'history.archive', '{"status": "ok", "system": true, "scope": "cluster", "slot": 0}'),
+        # The latest row decides: an older cluster row of a task that now runs per worker.
+        (110.0, 'moved', '{"status": "ok"}'),
+        (70.0, 'moved', '{"status": "ok", "scope": "cluster", "slot": 30}'),
+    ]
+    for ts, name, metadata in rows:
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) '
+            "VALUES (?, '2026-11-01', 'periodic_run', ?, 0.1, 0, ?)",
+            (ts, name, metadata),
+        )
+    await db.commit()
+    mock_recorder._db = db
+    mock_recorder._reader_db = db
+    mock_recorder.reader_db = db
+    mock_recorder.flush = AsyncMock()
+    mock_recorder._buffer = []
+    mock_recorder.config = debug_config
+    mock_recorder.storage_dir = str(tmp_path)
+
+    try:
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            groups = (await c.get('/api/v1/debug/periodic')).json()
+    finally:
+        await db.close()
+
+    assert {group['name']: group['scope'] for group in groups} == {
+        'history.archive': 'cluster',
+        'moved': 'worker',
+        'rebuild_index': 'cluster',
+        'sweep': 'worker',
+    }

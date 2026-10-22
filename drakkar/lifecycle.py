@@ -51,7 +51,7 @@ from drakkar.app import (
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
-from drakkar.cluster_tasks import ClusterElection, archive_task_runs, run_cluster_task
+from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, ClusterTask, SlotContext, run_cluster_task
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.plugins import resolve_provider_factory
@@ -69,13 +69,8 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.periodic import (
-    STARTUP_NO_SHARED_FOLDER,
-    SYSTEM_CLOCK,
-    Clock,
-    discover_periodic_tasks,
-    run_periodic_task,
-)
+from drakkar.periodic import STARTUP_NO_SHARED_FOLDER, SYSTEM_CLOCK, Clock, run_periodic_task
+from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
 from drakkar.providers.lookup import resolve_factory
 from drakkar.providers.resilience import ResilientCaller, describe_error
@@ -89,7 +84,7 @@ from drakkar.recorder.election import (
 )
 from drakkar.recorder.history import history_dir
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
-from drakkar.schedule import ARCHIVE_TASK_NAME
+from drakkar.schedule import DEFAULT_LEASE_SECONDS
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -156,6 +151,24 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     }
     build = builders.get(election.provider, lambda: dict(election.plugin_options))
     return build()
+
+
+def user_cluster_task(roster_task: RosterTask) -> ClusterTask:
+    """The slot loop's view of a handler's cluster task: a won slot calls the bound method."""
+    method = roster_task.method
+    meta = roster_task.meta
+
+    async def run(_ctx: SlotContext) -> None:
+        await method()
+
+    return ClusterTask(
+        name=roster_task.name,
+        run=run,
+        interval=int(meta.interval) if meta.interval is not None else None,
+        cron=meta.cron,
+        lease_seconds=meta.lease_seconds if meta.lease_seconds is not None else DEFAULT_LEASE_SECONDS,
+        on_error=meta.on_error,
+    )
 
 
 class AppLifecycle:
@@ -260,7 +273,7 @@ class AppLifecycle:
             await self._build_executor_pool()
             await self._start_observability()
             self._create_connections()
-            self._create_cluster_election()
+            self._build_periodic_roster()
             await self._start_ui_and_recorder()
             await self._start_fleet()
             self._start_runtime_health()
@@ -557,15 +570,22 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
-    def _create_cluster_election(self) -> None:
-        """Make the worker's election of the cluster periodic tasks, when it runs one.
+    def _build_periodic_roster(self) -> None:
+        """Resolve the handler's periodic tasks and make the election of its cluster tasks.
 
-        The only cluster task is the system task ``history.archive``, which
-        runs when :func:`~drakkar.cluster_tasks.archive_task_runs` says so.
+        Runs after ``on_startup`` and before any connection opens, the
+        registry starts or a sink connects: an override that names no
+        declared task or breaks a rule fails startup here, and the registry
+        card carries the definition hash from its first publish. The
+        election serves every enabled cluster task, ``history.archive``
+        included when the worker runs it.
+
+        Raises:
+            PeriodicConfigError: an override names no declared task or breaks a periodic rule.
         """
         app = self._app
-        names = [ARCHIVE_TASK_NAME] if archive_task_runs(app._config) else []
-        app._cluster_election = self._build_cluster_election(names)
+        app._periodic_roster = resolve_periodic_roster(app._handler, app._config, now_epoch=int(self._clock.time()))
+        app._cluster_election = self._build_cluster_election(app._periodic_roster.cluster_task_names)
 
     def _build_cluster_election(self, cluster_task_names: Sequence[str]) -> ClusterElection | None:
         """The election service of ``cluster_task_names``; ``None`` when the worker runs no cluster task.
@@ -574,8 +594,8 @@ class AppLifecycle:
         unknown name fails startup; with none, any name is accepted, as the
         registry accepts any name while it is off. The ``filesystem``
         provider needs a shared folder; without one startup fails, naming
-        the first task. The provider is made here and starts at the first
-        slot that needs it.
+        the first task in sorted order. The provider is made here and starts
+        at the first slot that needs it.
 
         Raises:
             UnknownProviderError: no built-in or plugin election has the configured name.
@@ -593,7 +613,7 @@ class AppLifecycle:
             config_path='periodic.election.provider',
         )
         if election.provider == FILESYSTEM_PROVIDER and not config.resolved_shared_dir:
-            raise ValueError(STARTUP_NO_SHARED_FOLDER.format(name=cluster_task_names[0]))
+            raise ValueError(STARTUP_NO_SHARED_FOLDER.format(name=sorted(cluster_task_names)[0]))
         options = election_provider_options(config)
         context = ElectionContext(
             worker=app._worker_id,
@@ -634,8 +654,23 @@ class AppLifecycle:
         Runs right after the UI server listens: peers reach this worker
         through the URL its card publishes. The service starts its loops in
         the background and returns at once; nothing later in startup, and
-        nothing in the pipeline, waits on a registry call.
+        nothing in the pipeline, waits on a registry call. Without a
+        registry no peer's cluster task hash can be compared, and a worker
+        with cluster tasks says so once.
         """
+        await self._start_registry()
+        app = self._app
+        roster = app._periodic_roster
+        if app._fleet is None and roster is not None and roster.cluster_task_count:
+            await logger.ainfo(
+                'periodic_cluster_check_off',
+                category='periodic',
+                cluster_tasks=roster.cluster_task_count,
+                reason='the worker registry is off',
+            )
+
+    async def _start_registry(self) -> None:
+        """Start the registry service, or log why it stays off and leave ``app._fleet`` unset."""
         app = self._app
         config = app._config
         registry = config.fleet.registry
@@ -667,12 +702,20 @@ class AppLifecycle:
             config=registry,
             identity=app.worker_identity,
             provider_options=options,
-            # The cache engine starts after the registry, so its marks are
-            # read at each publish.
-            features=lambda: app._cache_engine.features() if app._cache_engine is not None else {},
+            features=self._card_features,
             connections=app._connections,
+            on_refresh=ClusterHashChecker(app.cluster_tasks_hash, app._cluster_name).check,
         )
         await app._fleet.start()
+
+    def _card_features(self) -> dict[str, Any]:
+        """The card's ``features``: the cluster task hash, and the cache marks while the cache serves.
+
+        Read at each publish: the cache engine starts after the registry.
+        """
+        app = self._app
+        cache = app._cache_engine.features() if app._cache_engine is not None else {}
+        return {'periodic': {'cluster_hash': app.cluster_tasks_hash}, **cache}
 
     async def _prepare_explicit_registry_folder(self, folder: str, timeout_seconds: float) -> None:
         """Fail startup when a card folder the operator named cannot be created or written."""
@@ -909,44 +952,57 @@ class AppLifecycle:
         await app._handler.on_ready(app._config, pg_pool)
         unbind_contextvars('hook')
 
-        # start the worker-scope periodic tasks declared on the handler;
-        # cluster-scope tasks need the slot loop and are not started here
-        for name, method, meta in discover_periodic_tasks(app._handler):
-            if meta.scope != 'worker':
-                continue
-            task = asyncio.create_task(
-                run_periodic_task(
-                    name=name,
-                    coro_fn=method,
-                    interval=meta.interval,
-                    cron=meta.cron,
-                    on_error=meta.on_error,
-                    recorder=app._recorder,
-                ),
-                name=f'periodic:{name}',
-            )
-            app._periodic_tasks.append(task)
+        roster = app._periodic_roster
+        if roster is not None:
+            for roster_task in roster.worker_tasks:
+                self._start_worker_task(roster_task)
+            for roster_task in roster.cluster_tasks:
+                self._start_cluster_task(user_cluster_task(roster_task))
         self._start_archive_task()
 
-    def _start_archive_task(self) -> None:
-        """Start the slot loop of the system cluster task ``history.archive``, when the worker runs it."""
+    def _start_worker_task(self, roster_task: RosterTask) -> None:
+        """Start the loop of one worker-scope periodic task of the handler."""
         app = self._app
-        if app._cluster_election is None or app._recorder is None:
-            return
-        archive_task = app._recorder.archive_cluster_task()
-        if archive_task is None:
+        meta = roster_task.meta
+        task = asyncio.create_task(
+            run_periodic_task(
+                name=roster_task.name,
+                coro_fn=roster_task.method,
+                interval=meta.interval,
+                cron=meta.cron,
+                on_error=meta.on_error,
+                recorder=app._recorder,
+                clock=self._clock,
+            ),
+            name=f'periodic:{roster_task.name}',
+        )
+        app._periodic_tasks.append(task)
+
+    def _start_cluster_task(self, cluster_task: ClusterTask) -> None:
+        """Start the slot loop of one cluster task; the roster made an election for every one."""
+        app = self._app
+        if app._cluster_election is None:
             return
         task = asyncio.create_task(
             run_cluster_task(
-                archive_task,
+                cluster_task,
                 app._cluster_election,
                 cluster=app._cluster_name,
                 recorder=app._recorder,
                 clock=self._clock,
             ),
-            name=f'periodic:{archive_task.name}',
+            name=f'periodic:{cluster_task.name}',
         )
         app._periodic_tasks.append(task)
+
+    def _start_archive_task(self) -> None:
+        """Start the slot loop of the system cluster task ``history.archive``, when the worker runs it."""
+        app = self._app
+        if app._recorder is None:
+            return
+        archive_task = app._recorder.archive_cluster_task()
+        if archive_task is not None:
+            self._start_cluster_task(archive_task)
 
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.
@@ -1279,9 +1335,18 @@ class AppLifecycle:
             # The election stops once the cluster task loops are cancelled (at
             # the top of the shutdown) and the archive pass that still checked
             # its lease has ended or been left: one attempt in the time left.
-            # Its caller counts and logs a failure; it does not raise.
+            # Its caller counts and logs a failed call; anything else it
+            # raises is logged here, so the card withdraw and the closes below still run.
             if app._cluster_election is not None:
-                await app._cluster_election.stop(max(deadline - time.monotonic(), 0.0))
+                try:
+                    await app._cluster_election.stop(max(deadline - time.monotonic(), 0.0))
+                except Exception as exc:
+                    await log.awarning(
+                        'periodic_election_stop_failed',
+                        category='periodic',
+                        error=str(exc),
+                        exc_info=True,
+                    )
 
             # Withdraw the registry card after the recorder's last write and
             # before the UI server goes: until the card is gone, peers may

@@ -15,13 +15,21 @@ import pytest
 from drakkar import cronexpr, schedule
 from drakkar.cronexpr import check_cron_syntax, next_cron_fire, validate_cron
 from drakkar.periodic import (
+    OVERRIDE_NULL,
+    PREFIX_ARCHIVE,
     PREFIX_DECORATOR,
+    PREFIX_OVERRIDE,
+    RULE_ARCHIVE_INTERVAL,
+    RULE_AT_MOST_ONE,
     RULE_CLUSTER_INTERVAL,
+    RULE_DOT_NAME,
     RULE_LEASE_BOUNDS,
     RULE_LEASE_SCOPE,
     RULE_NAME,
     RULE_ONE_SCHEDULE,
     RULE_SCOPE,
+    RULE_SWEEP_AFTER,
+    RULE_UNKNOWN_TASK,
     RULE_WORKER_INTERVAL,
     STARTUP_NO_SHARED_FOLDER,
     PeriodicRuleError,
@@ -59,6 +67,14 @@ MESSAGE_CONSTANTS = {
     'rule_cluster_interval': RULE_CLUSTER_INTERVAL,
     'rule_lease_scope': RULE_LEASE_SCOPE,
     'rule_lease_bounds': RULE_LEASE_BOUNDS,
+    'prefix_override': PREFIX_OVERRIDE,
+    'prefix_archive': PREFIX_ARCHIVE,
+    'rule_at_most_one': RULE_AT_MOST_ONE,
+    'rule_archive_interval': RULE_ARCHIVE_INTERVAL,
+    'rule_sweep_after': RULE_SWEEP_AFTER,
+    'rule_dot_name': RULE_DOT_NAME,
+    'rule_unknown_task': RULE_UNKNOWN_TASK,
+    'override_null': OVERRIDE_NULL,
     'startup_no_shared_folder': STARTUP_NO_SHARED_FOLDER,
 }
 

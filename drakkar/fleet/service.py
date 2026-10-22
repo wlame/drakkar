@@ -10,6 +10,8 @@ Two background loops, both started by :meth:`FleetRegistry.start`:
 - refresh: ``list()`` every ``refresh_seconds`` into an immutable snapshot.
   The first refresh waits for the first publish attempt after the provider
   started, because a file folder learns the server clock from its own write.
+  After each refresh that succeeded, the optional ``on_refresh`` callback
+  gets the peers as the workers list shows them.
 
 Every provider call goes through a :class:`ResilientCaller`: a time limit
 per attempt, bounded retries, a circuit breaker, and at most one failure
@@ -121,8 +123,12 @@ class FleetRegistry:
         now_epoch: Callable[[], float] = time.time,
         caller: ResilientCaller | None = None,
         connections: Connections | None = None,
+        on_refresh: Callable[[list['PeerView']], Awaitable[None]] | None = None,
     ) -> None:
         self._provider = provider
+        # Called with the peer views after each refresh that succeeded; an
+        # error it raises is a failed refresh iteration (counted and logged).
+        self._on_refresh = on_refresh
         # The card's ``features``, read at every publish: the subsystems
         # that fill it (the cache engine) may start after the registry.
         self._features = features
@@ -365,6 +371,9 @@ class FleetRegistry:
         self._snapshot = FleetSnapshot(peers=tuple(peers), refreshed_at=now)
         fleet_registry_snapshot_age.set(0)
         self._set_peer_gauge(peers)
+        # After the snapshot is kept: a failing callback costs no snapshot.
+        if self._on_refresh is not None:
+            await self._on_refresh(self.peer_views())
 
     async def _list_checked(self) -> PeerCardList:
         """``provider.list()``, refusing a result that is not a list so it counts as a failed call."""
