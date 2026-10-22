@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import stat
 from datetime import datetime
@@ -23,6 +22,7 @@ from typing import Any
 import aiosqlite
 
 from drakkar.dbfiles import DB_FILE_MODE
+from drakkar.schedule import sanitize_cluster
 from drakkar.timefmt import format_epoch_micro, format_rfc3339_micro
 
 META_SCHEMA = 1
@@ -40,21 +40,6 @@ _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 # The age-check marker ``.clock.<instance>``: a file touched to read the file
 # server's clock, deleted right after.
 CLOCK_PREFIX = '.clock.'
-
-# Folder and archive-name prefix for an empty or missing cluster name.
-DEFAULT_CLUSTER = 'default'
-_UNSAFE_CLUSTER_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
-
-
-def sanitize_cluster(name: str | None) -> str:
-    """Return a cluster name safe to embed in a folder or file name.
-
-    Everything outside ``[a-zA-Z0-9_-]`` becomes ``_``; an empty or
-    missing name becomes :data:`DEFAULT_CLUSTER`.
-    """
-    if not name:
-        return DEFAULT_CLUSTER
-    return _UNSAFE_CLUSTER_CHARS.sub('_', name)
 
 
 def history_dir(shared_dir: str, cluster: str) -> str:

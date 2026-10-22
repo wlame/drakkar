@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Schedules for cluster periodic tasks.** New modules `drakkar.cronexpr`
+  and `drakkar.schedule`. They check a cron expression against one fixed
+  subset of five-field UTC cron, and they compute the next slot of an
+  interval (aligned to the epoch) or of a cron expression. They also build
+  the election scope `<cluster>/<task>` and a hash of the cluster task
+  definitions. `tests/fixtures/periodic_contract.json` pins the results. New
+  dependency: `cronsim` 2.7.
 - **Integration harness profiles.** `just integration-up profile=quick` runs
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario

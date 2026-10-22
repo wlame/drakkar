@@ -83,7 +83,7 @@ from drakkar.recorder.helpers import (
     open_reader,
     sanitize_env_value,
 )
-from drakkar.recorder.history import history_dir, sanitize_cluster
+from drakkar.recorder.history import history_dir
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -102,6 +102,7 @@ from drakkar.recorder.sealing import (
     seal_connection,
 )
 from drakkar.recorder.writer import EventWriter
+from drakkar.schedule import sanitize_cluster
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:

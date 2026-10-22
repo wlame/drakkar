@@ -57,16 +57,15 @@ from drakkar.recorder.archive_lock import STALE_PREFIX
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED
 from drakkar.recorder.history import (
     CLOCK_PREFIX,
-    DEFAULT_CLUSTER,  # noqa: F401  (re-exported: archive names fall back to it)
     META_SUFFIX,
     folder_server_now,
     history_dir,
     list_sealed,
     merged_dir,
     meta_path,
-    sanitize_cluster,
 )
 from drakkar.recorder.sealing import INCOMING_SUFFIX
+from drakkar.schedule import sanitize_cluster
 
 if TYPE_CHECKING:
     from drakkar.config import HistoryArchiveConfig

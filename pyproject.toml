@@ -33,6 +33,7 @@ dependencies = [
     "pymongo>=4.16.0",
     "httpx>=0.27.0",
     "redis>=7.2",
+    "cronsim==2.7",
 ]
 
 [project.scripts]

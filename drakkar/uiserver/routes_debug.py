@@ -96,7 +96,7 @@ def _has_unsafe_filename_char(filename: str) -> bool:
 # its purpose.
 DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
 
-# A sanitized cluster folder name (``drakkar.recorder.history.sanitize_cluster``).
+# A sanitized cluster folder name (``drakkar.schedule.sanitize_cluster``).
 _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
