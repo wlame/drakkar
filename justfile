@@ -248,13 +248,29 @@ integration-down:
 integration-logs *args:
     docker compose -f integration/docker-compose.yml logs -f {{ args }}
 
-# Needs the harness up and the producer finished; pass the TOTAL_MESSAGES it
-# ran with (just verify-delivery 200). Fails when a request was lost,
-# duplicated past the cap, or delivered out of payload order.
+# Needs the harness up and the producer finished. Without a total it reads the
+# one the running producer was started with; pass one to override it
+# (just verify-delivery 200). Fails when a request was lost, duplicated past the
+# cap, or delivered out of payload order.
 #
-# Check the harness delivered every request, in order (just verify-delivery 200)
-verify-delivery total='5000' *args:
-    uv run python integration/verify_delivery.py --total-messages={{ total }} {{ args }}
+# Check the harness delivered every request, in order (just verify-delivery [total])
+verify-delivery total='' *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    total="{{ total }}"
+    if [ -z "$total" ]; then
+        id=$(docker compose -f integration/docker-compose.yml ps -aq producer)
+        if [ -z "$id" ] || [ "$(docker inspect -f '{{{{.State.Running}}' "$id" 2>/dev/null)" != true ]; then
+            echo "no total given and the producer container is not running; pass the total (just verify-delivery 200)" >&2
+            exit 1
+        fi
+        total=$(docker inspect -f '{{{{range .Config.Env}}{{{{println .}}{{{{end}}' "$id" | sed -n 's/^TOTAL_MESSAGES=//p')
+        if [ -z "$total" ]; then
+            echo "the producer container has no TOTAL_MESSAGES in its environment; pass the total" >&2
+            exit 1
+        fi
+    fi
+    uv run python integration/verify_delivery.py --total-messages="$total" {{ args }}
 
 # Run the rolling-outage chaos test against the integration environment
 chaos:

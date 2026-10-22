@@ -23,8 +23,8 @@
 #   docker-compose up --build -d
 #   ./chaos-test.sh
 #
-# Export TOTAL_MESSAGES with the value the producer ran with if it is not
-# the compose default; the verification rebuilds the produced id set from it.
+# TOTAL_MESSAGES is read from the running producer container unless it is
+# exported; the verification rebuilds the produced id set from it.
 # ============================================================================
 
 set -euo pipefail
@@ -210,9 +210,16 @@ echo ""
 # still exited 0.
 step "Verifying delivery after the outages"
 if [ -z "${TOTAL_MESSAGES:-}" ]; then
-    warn "TOTAL_MESSAGES is unset — assuming the compose default of 5000."
-    warn "Export the value the producer ran with if you changed it."
-    TOTAL_MESSAGES=5000
+    producer_id=$($COMPOSE ps -aq producer 2>/dev/null || true)
+    if [ -z "$producer_id" ] || [ "$(docker inspect -f '{{.State.Running}}' "$producer_id" 2>/dev/null)" != true ]; then
+        fail "TOTAL_MESSAGES is unset and the producer container is not running; export TOTAL_MESSAGES"
+        exit 1
+    fi
+    TOTAL_MESSAGES=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$producer_id" | sed -n 's/^TOTAL_MESSAGES=//p')
+    if [ -z "$TOTAL_MESSAGES" ]; then
+        fail "the producer container has no TOTAL_MESSAGES in its environment; export TOTAL_MESSAGES"
+        exit 1
+    fi
 fi
 
 if ! (cd .. && uv run python integration/verify_delivery.py \
