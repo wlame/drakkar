@@ -288,7 +288,7 @@ class ThreadFence:
 
     def __init__(
         self,
-        lease: SlotLease,
+        lease: 'SlotLease',
         caller: ResilientCaller,
         loop: asyncio.AbstractEventLoop,
         *,
