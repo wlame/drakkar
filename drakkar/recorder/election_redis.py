@@ -1,4 +1,4 @@
-"""The ``redis`` election provider: archive leases as keys of a Redis database."""
+"""The ``redis`` election provider: task leases as keys of a Redis database."""
 
 import re
 import time
@@ -30,13 +30,15 @@ REFRESH_BEFORE_ACQUIRE = 'redis election: refresh of a scope this provider has n
 
 
 class RedisElection:
-    """Leases as keys ``<prefix>archive-locks:<scope>``, one key per scope, the lease being the key's time to live.
+    """Leases as keys ``<prefix>task-locks:<scope>``, one key per scope, the lease being the key's time to live.
+
+    The scope (``<cluster>/<task>``) goes into the key as an opaque string.
 
     The server's clock judges every lease: a lease is alive while its key
     exists, and Redis deletes the key when its time to live ends. No host's
     local clock enters the judgement. An expired lease is therefore a deleted
     key, so a taker finds a free scope and there is no previous holder to read:
-    this provider logs no ``recorder_archive_lock_taken_over`` line.
+    this provider logs no ``periodic_lock_taken_over`` line.
 
     Every write names the token and the server checks it. Each write is one
     script that reads the key's body and acts only while the body holds the
@@ -51,8 +53,8 @@ class RedisElection:
     ``refresh`` takes no lease length, so the provider remembers, per scope,
     the lease of its last successful ``acquire`` and forgets it at ``release``.
     A ``refresh`` of a scope without a remembered lease raises
-    ``RuntimeError``: the archive pass always refreshes on the provider that
-    acquired.
+    ``RuntimeError``: a lease is always refreshed on the provider that
+    acquired it.
 
     The client is the one of ``connections.redis.<connection>``, shared with
     every other feature that names the same connection. ``stop`` leaves it

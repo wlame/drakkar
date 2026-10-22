@@ -38,8 +38,8 @@ EXAMPLE = FIXTURE['example']
 
 LEASE_SECONDS = 600.0
 LEASE_MILLISECONDS = 600_000
-SCOPE = 'search-fleet'
-LOCK_KEY = f'drakkar:archive-locks:{SCOPE}'
+SCOPE = 'search-fleet/history.archive'
+LOCK_KEY = f'drakkar:task-locks:{SCOPE}'
 URL = 'redis://user:secret@cache:6379/0'
 CANONICAL_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
 
@@ -97,7 +97,7 @@ async def _started(
 
 
 def _takeover_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
+    return [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
 
 
 # --- The kit ---
@@ -138,7 +138,7 @@ async def test_a_preset_prefix_goes_into_the_lock_key(clock, server):
 
     await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
 
-    assert recorder.calls[1][3] == f'ops.fleet:archive-locks:{SCOPE}'
+    assert recorder.calls[1][3] == f'ops.fleet:task-locks:{SCOPE}'
 
 
 async def test_the_default_prefix_is_the_one_of_a_connection_entry(clock, server):
@@ -225,8 +225,8 @@ async def test_refresh_extends_the_lease_of_the_last_acquire_of_that_scope(clock
     refreshed_long = await provider.refresh('scope-long', TOKEN_A)
 
     assert (refreshed_short, refreshed_long) == (True, True)
-    assert await raw.pttl('drakkar:archive-locks:scope-short') == 100_000
-    assert await raw.pttl('drakkar:archive-locks:scope-long') == 200_000
+    assert await raw.pttl('drakkar:task-locks:scope-short') == 100_000
+    assert await raw.pttl('drakkar:task-locks:scope-long') == 200_000
 
 
 async def test_refresh_uses_the_lease_of_the_last_successful_acquire(clock, server):
@@ -382,7 +382,7 @@ async def test_start_through_the_connections_takes_the_prefix_of_the_entry(clock
     await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
 
     opener.assert_awaited_once()
-    assert await fake_client(server).exists(f'ops.fleet:archive-locks:{SCOPE}') == 1
+    assert await fake_client(server).exists(f'ops.fleet:task-locks:{SCOPE}') == 1
 
 
 async def test_registry_and_election_on_one_connection_share_one_client(clock, server):

@@ -24,6 +24,7 @@ from drakkar.recorder.history import (
     read_meta,
     sanitize_cluster,
     serialize_json,
+    task_lock_dir,
     write_meta,
 )
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE
@@ -180,6 +181,14 @@ def test_sanitize_cluster_maps_unsafe_characters(raw, expected):
 )
 def test_history_dir_uses_the_sanitized_cluster(tmp_path, cluster, expected):
     assert history_dir(str(tmp_path), cluster) == os.path.join(str(tmp_path), expected)
+
+
+@pytest.mark.parametrize(
+    ('cluster', 'expected'),
+    [('search', 'tasks/search'), ('', 'tasks/default'), ('a/b c', 'tasks/a_b_c')],
+)
+def test_task_lock_dir_uses_the_sanitized_cluster(tmp_path, cluster, expected):
+    assert task_lock_dir(str(tmp_path), cluster) == os.path.join(str(tmp_path), expected)
 
 
 def test_merged_dir(tmp_path):

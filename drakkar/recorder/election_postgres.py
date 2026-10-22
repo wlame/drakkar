@@ -1,4 +1,4 @@
-"""The ``postgres`` election provider: archive leases as rows of a Postgres table."""
+"""The ``postgres`` election provider: task leases as rows of a Postgres table."""
 
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -8,9 +8,9 @@ import structlog
 
 from drakkar.config.connections import SCHEMA_RE, PostgresConnectionConfig
 from drakkar.providers.postgres import (
-    ARCHIVE_LOCKS_TABLE,
     DEFAULT_SCHEMA,
     POSTGRES_PROVIDER,
+    TASK_LOCKS_TABLE,
     borrow,
     borrow_transaction,
     close_pool,
@@ -28,7 +28,9 @@ NO_CONNECTIONS_MESSAGE = 'the postgres election needs the worker connections'
 
 
 class PostgresElection:
-    """Leases as rows of ``<schema>.archive_locks``, one row per scope, judged on the server's clock.
+    """Leases as rows of ``<schema>.task_locks``, one row per scope, judged on the server's clock.
+
+    The scope (``<cluster>/<task>``) is the row's key, used as an opaque string.
 
     A lease is alive while its row's ``refreshed_at`` is younger than
     ``lease_seconds`` on the database server's ``now()``; no host's local
@@ -91,7 +93,7 @@ class PostgresElection:
             schema=schema,
             manage_schema=manage_schema,
             connection=self._connection,
-            tables=[ARCHIVE_LOCKS_TABLE],
+            tables=[TASK_LOCKS_TABLE],
         )
         self._ready = (pool, statements_for(schema))
 
@@ -109,8 +111,8 @@ class PostgresElection:
             return False
         if previous is not None and previous[0] != token:
             await self._logger.awarning(
-                'recorder_archive_lock_taken_over',
-                category='recorder',
+                'periodic_lock_taken_over',
+                category='periodic',
                 provider=POSTGRES_PROVIDER,
                 scope=scope,
                 previous_worker=previous[1],

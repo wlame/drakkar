@@ -66,7 +66,7 @@ EXAMPLE = FIXTURE['example']
 
 INDEX_KEY = 'drakkar:fleet:workers'
 CARD_PREFIX = 'drakkar:fleet:workers:'
-LOCK_KEY = 'drakkar:archive-locks:main'
+LOCK_KEY = 'drakkar:task-locks:main/history.archive'
 LEASE_MS = 7_200_000
 
 

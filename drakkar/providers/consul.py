@@ -1,6 +1,6 @@
 """Consul request corpus and client helpers shared by the fleet providers.
 
-The worker registry and the archive election both keep their state in the KV
+The worker registry and the election both keep their state in the KV
 store of a Consul agent, each key held by a session whose time to live is the
 liveness clock. This module holds what the two have in common: the request
 paths, the session names and settings, the session TTL rule, the checks of the
@@ -21,7 +21,9 @@ is the only retry and the only clock on a call.
 
 Nothing is percent-encoded. Every piece that goes into a path or a query is
 checked before it gets there: the key prefix and the datacenter by the config
-loader, the worker name and the scope by their sanitizers, and a session id
+loader, the worker name by its sanitizer, the scope by
+:func:`drakkar.schedule.parse_task_scope` (a sanitized cluster, a slash and a
+task name), and a session id
 against :data:`SESSION_ID_RE`. So the URL is built by plain concatenation, and
 no quoting rule, which differs between URL libraries, ever applies.
 
@@ -69,14 +71,14 @@ PATHS: dict[str, str] = {
     'session_info': '/v1/session/info/{session}',
     'registry_card': '/v1/kv/{prefix}/fleet/workers/{worker}',
     'registry_list': '/v1/kv/{prefix}/fleet/workers/',
-    'election_lock': '/v1/kv/{prefix}/archive-locks/{scope}',
+    'election_lock': '/v1/kv/{prefix}/task-locks/{scope}',
 }
 # The head of every KV request path; the rest of the path is the KV key.
 KV_PATH_HEAD = '/v1/kv/'
 
 SESSION_NAMES: dict[str, str] = {
     'registry': 'drakkar-{worker}-{instance}',
-    'election': 'drakkar/archive-lock/{scope}/{token}',
+    'election': 'drakkar/task-lock/{scope}/{token}',
 }
 
 # A session that ends deletes the keys it holds, and another session may take a key at once.
@@ -195,7 +197,7 @@ def registry_session_name(member: str, instance: str) -> str:
 
 
 def election_session_name(scope: str, token: str) -> str:
-    """Return the name of the session that holds the lease of ``token`` on ``scope`` (a sanitized cluster name)."""
+    """Return the name of the session that holds the lease of ``token`` on ``scope`` (``<cluster>/<task>``)."""
     return SESSION_NAMES['election'].replace(SCOPE_PLACEHOLDER, scope).replace(TOKEN_PLACEHOLDER, token)
 
 

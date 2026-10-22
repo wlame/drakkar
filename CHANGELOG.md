@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the general bound of 86400 covers every provider. New section
   `periodic.tasks.<name>` overrides `enabled`, `interval`, `cron` and
   `lease_seconds` of a declared task; a name with a dot fails the load.
+- **Every election lock is a task lock, keyed by cluster and task.** The
+  election scope is now `<cluster>/<task>` (the archive is
+  `<cluster>/history.archive`). The `filesystem` lock moved from
+  `history/<cluster>/.archive.lock` to `tasks/<cluster>/<task>.lock` in the
+  shared folder (`drakkar.recorder.task_lock.TaskLock`, was `ArchiveLock`).
+  The Postgres table `archive_locks` is replaced by `task_locks` (key column
+  `scope`), the Redis key `<prefix>archive-locks:<scope>` by
+  `<prefix>task-locks:<scope>`, and the Consul key and session name use
+  `task-locks` and `drakkar/task-lock/<scope>/<token>`. The `filesystem` and
+  `consul` elections refuse a scope that is not `<cluster>/<task>`. The log
+  events `recorder_archive_lock_taken_over` and
+  `recorder_archive_lock_put_back_failed` are now `periodic_lock_taken_over`
+  (field `scope` instead of `folder`) and `periodic_lock_put_back_failed`, in
+  category `periodic`. Old lock files and the old table are not read.
 
 ### Added
 

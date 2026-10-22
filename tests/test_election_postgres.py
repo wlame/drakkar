@@ -1,7 +1,7 @@
 """The ``postgres`` election provider, against an in-memory Postgres.
 
 No database: ``tests.pg_fake.FakePostgres`` answers only the pinned statement
-texts and models the ``archive_locks`` table on a clock the test moves. The
+texts and models the ``task_locks`` table on a clock the test moves. The
 provider runs the whole election test kit, then the tests of what it sends:
 the statements and their arguments, the takeover log line, the table check
 at start, the shared pool and the error mapping.
@@ -31,7 +31,7 @@ from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN
 from tests.pg_fake import FakePostgres
 
 LEASE_SECONDS = 600.0
-SCOPE = 'search-fleet'
+SCOPE = 'search-fleet/history.archive'
 DSN = 'postgresql://user:secret@db/x'
 
 
@@ -71,7 +71,7 @@ def make_connections(**settings: Any) -> Connections:
 
 
 def _takeover_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
+    return [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
 
 
 # --- The kit ---
@@ -125,8 +125,8 @@ async def test_acquire_takeover_logs_the_previous_holder(fake):
     assert took is True
     assert _takeover_logs(logs) == [
         {
-            'event': 'recorder_archive_lock_taken_over',
-            'category': 'recorder',
+            'event': 'periodic_lock_taken_over',
+            'category': 'periodic',
             'provider': 'postgres',
             'scope': SCOPE,
             'previous_worker': 'w-stalled',
@@ -237,7 +237,7 @@ async def test_start_runs_the_ddl_when_manage_schema_is_true(fake):
 async def test_start_checks_only_the_locks_table_when_not_managed(fake):
     await _started(fake, manage_schema=False)
 
-    assert fake.calls == [(statements_for('drakkar')['check_table'], ('drakkar.archive_locks',))]
+    assert fake.calls == [(statements_for('drakkar')['check_table'], ('drakkar.task_locks',))]
 
 
 async def test_start_with_a_missing_locks_table_raises_the_pinned_message():
@@ -247,7 +247,7 @@ async def test_start_with_a_missing_locks_table_raises_the_pinned_message():
     with pytest.raises(RuntimeError) as raised:
         await _started(fake, manage_schema=False)
 
-    assert str(raised.value) == missing_table_message('drakkar', 'archive_locks', 'main')
+    assert str(raised.value) == missing_table_message('drakkar', 'task_locks', 'main')
 
 
 @pytest.mark.parametrize('schema', ['Bad-Name', '', '1st', 'ops fleet'])
@@ -273,7 +273,7 @@ async def test_start_through_the_connections_takes_the_schema_and_manage_schema_
 
     statements = statements_for('ops_fleet')
     assert fake.calls == [
-        (statements['check_table'], ('ops_fleet.archive_locks',)),
+        (statements['check_table'], ('ops_fleet.task_locks',)),
         (statements['is_held'], (SCOPE, TOKEN_A)),
     ]
 

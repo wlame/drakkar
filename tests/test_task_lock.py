@@ -1,4 +1,4 @@
-"""The archive lock file: one archiver per cluster history folder.
+"""The task lock file: one holder per cluster task, in the cluster's task lock folder.
 
 Protocol: exclusive create; a stale lock (older than the lease on
 the file server's clock) is taken over once; the holder refreshes the
@@ -18,16 +18,19 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from drakkar.recorder import archive_lock
-from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
+from drakkar.recorder import task_lock
+from drakkar.recorder.task_lock import LOCK_SUFFIX, STALE_INFIX, TaskLock
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'history_meta.json').read_text(encoding='utf-8'))
 
 STALE = 7200.0
+TASK = 'history.archive'
+SCOPE = 'main/history.archive'
+LOCK_NAME = TASK + LOCK_SUFFIX
 
 
-def _lock(folder, worker='w-1', instance='1111111111111111', **kwargs) -> ArchiveLock:
-    return ArchiveLock(str(folder), worker=worker, instance=instance, stale_seconds=STALE, **kwargs)
+def _lock(folder, worker='w-1', instance='1111111111111111', name=TASK, **kwargs) -> TaskLock:
+    return TaskLock(str(folder), name, worker=worker, instance=instance, stale_seconds=STALE, scope=SCOPE, **kwargs)
 
 
 def _age_lock(folder, seconds: float) -> None:
@@ -52,6 +55,41 @@ def test_acquire_creates_an_owner_only_lock_with_its_body(tmp_path):
     lock.release()
 
 
+def test_the_lock_file_and_its_stale_copy_are_named_after_the_task(tmp_path, monkeypatch):
+    dead = _lock(tmp_path, worker='w-dead', instance='dddddddddddddddd', auto_refresh=False)
+    assert dead.acquire()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['history.archive.lock']
+    _age_lock(tmp_path, STALE + 60)
+    taker = _lock(tmp_path, worker='w-2', instance='2222222222222222', token='0123456789abcdef', auto_refresh=False)
+    seen: list[str] = []
+    real_rename = task_lock._rename_aside
+
+    def recording_rename(source, target):
+        seen.append(os.path.basename(target))
+        return real_rename(source, target)
+
+    monkeypatch.setattr(task_lock, '_rename_aside', recording_rename)
+
+    assert taker.acquire() is True
+
+    assert seen == ['history.archive.lock.stale.0123456789abcdef']
+    taker.release()
+
+
+def test_two_tasks_of_one_cluster_hold_independent_locks(tmp_path):
+    archive = _lock(tmp_path, auto_refresh=False)
+    refresh_rates = _lock(tmp_path, name='refresh_rates', worker='w-2', instance='2222222222222222', auto_refresh=False)
+
+    assert archive.acquire() is True
+    assert refresh_rates.acquire() is True
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['history.archive.lock', 'refresh_rates.lock']
+    archive.release()
+    assert refresh_rates.is_ours()
+    refresh_rates.release()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_the_body_names_the_provider(tmp_path):
     expected = FIXTURE['lock']
     lock = _lock(
@@ -72,7 +110,7 @@ def test_the_body_names_the_provider(tmp_path):
 
 
 def _refresh_threads() -> set[threading.Thread]:
-    return {thread for thread in threading.enumerate() if thread.name == 'drakkar-archive-lock'}
+    return {thread for thread in threading.enumerate() if thread.name == 'drakkar-task-lock'}
 
 
 def test_auto_refresh_false_starts_no_thread(tmp_path):
@@ -104,7 +142,7 @@ def test_refresh_answers_whether_the_lock_is_still_ours(tmp_path):
     assert lock.refresh() is False
 
 
-def test_a_second_archiver_is_refused_while_the_lock_is_fresh(tmp_path):
+def test_a_second_holder_is_refused_while_the_lock_is_fresh(tmp_path):
     first = _lock(tmp_path)
     second = _lock(tmp_path, worker='w-2', instance='2222222222222222')
     assert first.acquire()
@@ -127,10 +165,14 @@ def test_a_stale_lock_is_taken_over_once_and_logged(tmp_path):
 
     assert taker.is_ours()
     assert not dead.is_ours()
-    (event,) = [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
-    assert event['previous_worker'] == 'w-dead'
+    (event,) = [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
+    assert event['category'] == 'periodic'
     assert event['provider'] == 'filesystem'
-    assert not [p for p in tmp_path.iterdir() if p.name.startswith('.archive.lock.stale.')]
+    assert event['scope'] == SCOPE
+    assert (event['previous_worker'], event['previous_instance']) == ('w-dead', 'dddddddddddddddd')
+    assert event['age_seconds'] > STALE
+    assert 'folder' not in event
+    assert not [p for p in tmp_path.iterdir() if STALE_INFIX in p.name]
     taker.release()
 
 
@@ -262,7 +304,7 @@ def test_a_stale_lock_whose_body_cannot_be_read_is_still_taken_over(tmp_path, mo
     with capture_logs() as logs:
         assert taker.acquire() is True
 
-    (event,) = [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
+    (event,) = [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
     assert event['previous_worker'] is None
     monkeypatch.undo()
     assert taker.is_ours()
@@ -285,13 +327,13 @@ def _stale_dead_lock(folder) -> None:
 def test_a_taker_that_loses_the_rename_race_stands_down(tmp_path, monkeypatch):
     _stale_dead_lock(tmp_path)
     taker = _lock(tmp_path, worker='w-2', instance='2222222222222222')
-    real_rename = archive_lock._rename_aside
+    real_rename = task_lock._rename_aside
 
     def another_taker_moves_it_first(source, target):
-        real_rename(source, tmp_path / '.archive.lock.stale.ffffffffffffffff')
+        real_rename(source, tmp_path / f'{TASK}{STALE_INFIX}ffffffffffffffff')
         return real_rename(source, target)
 
-    monkeypatch.setattr(archive_lock, '_rename_aside', another_taker_moves_it_first)
+    monkeypatch.setattr(task_lock, '_rename_aside', another_taker_moves_it_first)
 
     assert taker.acquire() is False
     assert not (tmp_path / LOCK_NAME).exists()
@@ -301,16 +343,16 @@ def test_a_fresh_lock_moved_aside_by_a_racing_taker_is_put_back(tmp_path, monkey
     _stale_dead_lock(tmp_path)
     holder = _lock(tmp_path, worker='w-2', instance='2222222222222222')
     taker = _lock(tmp_path, worker='w-3', instance='3333333333333333')
-    real_rename = archive_lock._rename_aside
+    real_rename = task_lock._rename_aside
 
     def holder_takes_over_in_between(source, target):
         # After the taker saw the stale lock, another worker took it over
         # and created a fresh one; the taker now moves THAT one aside.
-        monkeypatch.setattr(archive_lock, '_rename_aside', real_rename)
+        monkeypatch.setattr(task_lock, '_rename_aside', real_rename)
         assert holder.acquire()
         return real_rename(source, target)
 
-    monkeypatch.setattr(archive_lock, '_rename_aside', holder_takes_over_in_between)
+    monkeypatch.setattr(task_lock, '_rename_aside', holder_takes_over_in_between)
 
     assert taker.acquire() is False
     assert holder.is_ours()
@@ -324,11 +366,11 @@ def test_a_put_back_that_loses_to_a_third_creator_fences_the_holder(tmp_path, mo
     holder = _lock(tmp_path, worker='w-2', instance='2222222222222222', auto_refresh=False)
     taker = _lock(tmp_path, worker='w-3', instance='3333333333333333')
     third = _lock(tmp_path, worker='w-4', instance='4444444444444444')
-    real_rename = archive_lock._rename_aside
-    real_link = archive_lock._link_back
+    real_rename = task_lock._rename_aside
+    real_link = task_lock._link_back
 
     def holder_takes_over_in_between(source, target):
-        monkeypatch.setattr(archive_lock, '_rename_aside', real_rename)
+        monkeypatch.setattr(task_lock, '_rename_aside', real_rename)
         assert holder.acquire()
         return real_rename(source, target)
 
@@ -336,16 +378,16 @@ def test_a_put_back_that_loses_to_a_third_creator_fences_the_holder(tmp_path, mo
         assert third.acquire()
         return real_link(source, target)
 
-    monkeypatch.setattr(archive_lock, '_rename_aside', holder_takes_over_in_between)
-    monkeypatch.setattr(archive_lock, '_link_back', third_creates_before_the_put_back)
+    monkeypatch.setattr(task_lock, '_rename_aside', holder_takes_over_in_between)
+    monkeypatch.setattr(task_lock, '_link_back', third_creates_before_the_put_back)
 
     with capture_logs() as logs:
         assert taker.acquire() is False
 
     assert not holder.is_ours()
     assert third.is_ours()
-    assert [e['event'] for e in logs if e['event'] == 'recorder_archive_lock_put_back_failed'] == [
-        'recorder_archive_lock_put_back_failed'
-    ]
+    (event,) = [e for e in logs if e['event'] == 'periodic_lock_put_back_failed']
+    assert (event['category'], event['scope'], event['folder']) == ('periodic', SCOPE, str(tmp_path))
+    assert event['error']
     assert sorted(p.name for p in tmp_path.iterdir()) == [LOCK_NAME]
     third.release()

@@ -93,7 +93,7 @@ async def test_the_recorder_runs_the_configured_election_with_its_options_resili
     assert ctx.options == {'address': 'consul:8500'}
     assert ctx.connections is app._connections
     lease = received['lease']
-    assert (lease.provider_name, lease.scope) == ('example-election', 'search')
+    assert (lease.provider_name, lease.scope) == ('example-election', 'search/history.archive')
     assert started_ok._value.get() == started_before + 1
     assert election.calls['stop'] == 1
 

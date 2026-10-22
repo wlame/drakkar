@@ -1,6 +1,6 @@
 """Postgres statement corpus, rendering and pool helpers shared by the fleet providers.
 
-The worker registry and the archive election both keep their state in Postgres
+The worker registry and the election both keep their state in Postgres
 tables. This module holds what the two have in common: the DDL and every
 statement text, the rule that fills in the connection's schema, the pool that
 the shared ``connections`` section opens, and the mapping of Postgres errors
@@ -25,7 +25,7 @@ from drakkar.providers.resilience import TransientError
 POSTGRES_PROVIDER = 'postgres'
 SCHEMA_PLACEHOLDER = '{schema}'
 FLEET_WORKERS_TABLE = 'fleet_workers'
-ARCHIVE_LOCKS_TABLE = 'archive_locks'
+TASK_LOCKS_TABLE = 'task_locks'
 # The schema of a connection entry that names none, so a preset pool gets the same default.
 DEFAULT_SCHEMA: str = PostgresConnectionConfig.model_fields['schema_name'].default
 
@@ -41,8 +41,8 @@ DDL_TEMPLATES: tuple[str, ...] = (
     ')',
     'CREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON {schema}.fleet_workers (cluster)',
     'CREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON {schema}.fleet_workers (heartbeat_at)',
-    'CREATE TABLE IF NOT EXISTS {schema}.archive_locks (\n'
-    '    cluster       text        PRIMARY KEY,\n'
+    'CREATE TABLE IF NOT EXISTS {schema}.task_locks (\n'
+    '    scope         text        PRIMARY KEY,\n'
     '    token         text        NOT NULL,\n'
     '    worker        text        NOT NULL,\n'
     '    instance      text        NOT NULL,\n'
@@ -68,21 +68,21 @@ STATEMENT_TEMPLATES: dict[str, str] = {
     'withdraw': 'DELETE FROM {schema}.fleet_workers WHERE worker = $1 AND instance = $2',
     'acquire_select': (
         'SELECT token, worker, instance, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 '
-        'FROM {schema}.archive_locks WHERE cluster = $1 FOR UPDATE'
+        'FROM {schema}.task_locks WHERE scope = $1 FOR UPDATE'
     ),
     'acquire': (
-        'INSERT INTO {schema}.archive_locks AS held (cluster, token, worker, instance, acquired_at, refreshed_at) '
+        'INSERT INTO {schema}.task_locks AS held (scope, token, worker, instance, acquired_at, refreshed_at) '
         'VALUES ($1, $2, $3, $4, now(), now()) '
-        'ON CONFLICT (cluster) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, '
+        'ON CONFLICT (scope) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, '
         'instance = EXCLUDED.instance, '
         'acquired_at = CASE WHEN held.token = EXCLUDED.token THEN held.acquired_at ELSE now() END, '
         'refreshed_at = now() '
         'WHERE held.token = EXCLUDED.token OR held.refreshed_at < now() - make_interval(secs => $5) '
         'RETURNING token'
     ),
-    'refresh': 'UPDATE {schema}.archive_locks SET refreshed_at = now() WHERE cluster = $1 AND token = $2',
-    'is_held': 'SELECT 1 FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2',
-    'release': 'DELETE FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2',
+    'refresh': 'UPDATE {schema}.task_locks SET refreshed_at = now() WHERE scope = $1 AND token = $2',
+    'is_held': 'SELECT 1 FROM {schema}.task_locks WHERE scope = $1 AND token = $2',
+    'release': 'DELETE FROM {schema}.task_locks WHERE scope = $1 AND token = $2',
 }
 
 # SQLSTATE classes a retry can cure: connection exceptions (08), insufficient

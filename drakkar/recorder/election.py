@@ -1,14 +1,19 @@
-"""The archive election: which worker of a cluster builds the archives.
+"""The election: which worker of a cluster runs a cluster task.
 
-Every worker of a cluster runs the archive pass; an election provider lets one
-of them work at a time. A pass takes a lease on its *scope* (the sanitized
-cluster name) under a 16-hex *token* of its own, refreshes it while it works,
-checks it right before each publish (fencing), and releases it at the end. A
-holder that dies stops refreshing, and once ``lease_seconds`` pass another
-worker may take the scope over.
+Every worker of a cluster runs the task; an election provider lets one of
+them work at a time. A run takes a lease on its *scope*, ``<cluster>/<task>``
+(the sanitized cluster name, a slash and the task name, see
+:func:`drakkar.schedule.task_scope`), under a 16-hex *token* of its own. It
+refreshes the lease while it works, may check it before a step that must not
+run twice (fencing; the archive pass checks it right before each publish),
+and releases it at the end. A holder that dies stops refreshing, and once
+``lease_seconds`` pass another worker may take the scope over. Every
+provider keeps its leases in one family keyed by the scope; a provider may
+treat the scope as an opaque string.
 
 The provider is asynchronous and runs on the worker's event loop; the archive
-pass is synchronous and runs in a thread. :class:`ElectionLease` joins the
+pass (the system task ``history.archive``) is synchronous and runs in a
+thread. :class:`ElectionLease` joins the
 two: the thread calls it, and it runs every provider call on the loop through
 a :class:`~drakkar.providers.resilience.ResilientCaller`, waiting at most the
 call's bound. A hung provider therefore holds up the archive thread for a
@@ -36,11 +41,12 @@ from drakkar.fleet.card import sanitize_worker_name
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
 from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
-from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER, ArchiveLock
 from drakkar.recorder.election_consul import consul_election_factory
 from drakkar.recorder.election_postgres import postgres_election_factory
 from drakkar.recorder.election_redis import redis_election_factory
-from drakkar.recorder.history import history_dir
+from drakkar.recorder.history import task_lock_dir
+from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER, TaskLock
+from drakkar.schedule import parse_task_scope
 
 # Public and stable: plugin packages name this group in their metadata.
 ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
@@ -71,7 +77,7 @@ class ElectionContext:
     """What a provider learns about the worker that runs it, at ``start``.
 
     ``shared_dir`` is the worker's shared folder (``shared.dir``); the
-    ``filesystem`` provider keeps its locks in its history folders, others
+    ``filesystem`` provider keeps its locks in its ``tasks`` folder, others
     ignore it. ``options`` is the provider's own settings mapping (for a
     plugin, ``periodic.election.plugin_options``). ``connections``
     resolves the worker's named shared connections; it is ``None`` when the
@@ -137,10 +143,12 @@ ElectionFactory = Callable[[Mapping[str, Any]], ElectionProvider]
 
 
 class FilesystemElection:
-    """The ``filesystem`` provider: the lock file ``history/<scope>/.archive.lock`` in the shared folder.
+    """The ``filesystem`` provider: the lock file ``tasks/<cluster>/<task>.lock`` of a scope in the shared folder.
 
-    One :class:`ArchiveLock` per scope, replaced when a call names another
-    token. Its takeover rule (rename aside, stale age on the file server's
+    One :class:`TaskLock` per scope, replaced when a call names another
+    token. A scope that is not ``<cluster>/<task>`` raises ``ValueError``
+    before any file is touched. Its takeover rule (rename aside, stale age
+    on the file server's
     clock) decides when a lease ran out.
 
     Every file call runs on the provider's own :class:`ProviderThread`, one at
@@ -156,7 +164,7 @@ class FilesystemElection:
     def __init__(self, stale_seconds: float | None = None) -> None:
         self._stale_seconds = stale_seconds
         self._ctx: ElectionContext | None = None
-        self._locks: dict[str, ArchiveLock] = {}
+        self._locks: dict[str, TaskLock] = {}
         self._runner: ProviderThread | None = None
         self._stopped = False
 
@@ -216,20 +224,24 @@ class FilesystemElection:
         return self._ctx
 
     def _folder(self, scope: str) -> str:
-        return history_dir(self._context().shared_dir, scope)
+        cluster, _ = parse_task_scope(scope)
+        return task_lock_dir(self._context().shared_dir, cluster)
 
-    def _new_lock(self, scope: str, token: str, stale_seconds: float) -> ArchiveLock:
+    def _new_lock(self, scope: str, token: str, stale_seconds: float) -> TaskLock:
         ctx = self._context()
-        return ArchiveLock(
+        _, name = parse_task_scope(scope)
+        return TaskLock(
             self._folder(scope),
+            name,
             worker=ctx.worker,
             instance=ctx.instance,
             stale_seconds=stale_seconds,
+            scope=scope,
             token=token,
             auto_refresh=False,
         )
 
-    def _lock(self, scope: str, token: str) -> ArchiveLock:
+    def _lock(self, scope: str, token: str) -> TaskLock:
         """The scope's lock for ``token``; a handle made here never takes anything over, only reads and deletes."""
         lock = self._locks.get(scope)
         if lock is None or lock.token != token:
@@ -238,8 +250,8 @@ class FilesystemElection:
         return lock
 
 
-def _acquire_in_folder(lock: ArchiveLock, folder: str) -> bool:
-    """Take ``lock``, creating its history folder first when it is missing."""
+def _acquire_in_folder(lock: TaskLock, folder: str) -> bool:
+    """Take ``lock``, creating its task lock folder first when it is missing."""
     os.makedirs(folder, mode=DB_DIR_MODE, exist_ok=True)
     # A timed-out attempt's thread may still have created the file with this
     # token; the retry must not then lock its own holder out.

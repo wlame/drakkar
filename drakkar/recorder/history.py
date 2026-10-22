@@ -29,6 +29,8 @@ META_SCHEMA = 1
 META_SUFFIX = '.meta.json'
 HISTORY_FOLDER = 'history'
 MERGED_FOLDER = 'merged'
+# The task locks of the filesystem election, one folder per cluster.
+TASKS_FOLDER = 'tasks'
 # A meta file is a few hundred bytes; anything far larger is not one.
 MAX_META_BYTES = 64 * 1024
 
@@ -45,6 +47,11 @@ CLOCK_PREFIX = '.clock.'
 def history_dir(shared_dir: str, cluster: str) -> str:
     """The history folder of ``cluster``: ``<shared>/history/<sanitized cluster>``."""
     return os.path.join(shared_dir, HISTORY_FOLDER, sanitize_cluster(cluster))
+
+
+def task_lock_dir(shared_dir: str, cluster: str) -> str:
+    """The task lock folder of ``cluster``: ``<shared>/tasks/<sanitized cluster>``."""
+    return os.path.join(shared_dir, TASKS_FOLDER, sanitize_cluster(cluster))
 
 
 def merged_dir(shared_dir: str) -> str:
@@ -85,7 +92,7 @@ def meta_path(db_path: str) -> str:
 def folder_server_now(folder: str, instance: str) -> float:
     """The file server's current time: the mtime of a freshly touched marker file in ``folder``.
 
-    Ages of files in the folder (the archive lock, work files to sweep) are
+    Ages of files in the folder (a task lock, work files to sweep) are
     measured against this, so no host's wall clock is compared with
     another's. The marker ``.clock.<instance>`` is deleted before returning.
     """

@@ -1,7 +1,7 @@
 """An in-memory Postgres for the fleet provider tests.
 
 ``FakePostgres`` keeps the two tables of the fleet providers, ``fleet_workers``
-and ``archive_locks``, on a clock the test moves. It answers only the exact
+and ``task_locks``, on a clock the test moves. It answers only the exact
 statement texts of the shared corpus (``drakkar.providers.postgres``) rendered
 for its schema, and models what each one does, so a test both pins the bytes
 a provider sends and watches the provider behave. A text the corpus does not
@@ -19,7 +19,7 @@ from typing import Any
 
 import asyncpg
 
-from drakkar.providers.postgres import ARCHIVE_LOCKS_TABLE, FLEET_WORKERS_TABLE, ddl_for, statements_for
+from drakkar.providers.postgres import FLEET_WORKERS_TABLE, TASK_LOCKS_TABLE, ddl_for, statements_for
 
 # What a statement comes to: the rows it returns and its command tag.
 Result = tuple[list[tuple[Any, ...]], str]
@@ -38,7 +38,7 @@ class WorkerRow:
 
 @dataclass(frozen=True)
 class LockRow:
-    """One row of ``archive_locks``; both times are on the fake clock."""
+    """One row of ``task_locks``; both times are on the fake clock."""
 
     token: str
     worker: str
@@ -48,7 +48,7 @@ class LockRow:
 
 
 class FakePostgres:
-    """In-memory fleet_workers and archive_locks behind the exact statement texts of the fixture, on a fake clock.
+    """In-memory fleet_workers and task_locks behind the exact statement texts of the fixture, on a fake clock.
 
     ``fail_next`` is raised by the next statement and then cleared;
     ``fail_every`` is raised by every statement while it is set. Both let a
@@ -63,7 +63,7 @@ class FakePostgres:
 
     def __init__(self, schema: str = 'drakkar', *, tables_exist: bool = True) -> None:
         self.schema = schema
-        self.tables: set[str] = {FLEET_WORKERS_TABLE, ARCHIVE_LOCKS_TABLE} if tables_exist else set()
+        self.tables: set[str] = {FLEET_WORKERS_TABLE, TASK_LOCKS_TABLE} if tables_exist else set()
         # Set by FakeConnection.transaction while its block runs.
         self.in_transaction = False
         self.open_transaction: FakeTransaction | None = None
@@ -82,16 +82,16 @@ class FakePostgres:
             ddl[1]: self._create_table(FLEET_WORKERS_TABLE),
             ddl[2]: lambda _args: ([], 'CREATE INDEX'),
             ddl[3]: lambda _args: ([], 'CREATE INDEX'),
-            ddl[4]: self._create_table(ARCHIVE_LOCKS_TABLE),
+            ddl[4]: self._create_table(TASK_LOCKS_TABLE),
             statements['publish']: self._on_tables(self._publish, FLEET_WORKERS_TABLE),
             statements['list_prune']: self._on_tables(self._list_prune, FLEET_WORKERS_TABLE),
             statements['list_select']: self._on_tables(self._list_select, FLEET_WORKERS_TABLE),
             statements['withdraw']: self._on_tables(self._withdraw, FLEET_WORKERS_TABLE),
-            statements['acquire_select']: self._on_tables(self._acquire_select, ARCHIVE_LOCKS_TABLE),
-            statements['acquire']: self._on_tables(self._acquire, ARCHIVE_LOCKS_TABLE),
-            statements['refresh']: self._on_tables(self._refresh, ARCHIVE_LOCKS_TABLE),
-            statements['is_held']: self._on_tables(self._is_held, ARCHIVE_LOCKS_TABLE),
-            statements['release']: self._on_tables(self._release, ARCHIVE_LOCKS_TABLE),
+            statements['acquire_select']: self._on_tables(self._acquire_select, TASK_LOCKS_TABLE),
+            statements['acquire']: self._on_tables(self._acquire, TASK_LOCKS_TABLE),
+            statements['refresh']: self._on_tables(self._refresh, TASK_LOCKS_TABLE),
+            statements['is_held']: self._on_tables(self._is_held, TASK_LOCKS_TABLE),
+            statements['release']: self._on_tables(self._release, TASK_LOCKS_TABLE),
         }
 
     def advance(self, seconds: float) -> None:

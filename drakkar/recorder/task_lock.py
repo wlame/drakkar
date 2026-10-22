@@ -1,14 +1,17 @@
-"""The archive lock: one archiver at a time per cluster history folder.
+"""The task lock: one holder at a time per cluster task.
 
 This is the lock of the ``filesystem`` election provider
-(:class:`drakkar.recorder.election.FilesystemElection`).
-``history/<cluster>/.archive.lock`` is created with an exclusive create, so
-exactly one worker of the cluster holds it. The holder refreshes the lock's
-mtime while its pass runs. A lock nobody refreshed for ``stale_seconds`` (the lease)
-belongs to a dead archiver: the next worker renames it aside (one rename
-wins), deletes it, and creates its own. Right before each publish the holder
-re-reads the lock and stops if the token is no longer its own (fencing), so
-a holder that stalled past the stale age publishes nothing.
+(:class:`drakkar.recorder.election.FilesystemElection`). The lock of task
+``<task>`` of a cluster is ``tasks/<cluster>/<task>.lock`` in the shared
+folder (:func:`drakkar.recorder.history.task_lock_dir`). It is created with
+an exclusive create, so exactly one worker of the cluster holds it. The
+holder refreshes the lock's mtime while its run goes on. A lock nobody
+refreshed for ``stale_seconds`` (the lease) belongs to a dead holder: the
+next worker renames it aside to ``<task>.lock.stale.<token>`` (one rename
+wins), deletes it, and creates its own. A holder can re-read the lock and
+stop if the token is no longer its own (fencing); the archive pass does so
+right before each publish, so a holder that stalled past the stale age
+publishes nothing.
 
 Ages are measured on the file server's clock
 (:func:`drakkar.recorder.history.folder_server_now`), so no host's wall
@@ -39,10 +42,13 @@ from drakkar.timefmt import format_rfc3339_micro
 
 logger = structlog.get_logger()
 
-LOCK_NAME = '.archive.lock'
+# The lock file of a task is its name plus this suffix; a lock moved aside by a
+# takeover is the name plus the infix plus the taker's token.
+LOCK_SUFFIX = '.lock'
+STALE_INFIX = '.lock.stale.'
 # The election provider this lock implements: named in the lock body and the takeover log line.
 FILESYSTEM_PROVIDER = 'filesystem'
-STALE_PREFIX = '.archive.lock.stale.'
+REFRESH_THREAD_NAME = 'drakkar-task-lock'
 DEFAULT_REFRESH_SECONDS = 60.0
 MAX_LOCK_BYTES = 4096
 
@@ -59,30 +65,35 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class ArchiveLock:
-    """The lock of one cluster history folder, held by one archive pass."""
+class TaskLock:
+    """The lock of one task of a cluster, the file ``<name>.lock`` in the cluster's task lock folder."""
 
     def __init__(
         self,
         folder: str,
+        name: str,
         *,
         worker: str,
         instance: str,
         stale_seconds: float,
+        scope: str,
         refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
         now: Callable[[], datetime] = _utc_now,
         token: str | None = None,
         auto_refresh: bool = True,
     ) -> None:
-        """Prepare the lock of ``folder``; nothing touches the folder before :meth:`acquire`.
+        """Prepare the lock of task ``name`` in ``folder``; nothing touches the folder before :meth:`acquire`.
 
-        ``token`` is the holder's token (16 hex characters are made when
+        ``scope`` is the election scope of the task (``<cluster>/<task>``);
+        it names the lock in the log lines. ``token`` is the holder's token (16 hex characters are made when
         ``None``). With ``auto_refresh`` a thread refreshes the lock every
         ``refresh_seconds`` while it is held; without it the caller calls
         :meth:`refresh` itself.
         """
         self._folder = folder
-        self._path = os.path.join(folder, LOCK_NAME)
+        self._name = name
+        self._path = os.path.join(folder, name + LOCK_SUFFIX)
+        self._scope = scope
         self._worker = worker
         self._instance = instance
         self._stale_seconds = stale_seconds
@@ -98,17 +109,17 @@ class ArchiveLock:
         return self._token
 
     def acquire(self) -> bool:
-        """Take the lock; take over a stale one once. False when another archiver holds it."""
+        """Take the lock; take over a stale one once. False when another worker holds it."""
         if not self._create() and not (self._take_over_stale() and self._create()):
             return False
         if not self._auto_refresh:
             return True
-        self._refresher = threading.Thread(target=self._refresh_loop, name='drakkar-archive-lock', daemon=True)
+        self._refresher = threading.Thread(target=self._refresh_loop, name=REFRESH_THREAD_NAME, daemon=True)
         self._refresher.start()
         return True
 
     def is_ours(self) -> bool:
-        """True while the lock file still holds this pass's token (the fencing check).
+        """True while the lock file still holds this holder's token (the fencing check).
 
         False when the lock is gone or holds another token. A read that fails
         for another reason (an I/O error on the mount) raises ``OSError``: it
@@ -128,8 +139,8 @@ class ArchiveLock:
         try:
             os.utime(self._path, None)
         except OSError:
-            # A refresh is best effort: the fencing check before each publish
-            # decides whether the pass may go on.
+            # A refresh is best effort: the fencing check decides whether the
+            # holder may go on.
             pass
         return True
 
@@ -150,8 +161,8 @@ class ArchiveLock:
     def _refresh_loop(self) -> None:
         # Event.wait returns True once stop_refreshing is called.
         while not self._stop_refreshing.wait(self._refresh_seconds):
-            # Best effort, like the mtime move: the fencing check before each
-            # publish decides whether the pass may go on.
+            # Best effort, like the mtime move: the fencing check decides
+            # whether the holder may go on.
             with contextlib.suppress(OSError):
                 self.refresh()
 
@@ -194,7 +205,7 @@ class ArchiveLock:
         except OSError:
             # The body only names the previous holder in the log line below.
             previous = {}
-        aside = os.path.join(self._folder, STALE_PREFIX + self._token)
+        aside = os.path.join(self._folder, self._name + STALE_INFIX + self._token)
         try:
             _rename_aside(self._path, aside)
         except FileNotFoundError:
@@ -211,10 +222,10 @@ class ArchiveLock:
         except FileNotFoundError:
             pass
         logger.warning(
-            'recorder_archive_lock_taken_over',
-            category='recorder',
+            'periodic_lock_taken_over',
+            category='periodic',
             provider=FILESYSTEM_PROVIDER,
-            folder=self._folder,
+            scope=self._scope,
             previous_worker=previous.get('worker'),
             previous_instance=previous.get('instance'),
             age_seconds=round(age, 3),
@@ -234,11 +245,12 @@ class ArchiveLock:
             _link_back(aside, self._path)
         except OSError as exc:
             # Another worker created a lock meanwhile, or the mount has no
-            # hard links. The lock's holder is fenced at its next check and
-            # publishes nothing; the newer lock's owner archives instead.
+            # hard links. The lock's holder is fenced at its next check; the
+            # newer lock's owner runs the task instead.
             logger.warning(
-                'recorder_archive_lock_put_back_failed',
-                category='recorder',
+                'periodic_lock_put_back_failed',
+                category='periodic',
+                scope=self._scope,
                 folder=self._folder,
                 error=str(exc),
             )

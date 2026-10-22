@@ -16,6 +16,9 @@ Every check in :data:`ELECTION_CHECKS` takes
   plain function or a coroutine function;
 - ``lease_seconds`` is the lease length the checks acquire with.
 
+The checks acquire the scopes :data:`SCOPE_A` and :data:`SCOPE_B`, two tasks
+of one cluster in the ``<cluster>/<task>`` form.
+
 The checks start each provider with :func:`make_context`, whose
 ``shared_dir`` is empty: a provider that keeps its leases in a folder is
 started on a test folder by the author's ``make_provider``.
@@ -43,8 +46,10 @@ INSTANCE_A = '0123456789abcdef'
 INSTANCE_B = 'fedcba9876543210'
 TOKEN_A = 'aaaaaaaaaaaaaaaa'
 TOKEN_B = 'bbbbbbbbbbbbbbbb'
-SCOPE_A = 'kit-scope-a'
-SCOPE_B = 'kit-scope-b'
+# Two tasks of one cluster: a scope is ``<sanitized cluster>/<task name>``.
+KIT_CLUSTER = 'kit_cluster'
+SCOPE_A = 'kit_cluster/kit_task_a'
+SCOPE_B = 'kit_cluster/kit_task_b'
 
 
 def _expect(condition: bool, message: str) -> None:
@@ -58,7 +63,7 @@ def make_context(worker: str, instance: str = INSTANCE_A, shared_dir: str = '') 
     return ElectionContext(
         worker=worker,
         instance=instance,
-        cluster='kit',
+        cluster=KIT_CLUSTER,
         shared_dir=shared_dir,
         logger=structlog.get_logger(),
         options={},

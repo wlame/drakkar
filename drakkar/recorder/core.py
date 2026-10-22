@@ -64,7 +64,6 @@ from drakkar.metrics import (
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import OUTCOME_NOT_STARTED, ResilientCaller
 from drakkar.recorder.archive import run_archive_pass
-from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER
 from drakkar.recorder.election import (
     ELECTION_FEATURE,
     ElectionContext,
@@ -101,8 +100,9 @@ from drakkar.recorder.sealing import (
     seal_closed_file,
     seal_connection,
 )
+from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
 from drakkar.recorder.writer import EventWriter
-from drakkar.schedule import sanitize_cluster
+from drakkar.schedule import ARCHIVE_TASK_NAME, task_scope
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
@@ -1384,7 +1384,7 @@ class EventRecorder(EventWriter):
             self._election,
             self._election_caller,
             asyncio.get_running_loop(),
-            scope=sanitize_cluster(self._cluster_name),
+            scope=task_scope(self._cluster_name, ARCHIVE_TASK_NAME),
             lease_seconds=self._archive.lease_seconds,
             provider_name=self._election_provider_name,
         )

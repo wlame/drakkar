@@ -41,6 +41,7 @@ from drakkar.recorder import electiontest
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext
 from drakkar.recorder.election_consul import REFRESH_BEFORE_ACQUIRE, ConsulElection, consul_election_factory
 from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
+from drakkar.schedule import SCOPE_INVALID
 from tests.consul_fake import LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
@@ -53,8 +54,8 @@ FIRST, SECOND = INPUTS['sessions']['first'], INPUTS['sessions']['second']
 # and the fake ends a session twice its TTL after the last renew, so a lease ends exactly at this age.
 LEASE_SECONDS = 600.0
 SESSION_TTL_SECONDS = 300
-SCOPE = 'search-fleet'
-LOCK_KEY = f'{DEFAULT_KEY_PREFIX}/archive-locks/{SCOPE}'
+SCOPE = 'search-fleet/history.archive'
+LOCK_KEY = f'{DEFAULT_KEY_PREFIX}/task-locks/{SCOPE}'
 LOCK_PATH = path('election_lock', prefix=DEFAULT_KEY_PREFIX, scope=SCOPE)
 FOREIGN_SESSION = '00000000-0000-4000-8000-0000000000f0'
 CANONICAL_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
@@ -143,7 +144,7 @@ def _lose_the_answer_of_the_first_acquire(fake: FakeConsul) -> None:
 
 
 def _takeover_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [entry for entry in logs if entry['event'] == 'recorder_archive_lock_taken_over']
+    return [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
 
 
 # --- The kit ---
@@ -152,6 +153,20 @@ def _takeover_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @pytest.mark.parametrize('check', electiontest.ELECTION_CHECKS, ids=lambda check: check.__name__)
 async def test_kit_checks_pass_for_consul(check, fake):
     await check(make_provider_factory(fake), fake.advance, LEASE_SECONDS)
+
+
+@pytest.mark.parametrize('scope', FIXTURE['refused_scopes'])
+@pytest.mark.parametrize('call', ['acquire', 'refresh', 'is_held', 'release'])
+async def test_consul_election_checks_the_scope_before_any_request(fake, scope, call):
+    provider = await _started(fake)
+    started = len(fake.seen)
+    args = (scope, TOKEN_A, LEASE_SECONDS) if call == 'acquire' else (scope, TOKEN_A)
+
+    with pytest.raises(ValueError) as raised:
+        await getattr(provider, call)(*args)
+
+    assert str(raised.value) == SCOPE_INVALID.format(scope=scope)
+    assert _requests(fake, started) == []
 
 
 # --- What the provider sends ---
@@ -194,7 +209,7 @@ async def test_the_session_name_and_ttl_follow_the_scope_the_token_and_the_lease
     assert json.loads(create.body) == {
         'Behavior': 'delete',
         'LockDelay': '0s',
-        'Name': f'drakkar/archive-lock/{SCOPE}/{TOKEN_A}',
+        'Name': f'drakkar/task-lock/{SCOPE}/{TOKEN_A}',
         'TTL': '10s',
     }
 

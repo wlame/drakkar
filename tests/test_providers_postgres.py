@@ -134,8 +134,8 @@ def test_transient_prefixes_match_the_fixture():
 def test_missing_table_message_matches_the_fixture():
     assert FIXTURE['messages']['missing_table'] == MISSING_TABLE_MESSAGE
     assert (
-        missing_table_message('ops_fleet', 'archive_locks', 'main')
-        == 'table ops_fleet.archive_locks does not exist and connections.postgres.main.manage_schema is false; '
+        missing_table_message('ops_fleet', 'task_locks', 'main')
+        == 'table ops_fleet.task_locks does not exist and connections.postgres.main.manage_schema is false; '
         'create it with: drakkar-schema postgres --schema=ops_fleet'
     )
 
@@ -148,7 +148,7 @@ def test_render_schema_sql_matches_the_fixture(case):
 def test_render_substitutes_every_placeholder():
     rendered = render(STATEMENT_TEMPLATES['acquire'], 'ops_fleet')
     assert SCHEMA_PLACEHOLDER not in rendered
-    assert 'ops_fleet.archive_locks AS held' in rendered
+    assert 'ops_fleet.task_locks AS held' in rendered
 
 
 def test_statements_for_renders_every_template():
@@ -368,13 +368,13 @@ async def test_ensure_tables_converts_a_transient_error_from_the_ddl():
 
 async def test_ensure_tables_checks_each_table_when_not_managed():
     conn = FakeConnection(fetchval_answer=True)
-    tables = [postgres.FLEET_WORKERS_TABLE, postgres.ARCHIVE_LOCKS_TABLE]
+    tables = [postgres.FLEET_WORKERS_TABLE, postgres.TASK_LOCKS_TABLE]
 
     await ensure_tables(FakePool(conn), schema='drakkar', manage_schema=False, connection='main', tables=tables)
 
     check_sql = statements_for('drakkar')['check_table']
     # Only the two probes: no transaction and no advisory lock.
-    assert conn.calls == [(check_sql, ('drakkar.fleet_workers',)), (check_sql, ('drakkar.archive_locks',))]
+    assert conn.calls == [(check_sql, ('drakkar.fleet_workers',)), (check_sql, ('drakkar.task_locks',))]
 
 
 async def test_ensure_tables_raises_the_pinned_message_for_a_missing_table():
@@ -386,10 +386,10 @@ async def test_ensure_tables_raises_the_pinned_message_for_a_missing_table():
             schema='drakkar',
             manage_schema=False,
             connection='main',
-            tables=[postgres.ARCHIVE_LOCKS_TABLE, postgres.FLEET_WORKERS_TABLE],
+            tables=[postgres.TASK_LOCKS_TABLE, postgres.FLEET_WORKERS_TABLE],
         )
 
-    assert str(caught.value) == missing_table_message('drakkar', 'archive_locks', 'main')
+    assert str(caught.value) == missing_table_message('drakkar', 'task_locks', 'main')
     assert len(conn.calls) == 1  # stops at the first missing table
 
 

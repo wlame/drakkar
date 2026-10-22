@@ -1,6 +1,6 @@
 """Redis key templates, Lua scripts and client helpers shared by the fleet providers.
 
-The worker registry and the archive election both keep their state in Redis.
+The worker registry and the election both keep their state in Redis.
 This module holds what the two have in common: the key layout, the six Lua
 scripts, the encoding of the fragments that the scripts search for, the mapping
 of Redis errors to the provider caller's retry rule, and the functions that
@@ -10,8 +10,10 @@ The key templates and the scripts are pinned by
 ``tests/fixtures/fleet_providers.json`` so the emitted bytes are identical for
 any implementation. ``{prefix}``, ``{worker}`` and ``{scope}`` in a template
 stand for the key prefix of the connection, the sanitized worker name and the
-sanitized cluster. None of the three can contain a brace or a glob character
-(the config loader and the sanitizers see to that), so a plain replace is safe.
+election scope (``<sanitized cluster>/<task>``, see
+:func:`drakkar.schedule.task_scope`). None of the three can contain a brace or
+a glob character (the config loader, the sanitizers and the task name rule see
+to that), so a plain replace is safe.
 
 Lua dialect rule: the scripts use only ``redis.call``, concatenation, ``#``,
 ``string.rep`` and a plain ``string.find``, and a number never becomes a key, a
@@ -60,7 +62,7 @@ DEFAULT_KEY_PREFIX: str = RedisConnectionConfig.model_fields['key_prefix'].defau
 KEY_TEMPLATES: dict[str, str] = {
     'registry_index': '{prefix}fleet:workers',
     'registry_card': '{prefix}fleet:workers:{worker}',
-    'election_lock': '{prefix}archive-locks:{scope}',
+    'election_lock': '{prefix}task-locks:{scope}',
 }
 
 # Sent with EVAL, never EVALSHA: a script cache that a restart empties would need a fallback path.

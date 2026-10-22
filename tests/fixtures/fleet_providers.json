@@ -1,12 +1,12 @@
 {
-  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the header that marks an answer whose results the token's rights hid, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
+  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the header that marks an answer whose results the token's rights hid, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, the refused scopes (a scope that is not <cluster>/<task>: every election call with one raises the scope_invalid message of periodic_contract.json before any request), and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
   "schema_placeholder": "{schema}",
   "ddl": [
     "CREATE SCHEMA IF NOT EXISTS {schema}",
     "CREATE TABLE IF NOT EXISTS {schema}.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n)",
     "CREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON {schema}.fleet_workers (cluster)",
     "CREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON {schema}.fleet_workers (heartbeat_at)",
-    "CREATE TABLE IF NOT EXISTS {schema}.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n)"
+    "CREATE TABLE IF NOT EXISTS {schema}.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n)"
   ],
   "statements": {
     "check_table": {"sql": "SELECT to_regclass($1) IS NOT NULL", "params": ["<schema>.<table>"]},
@@ -15,19 +15,19 @@
     "list_prune": {"sql": "DELETE FROM {schema}.fleet_workers WHERE heartbeat_at < now() - make_interval(secs => $1)", "params": ["prune_after_seconds"]},
     "list_select": {"sql": "SELECT worker, card, EXTRACT(EPOCH FROM now() - heartbeat_at)::float8 FROM {schema}.fleet_workers ORDER BY worker", "params": []},
     "withdraw": {"sql": "DELETE FROM {schema}.fleet_workers WHERE worker = $1 AND instance = $2", "params": ["worker", "instance"]},
-    "acquire_select": {"sql": "SELECT token, worker, instance, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 FROM {schema}.archive_locks WHERE cluster = $1 FOR UPDATE", "params": ["scope"]},
-    "acquire": {"sql": "INSERT INTO {schema}.archive_locks AS held (cluster, token, worker, instance, acquired_at, refreshed_at) VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT (cluster) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, instance = EXCLUDED.instance, acquired_at = CASE WHEN held.token = EXCLUDED.token THEN held.acquired_at ELSE now() END, refreshed_at = now() WHERE held.token = EXCLUDED.token OR held.refreshed_at < now() - make_interval(secs => $5) RETURNING token", "params": ["scope", "token", "worker", "instance", "lease_seconds"]},
-    "refresh": {"sql": "UPDATE {schema}.archive_locks SET refreshed_at = now() WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]},
-    "is_held": {"sql": "SELECT 1 FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]},
-    "release": {"sql": "DELETE FROM {schema}.archive_locks WHERE cluster = $1 AND token = $2", "params": ["scope", "token"]}
+    "acquire_select": {"sql": "SELECT token, worker, instance, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 FROM {schema}.task_locks WHERE scope = $1 FOR UPDATE", "params": ["scope"]},
+    "acquire": {"sql": "INSERT INTO {schema}.task_locks AS held (scope, token, worker, instance, acquired_at, refreshed_at) VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT (scope) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, instance = EXCLUDED.instance, acquired_at = CASE WHEN held.token = EXCLUDED.token THEN held.acquired_at ELSE now() END, refreshed_at = now() WHERE held.token = EXCLUDED.token OR held.refreshed_at < now() - make_interval(secs => $5) RETURNING token", "params": ["scope", "token", "worker", "instance", "lease_seconds"]},
+    "refresh": {"sql": "UPDATE {schema}.task_locks SET refreshed_at = now() WHERE scope = $1 AND token = $2", "params": ["scope", "token"]},
+    "is_held": {"sql": "SELECT 1 FROM {schema}.task_locks WHERE scope = $1 AND token = $2", "params": ["scope", "token"]},
+    "release": {"sql": "DELETE FROM {schema}.task_locks WHERE scope = $1 AND token = $2", "params": ["scope", "token"]}
   },
   "transient_sqlstate_prefixes": ["08", "53", "57", "40001", "40P01"],
   "messages": {
     "missing_table": "table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; create it with: drakkar-schema postgres --schema={schema}"
   },
   "schema_command": [
-    {"args": ["postgres", "--schema=drakkar"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"},
-    {"args": ["postgres", "--schema=ops_fleet"], "stdout": "CREATE SCHEMA IF NOT EXISTS ops_fleet;\n\nCREATE TABLE IF NOT EXISTS ops_fleet.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON ops_fleet.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON ops_fleet.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS ops_fleet.archive_locks (\n    cluster       text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"}
+    {"args": ["postgres", "--schema=drakkar"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"},
+    {"args": ["postgres", "--schema=ops_fleet"], "stdout": "CREATE SCHEMA IF NOT EXISTS ops_fleet;\n\nCREATE TABLE IF NOT EXISTS ops_fleet.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON ops_fleet.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON ops_fleet.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS ops_fleet.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"}
   ],
   "schema_command_usage_errors": [
     {"args": [], "exit": 2},
@@ -41,7 +41,7 @@
     "keys": {
       "registry_index": "{prefix}fleet:workers",
       "registry_card": "{prefix}fleet:workers:{worker}",
-      "election_lock": "{prefix}archive-locks:{scope}"
+      "election_lock": "{prefix}task-locks:{scope}"
     },
     "scripts": {
       "publish": "local now = redis.call('TIME')\nlocal score = now[1] .. '.' .. string.rep('0', 6 - #now[2]) .. now[2]\nredis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])\nredis.call('ZADD', KEYS[2], score, ARGV[3])\nredis.call('PEXPIRE', KEYS[2], ARGV[2])\nreturn 1",
@@ -123,7 +123,7 @@
     "key_examples": [
       {"name": "registry_index", "prefix": "drakkar:", "worker": "", "scope": "", "key": "drakkar:fleet:workers"},
       {"name": "registry_card", "prefix": "", "worker": "w_rker-1", "scope": "", "key": "fleet:workers:w_rker-1"},
-      {"name": "election_lock", "prefix": "ops.fleet:", "worker": "", "scope": "main", "key": "ops.fleet:archive-locks:main"}
+      {"name": "election_lock", "prefix": "ops.fleet:", "worker": "", "scope": "main/history.archive", "key": "ops.fleet:task-locks:main/history.archive"}
     ],
     "fragments": [
       {"field": "instance", "value": "9c41e0b27fd34a1e", "fragment": "\"instance\":\"9c41e0b27fd34a1e\""},
@@ -136,7 +136,7 @@
         "prefix": "drakkar:",
         "card": {"schema": 1, "worker": "search-worker-3", "instance": "9c41e0b27fd34a1e", "cluster": "main", "url": "http://10.0.0.3:8080/", "state": "running"},
         "prune_after_seconds": 86400,
-        "scope": "main", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
+        "scope": "main/history.archive", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
         "acquired_at": "2026-10-14T02:00:00.125000Z"
       },
       "commands": {
@@ -144,10 +144,10 @@
         "publish": ["EVAL", "@publish", "2", "drakkar:fleet:workers:search-worker-3", "drakkar:fleet:workers", "{\"cluster\":\"main\",\"instance\":\"9c41e0b27fd34a1e\",\"schema\":1,\"state\":\"running\",\"url\":\"http://10.0.0.3:8080/\",\"worker\":\"search-worker-3\"}", "86400000", "search-worker-3"],
         "list": ["EVAL", "@list", "1", "drakkar:fleet:workers", "drakkar:fleet:workers:"],
         "withdraw": ["EVAL", "@withdraw", "2", "drakkar:fleet:workers:search-worker-3", "drakkar:fleet:workers", "\"instance\":\"9c41e0b27fd34a1e\"", "search-worker-3"],
-        "acquire": ["EVAL", "@acquire", "1", "drakkar:archive-locks:main", "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"redis\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
-        "refresh": ["EVAL", "@refresh", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
-        "is_held": ["GET", "drakkar:archive-locks:main"],
-        "release": ["EVAL", "@release", "1", "drakkar:archive-locks:main", "\"token\":\"5f0c1d2e3a4b6978\""]
+        "acquire": ["EVAL", "@acquire", "1", "drakkar:task-locks:main/history.archive", "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"redis\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
+        "refresh": ["EVAL", "@refresh", "1", "drakkar:task-locks:main/history.archive", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
+        "is_held": ["GET", "drakkar:task-locks:main/history.archive"],
+        "release": ["EVAL", "@release", "1", "drakkar:task-locks:main/history.archive", "\"token\":\"5f0c1d2e3a4b6978\""]
       }
     }
   },
@@ -161,9 +161,9 @@
       "session_info": "/v1/session/info/{session}",
       "registry_card": "/v1/kv/{prefix}/fleet/workers/{worker}",
       "registry_list": "/v1/kv/{prefix}/fleet/workers/",
-      "election_lock": "/v1/kv/{prefix}/archive-locks/{scope}"
+      "election_lock": "/v1/kv/{prefix}/task-locks/{scope}"
     },
-    "session_names": {"registry": "drakkar-{worker}-{instance}", "election": "drakkar/archive-lock/{scope}/{token}"},
+    "session_names": {"registry": "drakkar-{worker}-{instance}", "election": "drakkar/task-lock/{scope}/{token}"},
     "session_settings": {"Behavior": "delete", "LockDelay": "0s"},
     "token_header": "X-Consul-Token",
     "filtered_header": "X-Consul-Results-Filtered-By-Acls",
@@ -221,14 +221,15 @@
       {"member": "w", "name": "drakkar-w-0123456789ABCDEF", "own": false},
       {"member": "w", "name": "drakkar-w-0123456789abcde", "own": false},
       {"member": "w", "name": "drakkar-w0123456789abcdef", "own": false},
-      {"member": "archive-lock", "name": "drakkar/archive-lock/main/5f0c1d2e3a4b6978", "own": false}
+      {"member": "task-lock", "name": "drakkar/task-lock/main/history.archive/5f0c1d2e3a4b6978", "own": false}
     ],
+    "refused_scopes": ["main"],
     "example": {
       "inputs": {
         "address": "http://127.0.0.1:8500", "datacenter": "dc1", "prefix": "drakkar",
         "card": {"schema": 1, "worker": "search-worker-3", "instance": "9c41e0b27fd34a1e", "cluster": "main", "url": "http://10.0.0.3:8080/", "state": "running"},
         "offline_after_seconds": 60,
-        "scope": "main", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
+        "scope": "main/history.archive", "token": "5f0c1d2e3a4b6978", "lease_seconds": 7200,
         "acquired_at": "2026-10-14T02:00:00.125000Z",
         "sessions": {"first": "00000000-0000-4000-8000-000000000001", "second": "00000000-0000-4000-8000-000000000002", "predecessor": "00000000-0000-4000-8000-000000000009"},
         "predecessor_name": "drakkar-search-worker-3-0123456789abcdef"
@@ -259,15 +260,15 @@
         "list": [["GET", "/v1/kv/drakkar/fleet/workers/", [["dc", "dc1"], ["recurse", "true"]], null]],
         "withdraw": [["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]],
         "acquire": [
-          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar/archive-lock/main/5f0c1d2e3a4b6978\",\"TTL\":\"3600s\"}"],
-          ["PUT", "/v1/kv/drakkar/archive-locks/main", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
+          ["PUT", "/v1/session/create", [["dc", "dc1"]], "{\"Behavior\":\"delete\",\"LockDelay\":\"0s\",\"Name\":\"drakkar/task-lock/main/history.archive/5f0c1d2e3a4b6978\",\"TTL\":\"3600s\"}"],
+          ["PUT", "/v1/kv/drakkar/task-locks/main/history.archive", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
         ],
         "acquire_by_the_holder": [
           ["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null],
-          ["PUT", "/v1/kv/drakkar/archive-locks/main", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
+          ["PUT", "/v1/kv/drakkar/task-locks/main/history.archive", [["acquire", "00000000-0000-4000-8000-000000000001"], ["dc", "dc1"]], "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"consul\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}"]
         ],
         "refresh": [["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]],
-        "is_held": [["GET", "/v1/kv/drakkar/archive-locks/main", [["dc", "dc1"]], null]],
+        "is_held": [["GET", "/v1/kv/drakkar/task-locks/main/history.archive", [["dc", "dc1"]], null]],
         "release": [["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]]
       }
     }

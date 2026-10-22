@@ -1,4 +1,4 @@
-"""The ``consul`` election provider: archive leases as keys of a Consul agent's KV store, each held by a session."""
+"""The ``consul`` election provider: task leases as keys of a Consul agent's KV store, each held by a session."""
 
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -26,6 +26,7 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.thread import PROVIDER_STOPPED
 from drakkar.recorder.history import serialize_json
+from drakkar.schedule import parse_task_scope
 from drakkar.timefmt import format_epoch_micro
 
 if TYPE_CHECKING:
@@ -44,13 +45,17 @@ class _Lease:
 
 
 class ConsulElection:
-    """Leases as keys ``<prefix>/archive-locks/<scope>``, one key per scope, each held by one session per scope and token.
+    """Leases as keys ``<prefix>/task-locks/<scope>``, one key per scope, each held by one session per scope and token.
+
+    The scope must be ``<cluster>/<task>`` (:func:`drakkar.schedule.parse_task_scope`):
+    it goes into a request path unencoded, so every call checks it first and
+    raises ``ValueError`` before any request.
 
     ``acquire`` creates a session named after the scope and the token and
     writes the lock body to the scope's key with ``?acquire=<session>``, which
     the agent grants only while no other session holds the key. The lease is
     the session's time to live on the server: half the lease length
-    (``history.archive.lease_seconds``, at least 10 s), because the agent
+    (the task's ``lease_seconds``, at least 10 s), because the agent
     ends a session only about twice its TTL after the last renew, so Consul
     ends a dead holder's lease by that limit. ``refresh`` renews the session.
     No host's clock enters the judgement; the lock body's ``acquired_at``
@@ -61,7 +66,7 @@ class ConsulElection:
     Every session has ``Behavior: delete``, so a session that ends takes the
     key it holds with it. An expired lease is therefore a deleted key: a taker
     finds a free scope and there is no previous holder to read, so this
-    provider logs no ``recorder_archive_lock_taken_over`` line. ``release``
+    provider logs no ``periodic_lock_taken_over`` line. ``release``
     destroys the session, which deletes the key only while that session holds
     it: a holder that was taken over cannot free the new holder's lease.
 
@@ -77,14 +82,14 @@ class ConsulElection:
     new one is created. An acquire that the agent refuses destroys its session
     at once (it holds nothing, and would otherwise live for up to twice its
     TTL) and forgets the entry. A ``refresh`` without an entry raises
-    ``RuntimeError``: the archive pass always refreshes on the provider that
-    acquired. ``is_held`` without an entry answers False without a request.
+    ``RuntimeError``: a lease is always refreshed on the provider that
+    acquired it. ``is_held`` without an entry answers False without a request.
 
     Two kinds of entry can stay: the entry of a lease that was lost as taken
     over (no ``release`` follows a clear refusal, so only a ``refresh`` that
     answers False forgets it), and the entry of a release whose destroy
     failed for good. Each keeps one small entry (a session id and a lock body)
-    until the process ends. Every archive pass uses a token of its own, so an
+    until the process ends. Every run uses a token of its own, so an
     entry is never reused, and these cases are rare.
 
     The client is the one of ``connections.consul.<connection>``, shared with
@@ -146,6 +151,7 @@ class ConsulElection:
         ``lease_seconds`` sets the TTL of a new session only: the session of a
         token that already has an entry keeps the TTL it was created with.
         """
+        parse_task_scope(scope)
         client, prefix = self._started()
         lease = self._leases.get((scope, token))
         if lease is not None and not await renew_session(client, lease.session):
@@ -167,6 +173,7 @@ class ConsulElection:
 
     async def refresh(self, scope: str, token: str) -> bool:
         """Renew the session of ``token`` on ``scope``; False, and the entry forgotten, once the agent no longer knows it."""
+        parse_task_scope(scope)
         client, _ = self._started()
         lease = self._leases.get((scope, token))
         if lease is None:
@@ -178,6 +185,7 @@ class ConsulElection:
 
     async def is_held(self, scope: str, token: str) -> bool:
         """True while the session of ``token`` holds the key of ``scope``; False without a request when there is none."""
+        parse_task_scope(scope)
         client, prefix = self._started()
         lease = self._leases.get((scope, token))
         if lease is None:
@@ -193,6 +201,7 @@ class ConsulElection:
         again; destroying a session that is already gone is no error.
         Without an entry nothing is sent.
         """
+        parse_task_scope(scope)
         client, _ = self._started()
         lease = self._leases.get((scope, token))
         if lease is None:

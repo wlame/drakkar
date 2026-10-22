@@ -250,7 +250,7 @@ def test_session_names_fill_the_fixture_templates():
     election = election_session_name(INPUTS['scope'], INPUTS['token'])
 
     assert registry == 'drakkar-search-worker-3-9c41e0b27fd34a1e'
-    assert election == 'drakkar/archive-lock/main/5f0c1d2e3a4b6978'
+    assert election == 'drakkar/task-lock/main/history.archive/5f0c1d2e3a4b6978'
     assert registry == SESSION_NAMES['registry'].replace(WORKER_PLACEHOLDER, MEMBER).replace(
         INSTANCE_PLACEHOLDER, INPUTS['card']['instance']
     )
@@ -344,7 +344,7 @@ def test_example_session_bodies_are_the_session_encoding():
     ('name', 'ttl'),
     [
         ('drakkar-search-worker-3-9c41e0b27fd34a1e', '30s'),
-        ('drakkar/archive-lock/main/5f0c1d2e3a4b6978', '3600s'),
+        ('drakkar/task-lock/main/history.archive/5f0c1d2e3a4b6978', '3600s'),
         ('wörker "1"', '10s'),
     ],
 )

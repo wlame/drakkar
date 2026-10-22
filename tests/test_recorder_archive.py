@@ -2,7 +2,8 @@
 
 The pass works on one cluster history folder, ``<shared>/history/<cluster>/``,
 where every ``*.db`` is a sealed file with a meta file beside it. One worker
-of the cluster holds ``.archive.lock`` while it archives.
+of the cluster holds the task lock ``tasks/<cluster>/history.archive.lock``
+while it archives.
 """
 
 import asyncio
@@ -38,9 +39,10 @@ from drakkar.recorder.archive import (
     run_archive_pass,
     warn_if_archives_unbounded,
 )
-from drakkar.recorder.archive_lock import LOCK_NAME, ArchiveLock
 from drakkar.recorder.election import ElectionContext, ElectionLease, FilesystemElection
-from drakkar.recorder.history import history_dir, meta_path, sanitize_cluster
+from drakkar.recorder.history import meta_path, task_lock_dir
+from drakkar.recorder.task_lock import LOCK_SUFFIX, TaskLock
+from drakkar.schedule import ARCHIVE_TASK_NAME, task_scope
 from tests.archive_helpers import (
     CLUSTER,
     DAY,
@@ -56,6 +58,26 @@ from tests.fleet_fakes import ElectionStore, MemoryElection
 
 OTHER_CLUSTER = 'index-fleet'
 INSTANCE = '1111111111111111'
+ARCHIVE_LOCK_FILE = ARCHIVE_TASK_NAME + LOCK_SUFFIX
+
+
+def _lock_path(tmp_path: Path, cluster: str = CLUSTER) -> Path:
+    """The archive task's lock file of ``cluster`` under ``<tmp_path>/shared``."""
+    return Path(task_lock_dir(str(tmp_path / 'shared'), cluster)) / ARCHIVE_LOCK_FILE
+
+
+def _other_holder(tmp_path: Path) -> TaskLock:
+    """The archive lock of another worker, its folder created; the caller acquires it."""
+    folder = _lock_path(tmp_path).parent
+    folder.mkdir(parents=True, exist_ok=True)
+    return TaskLock(
+        str(folder),
+        ARCHIVE_TASK_NAME,
+        worker='worker-2',
+        instance='2222222222222222',
+        stale_seconds=7200,
+        scope=task_scope(CLUSTER, ARCHIVE_TASK_NAME),
+    )
 
 
 async def make_lease(
@@ -82,7 +104,7 @@ async def make_lease(
         election,
         caller,
         asyncio.get_running_loop(),
-        scope=sanitize_cluster(cluster),
+        scope=task_scope(cluster, ARCHIVE_TASK_NAME),
         lease_seconds=lease_seconds,
         provider_name='filesystem',
     )
@@ -307,7 +329,7 @@ async def test_run_archive_pass_leaves_a_window_that_is_not_due(tmp_path):
 
     assert Path(path).exists()
     assert _archives(folder) == []
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
 
 
 async def test_run_archive_pass_without_a_history_folder_creates_nothing(tmp_path):
@@ -468,7 +490,7 @@ async def test_run_archive_pass_keeps_worker_attribution_across_folds(tmp_path):
 async def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
     folder = history_folder(tmp_path)
     source = make_sealed_db(folder, 'worker-1', due_start(time.time()))
-    holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
+    holder = _other_holder(tmp_path)
     assert holder.acquire()
     try:
         await _run(tmp_path)
@@ -483,7 +505,8 @@ async def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_pa
 async def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path):
     folder = history_folder(tmp_path)
     source = make_sealed_db(folder, 'worker-1', due_start(time.time()))
-    lock = folder / LOCK_NAME
+    lock = _lock_path(tmp_path)
+    lock.parent.mkdir(parents=True)
     lock.write_text(json.dumps({'acquired_at': '', 'instance': 'dead', 'token': 'dead', 'worker': 'worker-2'}))
     _age(lock, HistoryArchiveConfig().lease_seconds + 60)
 
@@ -502,7 +525,7 @@ async def test_run_archive_pass_names_its_work_files_with_the_lock_token(tmp_pat
 
     def spy(paths, output_path):
         seen['output'] = os.path.basename(output_path)
-        seen['token'] = json.loads((folder / LOCK_NAME).read_text())['token']
+        seen['token'] = json.loads(_lock_path(tmp_path).read_text())['token']
         return real_merge(paths, output_path)
 
     monkeypatch.setattr(archive_mod, 'merge_databases', spy)
@@ -543,7 +566,7 @@ async def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, mon
     def taken_over_during_merge(paths, output_path):
         result = real_merge(paths, output_path)
         body = {'acquired_at': '', 'instance': 'peer', 'token': 'f' * 16, 'worker': 'worker-2'}
-        (folder / LOCK_NAME).write_text(json.dumps(body))
+        _lock_path(tmp_path).write_text(json.dumps(body))
         return result
 
     monkeypatch.setattr(archive_mod, 'merge_databases', taken_over_during_merge)
@@ -555,8 +578,8 @@ async def test_a_fenced_pass_publishes_nothing_and_deletes_nothing(tmp_path, mon
     assert Path(source).exists()
     assert Path(meta_path(source)).exists()
     assert _archives(folder) == []
-    assert _dotfiles(folder) == [LOCK_NAME]
-    assert json.loads((folder / LOCK_NAME).read_text())['token'] == 'f' * 16
+    assert _dotfiles(folder) == []
+    assert json.loads(_lock_path(tmp_path).read_text())['token'] == 'f' * 16
     (fenced,) = [e for e in cap if e['event'] == 'recorder_archive_fenced']
     window_start = (start // DAY) * DAY
     assert fenced['name'] == archive_file_name(CLUSTER, window_start, window_start + DAY)
@@ -577,7 +600,7 @@ async def test_a_fenced_pass_names_the_provider(tmp_path, monkeypatch):
             'token': 'f' * 16,
             'worker': 'worker-2',
         }
-        (folder / LOCK_NAME).write_text(json.dumps(body))
+        _lock_path(tmp_path).write_text(json.dumps(body))
         return result
 
     monkeypatch.setattr(archive_mod, 'merge_databases', taken_over_during_merge)
@@ -609,7 +632,7 @@ async def test_a_pass_whose_lease_cannot_be_confirmed_is_fenced_as_unconfirmed(t
     )
     assert Path(source).exists()
     assert _archives(folder) == []
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
 
 
 async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path, monkeypatch):
@@ -637,7 +660,7 @@ async def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp
     assert Path(second_source).exists()
     window_start = (first_start // DAY) * DAY
     assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
 
 
 async def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path, monkeypatch):
@@ -653,7 +676,7 @@ async def test_a_failed_window_is_logged_counted_and_releases_the_lock(tmp_path,
     with capture_logs() as cap:
         await _run(tmp_path)
 
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
     assert Path(source).exists()
     (failure,) = [e for e in cap if e['event'] == 'recorder_archive_failed']
     assert failure['cluster'] == CLUSTER
@@ -693,7 +716,7 @@ async def test_a_stop_ends_the_pass_after_the_current_window(tmp_path, monkeypat
     assert _archives(folder) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
     assert not Path(first_source).exists()
     assert Path(second_source).exists()
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
     assert recorder_archive_failures._value.get() == failures_before
 
 
@@ -724,7 +747,6 @@ WORK_FILES = [
     f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.0123456789abcdef.previous.db',
     '.worker-2-2020-01-01__00_00_00.db.0123456789abcdef.incoming',
     '.clock.2222222222222222',
-    '.archive.lock.stale.0123456789abcdef',
 ]
 
 
@@ -740,6 +762,25 @@ async def test_the_sweep_removes_a_work_file_older_than_the_sweep_age(tmp_path, 
 
     assert not work_file.exists()
     assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [name]
+
+
+async def test_history_sweep_still_removes_old_archive_lock_stale_copies(tmp_path):
+    # Workers before the task lock family set a taken-over lock aside in the
+    # history folder; the sweep still cleans those copies up. The old lock
+    # itself stays until an operator deletes it.
+    folder = history_folder(tmp_path)
+    stale_copy = folder / '.archive.lock.stale.0123456789abcdef'
+    old_lock = folder / '.archive.lock'
+    for path in (stale_copy, old_lock):
+        path.write_bytes(b'left by an older worker')
+        _age(path, 101)
+
+    with capture_logs() as cap:
+        await _run(tmp_path, _make_config(sweep_after_seconds=100))
+
+    assert not stale_copy.exists()
+    assert old_lock.exists()
+    assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [stale_copy.name]
 
 
 @pytest.mark.parametrize('name', WORK_FILES)
@@ -875,7 +916,7 @@ async def test_archive_pass_reports_the_footprint_while_another_worker_holds_the
     existing = _make_archive(folder, CLUSTER, time.time() - 2 * DAY)
     archive_mod.recorder_archive_bytes.set(0)
     archive_mod.recorder_archive_files.set(0)
-    holder = ArchiveLock(str(folder), worker='worker-2', instance='2222222222222222', stale_seconds=7200)
+    holder = _other_holder(tmp_path)
     assert holder.acquire()
     try:
         await _run(tmp_path, _make_config(retention_days=0))
@@ -963,14 +1004,18 @@ async def test_archive_pass_runs_off_the_event_loop_on_the_shared_folder(tmp_pat
     assert seen['merged_retention_days'] == 7
     assert seen['thread'] != threading.current_thread().ident
     lease = seen['lease']
-    assert (lease.scope, lease.lease_seconds, lease.provider_name) == (sanitize_cluster(CLUSTER), 900, 'filesystem')
+    assert (lease.scope, lease.lease_seconds, lease.provider_name) == (
+        task_scope(CLUSTER, ARCHIVE_TASK_NAME),
+        900,
+        'filesystem',
+    )
 
 
-async def test_the_default_lease_keeps_its_lock_in_the_clusters_history_folder(tmp_path, monkeypatch):
+async def test_the_default_lease_keeps_its_lock_in_the_clusters_task_lock_folder(tmp_path, monkeypatch):
     rec = _make_recorder(tmp_path)
     seen: dict = {}
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: seen.update(kwargs))
-    lock = Path(history_dir(str(tmp_path / 'shared'), CLUSTER)) / LOCK_NAME
+    lock = _lock_path(tmp_path)
     try:
         await rec._archive_pass()
         lease = seen['lease']
@@ -1003,7 +1048,7 @@ async def test_the_archive_pass_needs_no_default_executor_thread_of_its_own(tmp_
 
     assert len(_archives(folder)) == 1
     assert not Path(source).exists()
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
 
 
 @pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
@@ -1569,7 +1614,7 @@ async def test_an_election_back_after_its_breaker_opened_archives_without_a_rest
     ]
     assert len(_archives(folder)) == 1
     assert not Path(source).exists()
-    assert not (folder / LOCK_NAME).exists()
+    assert not _lock_path(tmp_path).exists()
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):

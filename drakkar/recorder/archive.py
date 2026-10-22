@@ -15,9 +15,10 @@ Three ideas carry the design:
   never split, which is why an archive can carry events slightly past its
   own end — archives partition by file start time, not by event time.
 * **One archiver per cluster folder.** Every worker of the cluster runs the
-  pass; the election (:mod:`drakkar.recorder.election`, by default the
-  ``.archive.lock`` file of :mod:`drakkar.recorder.archive_lock`) lets one
-  of them work at a time. Every ``*.db`` in the folder is sealed, so the
+  pass; the election (:mod:`drakkar.recorder.election`, by default the task
+  lock ``tasks/<cluster>/history.archive.lock`` of
+  :mod:`drakkar.recorder.task_lock`) lets one of them work at a time.
+  Every ``*.db`` in the folder is sealed, so the
   pass needs no in-use or settled check and reads sources with
   ``immutable=1``.
 * **Sources die last, and only by the lease holder.** Merge, compress,
@@ -53,7 +54,6 @@ import structlog
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import merge_databases
 from drakkar.metrics import recorder_archive_bytes, recorder_archive_failures, recorder_archive_files
-from drakkar.recorder.archive_lock import STALE_PREFIX
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED
 from drakkar.recorder.history import (
     CLOCK_PREFIX,
@@ -85,12 +85,17 @@ _MERGE_TEMP_SUFFIX = '.merge.db'
 _COMPRESS_TEMP_SUFFIX = '.tmp'
 _PREVIOUS_TEMP_SUFFIX = '.previous.db'
 
+# A lock set aside by a takeover in the history folder, left by workers that
+# kept the archive lock there; the task locks live in their own folder now.
+# The old lock file itself stays until an operator deletes it.
+OLD_ARCHIVE_LOCK_STALE_PREFIX = '.archive.lock.stale.'
+
 # What the sweep removes once it is older than ``sweep_after_seconds``: dot
 # files ending in one of these (a pass's work files, a sealing copy in
-# progress) or starting with one of these (an age-check marker, a lock set
-# aside by a takeover), together with their SQLite sidecars.
+# progress) or starting with one of these (an age-check marker, an old lock
+# set aside by a takeover), together with their SQLite sidecars.
 _SWEPT_SUFFIXES = (_MERGE_TEMP_SUFFIX, _COMPRESS_TEMP_SUFFIX, _PREVIOUS_TEMP_SUFFIX, INCOMING_SUFFIX)
-_SWEPT_PREFIXES = (CLOCK_PREFIX, STALE_PREFIX)
+_SWEPT_PREFIXES = (CLOCK_PREFIX, OLD_ARCHIVE_LOCK_STALE_PREFIX)
 
 # Minute precision in archive names: window bounds always land on a
 # multiple of the window width, so seconds carry no information.

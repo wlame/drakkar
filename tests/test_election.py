@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import re
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -20,12 +21,12 @@ from pathlib import Path
 
 import pytest
 from prometheus_client import REGISTRY
+from structlog.testing import capture_logs
 
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder import electiontest
-from drakkar.recorder.archive_lock import LOCK_NAME
 from drakkar.recorder.election import (
     BUILTIN_ELECTIONS,
     ElectionContext,
@@ -33,11 +34,16 @@ from drakkar.recorder.election import (
     FilesystemElection,
     lease_refresh_seconds,
 )
-from drakkar.recorder.history import history_dir
+from drakkar.recorder.history import task_lock_dir
+from drakkar.recorder.task_lock import LOCK_SUFFIX, STALE_INFIX
+from drakkar.schedule import SCOPE_INVALID, task_scope
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
-SCOPE = 'search-fleet'
+CLUSTER = 'search-fleet'
+TASK = 'history.archive'
+SCOPE = task_scope(CLUSTER, TASK)
+LOCK_FILE = TASK + LOCK_SUFFIX
 LEASE_SECONDS = 600.0
 REFRESH_THREAD = 'drakkar-election-refresh'
 
@@ -95,7 +101,7 @@ class _FolderElection(FilesystemElection):
 
 def _age_locks(shared_dir: Path, seconds: float) -> None:
     """Make every lock file under ``shared_dir`` look ``seconds`` older on the file server's clock."""
-    for lock in shared_dir.glob(f'history/*/{LOCK_NAME}'):
+    for lock in shared_dir.glob(f'tasks/*/*{LOCK_SUFFIX}'):
         info = lock.stat()
         os.utime(lock, (info.st_atime, info.st_mtime - seconds))
 
@@ -181,12 +187,12 @@ async def _started_filesystem(tmp_path: Path, worker: str = 'w-1') -> Filesystem
     return provider
 
 
-async def test_the_filesystem_election_writes_the_lock_body_in_the_scope_folder(tmp_path):
+async def test_the_filesystem_election_writes_the_lock_body_in_the_task_lock_file(tmp_path):
     provider = await _started_filesystem(tmp_path, worker='search-worker-3')
 
     assert await provider.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS) is True
 
-    path = Path(history_dir(str(tmp_path), SCOPE)) / LOCK_NAME
+    path = Path(task_lock_dir(str(tmp_path), CLUSTER)) / LOCK_FILE
     body = json.loads(path.read_bytes())
     assert (body['worker'], body['instance'], body['token'], body['provider']) == (
         'search-worker-3',
@@ -196,6 +202,73 @@ async def test_the_filesystem_election_writes_the_lock_body_in_the_scope_folder(
     )
     await provider.release(SCOPE, electiontest.TOKEN_A)
     assert not path.exists()
+
+
+async def test_filesystem_election_puts_the_lock_in_the_tasks_folder(tmp_path):
+    provider = await _started_filesystem(tmp_path)
+    scope = task_scope('main cluster', 'history.archive')
+
+    assert await provider.acquire(scope, electiontest.TOKEN_A, LEASE_SECONDS) is True
+
+    folder = tmp_path / 'tasks' / 'main_cluster'
+    assert sorted(p.name for p in folder.iterdir()) == ['history.archive.lock']
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert not (tmp_path / 'history').exists()
+    await provider.release(scope, electiontest.TOKEN_A)
+    await provider.stop()
+
+
+@pytest.mark.parametrize('call', ['acquire', 'refresh', 'is_held', 'release'])
+async def test_filesystem_election_refuses_a_scope_without_a_task(tmp_path, call):
+    provider = await _started_filesystem(tmp_path)
+    args = ('main', electiontest.TOKEN_A, LEASE_SECONDS) if call == 'acquire' else ('main', electiontest.TOKEN_A)
+
+    with pytest.raises(ValueError) as raised:
+        await getattr(provider, call)(*args)
+
+    assert str(raised.value) == SCOPE_INVALID.format(scope='main')
+    assert list(tmp_path.iterdir()) == []
+    await provider.stop()
+
+
+async def test_filesystem_takeover_logs_periodic_lock_taken_over_with_scope(tmp_path):
+    holder = await _started_filesystem(tmp_path, worker='w-dead')
+    taker = FilesystemElection()
+    await taker.start(electiontest.make_context('w-2', electiontest.INSTANCE_B, shared_dir=str(tmp_path)))
+    assert await holder.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS)
+    _age_locks(tmp_path, LEASE_SECONDS + 60)
+
+    with capture_logs() as logs:
+        assert await taker.acquire(SCOPE, electiontest.TOKEN_B, LEASE_SECONDS) is True
+
+    (event,) = [entry for entry in logs if entry['event'] == 'periodic_lock_taken_over']
+    assert (event['category'], event['provider'], event['scope']) == ('periodic', 'filesystem', SCOPE)
+    assert (event['previous_worker'], event['previous_instance']) == ('w-dead', electiontest.INSTANCE_A)
+    assert event['age_seconds'] > LEASE_SECONDS
+    folder = Path(task_lock_dir(str(tmp_path), CLUSTER))
+    assert not [p for p in folder.iterdir() if STALE_INFIX in p.name]
+    await taker.release(SCOPE, electiontest.TOKEN_B)
+    await holder.stop()
+    await taker.stop()
+
+
+async def test_two_tasks_of_one_cluster_hold_independent_locks(tmp_path):
+    first = await _started_filesystem(tmp_path, worker='w-1')
+    second = FilesystemElection()
+    await second.start(electiontest.make_context('w-2', electiontest.INSTANCE_B, shared_dir=str(tmp_path)))
+    refresh_rates = task_scope(CLUSTER, 'refresh_rates')
+
+    assert await first.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS) is True
+    assert await second.acquire(refresh_rates, electiontest.TOKEN_B, LEASE_SECONDS) is True
+    assert await second.acquire(SCOPE, electiontest.TOKEN_B, LEASE_SECONDS) is False
+
+    folder = Path(task_lock_dir(str(tmp_path), CLUSTER))
+    assert sorted(p.name for p in folder.iterdir()) == ['history.archive.lock', 'refresh_rates.lock']
+    await first.release(SCOPE, electiontest.TOKEN_A)
+    assert await second.is_held(refresh_rates, electiontest.TOKEN_B) is True
+    await second.release(refresh_rates, electiontest.TOKEN_B)
+    await first.stop()
+    await second.stop()
 
 
 async def test_the_filesystem_election_acquires_again_for_the_holding_token(tmp_path):
@@ -230,7 +303,7 @@ async def test_the_filesystem_election_stop_releases_nothing(tmp_path):
 
     await provider.stop()
 
-    assert (Path(history_dir(str(tmp_path), SCOPE)) / LOCK_NAME).exists()
+    assert (Path(task_lock_dir(str(tmp_path), CLUSTER)) / LOCK_FILE).exists()
 
 
 def test_the_builtin_filesystem_factory_makes_a_filesystem_election():
@@ -266,7 +339,7 @@ async def test_a_hung_lock_file_call_holds_only_the_elections_own_thread(tmp_pat
     real_open = os.open
 
     def hanging_open(path, flags, *args, **kwargs):
-        if os.path.basename(os.fspath(path)) == LOCK_NAME:
+        if os.path.basename(os.fspath(path)) == LOCK_FILE:
             mount_answers.wait(WAIT_FOR_TIMEOUT_SECONDS)
         return real_open(path, flags, *args, **kwargs)
 
@@ -328,7 +401,7 @@ async def test_a_lock_read_error_on_refresh_reads_as_unconfirmed(tmp_path, monke
     assert await asyncio.to_thread(lease.acquire)
     (refresher,) = _refresh_threads() - before
     real_open = os.open
-    lock_path = os.path.join(history_dir(str(tmp_path), SCOPE), LOCK_NAME)
+    lock_path = os.path.join(task_lock_dir(str(tmp_path), CLUSTER), LOCK_FILE)
 
     def open_with_io_error(path, flags, *args, **kwargs):
         if os.fspath(path) == lock_path:

@@ -28,8 +28,8 @@ from drakkar.fleet.service import FleetRegistry
 from drakkar.providers import postgres
 from drakkar.providers.connections import Connections
 from drakkar.providers.postgres import (
-    ARCHIVE_LOCKS_TABLE,
     FLEET_WORKERS_TABLE,
+    TASK_LOCKS_TABLE,
     ddl_for,
     missing_table_message,
     statements_for,
@@ -272,7 +272,7 @@ async def test_start_with_a_missing_table_raises_the_pinned_message():
 
 async def test_start_with_only_the_lock_table_raises_for_the_workers_table():
     fake = FakePostgres()
-    fake.tables = {ARCHIVE_LOCKS_TABLE}
+    fake.tables = {TASK_LOCKS_TABLE}
 
     with pytest.raises(RuntimeError) as raised:
         await _started(fake, manage_schema=False)
@@ -286,7 +286,7 @@ async def test_start_with_a_missing_table_creates_it_when_manage_schema_is_true(
 
     await provider.publish(_card())
 
-    assert fake.tables == {FLEET_WORKERS_TABLE, ARCHIVE_LOCKS_TABLE}
+    assert fake.tables == {FLEET_WORKERS_TABLE, TASK_LOCKS_TABLE}
     assert list(fake.workers) == ['w-1']
 
 

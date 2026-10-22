@@ -291,7 +291,7 @@ async def test_a_worker_never_destroys_the_session_of_a_longer_name(fake):
         'someone-else',
         'drakkar-w-1-0123456789abcdef',
         'drakkar-w-0123456789ABCDEF',
-        'drakkar/archive-lock/main/5f0c1d2e3a4b6978',
+        'drakkar/task-lock/main/history.archive/5f0c1d2e3a4b6978',
     ],
     ids=['foreign', 'longer_worker_name', 'upper_case_instance', 'election'],
 )

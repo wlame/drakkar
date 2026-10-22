@@ -1,5 +1,5 @@
 {
-  "_comment": "History meta file (schema 1) and archive lock body, shared byte-for-byte by every implementation. meta/bytes: what an owner writes next to a sealed recorder file (sorted keys, compact separators, raw UTF-8, no trailing newline; first/last_event_ts null when the file has no events). lock/lock_bytes: the body of history/<cluster>/.archive.lock. epochs: float epoch seconds and their canonical text — microseconds = round half to even of ts * 1e6 on the IEEE double, then YYYY-MM-DDTHH:MM:SS.ffffffZ. mtimes_ns: integer nanosecond file mtimes (modified_at of the databases answer) and their text — truncated to the microsecond.",
+  "_comment": "History meta file (schema 1) and task lock body, shared byte-for-byte by every implementation. meta/bytes: what an owner writes next to a sealed recorder file (sorted keys, compact separators, raw UTF-8, no trailing newline; first/last_event_ts null when the file has no events). lock/lock_bytes: the body of a task lock file tasks/<cluster>/<task>.lock. epochs: float epoch seconds and their canonical text — microseconds = round half to even of ts * 1e6 on the IEEE double, then YYYY-MM-DDTHH:MM:SS.ffffffZ. mtimes_ns: integer nanosecond file mtimes (modified_at of the databases answer) and their text — truncated to the microsecond.",
   "meta": {
     "schema": 1,
     "worker": "search-worker-3",
