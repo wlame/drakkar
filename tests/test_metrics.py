@@ -849,3 +849,23 @@ def test_recorder_metrics_have_expected_types():
     assert by_name['drakkar_recorder_buffer_size']['type'] == 'gauge'
     assert by_name['drakkar_recorder_dropped_events']['type'] == 'counter'
     assert by_name['drakkar_recorder_flush_duration_seconds']['type'] == 'histogram'
+
+
+# === Cluster periodic task metrics ===
+
+
+def test_cluster_periodic_task_metrics_have_their_names_types_labels_and_help():
+    from prometheus_client import Counter, Gauge
+
+    from drakkar.metrics import periodic_cluster_mismatch_peers, periodic_cluster_slots
+
+    assert isinstance(periodic_cluster_slots, Counter)
+    assert periodic_cluster_slots._name == 'drakkar_periodic_cluster_slots'
+    assert periodic_cluster_slots._labelnames == ('name', 'outcome')
+    assert periodic_cluster_slots._documentation == 'Cluster periodic task slots by name and outcome'
+    assert isinstance(periodic_cluster_mismatch_peers, Gauge)
+    assert periodic_cluster_mismatch_peers._name == 'drakkar_periodic_cluster_mismatch_peers'
+    assert periodic_cluster_mismatch_peers._labelnames == ()
+    assert periodic_cluster_mismatch_peers._documentation == (
+        "Online peers of this worker's cluster whose cluster periodic task definitions differ"
+    )

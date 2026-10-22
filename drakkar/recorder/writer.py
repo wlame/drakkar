@@ -894,6 +894,8 @@ class EventWriter:
         status: str,
         error: str = '',
         system: bool = False,
+        *,
+        slot: int | None = None,
     ) -> None:
         """Record a periodic task execution (success or failure).
 
@@ -902,12 +904,19 @@ class EventWriter:
         ``@periodic`` handler methods. It is omitted from the metadata JSON
         when False so existing event rows remain byte-identical to those written
         before the flag was introduced — avoids a metadata schema diff.
+
+        ``slot`` is the slot (epoch second) of a cluster task's run; with it
+        the metadata gains ``"scope": "cluster"`` and ``"slot"``. A worker
+        task's row leaves both out and keeps its bytes.
         """
-        metadata: dict[str, str | bool] = {'status': status}
+        metadata: dict[str, str | bool | int] = {'status': status}
         if error:
             metadata['error'] = error
         if system:
             metadata['system'] = True
+        if slot is not None:
+            metadata['scope'] = 'cluster'
+            metadata['slot'] = slot
         self._record(
             {
                 'ts': time.time(),

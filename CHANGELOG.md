@@ -76,6 +76,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the election scope `<cluster>/<task>` and a hash of the cluster task
   definitions. `tests/fixtures/periodic_contract.json` pins the results. New
   dependency: `cronsim` 2.7.
+- **The slot loop of cluster periodic tasks.** New module
+  `drakkar.cluster_tasks`. At each slot a worker takes a lease on
+  `<cluster>/<task>` from the election provider. The winner runs the task,
+  refreshes the lease, holds it for the whole run and at least 20 seconds,
+  and then releases it. A worker takes a lease only in the first 10 seconds
+  of a slot; a later slot is skipped as `late`. The provider starts at the
+  first slot that needs it. A worker that stops while it holds a lease does
+  not release it; the lease ends by itself. New metrics:
+  `drakkar_periodic_cluster_slots_total{name,outcome}` and
+  `drakkar_periodic_cluster_mismatch_peers`. New log events:
+  `periodic_slot_skipped` and `periodic_lease_lost`. The `periodic_run` row
+  of a cluster run has the metadata keys `scope` and `slot`.
 - **Integration harness profiles.** `just integration-up profile=quick` runs
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario

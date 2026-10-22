@@ -13,7 +13,7 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
@@ -239,11 +239,12 @@ def discover_periodic_tasks(handler: object) -> list[tuple[str, Callable[..., Co
     return tasks
 
 
-async def _run_once(
+async def _run_counted(
     name: str,
-    coro_fn: Callable[[], Coroutine[Any, Any, Any]],
+    coro_fn: Callable[[], Awaitable[Any]],
     recorder: EventRecorder | None,
     system: bool,
+    slot: int | None,
 ) -> Exception | None:
     """Run the task once, count it in the metrics and the recorder; return the error it raised.
 
@@ -257,7 +258,7 @@ async def _run_once(
         periodic_task_runs.labels(name=name, status='ok').inc()
         periodic_task_duration.labels(name=name).observe(duration)
         if recorder:
-            recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok', system=system)
+            recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok', system=system, slot=slot)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -271,12 +272,41 @@ async def _run_once(
                 status='error',
                 error=str(exc),
                 system=system,
+                slot=slot,
             )
         return exc
     return None
 
 
-async def _sleep_until(clock: Clock, moment: int) -> None:
+async def run_task_once(
+    name: str,
+    coro_fn: Callable[[], Awaitable[Any]],
+    *,
+    recorder: EventRecorder | None,
+    system: bool,
+    on_error: OnErrorPolicy,
+    log: Any,
+    slot: int | None = None,
+) -> bool:
+    """Run one periodic task once and apply its error policy; True when its loop must end.
+
+    Every periodic loop runs its task through this: the run metrics, the
+    recorder row (``slot`` given for a cluster task's run) and the
+    ``on_error`` policy. A failed run logs ``periodic_task_failed`` on
+    ``log``; with ``on_error='stop'`` it also logs ``periodic_task_stopped``
+    and returns True.
+    """
+    error = await _run_counted(name, coro_fn, recorder, system, slot)
+    if error is None:
+        return False
+    await log.aexception('periodic_task_failed', category='periodic', exc_info=error)
+    if on_error != 'stop':
+        return False
+    await log.awarning('periodic_task_stopped', category='periodic')
+    return True
+
+
+async def sleep_until(clock: Clock, moment: float) -> None:
     """Sleep until the clock reaches ``moment``; a sleep that wakes early sleeps again."""
     while (now := clock.time()) < moment:
         await clock.sleep(moment - now)
@@ -322,11 +352,6 @@ async def run_periodic_task(
         else:
             # max() keeps a clock that stepped back from returning the fire time just run.
             last_fire = next_cron_fire(cron or '', max(math.floor(clock.time()), last_fire))
-            await _sleep_until(clock, last_fire)
-        error = await _run_once(name, coro_fn, recorder, system)
-        if error is None:
-            continue
-        await log.aexception('periodic_task_failed', category='periodic', exc_info=error)
-        if on_error == 'stop':
-            await log.awarning('periodic_task_stopped', category='periodic')
+            await sleep_until(clock, last_fire)
+        if await run_task_once(name, coro_fn, recorder=recorder, system=system, on_error=on_error, log=log):
             return

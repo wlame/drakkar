@@ -17,7 +17,9 @@ thread. :class:`ElectionLease` joins the
 two: the thread calls it, and it runs every provider call on the loop through
 a :class:`~drakkar.providers.resilience.ResilientCaller`, waiting at most the
 call's bound. A hung provider therefore holds up the archive thread for a
-bounded time and never the loop.
+bounded time and never the loop. :class:`ThreadFence` gives a thread the same
+bounded check of a cluster task's slot lease
+(:class:`~drakkar.cluster_tasks.SlotLease`).
 
 A third-party provider is a class with the six async methods of
 :class:`ElectionProvider` plus a factory ``(options) -> provider`` that its
@@ -34,7 +36,7 @@ import secrets
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.fleet.card import sanitize_worker_name
@@ -47,6 +49,10 @@ from drakkar.recorder.election_redis import redis_election_factory
 from drakkar.recorder.history import task_lock_dir
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER, TaskLock
 from drakkar.schedule import parse_task_scope
+
+if TYPE_CHECKING:
+    # Only for the annotations: loading drakkar.cluster_tasks imports this module.
+    from drakkar.cluster_tasks import SlotLease
 
 # Public and stable: plugin packages name this group in their metadata.
 ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
@@ -346,7 +352,7 @@ class ElectionLease:
         """True while the provider confirms the lease is still this pass's (the fencing check)."""
         if self._lost.is_set():
             return False
-        reason = _loss_reason(self._run('is_held', lambda: self._provider.is_held(self.scope, self.token)))
+        reason = lease_loss_reason(self._run('is_held', lambda: self._provider.is_held(self.scope, self.token)))
         if reason is None:
             return True
         self._loss_reason = reason
@@ -373,7 +379,7 @@ class ElectionLease:
     def _refresh_loop(self) -> None:
         # Event.wait returns True once release has been called.
         while not self._stop_refreshing.wait(self._refresh_seconds):
-            reason = _loss_reason(self._run('refresh', lambda: self._provider.refresh(self.scope, self.token)))
+            reason = lease_loss_reason(self._run('refresh', lambda: self._provider.refresh(self.scope, self.token)))
             if reason is not None:
                 # The reason is written before the event, so a reader that sees the event sees it too.
                 self._loss_reason = reason
@@ -401,7 +407,69 @@ class ElectionLease:
             return None
 
 
-def _loss_reason(result: CallResult | None) -> str | None:
+class ThreadFence:
+    """The archive thread's blocking check of one slot lease: is the slot still this worker's?
+
+    A cluster task's lease (:class:`~drakkar.cluster_tasks.SlotLease`) lives
+    on the event loop; a body that runs on a thread of its own (the archive
+    pass) checks it through this before each step that must not run twice.
+    :meth:`is_held` runs the lease's check on ``loop`` and waits at most the
+    caller's operation bound plus :data:`BRIDGE_SLACK_SECONDS`; a check that
+    does not answer in that time reads as not held, with
+    :data:`LOSS_UNCONFIRMED`.
+    """
+
+    def __init__(
+        self,
+        lease: SlotLease,
+        caller: ResilientCaller,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        provider_name: str,
+    ) -> None:
+        self.provider_name = provider_name
+        self._lease = lease
+        self._loop = loop
+        self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
+        # Set when a check got no answer; the lease's own reason covers every other loss.
+        self._no_answer_reason: str | None = None
+
+    @property
+    def token(self) -> str:
+        """The token of the slot's lease."""
+        return self._lease.token
+
+    @property
+    def loss_reason(self) -> str | None:
+        """Why the last check read as not held: :data:`LOSS_TAKEN_OVER` or :data:`LOSS_UNCONFIRMED`; ``None`` before."""
+        if self._no_answer_reason is not None:
+            return self._no_answer_reason
+        return self._lease.loss_reason
+
+    def is_held(self) -> bool:
+        """True while the provider confirms the slot's lease (blocking; never call it on ``loop``'s thread)."""
+        if _running_loop() is self._loop:
+            # Waiting here would stop the loop from ever running the check.
+            raise RuntimeError('a thread fence is called from a worker thread, never on its event loop')
+        check = self._lease.is_held()
+        try:
+            future = asyncio.run_coroutine_threadsafe(check, self._loop)
+        except RuntimeError:
+            # The loop is closed (the worker is shutting down).
+            check.close()
+            return self._no_answer()
+        try:
+            return future.result(timeout=self._wait_seconds)
+        except (TimeoutError, concurrent.futures.CancelledError):
+            future.cancel()
+            return self._no_answer()
+
+    def _no_answer(self) -> bool:
+        self._no_answer_reason = LOSS_UNCONFIRMED
+        return False
+
+
+def lease_loss_reason(result: CallResult | None) -> str | None:
     """``None`` when the provider confirmed the lease, else why it reads as not held."""
     if result is None or not result.ok:
         return LOSS_UNCONFIRMED

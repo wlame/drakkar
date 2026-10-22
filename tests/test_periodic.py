@@ -564,7 +564,7 @@ class RecorderThatFailsOnOk:
     def __init__(self) -> None:
         self.statuses: list[str] = []
 
-    def record_periodic_run(self, name, duration, status, error='', system=False):
+    def record_periodic_run(self, name, duration, status, error='', system=False, *, slot=None):
         self.statuses.append(status)
         if status == 'ok':
             raise RuntimeError('recorder is full')

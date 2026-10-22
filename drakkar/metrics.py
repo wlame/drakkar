@@ -1105,6 +1105,18 @@ periodic_task_duration = Histogram(
     buckets=(0.001, 0.01, 0.1, 0.5, 1, 5, 10, 30, 60),
 )
 
+# Outcomes: won, held_elsewhere, late, election_failed. A won slot also counts in the two metrics above.
+periodic_cluster_slots = Counter(
+    'drakkar_periodic_cluster_slots_total',
+    'Cluster periodic task slots by name and outcome',
+    ['name', 'outcome'],
+)
+
+periodic_cluster_mismatch_peers = Gauge(
+    'drakkar_periodic_cluster_mismatch_peers',
+    "Online peers of this worker's cluster whose cluster periodic task definitions differ",
+)
+
 
 # --- Runtime health ---
 

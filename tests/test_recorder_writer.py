@@ -122,6 +122,17 @@ class TestRowShapes:
             ('revoked', 1),
         ]
 
+    def test_record_periodic_run_with_slot_adds_scope_and_slot(self, writer):
+        writer.record_periodic_run('refresh_rates', duration=1.5, status='ok', slot=1_800_000_030)
+
+        assert writer.last['event'] == 'periodic_run'
+        assert writer.last['metadata'] == '{"scope":"cluster","slot":1800000030,"status":"ok"}'
+
+    def test_record_periodic_run_without_slot_keeps_its_bytes(self, writer):
+        writer.record_periodic_run('refresh_rates', duration=1.5, status='ok')
+
+        assert writer.last['metadata'] == '{"status":"ok"}'
+
 
 class TestDeferredStartEvents:
     """Deferral arms a timer on the running loop, so these are async."""
