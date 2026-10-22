@@ -397,9 +397,14 @@ each kind could archive one window at the same time. Do one of these:
   worker runs this release. Due windows wait; nothing is lost, and the next
   archive slot after you turn it on picks them up.
 
-During the rolling restart the new workers log `periodic_cluster_mismatch`
-for peers with other cluster task definitions, and a 2.4.0 peer publishes no
-definition hash at all. Both are expected until the restart ends.
+A 2.4.0 card carries no definition hash, so the new workers count a 2.4.0
+peer as unknown and log no warning about it. While archiving is off on every
+worker, the new workers also hash the same definitions. When you turn
+archiving back on one worker at a time, a worker with it on and a worker
+with it off hash different definitions (`history.archive` is one of them),
+so they log `periodic_cluster_mismatch` and
+`drakkar_periodic_cluster_mismatch_peers` is above zero until the last worker
+has archiving on again. That is expected.
 
 #### Old lock files {#old-lock-files}
 
