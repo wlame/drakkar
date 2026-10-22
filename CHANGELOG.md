@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scripts read the message total from the running producer.
 - **Integration harness run matrix.** `just integration-matrix` runs the
   harness for each provider and prints a PASS, FAIL or N/A table.
-  `integration/wait-ready.sh` waits for the workers before the scenarios.
+  `integration/wait-ready.sh` waits until the workers are listed online and
+  answer `/readyz` before the scenarios.
 
 - **Archive election in the unclean-exit scenario.** The scenario now plants
   a due history window (`integration/plant_history.py`), kills the worker
