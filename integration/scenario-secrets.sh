@@ -11,7 +11,8 @@
 #     which must list connections.consul.main.token with its value masked,
 #   - the logs of worker-1, worker-2 and worker-3,
 #   - the metrics page of each worker.
-# A hit prints the matching lines and where they came from.
+# A hit prints the matching lines and where they came from. The Consul token
+# is read from docker-compose.yml, so the harness value lives in one file.
 #
 # Runs with every provider: all three connections are configured whichever
 # provider the main cluster uses.
@@ -25,11 +26,27 @@ SCENARIO=scenario-secrets
 # shellcheck source=integration/scenario-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/scenario-lib.sh"
 
+# The Consul tokens that docker-compose.yml gives the main-cluster workers,
+# one per line and each once: consul_worker_tokens <service>...
+consul_worker_tokens() {
+    "${COMPOSE[@]}" config --format=json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+tokens = {services[name]["environment"]["DK_CONNECTIONS__CONSUL__MAIN__TOKEN"] for name in sys.argv[1:]}
+print("\n".join(sorted(tokens)))
+' "$@"
+}
+
+CONSUL_TOKENS=$(consul_worker_tokens "${MAIN_WORKERS[@]}") \
+    || fail "the Consul token of the main-cluster workers could not be read from docker-compose.yml"
+[ -n "$CONSUL_TOKENS" ] || fail "docker-compose.yml gives the main-cluster workers no DK_CONNECTIONS__CONSUL__MAIN__TOKEN"
 # Text that appears only where a DSN or a URL with its password is printed
 # whole (a redacted one reads ://***:***@), and the Consul token itself, a
 # value distinct from every other harness value.
-CONSUL_TOKEN=6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90
-SECRET_PATTERNS=('drakkar:drakkar@' 'postgresql://drakkar:' 'redis://drakkar:' "$CONSUL_TOKEN")
+SECRET_PATTERNS=('drakkar:drakkar@' 'postgresql://drakkar:' 'redis://drakkar:')
+while IFS= read -r consul_token; do
+    SECRET_PATTERNS+=("$consul_token")
+done <<<"$CONSUL_TOKENS"
 UI_PORTS=(8081 8082 8083)
 METRICS_PORTS=(9090 9091 9093)
 # The config reference must list every connection, or an answer without them

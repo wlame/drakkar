@@ -26,7 +26,7 @@ class InvalidCardLog:
         self._reported &= set(listed)
 
     async def report(self, logger: Any, worker: str, reason: str) -> None:
-        """Log ``fleet_card_invalid`` for ``worker`` the first time its name is reported since it was last cut."""
+        """Log ``fleet_card_invalid`` for ``worker`` once, and again only after its name has left the listing."""
         if worker in self._reported:
             return
         self._reported.add(worker)

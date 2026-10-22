@@ -94,7 +94,7 @@ NO_SINKS_ERROR = (
 
 
 def _connection_and_prune(registry: FleetRegistryConfig) -> dict[str, Any]:
-    """The registry options of a provider that keeps its cards in a shared database: the connection and the prune age."""
+    """The registry options of a provider that keeps its cards in a shared database: connection and prune age."""
     return {'connection': registry.connection, 'prune_after_seconds': registry.prune_after_seconds}
 
 

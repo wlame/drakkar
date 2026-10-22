@@ -16,9 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CONSUL_PREFIX_RE = r'^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
 CONSUL_DATACENTER_RE = r'^[A-Za-z0-9_.-]*$'
-# Path segments that some HTTP clients remove from a path before they send it and others send as written,
-# so a path that holds one is not the same request for every client.
-DOT_SEGMENTS = ('.', '..')
 # The rule of a key prefix, as the tail of its load message and of the providers' message for a preset prefix.
 CONSUL_PREFIX_RULE = (
     "must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', "
@@ -26,6 +23,10 @@ CONSUL_PREFIX_RULE = (
 )
 REDIS_PREFIX_RE = r'^[A-Za-z0-9_:.-]*$'
 SCHEMA_RE = r'^[a-z_][a-z0-9_]*$'
+
+# Path segments that some HTTP clients remove from a path before they send it and others send as written,
+# so a path that holds one is not the same request for every client.
+DOT_SEGMENTS = ('.', '..')
 
 
 def has_dot_segment(path: str) -> bool:

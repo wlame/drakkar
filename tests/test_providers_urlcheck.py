@@ -62,7 +62,7 @@ def test_is_portable_host_and_port_gives_the_verdict_of_the_redis_url_check(text
 
 
 @pytest.mark.parametrize(('text', 'accepted'), HOST_AND_PORT_CASES, ids=[repr(text) for text, _ in HOST_AND_PORT_CASES])
-def test_is_portable_url_judges_the_host_and_port_with_the_shared_rule(text, accepted):
+def test_is_portable_url_keeps_its_verdict_on_the_host_and_port_table(text, accepted):
     assert is_portable_url('redis://' + text + '/0') is accepted
 
 
