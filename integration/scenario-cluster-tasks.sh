@@ -36,7 +36,7 @@ SCENARIO=scenario-cluster-tasks
 # shellcheck source=integration/scenario-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/scenario-lib.sh"
 
-# The schedule of harness_cluster_tick in worker/handler.py.
+# The schedule of harness_cluster_tick in the harness handler.
 TICK_INTERVAL_SECONDS=30
 WATCHED_SLOTS=8
 # At least this many of the watched slots must run exactly once.
