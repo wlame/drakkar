@@ -91,9 +91,13 @@ config uses keys that moved or were removed (YAML paths; as env vars they are DK
 ```
 
 The [upgrade guide](upgrading.md) has the full table with YAML and env names.
-The newest move is `fleet.registry.timeout_seconds`, now
+The newest moves are `fleet.registry.timeout_seconds`, now
 `fleet.registry.resilience.timeout_seconds` (env:
-`DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`).
+`DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`), and the archive keys
+that became [`periodic.election`](#periodic), `history.archive.lease_seconds`,
+`history.archive.sweep_after_seconds` and the slot schedule
+`history.archive.interval` or `history.archive.cron` (see
+[Upgrading](upgrading.md#periodic-tasks-and-the-archive)).
 
 A config error no longer carries the input of the section that failed (the
 cut of the config that the validation library adds to its message). A bad
@@ -999,7 +1003,7 @@ Flight-recorder persistence — the UI's data store. The recorder writes into [`
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
 | `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves and, with archiving on, runs the archive pass. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
@@ -1128,12 +1132,10 @@ What happens to recorder history after a worker is done with a file. See
 | `archive.window_hours` | `int` | `24` | >= 1, and >= `ui.recorder.rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned). |
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
-| `archive.lock_stale_seconds` | `int` | `7200` | >= 1; at most `86400` when `archive.election.provider` is `consul` | An archive lock or archive work file older than this belongs to a dead archiver: the lock is taken over and the work file is removed. It is also the lease length of every [election provider](local-databases.md#the-election-provider). |
-| `archive.pass_interval_seconds` | `int` | `0` | `0`, or at least `10` | How often an archive pass starts on its own timer. `0` starts one pass after each recorder rotation. At least `10` starts a pass every that many seconds, whatever the rotation does; the rotation then only seals. A pass never starts while another one still runs. See [Passes on their own timer](local-databases.md#passes-on-their-own-timer). |
-| `archive.election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster builds the archives: `filesystem` (a lock file in the history folder), `postgres` (a row in a table of the database named by `archive.election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `archive.election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `archive.election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). Every worker of one cluster must use the same provider. |
-| `archive.election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
-| `archive.election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
-| `archive.election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_HISTORY__ARCHIVE__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
+| `archive.interval` | `int \| null` | `null` | a whole number, at least `30`; at most one of `interval` and `cron` | Seconds between archive slots, aligned to the epoch (a slot at every whole multiple since 1970-01-01T00:00:00Z). With neither `interval` nor `cron`, a slot every `3600` seconds. At each slot one worker of the cluster runs the archive pass. See [Archive slots](local-databases.md#archive-slots). |
+| `archive.cron` | `str \| null` | `null` | a five-field UTC cron expression in the [accepted subset](periodic-tasks.md#cron) | The archive slots as cron fire times, instead of `interval`. |
+| `archive.lease_seconds` | `int` | `60` | `40` to `86400` | The lease of an archive slot. The holder refreshes it while the pass runs; a lease nobody refreshed this long belongs to a dead archiver and is taken over. Used by every [election provider](local-databases.md#the-election-provider). |
+| `archive.sweep_after_seconds` | `int` | `7200` | >= `60` | An archive work file in the history folder (a merge or compress file, a sealing copy on its way in, an orphan meta file) older than this belongs to a dead worker and is deleted by the pass. Kept apart from the lease, so a short lease does not delete a slow sealing copy. |
 | `merged_retention_days` | `int` | `32` | >= 0 | Merge results from the UI (`<shared.dir>/merged/`) are deleted by the archive pass after this many days, so only while `archive.enabled` is true. `0` keeps them forever. |
 
 ```yaml
@@ -1143,11 +1145,54 @@ history:
     window_hours: 24
     due_after_hours: 48
     retention_days: 30
-    lock_stale_seconds: 7200
-    pass_interval_seconds: 0
-    election:
-      provider: filesystem
+    interval: 3600            # or cron: '0 * * * *'; give at most one
+    lease_seconds: 60
+    sweep_after_seconds: 7200
   merged_retention_days: 32
+```
+
+The load checks the schedule keys in this order, with the prefix
+`history.archive: `: `give at most one of interval and cron`, the
+[cron messages](periodic-tasks.md#cron-messages),
+`interval must be a whole number of seconds and at least 30`,
+`lease_seconds must be a whole number from 40 to 86400`,
+`sweep_after_seconds must be at least 60`. The archive keys of earlier
+releases fail the load with the [moved-key message](#moved-and-removed-keys);
+see [Upgrading](upgrading.md#periodic-tasks-and-the-archive).
+
+---
+
+## Periodic tasks (`periodic:`) {#periodic}
+
+The election of cluster periodic tasks (the archive included) and the
+overrides of the handler's declared `@periodic` tasks. See
+[Periodic Tasks](periodic-tasks.md).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster runs each slot of a cluster task: `filesystem` (a lock file in `<shared.dir>/tasks/<cluster>/`), `postgres` (a row in a table of the database named by `election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). Every worker of one cluster must use the same provider. The name is resolved only when the worker runs at least one cluster task; an unknown name then fails startup. |
+| `election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
+| `election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
+| `election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_PERIODIC__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_PERIODIC__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
+| `tasks.<name>.enabled` | `bool` | `true` | | `false`: this worker does not run the declared task `<name>`. |
+| `tasks.<name>.interval` | `float \| null` | `null` | at most one of `interval` and `cron`; a cluster task needs a whole number of at least `30` | A new interval; replaces the declared interval or cron. |
+| `tasks.<name>.cron` | `str \| null` | `null` | the [accepted cron subset](periodic-tasks.md#cron) | A new cron expression; replaces the declared interval or cron. |
+| `tasks.<name>.lease_seconds` | `int \| null` | `null` | `40` to `86400`; cluster tasks only | A new lease. |
+
+`<name>` is the method name of a declared task. A name with a dot (a system
+task) fails the load; a name the handler does not declare fails startup.
+From the environment: `DK_PERIODIC__ELECTION__PROVIDER`,
+`DK_PERIODIC__TASKS__<NAME>__<KEY>`.
+
+```yaml
+periodic:
+  election:
+    provider: filesystem
+  tasks:
+    refresh_shared_exchange_rates:
+      cron: '*/5 * * * *'
+    send_weekday_morning_report:
+      enabled: false
 ```
 
 ---
@@ -1183,7 +1228,7 @@ provider plugin are on [Fleet registry](fleet.md).
 
 How the worker calls a provider: a time limit per attempt, retries with
 doubling waits, and a circuit breaker. The same block sits at
-`fleet.registry.resilience` and at `history.archive.election.resilience`.
+`fleet.registry.resilience` and at `periodic.election.resilience`.
 The meaning of each part, the outcomes and the metrics are on
 [Fleet registry](fleet.md#resilience).
 
@@ -1258,7 +1303,7 @@ and `connections.consul.<name>`. A provider plugin can use any entry through
 `ctx.connections`.
 
 Which feature names which entry: `fleet.registry.connection` and
-`history.archive.election.connection`.
+`periodic.election.connection`.
 
 ### Consul (`connections.consul.<name>`)
 
@@ -1271,8 +1316,8 @@ Which feature names which entry: `fleet.registry.connection` and
 
 The `consul` providers talk to the HTTP API of a Consul agent. Each card or
 lease is a key that a session holds. The session's time to live is half of
-`fleet.registry.offline_after_seconds` (cards) or of
-`history.archive.lock_stale_seconds` (leases), at least 10 seconds, and Consul
+`fleet.registry.offline_after_seconds` (cards) or of the task's
+`lease_seconds` (leases), at least 10 seconds, and Consul
 ends a session at most twice its time to live after the last renew.
 
 The `address` and the `token` are checked when a provider starts. The address
@@ -1292,7 +1337,6 @@ The config load checks the rest, with the path and the rule in the message:
 - `connections.consul.<name>.key_prefix '<value>' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'`
 - `connections.consul.<name>.datacenter '<value>' may only contain letters, digits, '_', '.' and '-'`
 - `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`
-- `history.archive.lock_stale_seconds (<n>) must be <= 86400 when history.archive.election.provider is consul`
 - `fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only`, for the catalog mode with the `consul` registry.
 
 The client does no retrying of its own: the [`resilience`

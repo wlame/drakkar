@@ -586,7 +586,7 @@ from drakkar.concurrency import dispatch_to_loop
 
 
 class MyHandler(dk.BaseDrakkarHandler[KIn, KOut, RankRequest, RankResponse]):
-    @dk.periodic(seconds=30)
+    @dk.periodic(30)
     async def refresh_webapp_state(self):
         # ``self._app`` and the webapp loop are framework-private; this
         # pattern is intentionally low-level. Most handlers will never

@@ -134,12 +134,14 @@ Prometheus needed for a quick read.
 
 #### Periodic tasks
 
-Covers both user-defined [`@periodic`](#periodic-tasks) methods and the framework's system loops (`cache.flush`, `cache.sync`, `cache.cleanup`, ...), keyed by task name.
+Covers both user-defined [`@periodic`](#periodic-tasks) methods and the framework's system tasks (`cache.flush`, `cache.sync`, `cache.cleanup`, `history.archive`), keyed by task name. A cluster task's run counts only on the worker that won the slot.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_periodic_task_runs_total` | Counter | `name`, `status` (`ok`, `error`) | Periodic task executions by name and outcome. Alert on a non-zero `status="error"` rate — the wrapper logs and keeps scheduling by default, so this counter is the durable failure signal. |
 | `drakkar_periodic_task_duration_seconds` | Histogram | `name` | Duration of periodic task executions. Buckets: 0.001, 0.01, 0.1, 0.5, 1, 5, 10, 30, 60. |
+| `drakkar_periodic_cluster_slots_total` | Counter | `name`, `outcome` (`won`, `held_elsewhere`, `late`, `election_failed`) | Cluster periodic task slots by name and outcome. Across a healthy cluster, each slot counts `won` on one worker and `held_elsewhere` on the others. A growing `election_failed` rate means the election provider does not answer; `late` means the worker was blocked through the slot's 10-second acquire window. See [Periodic Tasks](periodic-tasks.md#cluster-tasks-the-slot-rule). |
+| `drakkar_periodic_cluster_mismatch_peers` | Gauge | -- | Online peers of this worker's cluster whose cluster periodic task definitions differ. Non-zero while a rolling change is not finished; alert when it stays non-zero. See [Definition hash](periodic-tasks.md#definition-hash). |
 
 #### Offload pool
 
@@ -212,7 +214,7 @@ hits its deadline.
 
 #### Fleet registry and provider operations
 
-Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the archive election makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -234,7 +236,8 @@ The provider log events:
 | `provider_breaker_opened` | warning | A breaker opened (once per opening; a failed probe does not log it again). |
 | `provider_breaker_closed` | info | A probe succeeded and the breaker closed. |
 | `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call. At most once a minute per loop, with `suppressed`. |
-| `recorder_archive_lock_taken_over` | warning | A worker took over the archive lease of a dead archiver. Written by the `filesystem` and `postgres` providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server has deleted (Redis by its time to live, Consul with the session that ended) and there is no previous holder to name. Fields: `provider` (`filesystem` or `postgres`), `previous_worker`, `previous_instance`, `age_seconds`, and the place of the lease: `folder` for `filesystem`, `scope` (the sanitized cluster name) for `postgres`. |
+| `periodic_lock_taken_over` | warning | A worker took over the lease of a cluster task (the archive included) whose holder died. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. Written by the `filesystem` and `postgres` election providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server deleted. |
+| `periodic_lock_put_back_failed` | warning | Two workers took over one `filesystem` lock at once, and a third worker's lock came first, so the lock moved aside could not be put back. Fields `scope`, `folder`, `error`. The holder of the moved lock is fenced at its next check. |
 
 #### Webapp
 
@@ -681,7 +684,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `runtime_probe` | Opt-in stack probe (`runtime_health.probe_interval_seconds > 0`) — a flight-recorder profiler sample, recorded regardless of health state | `metadata` (lag_ms, unit_count, stacks: [{stack, location, count}]) |
 | `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
 | `offload` | One `handler.offload()` call completed — CPU-bound hook work run on the offload thread pool; see [Offload](offload.md) | `partition` (NULL outside hooks), `offset` / `task_id` (annotation-style anchoring), `duration`, `metadata` (hook, function, queued, status: ok/error/cancelled, window_id, offsets, error) |
-| `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
+| `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error; `system: true` for a framework task; `scope: "cluster"` and `slot` (the slot's epoch second) for a cluster run) |
 | `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |
 | `webapp_request_completed` | An HTTP request returned 200 to the caller | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (status='ok', duration_ms) |
 | `webapp_request_timeout` | T2's `asyncio.wait_for` tripped its `request_timeout_seconds` budget; client received a 504 | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (duration_ms) |
@@ -805,8 +808,8 @@ byte-level spec. The short version:
   `history.archive` `enabled: true`, `window_hours: 24`,
   `due_after_hours: 48`, `retention_days: 30`): files rotate hourly and
   are sealed into the history folder; a UTC day's window becomes due
-  exactly 48h after it closes and is archived on the next hourly tick after
-  that, merging its sealed files into one `.db.gz` per cluster and deleting
+  exactly 48h after it closes and is archived at the next archive slot
+  after that (hourly by default), merging its sealed files into one `.db.gz` per cluster and deleting
   them and their meta files. That 48h due delay is the safety margin, not a
   bug — but it means a single recorder file's lifespan, counted from when
   it was *created* rather than from window close, can reach up to ~72h (up
@@ -814,34 +817,39 @@ byte-level spec. The short version:
   window closes). Archives themselves are deleted once their window ended
   more than `retention_days` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
-- **Every worker runs the pass** after each rotation tick, in the
-  background, on the history folder of its own cluster only, unless
-  `history.archive.pass_interval_seconds` is set: passes then run on their
-  own timer.
+- **One worker runs the pass at each archive slot.** The pass is the
+  system [cluster task](periodic-tasks.md) `history.archive`: its slots come
+  from `history.archive.interval` (default 3600 seconds, aligned to the
+  epoch) or `history.archive.cron`, and the worker that wins the slot runs
+  the pass in the background, on the history folder of its own cluster
+  only. Every other worker updates the footprint gauges at that slot. The
+  rotation only seals; it starts no pass.
 - **Windows key on file start time, not event time.** A sealed file
   belongs to the window holding its own start timestamp; an archive can
   carry a handful of events timestamped slightly past its own window end.
 - **Only sealed files are candidates.** Every `*.db` in a cluster history
   folder is sealed and never changes, so the pass needs no in-use check and
   reads its sources with `immutable=1`.
-- **One archiver per cluster.** Every worker of the cluster tries to
-  create `history/<cluster>/.archive.lock` with an exclusive create; one
-  wins, and the others skip the tick and lose nothing. A lock older than
-  `history.archive.lock_stale_seconds` (default 7200) belongs to a dead
-  archiver and is taken over (`recorder_archive_lock_taken_over`, with the
-  field `provider`: `filesystem`, or `postgres` with the field `scope`); a fresh
-  lock that two racing takers moved aside is put back, and
-  `recorder_archive_lock_put_back_failed` reports when a third worker's
-  lock came first. Ages are measured on the file server's clock. Right before it publishes, the
-  holder checks that the lock still holds its token; if another worker took
-  it over, the pass publishes and deletes nothing (`recorder_archive_fenced`,
-  with the fields `provider` and `reason`: `taken_over`, or `unconfirmed`
-  when the election provider could not confirm the lease). This is the
-  default `filesystem` election provider; `history.archive.election` selects
-  another one (`postgres`, `redis` and `consul` are built in), and every worker
-  of a cluster must use the same. With `redis` or `consul` an expired lease is a
-  deleted key, so no `recorder_archive_lock_taken_over` line is written; the
-  pass that finds the scope free just takes it.
+- **One archiver per slot.** At each slot every worker of the cluster asks
+  the election provider for the lease of `<cluster>/history.archive`; one
+  wins, and the others skip the slot and lose nothing. With the default
+  `filesystem` provider the lease is the file
+  `<shared.dir>/tasks/<cluster>/history.archive.lock`, made with an
+  exclusive create. A lease nobody refreshed for
+  `history.archive.lease_seconds` (default 60) belongs to a dead archiver
+  and is taken over (`periodic_lock_taken_over`, with the fields `provider`
+  and `scope`); a fresh lock that two racing takers moved aside is put back,
+  and `periodic_lock_put_back_failed` reports when a third worker's lock
+  came first. Ages are measured on the file server's clock. Right before it
+  publishes, and before it deletes a source, the holder checks that the
+  lease is still its own; if another worker took it over, the pass
+  publishes and deletes nothing (`recorder_archive_fenced`, with the fields
+  `provider` and `reason`: `taken_over`, or `unconfirmed` when the election
+  provider could not confirm the lease). `periodic.election` selects
+  another provider (`postgres`, `redis` and `consul` are built in), and every
+  worker of a cluster must use the same. With `redis` or `consul` an expired
+  lease is a deleted key, so no `periodic_lock_taken_over` line is written;
+  the next slot finds the scope free and takes it.
   See [Local Databases — The election provider](local-databases.md#the-election-provider).
 - **Sources die last.** A sealed file is deleted only once its archive is
   durably on disk. A file the merge cannot read is renamed to
@@ -1222,30 +1230,65 @@ filtering.
 
 ## Periodic Tasks
 
-The `@periodic` decorator schedules handler methods to run at fixed intervals alongside the main processing loop. See also [Periodic Tasks](handler.md#periodic-tasks) in the handler reference.
-
-### Declaration
+The `@periodic` decorator runs handler methods on a schedule, next to the
+main processing loop: on every worker (`scope='worker'`, the default) or on
+one worker of the cluster per slot (`scope='cluster'`). The schedules, the
+slot rule, the overrides and the definition hash are on
+[Periodic Tasks](periodic-tasks.md); this section lists what a periodic
+task makes visible.
 
 ```python
 from drakkar.periodic import periodic
 
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
-    @periodic(seconds=60)
-    async def refresh_cache(self):
-        """Reload lookup table from database every minute."""
-        self.lookup = await load_lookup_table()
+    @periodic(60)
+    async def reload_country_lookup_table(self):
+        """Reload the lookup table from the database every minute, on every worker."""
+        self.country_lookup = await load_country_lookup()
 
-    @periodic(seconds=300, on_error='stop')
-    async def health_check(self):
-        """Check downstream service health. Stop if it fails."""
-        await ping_downstream()
+    @periodic(cron='0 * * * *', scope='cluster', on_error='stop')
+    async def refresh_shared_exchange_rates(self):
+        """Refresh the shared table once an hour, on one worker of the cluster. Stop if it fails."""
+        await copy_exchange_rates_into_reporting_table()
 ```
 
 ### Behavior
 
-- **Discovery**: at startup, the framework inspects the handler instance for methods decorated with `@periodic`. Only `async` functions are accepted -- decorating a sync function raises `TypeError`.
-- **Scheduling**: each periodic task runs in its own `asyncio.Task` within the main event loop. The loop is: `sleep(seconds)` then `await coro_fn()`. The next interval starts only after the current invocation finishes, preventing overlapping runs.
-- **Lifecycle**: periodic tasks are started after [on_ready()](handler.md#on_ready) completes and cancelled during graceful shutdown (before partition processors are drained).
+- **Discovery**: at startup, after `on_startup` and before the recorder,
+  the registry and the sinks start, the framework finds the methods
+  decorated with `@periodic` and applies the `periodic.tasks` overrides. A
+  broken override fails startup. Only `async` functions are accepted --
+  decorating a sync function raises `TypeError`.
+- **Scheduling**: each periodic task runs in its own `asyncio.Task` within
+  the main event loop. Runs of one task never overlap on one worker.
+- **Lifecycle**: periodic tasks are started after [on_ready()](handler.md#on_ready)
+  completes and cancelled during graceful shutdown (before partition
+  processors are drained). A cluster task's lease is not released at
+  shutdown; it ends by itself.
 - **Error handling**:
     - `on_error='continue'` (default) -- the exception is logged, and the task continues scheduling on the next interval.
     - `on_error='stop'` -- the exception is logged, and this specific periodic task is permanently cancelled. Other periodic tasks and the main processing loop are unaffected.
+
+### Log events
+
+All in category `periodic`.
+
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `periodic_task_started` | info | A task's loop started. Fields `periodic_task`, `scope` (`worker` or `cluster`), and `interval_seconds` or `cron`. |
+| `periodic_task_failed` | error | A run raised; carries the exception. |
+| `periodic_task_stopped` | warning | A run raised and the task has `on_error='stop'`: its loop ended. |
+| `periodic_slot_skipped` | debug or warning | A cluster slot this worker does not run. Fields `name`, `slot` (epoch second), `outcome`. Debug for `held_elsewhere` (the normal case on every worker but one). Warning for `late` (field `late_seconds`) and `election_failed` (field `error`: the operation and its outcome, such as `start timeout`, `acquire error` or `acquire skipped_open`). At most one warning line per task per 60 seconds; `suppressed` counts the lines left out since the last one. |
+| `periodic_lease_lost` | warning | A refresh of a running slot's lease did not confirm it. Fields `name`, `slot`, `reason` (`taken_over`: another worker holds it; `unconfirmed`: the provider did not answer). Once per slot; the run goes on. |
+| `periodic_lease_refresh_failed` | error | The lease refresher of a running slot raised outside a provider call. Field `scope`. |
+| `periodic_skip_hook_failed` | error | The framework's hook for a skipped slot raised (for the archive: starting the footprint update). Fields `name`, `slot`, `outcome`. The slot is skipped either way. |
+| `periodic_cluster_mismatch` | warning | An online peer of this worker's cluster has another [definition hash](periodic-tasks.md#definition-hash). Fields `peer`, `own_hash`, `peer_hash`. Once per peer and hash; again when the peer leaves the registry listing and comes back. |
+| `periodic_cluster_check_off` | info | The worker has cluster tasks but no worker registry, so it cannot compare definitions. Fields `cluster_tasks` (count), `reason`. Once at startup. |
+| `periodic_lock_taken_over` | warning | A lease whose holder died was taken over. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. `filesystem` and `postgres` providers only. |
+| `periodic_lock_put_back_failed` | warning | A `filesystem` lock moved aside by a contested takeover could not be put back. Fields `scope`, `folder`, `error`. |
+| `periodic_election_stop_failed` | warning | Stopping the election at shutdown raised. Field `error`. The rest of the shutdown still runs. |
+
+The election's provider calls are counted and logged like every provider
+call (`drakkar_provider_calls_total{feature="election"}`, `provider_started`
+and `provider_call_failed` in category `periodic`); see
+[Fleet registry and provider operations](#fleet-registry-and-provider-operations).

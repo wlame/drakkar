@@ -934,31 +934,42 @@ warm-then-peek pattern, and the observability that comes with it.
 
 ## Periodic Tasks
 
-Decorate async handler methods with `@periodic(seconds=N)` to run them
-on a recurring interval.
+Decorate async handler methods with `@periodic` to run them on a
+schedule: an interval in seconds, or a five-field cron expression in UTC.
+A `worker` task (the default) runs on every worker; a `cluster` task runs
+on exactly one worker of the cluster at each slot. The schedules, the slot
+rule, the YAML overrides and the definition hash are on
+[Periodic Tasks](periodic-tasks.md).
 
 ```python
 from drakkar import periodic
 
 class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 
-    @periodic(seconds=60)
-    async def refresh_cache(self):
-        self.lookup_table = await fetch_lookup_data()
+    @periodic(60)
+    async def reload_country_lookup_table(self):
+        self.country_lookup = await fetch_country_lookup()
 
-    @periodic(seconds=30, on_error='stop')
-    async def health_check(self):
+    @periodic(cron='*/10 * * * *', scope='cluster')
+    async def refresh_shared_exchange_rates(self):
+        await copy_exchange_rates_into_reporting_table()
+
+    @periodic(30, on_error='stop')
+    async def check_corpus_directory_exists(self):
         if not os.path.isdir('/data/corpus'):
             raise RuntimeError('Corpus directory missing')
 ```
 
 ### Behavior
 
+- The decorator checks the declaration when the module is imported and
+  raises `PeriodicRuleError` (a `ValueError`) that names the method.
 - Periodic tasks start after [on_ready()](#on_ready) completes.
 - They run in the same async event loop as the rest of the worker.
-- Overlapping runs are prevented -- the next interval starts only after
-  the current invocation finishes.
-- All periodic tasks are cancelled during shutdown.
+- Runs of one task never overlap on one worker: a `worker` interval task
+  sleeps its interval from the end of the previous run.
+- All periodic tasks are cancelled during shutdown. A cluster task's lease
+  is not released then; it ends by itself.
 
 ### Error handling
 

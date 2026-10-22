@@ -11,8 +11,11 @@ This page has two guides, one for each move:
 - **From 2.4.0 to this release**
   ([Upgrading from 2.4.0: provider settings](#from-2-4-0)). This release
   puts the calls to a registry or election provider under shared rules and
-  adds the `connections` section. One key moved, one default changed, and
-  some log events were replaced.
+  adds the `connections` section. It also gives `@periodic` a schedule that
+  every worker computes the same way and a `cluster` scope, and turns the
+  archive pass into a cluster periodic task: the archive keys and the
+  archive lock changed. Some keys moved, one default changed, and some log
+  events were replaced.
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.
@@ -106,8 +109,7 @@ These keys are new. Their defaults work for most deployments.
 | `storage.dir` | `/tmp/drakkar` | This worker's own files. The worker creates the folder with mode `0700` when it is missing. `''` = memory-only. |
 | `shared.dir` | `''` | The folder all workers see. `''` = `storage.dir`. |
 | `history.archive.due_after_hours` | `48` | A window is archived this many hours after it ends. |
-| `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. |
-| `history.archive.pass_interval_seconds` | `0` | `0` = an archive pass after each rotation. At least `10` = a pass every that many seconds. |
+| `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. The second guide replaces it with `history.archive.lease_seconds` and `history.archive.sweep_after_seconds`. |
 | `history.merged_retention_days` | `32` | UI merge results older than this are deleted. `0` = never. |
 | `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `static`, `none`, or a plugin. Needs `ui.enabled`. |
 | `fleet.registry.heartbeat_seconds` | `10` | How often a worker publishes its card. |
@@ -184,8 +186,8 @@ volumeMounts:
 2. Read the startup line `drakkar_starting`. Its summary shows
    `storage=<folder>`, `shared=<folder>` when the shared folder differs,
    and `fleet=<provider>` (`fleet=off` when the UI is off or no folder
-   resolves). When the archive election provider is not `filesystem`, it
-   also shows `election=<provider>` after `fleet=`.
+   resolves). When the election provider (`periodic.election.provider`) is
+   not `filesystem`, it also shows `election=<provider>` after `fleet=`.
 3. Start the other workers. The workers list in the UI shows every peer.
    With the cache on, `drakkar_fleet_peer_requests_total{outcome="ok"}`
    grows on each worker once a peer has new `cluster` or `global` rows.
@@ -220,7 +222,7 @@ The worker does not delete the old files. Delete them yourself:
 | `<worker>-live.db` | Link to the live recorder file. Workers no longer open each other's live files. |
 | `<worker>-cache.db` (a link) and `<worker>-cache.db.actual` (and its `-wal`, `-shm`) | The old cache link and cache file. The cache file is now a plain `<worker>-cache.db`, private to its worker. Delete both **before** the first start: the worker does not remove them, and an old link with that name is followed to the old `.actual` file. |
 | `.dbstats.db` | Statistics cache of the Databases page. Sealed files now carry a meta file. |
-| `.archive-<cluster>.lock` | The old archive lock. The lock is now `history/<cluster>/.archive.lock`. |
+| `.archive-<cluster>.lock` | The old archive lock. Release 2.4.0 kept the lock in `history/<cluster>/.archive.lock`, and this release keeps it in `tasks/<cluster>/history.archive.lock`; see [Old lock files](#old-lock-files). |
 | `<cluster>-<from>__<to>.db.gz` in `storage.dir` | Old archives. The archive pass now works only inside `<shared.dir>/history/<cluster>/`. |
 | `merged-*.db` in `storage.dir` | Old UI merge results. New ones go to `<shared.dir>/merged/`. |
 
@@ -234,20 +236,24 @@ The worker does not delete the old files. Delete them yourself:
 
 ## Upgrading from 2.4.0: provider settings {#from-2-4-0}
 
-The calls from a worker to a registry provider and to an archive election
-provider now follow one set of rules: a time limit per attempt, retries, and
-a circuit breaker. The new `connections` section declares the shared
-services that providers use. One key moved, one default changed, and some
-log events were replaced.
+The calls from a worker to a registry provider and to an election provider
+now follow one set of rules: a time limit per attempt, retries, and a
+circuit breaker. The new `connections` section declares the shared services
+that providers use. Periodic tasks have new schedules and a cluster scope,
+and the archive pass is now the cluster periodic task `history.archive`
+([step 6](#periodic-tasks-and-the-archive)). Some keys moved, one default
+changed, and some log events were replaced.
 
-Between 2.4.0 and this release these formats did not change: the registry
-card, the sealed recorder file and its meta file, the cache exchange route,
-and the archive lock protocol. The archive lock body gains one key,
-`provider`, which a 2.4.0 worker ignores. A worker of one release can
-therefore read the cards, the sealed files and the lock that a worker of the
-other writes. Each worker applies its own settings, though: a worker that
-still has the 2.4.0 default of `offline_after_seconds` (30) and a worker with
-the new default (60) call the same peer offline at different times.
+Between 2.4.0 and this release these formats did not change: the sealed
+recorder file and its meta file, and the cache exchange route. The registry
+card gains `features.periodic`, which a 2.4.0 worker ignores, so a worker of
+one release can read the cards and the sealed files that a worker of the
+other writes. **The archive lock moved**, so a 2.4.0 worker and a worker of
+this release do not see each other's lock and must not archive at the same
+time; see [step 6](#periodic-tasks-and-the-archive). Each worker applies its
+own settings, too: a worker that still has the 2.4.0 default of
+`offline_after_seconds` (30) and a worker with the new default (60) call the
+same peer offline at different times.
 
 ### 1. Move the registry timeout
 
@@ -283,6 +289,8 @@ publishing shows as offline after 60 seconds, not after 30. A value below
 | `fleet_registry_publish_failed`, `fleet_registry_list_failed`, `fleet_registry_withdraw_failed` | `provider_call_failed` with `feature="registry"` and `op` set to `publish`, `list` or `withdraw`. At most once a minute per operation; `suppressed` says how many failures it stands for. |
 | `fleet_registry_start_failed` | `provider_call_failed` with `op="start"`. The worker no longer replaces a provider that fails to start with `none`: it tries the start again at the next heartbeat. |
 | `fleet_registry_entry_point_scan_failed`, `fleet_registry_entry_point_load_failed`, `fleet_registry_entry_point_invalid` | `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid`. The field `group` names the entry-point group. |
+| `recorder_archive_lock_taken_over` | `periodic_lock_taken_over`, in category `periodic`. Fields `provider`, `scope` (such as `main/history.archive`), `previous_worker`, `previous_instance`, `age_seconds`. |
+| `recorder_archive_lock_put_back_failed` | `periodic_lock_put_back_failed`, in category `periodic`. Fields `scope`, `folder`, `error`. |
 
 `fleet_registry_stop_failed` and `fleet_registry_loop_failed` keep their
 names. `fleet_registry_stop_failed` now means that the registry's own stop
@@ -303,27 +311,27 @@ are new. See [Fleet registry](fleet.md#metrics).
   that failed, so a wrong `connections` block cannot print a connection
   string. The messages of the framework itself still quote a value that is
   not a secret, for example a schema name or an out-of-range number.
-- **The archive lock body has a `provider` key.** For the default election
-  provider it is `"provider":"filesystem"`. A worker of 2.4.0 ignores the key.
+- **The lock body has a `provider` key.** For the default election
+  provider it is `"provider":"filesystem"`.
 - **`recorder_archive_fenced` has two more fields,** `provider` and
-  `reason` (`taken_over` or `unconfirmed`), and `recorder_archive_lock_taken_over`
-  has `provider`. See [Fencing](local-databases.md#fencing).
+  `reason` (`taken_over` or `unconfirmed`). See
+  [Fencing](local-databases.md#fencing).
 - **The summary line** shows ` election=<provider>` after `fleet=` when
-  `history.archive.election.provider` is not `filesystem`.
+  `periodic.election.provider` is not `filesystem`.
 - **The `redis` package must be 7.2 or later.** The minimum was 5.2.0. The
   `redis` providers need it, and the Redis sink uses the same package.
   Installing `py-drakkar` brings a matching version; check it only when you
   pin `redis` yourself.
 - **New sections and keys** need no action. `connections` is empty by
   default. `fleet.registry.connection`, `fleet.registry.consul`,
-  `history.archive.election` and the `resilience` blocks have working
+  `periodic.election` and the `resilience` blocks have working
   defaults.
 
 ### 5. If you wrote a provider plugin
 
 - **A plugin named `consul`, `redis` or `postgres` needs a declared
   connection.** The config load checks `fleet.registry.connection` and
-  `history.archive.election.connection` by provider name, and the default
+  `periodic.election.connection` by provider name, and the default
   connection name is `main`. A registry or election plugin with one of these
   names now fails the load, for example with
   `fleet.registry.connection 'main' is not defined under connections.consul`,
@@ -343,3 +351,70 @@ are new. See [Fleet registry](fleet.md#metrics).
 
 See [Writing a provider](fleet.md#writing-a-provider).
 
+### 6. Periodic tasks and the archive {#periodic-tasks-and-the-archive}
+
+**The decorator.** `@periodic` takes `interval` instead of `seconds`. Write
+`@periodic(30)` or `@periodic(interval=30)`; `@periodic(seconds=30)` now
+raises `TypeError` when the handler module is imported. The decorator also
+checks the method name: 1 to 64 characters of `a-z`, `0-9` and `_`, not
+starting with a digit. A method named `refreshRates` must be renamed. A
+worker-scope task with an interval runs as before. See
+[Periodic Tasks](periodic-tasks.md) for `cron=` and `scope='cluster'`.
+
+**The archive keys.** The archive pass no longer runs after each rotation:
+it runs at archive slots, at the top of each UTC hour by default.
+
+| Old YAML path | New YAML path | New environment variable |
+|---|---|---|
+| `history.archive.lock_stale_seconds` | `history.archive.lease_seconds` (the lease, default 60, 40 to 86400) and `history.archive.sweep_after_seconds` (the age of work files to sweep, default 7200, at least 60) | `DK_HISTORY__ARCHIVE__LEASE_SECONDS`, `DK_HISTORY__ARCHIVE__SWEEP_AFTER_SECONDS` |
+| `history.archive.pass_interval_seconds` | `history.archive.interval` (seconds between slots, at least 30) or `history.archive.cron` (five-field UTC cron) | `DK_HISTORY__ARCHIVE__INTERVAL`, `DK_HISTORY__ARCHIVE__CRON` |
+| `history.archive.election` (and every key below it) | `periodic.election` | `DK_PERIODIC__ELECTION__<KEY>` |
+
+Release 2.4.0 has only the first of these keys; the other two exist only in
+configs written for an older build of this release.
+
+Each old key fails the load with the moved-key message:
+
+```
+config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
+  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)
+```
+
+The old `lock_stale_seconds` was both the lease and the sweep age. If you
+set it, set `sweep_after_seconds` to the old value and leave
+`lease_seconds` at its default: the lease now only says how long the lock of
+a dead archiver lives.
+
+**Roll out with archiving off, or stop the fleet.** A 2.4.0 worker takes the
+archive lock `history/<cluster>/.archive.lock`; a worker of this release
+takes `tasks/<cluster>/history.archive.lock` (or the lease of another
+election provider). The two cannot see each other's lock, so a worker of
+each kind could archive one window at the same time. Do one of these:
+
+- Stop every worker of the fleet, upgrade, and start them again.
+- Or set `history.archive.enabled: false` (`DK_HISTORY__ARCHIVE__ENABLED=false`)
+  on every worker for the rolling restart, and turn it back on once every
+  worker runs this release. Due windows wait; nothing is lost, and the next
+  archive slot after you turn it on picks them up.
+
+During the rolling restart the new workers log `periodic_cluster_mismatch`
+for peers with other cluster task definitions, and a 2.4.0 peer publishes no
+definition hash at all. Both are expected until the restart ends.
+
+#### Old lock files {#old-lock-files}
+
+Nothing reads the old locks any more, and the worker does not delete them.
+Once no 2.4.0 worker runs, delete:
+
+| Old file or table | What it was |
+|---|---|
+| `<shared.dir>/history/<cluster>/.archive.lock` | The archive lock of 2.4.0. |
+| `<shared.dir>/history/<cluster>/.archive.lock.stale.<token>` | A lock set aside by a takeover. The archive pass also deletes these once they are older than `history.archive.sweep_after_seconds`. |
+| Postgres table `<schema>.archive_locks` | The archive lease of the `postgres` election provider in an older build. Drop it with `DROP TABLE IF EXISTS <schema>.archive_locks;`. The provider now creates `task_locks`. |
+
+**Redis and Consul keys.** The `redis` election provider now keeps its leases
+under `<key_prefix>task-locks:<cluster>/<task>`, and the `consul` provider
+under `<key_prefix>/task-locks/<cluster>/<task>`, with sessions named
+`drakkar/task-lock/<cluster>/<task>/<token>`. A Redis user or a Consul
+token limited to the key prefix needs no change. A lock key of an older
+build ends by itself.

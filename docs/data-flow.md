@@ -36,16 +36,18 @@ After `on_startup`, the framework builds all components in this order:
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
 
-4. **If `ui.enabled`** (default: `True`):
+4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`, applies the `periodic.tasks` overrides, and checks the merged tasks again. An override that names no declared task or breaks a rule fails startup here, before the recorder, the registry, the UI server, the sinks and the sources start. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `periodic.election`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
+
+5. **If `ui.enabled`** (default: `True`):
    - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
    - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `ui.recorder.state_sync_interval_seconds` (default: `10`) seconds.
    - Starts the recorder (creates/opens the SQLite database, starts flush/rotation/state-sync background tasks).
      Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
    - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
    - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
-   - Starts the [fleet registry](fleet.md) service (when `ui.enabled` and a provider other than `none`): it publishes this worker's card with state `starting` and reads the peer cards in the background. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
+   - Starts the [fleet registry](fleet.md) service (when `ui.enabled` and a provider other than `none`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. Without a registry, a worker with cluster tasks logs `periodic_cluster_check_off` once. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
 
-5. **Builds all sinks** from config by iterating each type's dict:
+6. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
    - `sinks.postgres` -- creates `PostgresSink(name, config)` for each
    - `sinks.mongo` -- creates `MongoSink(name, config)` for each
@@ -54,14 +56,14 @@ After `on_startup`, the framework builds all components in this order:
    - `sinks.filesystem` -- creates `FileSink(name, config)` for each
    Each is registered with the `SinkManager` under a `(sink_type, name)` key.
 
-6. **Connects all sinks** by calling `connect()` on each in registration order. If any `connect()` raises, the worker crashes immediately (fail-fast design).
+7. **Connects all sinks** by calling `connect()` on each in registration order. If any `connect()` raises, the worker crashes immediately (fail-fast design).
 
-7. **Builds and connects the DLQ sink**:
+8. **Builds and connects the DLQ sink**:
    - Topic: `dlq.topic` if non-empty, otherwise `'{sources.kafka.topic}_dlq'` (default source topic: `'input-events'`). With the Kafka source disabled and `dlq.topic` empty, **no DLQ producer is built** -- see [the DLQ rule](sources.md#the-dlq-without-the-kafka-source).
    - Brokers: `dlq.brokers` if non-empty, otherwise `kafka.brokers` (default: `'localhost:9092'`).
    - Connects a dedicated Kafka producer for the DLQ.
 
-8. **Builds the enabled input sources**, in the fixed order `kafka`, then `http`. A source whose `enabled` flag is false is not built at all. The Kafka source creates a `KafkaConsumer` (wrapping `confluent_kafka.aio.AIOConsumer`) with:
+9. **Builds the enabled input sources**, in the fixed order `kafka`, then `http`. A source whose `enabled` flag is false is not built at all. The Kafka source creates a `KafkaConsumer` (wrapping `confluent_kafka.aio.AIOConsumer`) with:
    - `bootstrap.servers`: `kafka.brokers` (default: `'localhost:9092'`)
    - `group.id`: `sources.kafka.consumer_group` (default: `'drakkar-workers'`)
    - `enable.auto.commit`: `False` (offsets are committed manually by the framework)
@@ -74,20 +76,21 @@ After `on_startup`, the framework builds all components in this order:
 
    The HTTP source builds the webapp server. See [Input Sources](sources.md).
 
-9. **Exposes the PostgreSQL connection pool** for the handler: if any postgres sink exists, its `asyncpg.Pool` is extracted and passed to the next hook.
+10. **Exposes the PostgreSQL connection pool** for the handler: if any postgres sink exists, its `asyncpg.Pool` is extracted and passed to the next hook.
 
-10. **Calls the handler's `on_ready(config, pg_pool)` hook**. The user can use this for database migrations, loading lookup tables, initializing caches, or any async setup that requires live connections.
+11. **Calls the handler's `on_ready(config, pg_pool)` hook**. The user can use this for database migrations, loading lookup tables, initializing caches, or any async setup that requires live connections.
 
-11. **Discovers and starts periodic tasks** by inspecting the handler for methods decorated with `@periodic(seconds=N)`. For each discovered method:
-    - Creates an `asyncio.Task` that loops: sleep `seconds`, then `await coro_fn()`.
-    - Overlap prevention: the next interval begins only after the current invocation finishes (no concurrent runs of the same periodic task).
+12. **Starts the periodic tasks** resolved in step 4:
+    - A **worker** task runs in its own `asyncio.Task`. With an interval it sleeps the interval, runs, and sleeps again from the end of the run; with a cron expression it sleeps until the next fire time. Runs of one task never overlap.
+    - A **cluster** task runs a slot loop in its own `asyncio.Task`: at each slot it starts the election provider if needed, takes the lease of `<cluster>/<task>`, and runs the task only when it won the lease ([the slot rule](periodic-tasks.md#cluster-tasks-the-slot-rule)).
+    - The system cluster task `history.archive` starts here too, when the recorder runs and archiving is on.
     - If the coroutine raises an exception:
       - `on_error='continue'` (default): logs the error and continues looping.
       - `on_error='stop'`: logs the error and exits the task permanently.
 
-12. **Starts the sources** in the same fixed order and logs `sources_starting` / `source_started`. The Kafka source subscribes to the topic and enters the poll loop; the HTTP source binds its socket. A source that fails to start is fatal: the worker logs `source_start_failed`, tears down, and stops.
+13. **Starts the sources** in the same fixed order and logs `sources_starting` / `source_started`. The Kafka source subscribes to the topic and enters the poll loop; the HTTP source binds its socket. A source that fails to start is fatal: the worker logs `source_start_failed`, tears down, and stops.
 
-13. **Registers signal handlers** for `SIGINT` and `SIGTERM` that set `_running = False`, triggering graceful shutdown.
+14. **Registers signal handlers** for `SIGINT` and `SIGTERM` that set `_running = False`, triggering graceful shutdown.
 
 ---
 
@@ -684,7 +687,7 @@ total shutdown time does not grow with the number of sources — the steps that
 follow describe what the **Kafka** source does inside its share of it.
 
 ### Step 1: Cancel Periodic Tasks
-- All periodic task `asyncio.Task` objects are cancelled.
+- All periodic task `asyncio.Task` objects are cancelled, worker and cluster tasks alike. A cluster task that holds a lease does not release it: the lease ends by itself, so a worker whose clock is behind cannot run the slot again. An archive pass that already runs goes on in its thread until the recorder stops it (step 7).
 - `asyncio.gather(*tasks, return_exceptions=True)` waits for them to finish.
 - The list is cleared.
 
@@ -721,6 +724,8 @@ follow describe what the **Kafka** source does inside its share of it.
 
 ### Step 7: Stop the Flight Recorder
 - If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout_seconds` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
+- An archive pass still running is asked to stop after its current window; the recorder waits for it until only `fleet.registry.resilience.timeout_seconds` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
+- Then the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
 
 ### Step 8: Stop the UI Server
 - If the UI is enabled: stops the FastAPI server.
@@ -919,7 +924,10 @@ Each sink type is a dict mapping instance names to their config:
 | `history.archive.window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
 | `history.archive.due_after_hours` | int | `48` | A window is archived this long after it ends |
 | `history.archive.retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |
-| `history.archive.lock_stale_seconds` | int | `7200` | Age after which an archive lock or work file belongs to a dead archiver |
+| `history.archive.interval` | int \| null | `null` | Seconds between archive slots, aligned to the epoch; `null` with no `cron` = `3600` |
+| `history.archive.cron` | str \| null | `null` | Five-field UTC cron for the archive slots instead of `interval` |
+| `history.archive.lease_seconds` | int | `60` | Lease of an archive slot; a dead archiver's lease ends this long after its last refresh |
+| `history.archive.sweep_after_seconds` | int | `7200` | Age after which an archive work file belongs to a dead worker |
 | `history.merged_retention_days` | int | `32` | Delete UI merge results older than this; `0` = never |
 
 ### `fleet` -- Registry and Cache Exchange

@@ -118,6 +118,11 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 | `cache.sync` | `fleet.cache_exchange.interval_seconds` (30s) | Pulls new `cluster`/`global` rows from peer workers over HTTP and LWW-merges them into the local DB. See [Cache exchange](#cache-exchange) |
 | `cache.cleanup` | `cleanup_interval_seconds` (60s) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
 
+The three loops are worker-scope system tasks: every worker runs its own,
+on its own timer. They are configured here, under `cache.*` and
+`fleet.cache_exchange.*`, not under `periodic.tasks` (a name with a dot is
+refused there). See [Periodic Tasks](periodic-tasks.md).
+
 A reader aiosqlite connection is opened alongside the writer so `get()`
 DB-fallback queries never queue behind a flush/sync/cleanup commit. WAL
 mode lets the reader see consistent snapshots during concurrent writes.
@@ -709,7 +714,9 @@ and `cache.cleanup` alongside user-defined `@periodic` methods, each
 with a small `[system]` pill indicating framework origin. Status, last
 run, duration, success/error counts, and sparkline of recent runs are
 rendered identically to user periodic tasks — the `[system]` pill is
-the only visual difference.
+the only visual difference. In `GET /api/v1/debug/periodic` each group
+carries `scope`: `worker` for the cache loops, `cluster` for a cluster
+task such as `history.archive`.
 
 ### Prometheus metrics page
 

@@ -43,13 +43,26 @@ breaking change, never a refactor:
   gated by the card's `features.cache` marks; the cache file itself is
   private to its worker
 - the history meta file `<name>.db.meta.json` (schema 1: fields, sorted
-  compact JSON, no trailing newline) and the archive lock body of
-  `history/<cluster>/.archive.lock` (`tests/fixtures/history_meta.json`) —
-  workers of other releases read the meta files and take over each other's
-  locks
-- the worker registry card (schema 1, `tests/fixtures/fleet_card.json`) and
-  the filesystem provider layout (`<dir>/workers/<sanitized worker>.json`,
-  temp file plus rename) — workers of other releases read these cards
+  compact JSON, no trailing newline) and the task lock body of
+  `<shared.dir>/tasks/<cluster>/<task>.lock`
+  (`tests/fixtures/history_meta.json`) — workers of other releases read the
+  meta files and take over each other's locks
+- the worker registry card (schema 1, `tests/fixtures/fleet_card.json`,
+  including `features.periodic.cluster_hash`) and the filesystem provider
+  layout (`<dir>/workers/<sanitized worker>.json`, temp file plus rename) —
+  workers of other releases read these cards
+- periodic schedules (`tests/fixtures/periodic_contract.json`): the
+  decorator rules and their messages, the accepted cron subset and its
+  messages, the next slot of an interval (aligned to the epoch) or a cron
+  expression, the election scope `<sanitized cluster>/<task>`, and the
+  canonical bytes and hash of the cluster task definitions. Every worker of
+  a cluster must compute the same slot for the same moment, or a slot runs
+  twice. `cronsim` is pinned exactly (`==`) because the fixture pins its
+  fire times; upgrade it only together with a fixture run
+- the election providers' stored shapes (`tests/fixtures/fleet_providers.json`:
+  the `task_locks` DDL and statements, the `task-locks` Redis keys and
+  scripts, the Consul paths and session names) — workers of one cluster
+  contend for the same lock
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 
@@ -120,6 +133,17 @@ parametrize).
      `Message.error()`, it is not raised.
 6. Errors are explicit, never silently swallowed. Structured logging via
    structlog, ECS-compatible.
+7. Cluster periodic tasks (`drakkar/cluster_tasks.py`): the acquire window
+   (10 s) and the minimum hold (20 s) are constants, the same on every
+   worker whatever the task settings; together they keep a slot from running
+   twice while clocks differ by less than 10 s. Do not make them
+   configurable or derive them from a lease. A lease held at shutdown is
+   never released early (a worker whose clock is behind could run the slot
+   again); it ends by itself. A cluster task never blocks the pipeline: a
+   provider that is down only skips slots. The roster
+   (`drakkar/periodic_roster.py`) is built before the recorder, the
+   registry and any sink start, so the registry card carries the definition
+   hash from its first publish.
 
 ## UI server footguns
 
@@ -166,7 +190,11 @@ drakkar/
   sources/                 input-source protocol, registry, handler validation
   cache/                   LWW SQLite cache + the HTTP cache exchange (client and query parsing)
   fleet/                   worker registry: cards, providers, plugin lookup, test kit, service
-  recorder/                flight recorder (SQLite event log)
+  periodic.py              @periodic decorator, its rules, the worker-scope loop, the shared run-once helper
+  periodic_roster.py       discovery of declared tasks, periodic.tasks overrides, startup checks, definition hash
+  cluster_tasks.py         cluster slot loop, slot lease, the worker's one election service, hash checker
+  schedule.py, cronexpr.py slot math, scopes, definition hash; the cron subset check (a library computes fire times)
+  recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock
   uiserver/                UI server: routes + message probe runner
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine

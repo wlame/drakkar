@@ -517,7 +517,9 @@ class ClusterHashChecker:
     hash is unknown is not a mismatch. Each check sets
     ``drakkar_periodic_cluster_mismatch_peers`` to the count of peers whose
     hash differs and logs ``periodic_cluster_mismatch`` once per peer and
-    peer hash.
+    peer hash while the peer stays in the registry listing. The record of
+    logged pairs keeps only the peers of the current listing, so a peer
+    that leaves the listing and comes back is logged again.
     """
 
     def __init__(self, own_hash: str, own_cluster: str, logger: Any = None) -> None:

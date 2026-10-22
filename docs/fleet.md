@@ -35,7 +35,7 @@ service. Two features have one, and each is chosen on its own:
 | Feature | Key | Default | Plugin entry-point group |
 |---|---|---|---|
 | Worker registry (this page) | `fleet.registry.provider` | `filesystem` | `drakkar.registry_providers` |
-| [Archive election](local-databases.md#the-election-provider) | `history.archive.election.provider` | `filesystem` | `drakkar.election_providers` |
+| [Election of cluster periodic tasks](local-databases.md#the-election-provider) (the archive included) | `periodic.election.provider` | `filesystem` | `drakkar.election_providers` |
 
 Each feature has its own `connection`, [`resilience`](#resilience) block and
 `plugin_options`. The rest of this page is about the registry.
@@ -221,7 +221,7 @@ The schema and the pool come from the connection, which is
 `connections.postgres.<connection>` (`schema`, `manage_schema`, `pool_min`,
 `pool_max`; see [Configuration](configuration.md#connections)).
 `fleet.registry.postgres` exists and has no keys. The pool is opened once,
-at the first provider start, and the registry and the archive election share
+at the first provider start, and the registry and the election share
 it when they name the same connection. The worker closes it at shutdown,
 after both providers have stopped (see [Connections](#connections)).
 
@@ -230,7 +230,7 @@ after both providers have stopped (see [Connections](#connections)).
 - With `manage_schema: true` (the default), the worker takes an advisory
   lock on the schema name and runs five `CREATE ... IF NOT EXISTS`
   statements in one transaction: the schema, `fleet_workers` with its two
-  indexes, and `archive_locks`. The lock makes workers that start together
+  indexes, and `task_locks`. The lock makes workers that start together
   take turns, so they do not race on the DDL. Whichever provider starts
   first creates both tables.
 - With `manage_schema: false`, the worker only checks that the table it
@@ -265,10 +265,10 @@ code 2, writes the reason and the usage to stderr and nothing to stdout.
   `fleet_workers`: its two `CREATE INDEX IF NOT EXISTS` statements check
   ownership before they skip an index that exists. The simplest case is to
   let the worker role create the objects. For tables that another role
-  created, set `manage_schema: false`. `archive_locks` needs no ownership.
+  created, set `manage_schema: false`. `task_locks` needs no ownership.
 - With `manage_schema: false`, the role needs `USAGE` on the schema and
   `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the tables it uses
-  (`fleet_workers`; `archive_locks` for the election). It needs no right to
+  (`fleet_workers`; `task_locks` for the election). It needs no right to
   create anything, so an operator creates the objects once with
   `drakkar-schema`. See [Security](security.md#provider-credentials).
 
@@ -345,8 +345,8 @@ What it keeps and does:
   again at the next heartbeat, and the list is complete again. Under the
   default policy, `noeviction`, a full server evicts nothing and answers a
   script that needs more memory with an error that names `OOM`. That error
-  is final and counts as a failed operation for the breaker. The archive
-  lease is lost the same way (see [The redis election
+  is final and counts as a failed operation for the breaker. A lease of a
+  cluster task is lost the same way (see [The redis election
   provider](local-databases.md#the-redis-election-provider)).
 - **Liveness.** The provider gives no `online` verdict. The
   [liveness rule](#liveness) applies: a peer is online while its age is at
@@ -372,7 +372,7 @@ the connection, and the key prefix from its `key_prefix`:
 `connections.redis.<connection>` (see
 [Configuration](configuration.md#connections)). `fleet.registry.redis` exists
 and has no keys. The client is created once, at the first provider start, and
-the registry and the archive election share it when they name the same
+the registry and the election share it when they name the same
 connection. The worker closes it at shutdown, after both providers have
 stopped (see [Connections](#connections)).
 
@@ -568,7 +568,7 @@ connection: `connections.consul.<connection>` (see
 keys. `mode` is `publish`, which this section describes; `catalog` is reserved
 for a later release, and the load refuses it with `provider: consul`.
 `service_name` belongs to catalog mode and is not used. The client is created
-once, at the first provider start, and the registry and the archive election
+once, at the first provider start, and the registry and the election
 share it when they name the same connection. The worker closes it at shutdown,
 after both providers have stopped (see [Connections](#connections)).
 
@@ -663,7 +663,7 @@ A card is a JSON object, at most 4096 bytes:
 {
   "backend": "python",
   "cluster": "search",
-  "features": {"cache": {"cluster": {"key": "match|a", "ms": 1760348411000}}},
+  "features": {"cache": {"cluster": {"key": "match|a", "ms": 1760348411000}}, "periodic": {"cluster_hash": "4f53cda18c2baa0c"}},
   "heartbeat_at": "2026-10-13T09:40:11.000210Z",
   "instance": "9c41e0b27fd34a1e",
   "schema": 1,
@@ -686,7 +686,7 @@ A card is a JSON object, at most 4096 bytes:
 | `version` | no | The worker's release, as `/api/v1/identity` reports it. |
 | `state` | no | `starting`, `running` or `draining`. |
 | `started_at`, `heartbeat_at` | no | Process start and the time of this publish, on the writer's clock. Informational only: liveness never uses them. |
-| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `fleet.cache_exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. |
+| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `fleet.cache_exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. `features.periodic` is on every card from the first publish: `{"cluster_hash": "<16 hex>"}`, the hash of the worker's cluster periodic task definitions (see [Definition hash](periodic-tasks.md#definition-hash)). Peers of the same cluster compare it after each refresh and warn on a difference; a hash in any other form counts as unknown. |
 
 A card whose required field is missing, empty (`worker`, `url`) or of the
 wrong type, or whose optional field has the wrong type, is skipped; the
@@ -773,6 +773,9 @@ unknown.
 current worker plus the peers of the last refresh. The current worker is
 always listed and always `online: true`. A peer row carries the fields of
 its card that are present; see the UI contract for the full row shape.
+Every row also has `cluster_tasks_hash` and `cluster_tasks_match`, which
+compare the worker's cluster periodic task definitions with this worker's
+(see [Definition hash](periodic-tasks.md#definition-hash)).
 
 ## Connections {#connections}
 
@@ -806,7 +809,7 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
 
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
-- `fleet.registry.connection` and `history.archive.election.connection` name
+- `fleet.registry.connection` and `periodic.election.connection` name
   an entry. The `postgres`, `redis` and `consul` providers read it.
   `filesystem`, `static` and `none` ignore it, and so does
   a plugin with any other name. The config load checks the key by provider name, so a provider
@@ -831,9 +834,10 @@ Every key is in [Configuration](configuration.md#connections).
 ## Resilience {#resilience}
 
 Every call from the worker to a provider is an **operation**. The registry
-makes five: `start`, `publish`, `list`, `withdraw` and `stop`. The archive
-election has its own. An operation runs under the `resilience` block of its
-feature: `fleet.registry.resilience` and `history.archive.election.resilience`.
+makes five: `start`, `publish`, `list`, `withdraw` and `stop`. The election
+of cluster periodic tasks has its own. An operation runs under the
+`resilience` block of its feature: `fleet.registry.resilience` and
+`periodic.election.resilience`.
 Both have the same keys:
 
 | Key | Default | Meaning |
@@ -1126,7 +1130,7 @@ context for them.
 | `drakkar_fleet_peer_requests_total` | counter | `endpoint` (`cache_changes`), `outcome` (`ok`, `http_error`, `timeout`, `transport_error`, `bad_body`) | Requests this worker sent to peer workers, by endpoint and outcome. |
 | `drakkar_fleet_peer_request_duration_seconds` | histogram | `endpoint` | Time of one request this worker sent to a peer worker, by endpoint. |
 
-Every provider operation, of the registry and of the archive election, is
+Every provider operation, of the registry and of the election, is
 also counted by the three provider metrics:
 
 | Metric | Type | Labels | Meaning |

@@ -697,7 +697,7 @@ history:
 
 ## Periodic tasks (`periodic:`)
 
-📚 [Periodic tasks](handler.md#periodic-tasks)
+📚 [Periodic tasks](periodic-tasks.md)
 
 ```yaml
 periodic:

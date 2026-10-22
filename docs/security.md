@@ -55,7 +55,7 @@ network access.
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
 | **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file, behind the token. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
-| **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder and `merged/` are created with mode `0700`. |
+| **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder, each cluster task lock folder (`tasks/<cluster>/`) and `merged/` are created with mode `0700`. |
 | **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, every `*.client_config` and the `plugin_options` of the provider plugins by key name; the flight recorder applies the same redaction before storing task env. |
 | **No input echo in config errors** | A load error of the framework config names the key and the rule but does not add the input of the section that failed, so a wrong `connections` block cannot print a connection string. The messages of the framework still quote a value that is not a secret, such as a schema name. The model of your own `app:` section does not inherit this. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
@@ -92,9 +92,12 @@ Stated plainly, so nobody plans around a control that is not there:
   Protect the card store like the token itself. Cards hold no secrets — a
   name, a cluster, a URL, a state, a release and the marks of the newest
   cache rows — so reading the store reveals where workers answer and the
-  newest `cluster`/`global` cache key of each worker. The archive election
-  is trusted the same way: whoever can reach its store can take or hold the
-  lease, which decides only which worker archives.
+  newest `cluster`/`global` cache key of each worker. The election of
+  cluster periodic tasks is trusted the same way: whoever can reach its
+  store (the folder `tasks/` of the shared folder, for the `filesystem`
+  provider) can take or hold a lease, which decides which worker runs a slot
+  of a cluster task, the archive pass included. Holding a lease keeps every
+  worker from running that task until the lease ends.
 
 The last two are architectural trust boundaries with their own reasoning —
 see [the FAQ's trust model](faq.md#security-and-trust-model) and
@@ -219,15 +222,15 @@ below applies to the entries you declare and to any provider that uses them.
   The role must also own the table `fleet_workers`: its two `CREATE INDEX
   IF NOT EXISTS` statements check ownership before they skip an index that
   exists. The simplest case is to let the worker role create the objects;
-  `archive_locks` needs no ownership. For tables that another role created,
+  `task_locks` needs no ownership. For tables that another role created,
   set `manage_schema: false`.
   For a role without these rights, set `manage_schema: false` and let an
   operator run `drakkar-schema postgres --schema=<name>` once, as a role that
   has the DDL rights; it prints the DDL as plain SQL. The worker role then
   needs `USAGE` on the schema and `SELECT`,
   `INSERT`, `UPDATE` and `DELETE` on `fleet_workers` (registry) and
-  `archive_locks` (election), and nothing else. A role with these rights can
-  publish and delete worker cards and take the archive lease, so protect the
+  `task_locks` (election), and nothing else. A role with these rights can
+  publish and delete worker cards and take the lease of any cluster task, so protect the
   schema like the card folder of the `filesystem` provider.
 - **Give the Consul providers a token of their own.** The `consul` providers
   send `GET /v1/status/leader`, the session requests (`create`, `renew`,
@@ -252,7 +255,7 @@ below applies to the entries you declare and to any provider that uses them.
 
   - `write` on the key prefix lets the token read, write and delete **any**
     key under the prefix, not only the cards and the locks. Whoever holds the
-    token can publish and delete worker cards and take the archive lease. Give
+    token can publish and delete worker cards and take the lease of any cluster task. Give
     the fleet a `key_prefix` of its own, so that no other tool keeps keys
     under it.
   - `session_prefix ""` matches every node, so the token can create, renew,
@@ -336,7 +339,7 @@ below applies to the entries you declare and to any provider that uses them.
   other data. It does not protect that other data from this user.
 
   Whoever holds the URL can publish and delete worker cards and take the
-  archive lease. That person can also run every other command that these
+  lease of any cluster task. That person can also run every other command that these
   categories allow, so keep the URL secret and use the user for the providers
   only.
 - **Operator views mask them.** The config reference shows a mask in place

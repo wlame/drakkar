@@ -138,7 +138,7 @@ WORKER_ID=worker-1 python main.py
 
 Every config field can be overridden by environment variables (`DK_` prefix, `__` for nesting: `DK_EXECUTOR__MAX_EXECUTORS=16`). Scale horizontally by running more workers in the same consumer group; cooperative-sticky rebalancing spreads partitions without stopping the others.
 
-More hooks are available for aggregation and error handling — `on_message_complete` (fan-out → fan-in), `on_window_complete`, `on_error`, `@periodic` background tasks, lifecycle hooks. See the [handler guide](https://wlame.github.io/drakkar/handler/).
+More hooks are available for aggregation and error handling — `on_message_complete` (fan-out → fan-in), `on_window_complete`, `on_error`, `@periodic` tasks (on every worker, or on one worker of the cluster per slot, by interval or UTC cron), lifecycle hooks. See the [handler guide](https://wlame.github.io/drakkar/handler/).
 
 ## Try it
 

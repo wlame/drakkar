@@ -30,92 +30,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, or rename the plugin. See `docs/upgrading.md`.
 - **The `redis` package must be version 7.2 or later** (it was 5.2.0). The
   Redis sink uses the same package, so this applies to it too.
-- **`@periodic` takes `interval` instead of `seconds`.** Write
+- **Periodic tasks have new schedules, and the archive is a cluster
+  periodic task.** `@periodic` takes `interval` instead of `seconds`: write
   `@periodic(30)` or `@periodic(interval=30)`; `seconds=` now raises
-  `TypeError`. A task can also take `cron='<five fields>'` (UTC) instead of an
-  interval, and `scope='cluster'` with `lease_seconds`. The decorator checks
-  the method name (1 to 64 characters of `a-z`, `0-9` and `_`, not starting
-  with a digit) and the schedule, and raises `PeriodicRuleError` (a
-  `ValueError`) that names the method. `run_periodic_task` takes `interval=`
-  or `cron=` as keywords. A worker cron task skips the fire times that pass
-  during a run.
-- **The election moved to `periodic.election`, and the archive has a slot
-  schedule.** `history.archive.election` is now `periodic.election` (env
-  `DK_PERIODIC__ELECTION__*`). `history.archive.lock_stale_seconds` is
-  replaced by `history.archive.lease_seconds` (the lease, default 60, from 40
-  to 86400) and `history.archive.sweep_after_seconds` (the age of work files
-  to sweep, default 7200, at least 60). `history.archive.pass_interval_seconds`
-  is replaced by `history.archive.interval` (seconds, at least 30) or
-  `history.archive.cron` (five-field UTC cron); give at most one, and with
-  neither the archive slot comes every 3600 seconds. The old keys fail the
-  load with the moved-key message. The consul-only limit on the lease is gone:
-  the general bound of 86400 covers every provider. New section
-  `periodic.tasks.<name>` overrides `enabled`, `interval`, `cron` and
-  `lease_seconds` of a declared task; a name with a dot fails the load.
-- **Every election lock is a task lock, keyed by cluster and task.** The
-  election scope is now `<cluster>/<task>` (the archive is
-  `<cluster>/history.archive`). The `filesystem` lock moved from
-  `history/<cluster>/.archive.lock` to `tasks/<cluster>/<task>.lock` in the
-  shared folder (`drakkar.recorder.task_lock.TaskLock`, was `ArchiveLock`).
-  The Postgres table `archive_locks` is replaced by `task_locks` (key column
-  `scope`), the Redis key `<prefix>archive-locks:<scope>` by
-  `<prefix>task-locks:<scope>`, and the Consul key and session name use
-  `task-locks` and `drakkar/task-lock/<scope>/<token>`. The `filesystem` and
-  `consul` elections refuse a scope that is not `<cluster>/<task>`. The log
+  `TypeError`. The decorator checks the method name (1 to 64 characters of
+  `a-z`, `0-9` and `_`, not starting with a digit) and the schedule when the
+  module is imported, and raises `PeriodicRuleError` (a `ValueError`) that
+  names the method. `run_periodic_task` takes `interval=` or `cron=` as
+  keywords. The archive pass no longer runs after each rotation: it runs at
+  archive slots, at the top of each UTC hour by default.
+  `history.archive.lock_stale_seconds` is replaced by
+  `history.archive.lease_seconds` (the lease, default 60, from 40 to 86400)
+  and `history.archive.sweep_after_seconds` (the age of work files to sweep,
+  default 7200, at least 60); the old key fails the load with the moved-key
+  message, and so do `history.archive.election` and
+  `history.archive.pass_interval_seconds` in a config written for an older
+  build. The `filesystem` lock moved from `history/<cluster>/.archive.lock`
+  to `tasks/<cluster>/history.archive.lock` in the shared folder
+  (`drakkar.recorder.task_lock.TaskLock`, was `ArchiveLock`), and the log
   events `recorder_archive_lock_taken_over` and
   `recorder_archive_lock_put_back_failed` are now `periodic_lock_taken_over`
-  (field `scope` instead of `folder`) and `periodic_lock_put_back_failed`, in
-  category `periodic`. Old lock files and the old table are not read.
+  (field `scope` instead of `folder`) and `periodic_lock_put_back_failed`,
+  in category `periodic`. A 2.4.0 worker and a worker of this release take
+  different archive locks, so upgrade with the whole fleet stopped, or set
+  `history.archive.enabled: false` on every worker during the rolling
+  restart. Old lock files are not read; delete them. `EventRecorder` takes no
+  election arguments, `run_archive_pass` takes a `fence`, and
+  `EventRecorder.stop` takes `reserve_seconds=`. See `docs/upgrading.md`.
 
 ### Added
 
-- **Schedules for cluster periodic tasks.** New modules `drakkar.cronexpr`
-  and `drakkar.schedule`. They check a cron expression against one fixed
-  subset of five-field UTC cron, and they compute the next slot of an
-  interval (aligned to the epoch) or of a cron expression. They also build
-  the election scope `<cluster>/<task>` and a hash of the cluster task
-  definitions. `tests/fixtures/periodic_contract.json` pins the results. New
-  dependency: `cronsim` 2.7.
-- **The slot loop of cluster periodic tasks.** New module
-  `drakkar.cluster_tasks`. At each slot a worker takes a lease on
-  `<cluster>/<task>` from the election provider. The winner runs the task,
-  refreshes the lease, holds it for the whole run and at least 20 seconds,
-  and then releases it. A worker takes a lease only in the first 10 seconds
-  of a slot; a later slot is skipped as `late`. The provider starts at the
-  first slot that needs it. A worker that stops while it holds a lease does
-  not release it; the lease ends by itself. New metrics:
-  `drakkar_periodic_cluster_slots_total{name,outcome}` and
+- **Cluster periodic tasks.** `@periodic(..., scope='cluster')` runs each
+  slot of a task on exactly one worker of the cluster, and
+  `@periodic(cron='<five fields>')` schedules a task by a cron expression in
+  UTC. A cluster task's slots are the same on every worker: whole multiples
+  of its interval since the epoch (at least 30 seconds), or the fire times of
+  its cron expression. Only one subset of cron is accepted, the one on which
+  cron libraries agree; the new dependency `cronsim` is pinned to 2.7 and
+  computes the fire times, and `tests/fixtures/periodic_contract.json` pins
+  the subset, its messages, the slots, the scopes and the definition hash.
+  At each slot every worker asks the election provider for a lease on
+  `<cluster>/<task>`, only in the first 10 seconds of the slot (a later slot
+  is `late`). The winner runs the task, refreshes the lease, holds it for
+  the whole run and at least 20 seconds, and then releases it; a slot runs
+  once while the clocks of the cluster differ by less than 10 seconds.
+  `lease_seconds` (default 60, from 40 to 86400) only sets how long the
+  lease of a dead holder lives. A lost lease is logged and does not stop the
+  run. There is no catch-up of missed slots. A worker that stops does not
+  release a lease it holds. A provider that is down skips slots and never
+  blocks the pipeline. The new section `periodic` holds the election
+  (`periodic.election`, used by every cluster task) and overrides of
+  declared tasks (`periodic.tasks.<name>`: `enabled`, `interval`, `cron`,
+  `lease_seconds`; env `DK_PERIODIC__TASKS__<NAME>__<KEY>`). A name with a
+  dot fails the load; a name the handler does not declare, or an override
+  that breaks a rule, fails startup. The worker resolves its periodic tasks
+  before the recorder, the registry and the sinks start. The election is
+  owned by the worker, not the recorder: it is made only when the worker
+  runs a cluster task (only then does an unknown provider name fail
+  startup), it starts at the first slot that needs it, it stops after the
+  recorder, and cluster tasks run with the UI off. The archive pass is the
+  system cluster task `history.archive` (`history.archive.interval`, default
+  3600, or `history.archive.cron`); a worker that does not win an archive
+  slot updates the archive footprint gauges. The registry card carries
+  `features.periodic.cluster_hash`, a hash of the worker's cluster task
+  definitions; after each registry refresh the worker logs
+  `periodic_cluster_mismatch` once per online peer of its cluster and
+  peer hash, and again when that peer leaves the listing and comes back.
+  Without a registry it logs `periodic_cluster_check_off` once.
+  `/api/v1/workers` rows have `cluster_tasks_hash` and
+  `cluster_tasks_match`, and `/api/v1/debug/periodic` groups have `scope`.
+  New metrics: `drakkar_periodic_cluster_slots_total{name,outcome}` and
   `drakkar_periodic_cluster_mismatch_peers`. New log events:
-  `periodic_slot_skipped` and `periodic_lease_lost`. The `periodic_run` row
-  of a cluster run has the metadata keys `scope` and `slot`.
-- **The archive pass is the system cluster task `history.archive`.** It runs
-  at its slots, not after each rotation. The worker owns the election: it
-  builds one election service when it runs a cluster task, here when the
-  UI is on, `history.archive.enabled` is true and `storage.dir` is set. Only
-  then does an unknown `periodic.election.provider` fail startup. The
-  election stops after the recorder and before the registry card is
-  withdrawn. `EventRecorder` no longer takes election arguments, its
-  `stop(election_reserve_seconds=)` is now `stop(reserve_seconds=)`,
-  `run_archive_pass` takes a `fence` instead of a `lease`, and
-  `ElectionLease` is removed. A won slot writes a `periodic_run` row named
-  `history.archive` with `system: true`. A worker that does not win a slot
-  updates the archive footprint gauges. The `provider_started` line of the
-  election is in category `periodic`.
-- **Handler cluster tasks run, and workers compare their definitions.** A
-  `@periodic(scope='cluster')` task now runs on one worker of the cluster at
-  each slot. The worker resolves its periodic tasks at startup, before the
-  registry starts and before a sink connects. Each `periodic.tasks.<name>`
-  must name a declared task, and the task must still pass the decorator
-  rules after the override (an override with `enabled: false` is checked
-  too). The registry card carries `features.periodic.cluster_hash`, the hash
-  of the worker's cluster task definitions (`history.archive` included when
-  it runs). After each registry refresh the worker compares it with the
-  online peers of its cluster and logs `periodic_cluster_mismatch` once per
-  peer and hash; the gauge `drakkar_periodic_cluster_mismatch_peers` counts
-  them. Without a registry the worker logs `periodic_cluster_check_off` once.
-  `/api/v1/workers` rows have `cluster_tasks_hash` and `cluster_tasks_match`,
-  and `/api/v1/debug/periodic` groups have `scope`. An election stop that
-  fails at shutdown logs `periodic_election_stop_failed`.
+  `periodic_slot_skipped`, `periodic_lease_lost`,
+  `periodic_lease_refresh_failed`, `periodic_skip_hook_failed`,
+  `periodic_cluster_mismatch`, `periodic_cluster_check_off` and
+  `periodic_election_stop_failed`. The `periodic_run` row of a cluster run
+  has the metadata keys `scope` and `slot`, and an archive pass writes a
+  `periodic_run` row named `history.archive`. New modules:
+  `drakkar.cronexpr`, `drakkar.schedule`, `drakkar.cluster_tasks` and
+  `drakkar.periodic_roster`. See `docs/periodic-tasks.md`.
 - **Integration harness profiles.** `just integration-up profile=quick` runs
   a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
   `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario
@@ -131,17 +124,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider. The harness runs one-hour windows, a 30 s lease and a 20 s pass
   timer on worker-2 and worker-3.
 
-- **Provider framework.** The worker registry and the archive election share
+- **Provider framework.** The worker registry and the election share
   one set of rules for their calls to a provider. The blocks
-  `fleet.registry.resilience` and `history.archive.election.resilience` set
+  `fleet.registry.resilience` and `periodic.election.resilience` set
   a time limit per attempt, retries with doubling waits, and a circuit
   breaker. The breaker skips the provider while it is down and lets one
   operation probe it after a cooldown. The new `connections` section
   declares shared services by name (`consul`, `redis`, `postgres`; `main` is
   the default). A feature names an entry with `fleet.registry.connection` or
-  `history.archive.election.connection`. Set secrets from the environment.
-  The config reference masks them. `history.archive.election.provider`
-  (default `filesystem`) selects which worker of a cluster archives. Plugins
+  `periodic.election.connection`. Set secrets from the environment.
+  The config reference masks them. `periodic.election.provider`
+  (default `filesystem`) selects which worker of a cluster runs a slot of a
+  cluster task, the archive pass included. Plugins
   use the entry-point group `drakkar.election_providers`, and
   `drakkar.recorder.electiontest` holds the checks a provider should pass.
   A registry provider can give its own `online` verdict (`PeerCard.online`);
@@ -173,8 +167,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/local-databases.md` and `docs/configuration.md`.
 - **Postgres providers.** `fleet.registry.provider: postgres` keeps the
   worker cards in the table `fleet_workers`, and
-  `history.archive.election.provider: postgres` keeps the archive lease in
-  `archive_locks`. Both use the schema of the connection that the `connection`
+  `periodic.election.provider: postgres` keeps the leases of cluster tasks
+  in `task_locks` (key column `scope`). Both use the schema of the connection that the `connection`
   key of the feature names (`connections.postgres.<name>`). A worker creates
   the schema and the tables when the provider starts if `manage_schema` is
   true. If it is false, run `drakkar-schema postgres --schema=<name>` first
@@ -189,8 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection back then.
 - **Redis providers.** `fleet.registry.provider: redis` keeps the worker
   cards in Redis keys with one index of the workers, and
-  `history.archive.election.provider: redis` keeps the archive lease in one
-  key per cluster. Both use the `key_prefix` of the connection that the
+  `periodic.election.provider: redis` keeps the lease of each cluster task
+  in one key, `<prefix>task-locks:<cluster>/<task>`. Both use the `key_prefix` of the connection that the
   `connection` key of the feature names (`connections.redis.<name>`). The
   clock of the Redis server decides the age of a card, and key expiry ends a
   lease. The client does not retry on its own. The `resilience` block of the
@@ -216,11 +210,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read the reply code that the client sets from 7.2 on (see Breaking).
 - **Consul providers.** `fleet.registry.provider: consul` keeps each worker
   card in a Consul key that a session of its worker holds, and
-  `history.archive.election.provider: consul` keeps the archive lease in one
-  key per cluster. Both use the `key_prefix` of the connection that the
+  `periodic.election.provider: consul` keeps the lease of each cluster task
+  in one key, `<key_prefix>/task-locks/<cluster>/<task>`, held by a session
+  named `drakkar/task-lock/<cluster>/<task>/<token>`. Both use the `key_prefix` of the connection that the
   `connection` key of the feature names (`connections.consul.<name>`). The
   time to live of a session is half of the limit (`offline_after_seconds`
-  for a card, `lock_stale_seconds` for a lease), and at least 10 seconds.
+  for a card, `lease_seconds` for a lease), and at least 10 seconds.
   Consul can end a session up to twice its time to live after the last
   renew, so a dead worker's card or lease ends by the limit, one second
   later for an odd limit, and by 20 seconds when the limit is below 20. With
@@ -262,8 +257,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Archive lease refresh follows the lease.** A lease is now refreshed at a third of
-  its length, at most every 60 seconds. A short `lock_stale_seconds` no longer
-  lets a long archive pass lose its lease.
+  its length, at most every 60 seconds. A short lease no longer lets a long
+  archive pass lose it.
 
 - **Documentation matches the code.** The HTTP source path, the commit
   rules (per message, batched), the Kafka keys under `sources.kafka.*` in the

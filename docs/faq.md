@@ -118,6 +118,10 @@ Subclass `BaseDrakkarHandler[InputModel, OutputModel]` and implement at least `a
 
 A task whose result the handler already knows (cache hit, deterministic shortcut) — the executor skips the subprocess and emits synthetic `task_started`/`task_completed` events. Useful for memoization. See [Precomputed task results](handler.md#precomputed-task-results-skip-the-subprocess).
 
+### How do I run a task on only one worker of the cluster?
+
+Declare it with `@periodic(..., scope='cluster')`, for example `@periodic(cron='0 6 * * *', scope='cluster')`. At each scheduled time every worker of the cluster asks the election provider (by default a lock file in the shared folder) for a lease, and only the worker that gets it runs the method. There is no catch-up of missed slots and no queue. See [Periodic Tasks](periodic-tasks.md).
+
 ### When does a message's offset get committed to Kafka?
 
 After **all** tasks generated from that message terminate (success or failure after retries exhausted) AND `on_message_complete` has run. Failures go through `on_error` → DLQ, not a "skipped commit". See [Offset Commit Semantics](fan-out.md#offset-commit-semantics).
@@ -308,9 +312,9 @@ Each worker writes its live recorder file only to its own `storage.dir`. Only fi
 The shared folder needs two things:
 
 - **The same folder on every worker.** The mount path may differ: no file stores an absolute path.
-- **An exclusive create and a rename inside one folder.** The archive lock (`history/<cluster>/.archive.lock`) is taken with an exclusive create, and a sealed file appears in the history folder by a rename. It does not need `flock`.
+- **An exclusive create and a rename inside one folder.** The task lock of the archive (`tasks/<cluster>/history.archive.lock`) is taken with an exclusive create, and a sealed file appears in the history folder by a rename. It does not need `flock`.
 
-Clock skew between worker hosts does not matter: lock ages are measured on the file server's clock (a worker touches a marker file and reads its modification time), never by comparing two hosts' clocks.
+Lock ages are measured on the file server's clock (a worker touches a marker file and reads its modification time), never by comparing two hosts' clocks. The slots of [cluster periodic tasks](periodic-tasks.md), the archive included, are computed from each worker's own clock, though: keep the clocks of one cluster within 10 seconds of each other (NTP does much better), or a slot can run twice.
 
 Watch `drakkar_recorder_unsealed_files`: a value above `0` for two rotation intervals means files cannot reach the shared folder. See [Sharing folders across workers](local-databases.md#sharing-folders-across-workers).
 

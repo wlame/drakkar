@@ -25,8 +25,8 @@ interaction between the UI server and cluster health checks.
 
 This layout fits a deployment that already runs Postgres. The workers keep
 their sealed history in a shared folder, as with the defaults. They find each
-other, and choose the one worker that builds the archives of a cluster,
-through tables in Postgres instead of files in the folder. Both choices use
+other, and choose the one worker that runs each slot of a cluster periodic
+task (the archive pass included), through tables in Postgres instead of files in the folder. Both choices use
 the same `connections.postgres.main` entry and so share one pool.
 
 ```yaml
@@ -48,11 +48,10 @@ fleet:
     provider: postgres
     connection: main
 
-history:
-  archive:
-    election:
-      provider: postgres
-      connection: main
+periodic:
+  election:
+    provider: postgres
+    connection: main
 ```
 
 Set the connection string in the environment of every worker, for example
@@ -69,7 +68,7 @@ What to check:
   different providers do not see each other's cards or leases.
 - The registry needs `ui.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
-  Only the cards and the archive lease move to Postgres.
+  Only the cards and the leases of the cluster tasks move to Postgres.
 - `manage_schema: true` lets the first worker that starts create the schema
   and both tables. Workers that start together take turns through an advisory
   lock. Every worker repeats the idempotent DDL at its first provider start,
@@ -79,7 +78,7 @@ What to check:
   `fleet_workers`, because its two `CREATE INDEX IF NOT EXISTS` statements
   check ownership before they skip an index that exists. The simplest case is
   to let the worker role create the objects. For tables that another role
-  created, set `manage_schema: false`. `archive_locks` needs no ownership.
+  created, set `manage_schema: false`. `task_locks` needs no ownership.
 - With an operator-managed schema, set `manage_schema: false` and run the
   command once, as a role that has the DDL rights:
 
@@ -88,12 +87,13 @@ What to check:
   ```
 
   The worker role then needs `USAGE` on the schema and `SELECT`, `INSERT`,
-  `UPDATE` and `DELETE` on `fleet_workers` and `archive_locks` only. A worker
+  `UPDATE` and `DELETE` on `fleet_workers` and `task_locks` only. A worker
   that finds a table missing fails the provider's start with a message that
   names this command and tries again at the next heartbeat (registry) or the
-  next archive pass (election).
+  next slot of a cluster task (election).
 - During a database outage the pipeline keeps running. The workers list
-  keeps its last snapshot, an archive pass stops without publishing, and both
+  keeps its last snapshot, cluster task slots are skipped as
+  `election_failed`, an archive pass stops without publishing, and both
   providers recover when the server is back. Watch `drakkar_provider_breaker_open`
   and `drakkar_provider_calls_total` (see [Observability](observability.md)).
 
@@ -105,8 +105,8 @@ More: [Fleet registry: postgres](fleet.md#postgres),
 
 This layout fits a deployment that already runs Redis. The workers keep their
 sealed history in a shared folder, as with the defaults. They find each other,
-and choose the one worker that builds the archives of a cluster, through keys
-in Redis instead of files in the folder. Both choices use the same
+and choose the one worker that runs each slot of a cluster periodic task
+(the archive pass included), through keys in Redis instead of files in the folder. Both choices use the same
 `connections.redis.main` entry and so share one client.
 
 ```yaml
@@ -125,11 +125,10 @@ fleet:
     provider: redis
     connection: main
 
-history:
-  archive:
-    election:
-      provider: redis
-      connection: main
+periodic:
+  election:
+    provider: redis
+    connection: main
 ```
 
 Set the URL in the environment of every worker, not in the YAML file. The
@@ -147,7 +146,7 @@ What to check:
   databases do not see each other's cards or leases.
 - The registry needs `ui.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
-  Only the cards and the archive lease move to Redis.
+  Only the cards and the leases of the cluster tasks move to Redis.
 - Use a **database number of its own** for the fleet, so that the keys of the
   providers stay apart from other data. Use a Redis user of its own too, with
   the rights `~drakkar:* +@read +@write +@scripting +@connection +time` (the
@@ -176,9 +175,9 @@ What to check:
   `allkeys-*` `maxmemory` policy can evict a live card or a lease. A database
   number of its own does not protect them, because the memory limit and
   eviction cover the whole server. The workers publish their cards again at
-  the next heartbeat. A pass that held the lease finds it gone at its next
-  refresh or check, stops without publishing, and the next pass takes the
-  scope. That pass logs `recorder_archive_fenced` with `reason=taken_over`,
+  the next heartbeat. An archive pass that held the lease finds it gone at
+  its next refresh or check, stops without publishing, and the next slot
+  takes the scope. That pass logs `recorder_archive_fenced` with `reason=taken_over`,
   whose detail says that another worker took the archive lock over, although
   no worker did: the provider can only answer that the pass no longer holds
   the lease. Under the default policy, `noeviction`, a full server evicts
@@ -186,8 +185,9 @@ What to check:
   names `OOM`. That error is final and counts as a failed operation for the
   breaker.
 - During a Redis outage the pipeline keeps running. The workers list keeps its
-  last snapshot, an archive pass stops without publishing, and both providers
-  recover when the server is back. Watch `drakkar_provider_breaker_open` and
+  last snapshot, cluster task slots are skipped as `election_failed`, an
+  archive pass stops without publishing, and both providers recover when the
+  server is back. Watch `drakkar_provider_breaker_open` and
   `drakkar_provider_calls_total` (see [Observability](observability.md)).
 
 More: [Fleet registry: redis](fleet.md#redis),
@@ -199,7 +199,8 @@ More: [Fleet registry: redis](fleet.md#redis),
 This layout fits a deployment that already runs Consul and Postgres. The
 workers keep their sealed history in a shared folder, as with the defaults.
 They find each other through keys in Consul, and they choose the one worker
-that builds the archives of a cluster through a table in Postgres. The two
+that runs each slot of a cluster periodic task (the archive pass included)
+through a table in Postgres. The two
 features are chosen on their own, so each names its own connection; the
 registry uses `connections.consul.main` and the election uses
 `connections.postgres.main`.
@@ -225,11 +226,10 @@ fleet:
     provider: consul
     connection: main
 
-history:
-  archive:
-    election:
-      provider: postgres
-      connection: main
+periodic:
+  election:
+    provider: postgres
+    connection: main
 ```
 
 Set the token and the connection string in the environment of every worker,
@@ -248,7 +248,8 @@ What to check:
   different providers or stores do not see each other's cards or leases.
 - The registry needs `ui.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
-  Only the cards move to Consul, and only the archive lease moves to Postgres.
+  Only the cards move to Consul, and only the leases of the cluster tasks
+  move to Postgres.
 - The Consul token needs two rules, in which `drakkar/` is the `key_prefix`:
   `key_prefix "drakkar/" { policy = "write" }` and
   `session_prefix "" { policy = "write" }`. The first allows every key under
@@ -264,12 +265,12 @@ What to check:
   With an operator-managed schema, set `manage_schema: false` and run
   `drakkar-schema postgres --schema=drakkar | psql "$ADMIN_DSN"` once; the
   worker role then needs `USAGE` on the schema and `SELECT`, `INSERT`,
-  `UPDATE` and `DELETE` on `archive_locks`.
+  `UPDATE` and `DELETE` on `task_locks`.
 - Two clocks decide liveness, and neither is a worker's: Consul ends the
   session of a worker that stopped renewing (half of `offline_after_seconds`,
   at least 10 seconds, and Consul ends a session at most twice that after the
-  last renew), and the Postgres server's `now()` decides the length of the
-  archive lease.
+  last renew), and the Postgres server's `now()` decides the length of a
+  task lease.
 - Point each worker at a Consul agent that stays reachable and healthy,
   usually the agent of its own host. When the cluster marks the agent's node as
   failed, Consul ends the sessions of that node, and the cards of its workers
@@ -279,8 +280,9 @@ What to check:
 - During a Consul outage the pipeline keeps running. The workers list keeps its
   last snapshot, and a worker that cannot reach Consul drops out of the lists
   of the others once its session ends. It writes its card again when Consul is
-  back, without a restart. During a Postgres outage an archive pass stops
-  without publishing, and the election recovers when the server is back. Watch
+  back, without a restart. During a Postgres outage cluster task slots are
+  skipped as `election_failed`, an archive pass stops without publishing, and
+  the election recovers when the server is back. Watch
   `drakkar_provider_breaker_open` and `drakkar_provider_calls_total`, which
   carry the label `feature` (`registry` or `election`) for each provider (see
   [Observability](observability.md)).
@@ -385,3 +387,12 @@ in-flight traffic drains to healthy replicas while the stopping pod
 finishes committing offsets, draining executors, and closing sinks.
 Liveness continues to return 200 until the process actually exits, so
 the kubelet does not interpret the graceful-shutdown window as a crash.
+
+A rolling restart that changes a cluster periodic task (its schedule or its
+lease) leaves workers of one cluster with different definitions for a
+while: they log `periodic_cluster_mismatch` and
+`drakkar_periodic_cluster_mismatch_peers` is above zero until the last
+worker restarted. See [Definition hash](periodic-tasks.md#definition-hash).
+A rolling upgrade from 2.4.0 needs `history.archive.enabled: false` on every
+worker until the restart ends, or a stop of the whole fleet; see
+[Upgrading](upgrading.md#periodic-tasks-and-the-archive).
