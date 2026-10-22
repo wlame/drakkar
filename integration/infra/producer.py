@@ -1,6 +1,8 @@
 """Integration test producer with realistic load patterns.
 
-Load phases:
+Load phases (sizes are fractions of TOTAL_MESSAGES, see PHASE_TABLE; the
+sizes below are those of 5000 messages):
+  0. Drip:       10 msgs at 0.2/sec
   1. Warm-up:    500 msgs at steady 15/sec
   2. Pause:      15 second silence
   3. Burst:      200 msgs as fast as possible
@@ -8,10 +10,12 @@ Load phases:
   5. Pause:      10 second silence
   6. Burst:      300 msgs as fast as possible
   7. Cool-down:  remaining msgs at 10/sec
+  8. Flood:      every id again as fast as possible
 
 Messages include a "repeat" field (how many times to run rg):
   - 97% of messages: repeat 1-15 (normal, seconds)
   - 3% of messages:  repeat 150-250 (slow outliers, minutes)
+REPEAT_SCALE multiplies both ranges.
 
 Request ids are DETERMINISTIC (``req-000001`` ... ``req-<TOTAL>``) rather
 than random UUIDs, so ``verify_delivery.py`` can reconstruct exactly what
@@ -27,12 +31,16 @@ import random
 import time
 import urllib.error
 import urllib.request
+from typing import NamedTuple
 
 from confluent_kafka import Producer
 
 BROKERS = os.environ.get('KAFKA_BROKERS', 'kafka:9092')
 TOPIC = os.environ.get('SOURCE_TOPIC', 'search-requests')
 TOTAL_MESSAGES = int(os.environ.get('TOTAL_MESSAGES', '5000'))
+# Multiplies both ranges of the per-message `repeat`, so a quick profile
+# does less work per task and still sees every phase drain.
+REPEAT_SCALE = float(os.environ.get('REPEAT_SCALE', '1.0'))
 
 # Kept byte-identical in integration/verify_delivery.py, which rebuilds the
 # produced id set from TOTAL_MESSAGES alone. A unit test pins the two.
@@ -103,11 +111,81 @@ SEARCH_REQUESTS = [
 ]
 
 
-def make_repeat() -> int:
-    """97% normal (1-15), 3% slow outlier (150-250)."""
-    if random.random() < 0.03:
-        return random.randint(150, 250)
-    return random.randint(1, 15)
+NORMAL_REPEAT_RANGE = (1, 15)
+OUTLIER_REPEAT_RANGE = (150, 250)
+OUTLIER_SHARE = 0.03
+
+
+def repeat_ranges(scale: float) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The (normal, outlier) `repeat` ranges multiplied by `scale`, each bound at least 1."""
+    if scale <= 0:
+        raise ValueError(f'REPEAT_SCALE must be greater than 0, got {scale}')
+
+    def scaled(bounds: tuple[int, int]) -> tuple[int, int]:
+        low, high = bounds
+        return max(1, round(low * scale)), max(1, round(high * scale))
+
+    return scaled(NORMAL_REPEAT_RANGE), scaled(OUTLIER_REPEAT_RANGE)
+
+
+def make_repeat(scale: float = 1.0) -> int:
+    """97% normal (1-15), 3% slow outlier (150-250), both ranges multiplied by `scale`."""
+    normal, outlier = repeat_ranges(scale)
+    if random.random() < OUTLIER_SHARE:
+        return random.randint(*outlier)
+    return random.randint(*normal)
+
+
+class Phase(NamedTuple):
+    """One load phase: how many ids, at what rate, and the silence after it."""
+
+    label: str
+    title: str
+    size: int
+    rate: float | None  # messages per second; None is a burst at max speed
+    pause_seconds: int  # silence after the phase; 0 for none
+
+
+class PhaseSpec(NamedTuple):
+    """A row of PHASE_TABLE: a phase whose size is a fraction of the total."""
+
+    label: str
+    title: str
+    fraction: float | None  # None takes whatever is left (the cool-down)
+    rate: float | None
+    pause_seconds: int
+
+
+# Fractions of TOTAL_MESSAGES. At 5000 they give 500, 200, 2000 and 300
+# messages; the cool-down takes the rest. The drip is not in the table:
+# it is always min(DRIP_MESSAGES, total).
+DRIP_MESSAGES = 10
+DRIP_RATE = 0.2
+PHASE_TABLE = (
+    PhaseSpec('warmup', 'warm-up', 0.10, 15, 15),
+    PhaseSpec('burst1', 'burst', 0.04, None, 0),
+    PhaseSpec('steady', 'steady', 0.40, 20, 10),
+    PhaseSpec('burst2', 'burst', 0.06, None, 0),
+    PhaseSpec('cooldown', 'cool-down', None, 10, 0),
+)
+
+
+def phase_plan(total: int) -> list[Phase]:
+    """The load phases for `total` messages; the sizes always add up to `total`.
+
+    A phase gets max(1, round(total * fraction)) ids, clipped to what is
+    left. A phase that gets nothing (a tiny total) is dropped.
+    """
+    left = total
+    plan = []
+    drip = min(DRIP_MESSAGES, total)
+    left -= drip
+    plan.append(Phase('drip', 'slow drip', drip, DRIP_RATE, 0))
+    for spec in PHASE_TABLE:
+        size = left if spec.fraction is None else min(left, max(1, round(total * spec.fraction)))
+        left -= size
+        plan.append(Phase(spec.label, spec.title, size, spec.rate, spec.pause_seconds))
+    return [phase for phase in plan if phase.size > 0]
 
 
 # "Hot" queries that many messages reference, driving visible fan-IN in
@@ -161,7 +239,7 @@ def make_message(request_id: str) -> dict:
         'request_id': request_id,
         'patterns': patterns,
         'file_paths': file_paths,
-        'repeat': make_repeat(),
+        'repeat': make_repeat(REPEAT_SCALE),
     }
 
 
@@ -249,60 +327,26 @@ def main():
         sent += len(chunk)
         return chunk
 
-    # Phase 0: slow drip — 10 messages, one every 5 seconds
-    print('Phase 0: slow drip — 10 msgs, one every 5 sec', flush=True)
-    send_steady(producer, take(10), rate=0.2, label='drip')
+    number = 0
+    for phase in phase_plan(TOTAL_MESSAGES):
+        chunk = take(phase.size)
+        speed = 'at max speed' if phase.rate is None else f'at {phase.rate}/sec'
+        print(f'Phase {number}: {phase.title} — {len(chunk)} msgs {speed}', flush=True)
+        number += 1
+        if phase.rate is None:
+            send_batch(producer, chunk, label=phase.label)
+        else:
+            send_steady(producer, chunk, rate=phase.rate, label=phase.label)
+        if phase.pause_seconds:
+            print(f'Phase {number}: pause — {phase.pause_seconds} seconds silence', flush=True)
+            number += 1
+            time.sleep(phase.pause_seconds)
 
-    # Phase 1: warm-up
-    phase1 = take(500)
-    print(f'Phase 1: warm-up — {len(phase1)} msgs at 15/sec', flush=True)
-    send_steady(producer, phase1, rate=15, label='warmup')
-
-    if sent >= TOTAL_MESSAGES:
-        return _done(sent)
-
-    # Phase 2: pause
-    print('Phase 2: pause — 15 seconds silence', flush=True)
-    time.sleep(15)
-
-    # Phase 3: burst
-    phase3 = take(200)
-    print(f'Phase 3: burst — {len(phase3)} msgs at max speed', flush=True)
-    send_batch(producer, phase3, label='burst1')
-
-    if sent >= TOTAL_MESSAGES:
-        return _done(sent)
-
-    # Phase 4: steady
-    phase4 = take(2000)
-    print(f'Phase 4: steady — {len(phase4)} msgs at 20/sec', flush=True)
-    send_steady(producer, phase4, rate=20, label='steady')
-
-    if sent >= TOTAL_MESSAGES:
-        return _done(sent)
-
-    # Phase 5: pause
-    print('Phase 5: pause — 10 seconds silence', flush=True)
-    time.sleep(10)
-
-    # Phase 6: burst
-    phase6 = take(300)
-    print(f'Phase 6: burst — {len(phase6)} msgs at max speed', flush=True)
-    send_batch(producer, phase6, label='burst2')
-
-    if sent >= TOTAL_MESSAGES:
-        return _done(sent)
-
-    # Phase 7: cool-down — remaining messages
-    cooldown = take(TOTAL_MESSAGES - sent)
-    print(f'Phase 7: cool-down — {len(cooldown)} msgs at 10/sec', flush=True)
-    send_steady(producer, cooldown, rate=10, label='cooldown')
-
-    # Phase 8: flood — the SAME id range again, no pauses. Same volume and the
+    # Flood: the SAME id range again, no pauses. Same volume and the
     # same consumer lag as before, but every request is now redelivered, so
     # the upsert convergence and the "a redelivery must not un-notify"
     # invariant are actually under load rather than assumed.
-    print(f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (redelivering every id)', flush=True)
+    print(f'\nPhase {number}: FLOOD — {TOTAL_MESSAGES} msgs at max speed (redelivering every id)', flush=True)
     send_batch(producer, ids, label='flood')
 
     _done(sent)

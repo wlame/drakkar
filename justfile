@@ -119,7 +119,7 @@ cover:
 # because pyproject's testpaths is tests/ only, so the harness handlers
 # would otherwise never run in any gate.
 test-harness:
-    uv run pytest integration/worker/test_handler.py -q
+    uv run pytest integration/worker/test_handler.py integration/infra/test_producer.py -q
 
 # Regenerate the recorder event-type vocabulary fixture from
 # drakkar.recorder.schema.EventType (test_event_vocabulary.py pins it)
