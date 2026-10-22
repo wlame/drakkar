@@ -865,13 +865,17 @@ class AppLifecycle:
         await app._handler.on_ready(app._config, pg_pool)
         unbind_contextvars('hook')
 
-        # start periodic tasks declared on the handler
+        # start the worker-scope periodic tasks declared on the handler;
+        # cluster-scope tasks need the slot loop and are not started here
         for name, method, meta in discover_periodic_tasks(app._handler):
+            if meta.scope != 'worker':
+                continue
             task = asyncio.create_task(
                 run_periodic_task(
                     name=name,
                     coro_fn=method,
-                    seconds=meta.seconds,
+                    interval=meta.interval,
+                    cron=meta.cron,
                     on_error=meta.on_error,
                     recorder=app._recorder,
                 ),

@@ -1,5 +1,5 @@
 {
-  "_comment": "Schedules of cluster periodic tasks, shared by every implementation. constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names. messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text. cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never). interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first. cron_slots: the first fire time strictly after now truncated to the whole second. scopes: the election scope of a task: the sanitized cluster, a slash, the task name. scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message. hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes.",
+  "_comment": "Schedules of cluster periodic tasks, shared by every implementation. constants: the acquire window, the minimum hold, the lease bounds, the cluster interval floor, the task name and scope patterns (matched as whole strings) and the system task names. messages: the validation texts; {x} is a placeholder. The prefix_* entries go before a rule_* text. cron_cases: the cron subset check. accepted: true carries start and the next five fire times, each strictly after the one before (UTC). accepted: false carries the message of the first refusal: the syntax check in its order, then one fire-time lookup (cron_never). interval_slots: the first slot strictly after now; slots are whole multiples of the interval since the epoch. now is truncated to the whole second first. cron_slots: the first fire time strictly after now truncated to the whole second. scopes: the election scope of a task: the sanitized cluster, a slash, the task name. scope_checks: valid scopes split back into cluster and task; invalid ones are refused with the scope_invalid message. hashes: definitions are objects with name, lease_seconds and exactly one of interval and cron. bytes: the JSON array sorted by name, sorted keys, no spaces, raw UTF-8. hash: the first 16 hex characters of the SHA-256 of bytes. decorator_validation: one task declaration each (name, interval, cron, scope, lease_seconds; null when not given); message is the full text of the first refusal (prefix_decorator, then the rule), in the order rule_name, rule_scope, rule_one_schedule, then rule_worker_interval or rule_cluster_interval or the cron texts, then rule_lease_scope, rule_lease_bounds; null when the declaration is accepted. No case uses 0 for interval or lease_seconds.",
   "constants": {
     "acquire_window_seconds": 10,
     "min_hold_seconds": 20,
@@ -5490,6 +5490,382 @@
       ],
       "bytes": "[{\"interval\":30,\"lease_seconds\":60,\"name\":\"harness_cluster_tick\"},{\"interval\":30,\"lease_seconds\":40,\"name\":\"history.archive\"}]",
       "hash": "eea5015b452ae1fd"
+    }
+  ],
+  "decorator_validation": [
+    {
+      "name": "name_mixed_case",
+      "task": {
+        "name": "RefreshRates",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'RefreshRates': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "name_starts_with_digit",
+      "task": {
+        "name": "1abc",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task '1abc': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "name_65_characters",
+      "task": {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "name_64_characters_accepted",
+      "task": {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "name_with_dash",
+      "task": {
+        "name": "a-b",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'a-b': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "name_with_dot_is_a_system_name",
+      "task": {
+        "name": "cache.flush",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'cache.flush': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "name_with_leading_underscore_accepted",
+      "task": {
+        "name": "_refresh",
+        "interval": 10,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "scope_unknown",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 10,
+        "cron": null,
+        "scope": "global",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': scope must be worker or cluster"
+    },
+    {
+      "name": "both_schedules",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": "*/5 * * * *",
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': give exactly one of interval and cron"
+    },
+    {
+      "name": "no_schedule",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': give exactly one of interval and cron"
+    },
+    {
+      "name": "worker_interval_negative",
+      "task": {
+        "name": "refresh_rates",
+        "interval": -1,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': interval must be greater than 0"
+    },
+    {
+      "name": "worker_interval_fraction_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 0.5,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "cluster_interval_below_floor",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 29,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': a cluster task's interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "cluster_interval_fraction",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 30.5,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': a cluster task's interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "cluster_interval_floor_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 30,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "cluster_interval_hour_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 3600,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "cluster_interval_negative",
+      "task": {
+        "name": "refresh_rates",
+        "interval": -30,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': a cluster task's interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "worker_cron_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "*/5 * * * *",
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "cluster_cron_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "0 3 * * *",
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": null
+    },
+    {
+      "name": "cron_never_fires",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "0 0 30 2 *",
+        "scope": "cluster",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': cron '0 0 30 2 *' never fires"
+    },
+    {
+      "name": "cron_six_fields",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "*/5 * * * * *",
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': cron '*/5 * * * * *' must have 5 fields separated by single spaces"
+    },
+    {
+      "name": "cron_empty",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "",
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': cron '' must have 5 fields separated by single spaces"
+    },
+    {
+      "name": "lease_on_worker_task",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": 60
+      },
+      "message": "periodic task 'refresh_rates': lease_seconds is only for cluster tasks"
+    },
+    {
+      "name": "lease_below_bounds",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": 39
+      },
+      "message": "periodic task 'refresh_rates': lease_seconds must be a whole number from 40 to 86400"
+    },
+    {
+      "name": "lease_above_bounds",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": 86401
+      },
+      "message": "periodic task 'refresh_rates': lease_seconds must be a whole number from 40 to 86400"
+    },
+    {
+      "name": "lease_lowest_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": 40
+      },
+      "message": null
+    },
+    {
+      "name": "lease_highest_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": 86400
+      },
+      "message": null
+    },
+    {
+      "name": "lease_with_cron_accepted",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "0 3 * * *",
+        "scope": "cluster",
+        "lease_seconds": 7200
+      },
+      "message": null
+    },
+    {
+      "name": "order_name_before_scope",
+      "task": {
+        "name": "RefreshRates",
+        "interval": 10,
+        "cron": null,
+        "scope": "global",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'RefreshRates': the name must be 1 to 64 characters of a-z, 0-9 and _, and must not start with a digit"
+    },
+    {
+      "name": "order_scope_before_schedule",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": null,
+        "scope": "global",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': scope must be worker or cluster"
+    },
+    {
+      "name": "order_schedule_before_interval",
+      "task": {
+        "name": "refresh_rates",
+        "interval": -1,
+        "cron": "*/5 * * * *",
+        "scope": "worker",
+        "lease_seconds": null
+      },
+      "message": "periodic task 'refresh_rates': give exactly one of interval and cron"
+    },
+    {
+      "name": "order_interval_before_lease",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 29,
+        "cron": null,
+        "scope": "cluster",
+        "lease_seconds": 39
+      },
+      "message": "periodic task 'refresh_rates': a cluster task's interval must be a whole number of seconds and at least 30"
+    },
+    {
+      "name": "order_cron_before_lease",
+      "task": {
+        "name": "refresh_rates",
+        "interval": null,
+        "cron": "0 0 30 2 *",
+        "scope": "cluster",
+        "lease_seconds": 39
+      },
+      "message": "periodic task 'refresh_rates': cron '0 0 30 2 *' never fires"
+    },
+    {
+      "name": "order_lease_scope_before_bounds",
+      "task": {
+        "name": "refresh_rates",
+        "interval": 60,
+        "cron": null,
+        "scope": "worker",
+        "lease_seconds": 39
+      },
+      "message": "periodic task 'refresh_rates': lease_seconds is only for cluster tasks"
     }
   ]
 }

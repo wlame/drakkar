@@ -284,7 +284,7 @@ class RipgrepHandler(
 
     # -- Periodic tasks -------------------------------------------------
 
-    @dk.periodic(seconds=10)
+    @dk.periodic(10)
     async def log_stats(self):
         """Log pipeline stats every 10 seconds. Demonstrates a recurring
         background task that accesses handler state set during processing.
@@ -302,7 +302,7 @@ class RipgrepHandler(
         )
         await asyncio.sleep(0.8)  # emulate some async work
 
-    @dk.periodic(seconds=30, on_error='stop')
+    @dk.periodic(30, on_error='stop')
     async def health_check(self):
         """Verify /tmp/search-corpus exists (executor needs it).
         Demonstrates on_error='stop' — if the corpus disappears, this

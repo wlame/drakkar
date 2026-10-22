@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, or rename the plugin. See `docs/upgrading.md`.
 - **The `redis` package must be version 7.2 or later** (it was 5.2.0). The
   Redis sink uses the same package, so this applies to it too.
+- **`@periodic` takes `interval` instead of `seconds`.** Write
+  `@periodic(30)` or `@periodic(interval=30)`; `seconds=` now raises
+  `TypeError`. A task can also take `cron='<five fields>'` (UTC) instead of an
+  interval, and `scope='cluster'` with `lease_seconds`. The decorator checks
+  the method name (1 to 64 characters of `a-z`, `0-9` and `_`, not starting
+  with a digit) and the schedule, and raises `PeriodicRuleError` (a
+  `ValueError`) that names the method. `run_periodic_task` takes `interval=`
+  or `cron=` as keywords. A worker cron task skips the fire times that pass
+  during a run.
 
 ### Added
 

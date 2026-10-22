@@ -463,7 +463,7 @@ async def test_start_registers_cleanup_task_as_system_periodic(tmp_path, monkeyp
         kwargs = cleanup_calls[0]
         assert kwargs.get('system') is True
         assert kwargs.get('on_error') == 'continue'
-        assert kwargs.get('seconds') == engine._config.cleanup_interval_seconds  # type: ignore[reportPrivateUsage]
+        assert kwargs.get('interval') == engine._config.cleanup_interval_seconds  # type: ignore[reportPrivateUsage]
         assert kwargs.get('coro_fn') == engine._cleanup_once  # type: ignore[reportPrivateUsage]
     finally:
         await engine.stop()

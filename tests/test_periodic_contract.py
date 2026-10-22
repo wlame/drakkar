@@ -14,6 +14,18 @@ import pytest
 
 from drakkar import cronexpr, schedule
 from drakkar.cronexpr import check_cron_syntax, next_cron_fire, validate_cron
+from drakkar.periodic import (
+    PREFIX_DECORATOR,
+    RULE_CLUSTER_INTERVAL,
+    RULE_LEASE_BOUNDS,
+    RULE_LEASE_SCOPE,
+    RULE_NAME,
+    RULE_ONE_SCHEDULE,
+    RULE_SCOPE,
+    RULE_WORKER_INTERVAL,
+    PeriodicRuleError,
+    periodic,
+)
 from drakkar.schedule import (
     ClusterTaskDefinition,
     canonical_definitions,
@@ -38,6 +50,14 @@ MESSAGE_CONSTANTS = {
     'cron_step': cronexpr.CRON_STEP_MESSAGE,
     'cron_never': cronexpr.CRON_NEVER_MESSAGE,
     'scope_invalid': schedule.SCOPE_INVALID,
+    'prefix_decorator': PREFIX_DECORATOR,
+    'rule_name': RULE_NAME,
+    'rule_scope': RULE_SCOPE,
+    'rule_one_schedule': RULE_ONE_SCHEDULE,
+    'rule_worker_interval': RULE_WORKER_INTERVAL,
+    'rule_cluster_interval': RULE_CLUSTER_INTERVAL,
+    'rule_lease_scope': RULE_LEASE_SCOPE,
+    'rule_lease_bounds': RULE_LEASE_BOUNDS,
 }
 
 
@@ -102,6 +122,27 @@ def test_hash_case_bytes_and_hash(case):
 
     assert canonical_definitions(definitions) == case['bytes'].encode('utf-8')
     assert cluster_tasks_hash(definitions) == case['hash']
+
+
+@pytest.mark.parametrize(
+    'case', FIXTURE['decorator_validation'], ids=[c['name'] for c in FIXTURE['decorator_validation']]
+)
+def test_decorator_validation_case(case):
+    task = case['task']
+
+    async def method(self):
+        pass
+
+    # Names such as '1abc' cannot be written as a def; the decorator reads __name__.
+    method.__name__ = task['name']
+    decorate = periodic(task['interval'], cron=task['cron'], scope=task['scope'], lease_seconds=task['lease_seconds'])
+
+    if case['message'] is None:
+        assert decorate(method) is method
+        return
+    with pytest.raises(PeriodicRuleError) as caught:
+        decorate(method)
+    assert str(caught.value) == case['message']
 
 
 def test_message_constants_equal_the_fixture():

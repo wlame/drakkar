@@ -1,14 +1,24 @@
 """Tests for periodic task decorator, discovery, and scheduling."""
 
 import asyncio
+import math
+import time
 import warnings
+from datetime import UTC, datetime
 
 import pytest
 
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.periodic import (
     PERIODIC_ATTR,
+    RULE_CLUSTER_INTERVAL,
+    RULE_LEASE_BOUNDS,
+    RULE_LEASE_SCOPE,
+    RULE_WORKER_INTERVAL,
+    SYSTEM_CLOCK,
     PeriodicMeta,
+    PeriodicRuleError,
+    check_periodic_rules,
     discover_periodic_tasks,
     periodic,
     run_periodic_task,
@@ -19,18 +29,18 @@ from tests.conftest import make_ui_config, wait_for
 
 
 def test_periodic_sets_metadata():
-    @periodic(seconds=10)
+    @periodic(interval=10)
     async def my_task(self):
         pass
 
     meta = getattr(my_task, PERIODIC_ATTR)
     assert isinstance(meta, PeriodicMeta)
-    assert meta.seconds == 10
+    assert meta.interval == 10
     assert meta.on_error == 'continue'
 
 
 def test_periodic_custom_on_error():
-    @periodic(seconds=5, on_error='stop')
+    @periodic(interval=5, on_error='stop')
     async def my_task(self):
         pass
 
@@ -38,26 +48,116 @@ def test_periodic_custom_on_error():
     assert meta.on_error == 'stop'
 
 
-def test_periodic_rejects_non_positive_seconds():
-    with pytest.raises(ValueError, match='positive'):
+def test_periodic_positional_interval_keeps_working():
+    @periodic(10)
+    async def my_task(self):
+        pass
 
-        @periodic(seconds=0)
+    meta = getattr(my_task, PERIODIC_ATTR)
+    assert meta == PeriodicMeta(interval=10, cron=None, scope='worker', lease_seconds=None, on_error='continue')
+
+
+def test_periodic_cluster_cron_metadata():
+    @periodic(cron='0 3 * * *', scope='cluster', lease_seconds=7200, on_error='stop')
+    async def nightly(self):
+        pass
+
+    meta = getattr(nightly, PERIODIC_ATTR)
+    assert meta == PeriodicMeta(interval=None, cron='0 3 * * *', scope='cluster', lease_seconds=7200, on_error='stop')
+
+
+def test_periodic_seconds_keyword_is_gone():
+    with pytest.raises(TypeError):
+        periodic(seconds=10)  # type: ignore[call-arg]
+
+
+def test_zero_interval_is_refused_as_not_positive():
+    with pytest.raises(PeriodicRuleError) as caught:
+
+        @periodic(0)
+        async def my_task(self):
+            pass
+
+    assert str(caught.value) == "periodic task 'my_task': " + RULE_WORKER_INTERVAL
+
+
+@pytest.mark.parametrize(
+    ('scope', 'rule'),
+    [('cluster', RULE_LEASE_BOUNDS), ('worker', RULE_LEASE_SCOPE)],
+)
+def test_zero_lease_is_refused(scope, rule):
+    with pytest.raises(PeriodicRuleError) as caught:
+
+        @periodic(60, scope=scope, lease_seconds=0)
+        async def my_task(self):
+            pass
+
+    assert str(caught.value) == "periodic task 'my_task': " + rule
+
+
+def test_periodic_rule_error_is_a_value_error():
+    with pytest.raises(ValueError):
+
+        @periodic(-5)
         async def my_task(self):
             pass
 
 
-def test_periodic_rejects_negative_seconds():
-    with pytest.raises(ValueError, match='positive'):
+def test_periodic_checks_nothing_before_the_function_is_known():
+    """The rules need the method name, so a bad declaration fails only when it decorates."""
+    decorate = periodic(-5)
 
-        @periodic(seconds=-5)
-        async def my_task(self):
-            pass
+    async def my_task(self):
+        pass
+
+    with pytest.raises(PeriodicRuleError):
+        decorate(my_task)
+
+
+def test_check_periodic_rules_accepts_a_whole_number_float_cluster_interval():
+    rule = check_periodic_rules(
+        name='refresh', interval=30.0, cron=None, scope='cluster', lease_seconds=None, now_epoch=0
+    )
+
+    assert rule is None
+
+
+@pytest.mark.parametrize(
+    ('scope', 'interval', 'rule'),
+    [
+        ('worker', True, RULE_WORKER_INTERVAL),
+        ('worker', '10', RULE_WORKER_INTERVAL),
+        ('cluster', '60', RULE_CLUSTER_INTERVAL),
+    ],
+)
+def test_check_periodic_rules_refuses_an_interval_that_is_not_a_number(scope, interval, rule):
+    found = check_periodic_rules(
+        name='refresh', interval=interval, cron=None, scope=scope, lease_seconds=None, now_epoch=0
+    )
+
+    assert found == rule
+
+
+def test_system_clock_reads_the_wall_clock():
+    before = time.time()
+
+    assert before <= SYSTEM_CLOCK.time() <= time.time()
+
+
+async def test_run_periodic_task_needs_exactly_one_schedule():
+    async def task():
+        pass
+
+    with pytest.raises(ValueError, match='exactly one of interval and cron'):
+        await run_periodic_task('t', task, on_error='continue')
+    with pytest.raises(ValueError, match='exactly one of interval and cron'):
+        await run_periodic_task('t', task, interval=1, cron='* * * * *', on_error='continue')
 
 
 def test_periodic_rejects_sync_function():
     with pytest.raises(TypeError, match='async'):
 
-        @periodic(seconds=10)
+        @periodic(interval=10)
         def not_async(self):
             pass
 
@@ -70,7 +170,7 @@ def test_periodic_decorator_emits_no_deprecation_warning():
     with warnings.catch_warnings():
         warnings.simplefilter('error', DeprecationWarning)
 
-        @periodic(seconds=10)
+        @periodic(interval=10)
         async def my_task(self):
             pass
 
@@ -79,7 +179,7 @@ def test_periodic_preserves_function_identity():
     async def my_task(self):
         pass
 
-    decorated = periodic(seconds=10)(my_task)
+    decorated = periodic(interval=10)(my_task)
     assert decorated is my_task
 
 
@@ -91,11 +191,11 @@ def test_discover_periodic_tasks_on_handler():
         async def arrange(self, messages, pending):
             return []
 
-        @periodic(seconds=30)
+        @periodic(interval=30)
         async def refresh_cache(self):
             pass
 
-        @periodic(seconds=60, on_error='stop')
+        @periodic(interval=60, on_error='stop')
         async def health_check(self):
             pass
 
@@ -106,10 +206,10 @@ def test_discover_periodic_tasks_on_handler():
 
     for name, _method, meta in tasks:
         if name == 'refresh_cache':
-            assert meta.seconds == 30
+            assert meta.interval == 30
             assert meta.on_error == 'continue'
         elif name == 'health_check':
-            assert meta.seconds == 60
+            assert meta.interval == 60
             assert meta.on_error == 'stop'
 
 
@@ -128,7 +228,7 @@ def test_discover_returns_bound_methods():
         async def arrange(self, messages, pending):
             return []
 
-        @periodic(seconds=10)
+        @periodic(interval=10)
         async def tick(self):
             pass
 
@@ -167,7 +267,7 @@ async def test_run_periodic_task_executes_on_interval():
         run_periodic_task(
             name='test_task',
             coro_fn=task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
         )
     )
@@ -190,7 +290,7 @@ async def test_run_periodic_task_no_overlap():
         run_periodic_task(
             name='slow_task',
             coro_fn=slow_task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
         )
     )
@@ -217,7 +317,7 @@ async def test_run_periodic_task_on_error_continue():
         run_periodic_task(
             name='failing_continue',
             coro_fn=failing_task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
         )
     )
@@ -241,7 +341,7 @@ async def test_run_periodic_task_on_error_stop():
         run_periodic_task(
             name='failing_stop',
             coro_fn=failing_task,
-            seconds=0.05,
+            interval=0.05,
             on_error='stop',
         )
     )
@@ -262,7 +362,7 @@ async def test_run_periodic_task_cancellation():
         run_periodic_task(
             name='cancel_me',
             coro_fn=task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
         )
     )
@@ -285,7 +385,7 @@ async def test_run_periodic_task_sleep_first():
         run_periodic_task(
             name='sleep_first',
             coro_fn=task,
-            seconds=0.2,
+            interval=0.2,
             on_error='continue',
         )
     )
@@ -311,7 +411,7 @@ async def test_run_periodic_task_cancellation_during_sleep():
         run_periodic_task(
             name='cancel_during_sleep',
             coro_fn=task,
-            seconds=10.0,
+            interval=10.0,
             on_error='continue',
         )
     )
@@ -336,7 +436,7 @@ async def test_run_periodic_task_cancellation_during_execution():
         run_periodic_task(
             name='cancel_during_exec',
             coro_fn=blocking_task,
-            seconds=0.01,
+            interval=0.01,
             on_error='continue',
         )
     )
@@ -345,6 +445,95 @@ async def test_run_periodic_task_cancellation_during_execution():
     t.cancel()
     with pytest.raises(asyncio.CancelledError):
         await t
+
+
+# --- Scheduler loop with a fake clock ---
+
+
+class FakeClock:
+    """A clock that advances only when the loop sleeps; no test waits for real time.
+
+    ``early`` lists how many seconds each of the first sleeps wakes before it
+    was asked to, like ``asyncio.sleep`` rounding or a clock that runs behind.
+    """
+
+    def __init__(self, now: float, early: tuple[float, ...] = ()) -> None:
+        self.now = now
+        self.early = list(early)
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds - (self.early.pop(0) if self.early else 0)
+        await asyncio.sleep(0)
+
+
+def at(text: str) -> float:
+    """Epoch seconds of an ISO 8601 UTC time."""
+    return datetime.fromisoformat(text).replace(tzinfo=UTC).timestamp()
+
+
+async def _collect_starts(clock: FakeClock, runs: int, run_seconds: float, **schedule) -> list[float]:
+    """Run the loop until ``runs`` runs have started; return the clock time of each start."""
+    starts: list[float] = []
+
+    async def body():
+        starts.append(clock.time())
+        if len(starts) == runs:
+            raise asyncio.CancelledError
+        await clock.sleep(run_seconds)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_periodic_task('fake_clock_task', body, on_error='continue', clock=clock, **schedule)
+    return starts
+
+
+async def test_worker_interval_task_sleeps_interval_after_the_run_ended():
+    clock = FakeClock(now=1000.0)
+
+    starts = await _collect_starts(clock, runs=3, run_seconds=3, interval=10)
+
+    assert starts == [1010.0, 1023.0, 1036.0]
+
+
+async def test_worker_cron_task_runs_at_fire_times_and_skips_those_passed_during_a_run():
+    clock = FakeClock(now=at('2026-11-01T00:01:30.700'))
+
+    # every five minutes; each run lasts 7 minutes, so the next fire time passes during it
+    starts = await _collect_starts(clock, runs=3, run_seconds=420, cron='*/5 * * * *')
+
+    assert starts == [at('2026-11-01T00:05:00'), at('2026-11-01T00:15:00'), at('2026-11-01T00:25:00')]
+
+
+async def test_worker_cron_task_wakes_early_and_sleeps_again():
+    clock = FakeClock(now=at('2026-11-01T00:00:10'), early=(0.4, 0.05))
+
+    starts = await _collect_starts(clock, runs=1, run_seconds=0, cron='* * * * *')
+
+    assert starts == [at('2026-11-01T00:01:00')]
+    assert len(clock.sleeps) == 3
+    assert clock.sleeps[0] == 50
+    assert math.isclose(clock.sleeps[1], 0.4, abs_tol=1e-6)
+    assert math.isclose(clock.sleeps[2], 0.05, abs_tol=1e-6)
+
+
+async def test_worker_cron_task_never_runs_a_fire_time_twice_when_the_clock_steps_back():
+    clock = FakeClock(now=at('2026-11-01T00:00:50'))
+    starts: list[float] = []
+
+    async def body():
+        starts.append(clock.time())
+        if len(starts) == 2:
+            raise asyncio.CancelledError
+        clock.now -= 5  # the clock steps back during the run
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_periodic_task('step_back', body, cron='* * * * *', on_error='continue', clock=clock)
+
+    assert starts == [at('2026-11-01T00:01:00'), at('2026-11-01T00:02:00')]
 
 
 # --- Integration with handler class ---
@@ -358,7 +547,7 @@ async def test_handler_periodic_methods_are_callable():
         async def arrange(self, messages, pending):
             return []
 
-        @periodic(seconds=0.05)
+        @periodic(interval=0.05)
         async def tick(self):
             results.append('tick')
 
@@ -371,7 +560,7 @@ async def test_handler_periodic_methods_are_callable():
         run_periodic_task(
             name=name,
             coro_fn=method,
-            seconds=meta.seconds,
+            interval=meta.interval,
             on_error=meta.on_error,
         )
     )
@@ -393,7 +582,7 @@ async def test_handler_periodic_accesses_self_state():
         async def arrange(self, messages, pending):
             return []
 
-        @periodic(seconds=0.05)
+        @periodic(interval=0.05)
         async def increment(self):
             self.counter += 1
 
@@ -405,7 +594,7 @@ async def test_handler_periodic_accesses_self_state():
         run_periodic_task(
             name=name,
             coro_fn=method,
-            seconds=meta.seconds,
+            interval=meta.interval,
             on_error=meta.on_error,
         )
     )
@@ -425,12 +614,12 @@ async def test_multiple_periodic_tasks_run_independently():
         async def arrange(self, messages, pending):
             return []
 
-        @periodic(seconds=0.05)
+        @periodic(interval=0.05)
         async def fast_task(self):
             nonlocal fast_count
             fast_count += 1
 
-        @periodic(seconds=0.15)
+        @periodic(interval=0.15)
         async def slow_task(self):
             nonlocal slow_count
             slow_count += 1
@@ -444,7 +633,7 @@ async def test_multiple_periodic_tasks_run_independently():
             run_periodic_task(
                 name=name,
                 coro_fn=method,
-                seconds=meta.seconds,
+                interval=meta.interval,
                 on_error=meta.on_error,
             )
         )
@@ -474,7 +663,7 @@ def test_discover_periodic_tasks_skips_broken_descriptor():
 
         broken = BrokenDescriptor()
 
-        @periodic(seconds=10)
+        @periodic(interval=10)
         async def good_task(self):
             pass
 
@@ -502,7 +691,7 @@ async def test_periodic_run_increments_metrics():
     dur_before = periodic_task_duration.labels(name='test_metric_task')._sum.get()
 
     task = asyncio.create_task(
-        run_periodic_task(name='test_metric_task', coro_fn=fast_task, seconds=0.05, on_error='continue')
+        run_periodic_task(name='test_metric_task', coro_fn=fast_task, interval=0.05, on_error='continue')
     )
     await wait_for(lambda: call_count >= 2)
     task.cancel()
@@ -528,7 +717,7 @@ async def test_periodic_run_error_increments_error_metric():
     err_before = periodic_task_runs.labels(name='test_err_metric', status='error')._value.get()
 
     task = asyncio.create_task(
-        run_periodic_task(name='test_err_metric', coro_fn=failing_task, seconds=0.05, on_error='continue')
+        run_periodic_task(name='test_err_metric', coro_fn=failing_task, interval=0.05, on_error='continue')
     )
     await wait_for(
         lambda: periodic_task_runs.labels(name='test_err_metric', status='error')._value.get() >= err_before + 1
@@ -558,7 +747,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
         call_count += 1
 
     task = asyncio.create_task(
-        run_periodic_task(name='test_recorded', coro_fn=tracked_task, seconds=0.05, on_error='continue', recorder=rec)
+        run_periodic_task(name='test_recorded', coro_fn=tracked_task, interval=0.05, on_error='continue', recorder=rec)
     )
     await wait_for(lambda: call_count >= 2)
     task.cancel()
@@ -592,7 +781,7 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
 
     task = asyncio.create_task(
         run_periodic_task(
-            name='test_err_recorded', coro_fn=failing_task, seconds=0.05, on_error='continue', recorder=rec
+            name='test_err_recorded', coro_fn=failing_task, interval=0.05, on_error='continue', recorder=rec
         )
     )
     await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
@@ -632,7 +821,7 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
         run_periodic_task(
             name='cache.flush',
             coro_fn=task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
             recorder=rec,
             system=True,
@@ -674,7 +863,7 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
         run_periodic_task(
             name='user.task',
             coro_fn=task,
-            seconds=0.05,
+            interval=0.05,
             on_error='continue',
             recorder=rec,
         )

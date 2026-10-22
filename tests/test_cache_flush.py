@@ -737,7 +737,7 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
         flush_kwargs = flush_calls[0]
         assert flush_kwargs.get('system') is True
         # The interval comes from config (default flush_interval_seconds=3.0)
-        assert flush_kwargs.get('seconds') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
+        assert flush_kwargs.get('interval') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
         # Error policy: flush errors should not stop the whole engine.
         assert flush_kwargs.get('on_error') == 'continue'
         # The wrapped callable must be the engine's bound _flush_once.

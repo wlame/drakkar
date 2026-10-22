@@ -447,7 +447,7 @@ class CacheEngine:
             run_periodic_task(
                 name='cache.flush',
                 coro_fn=self._flush_once,
-                seconds=self._config.flush_interval_seconds,
+                interval=self._config.flush_interval_seconds,
                 on_error='continue',
                 recorder=self._recorder,
                 system=True,
@@ -463,7 +463,7 @@ class CacheEngine:
             run_periodic_task(
                 name='cache.cleanup',
                 coro_fn=self._cleanup_once,
-                seconds=self._config.cleanup_interval_seconds,
+                interval=self._config.cleanup_interval_seconds,
                 on_error='continue',
                 recorder=self._recorder,
                 system=True,
@@ -480,7 +480,7 @@ class CacheEngine:
                 run_periodic_task(
                     name='cache.sync',
                     coro_fn=self._sync_once,
-                    seconds=self._exchange.interval_seconds,
+                    interval=self._exchange.interval_seconds,
                     on_error='continue',
                     recorder=self._recorder,
                     system=True,
