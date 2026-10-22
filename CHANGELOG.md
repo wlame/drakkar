@@ -163,6 +163,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Archive lease refresh follows the lease.** A lease is now refreshed at a third of
+  its length, at most every 60 seconds. A short `lock_stale_seconds` no longer
+  lets a long archive pass lose its lease.
+
 - **Documentation matches the code.** The HTTP source path, the commit
   rules (per message, batched), the Kafka keys under `sources.kafka.*` in the
   tuning examples and in the calculator output, the fixed limit of 3 for

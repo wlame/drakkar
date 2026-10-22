@@ -31,6 +31,7 @@ from drakkar.recorder.election import (
     ElectionContext,
     ElectionLease,
     FilesystemElection,
+    lease_refresh_seconds,
 )
 from drakkar.recorder.history import history_dir
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
@@ -691,3 +692,46 @@ def test_a_lease_call_cancelled_on_the_loop_reads_as_not_held():
         finally:
             canceller.join()
     assert provider.entered.is_set()
+
+
+@pytest.mark.parametrize(
+    ('lease_seconds', 'expected'),
+    [(7200, 60.0), (180, 60.0), (90, 30.0), (30, 10.0), (10, 10 / 3)],
+)
+def test_lease_refresh_seconds_follows_short_leases(lease_seconds, expected):
+    assert lease_refresh_seconds(lease_seconds) == pytest.approx(expected)
+
+
+class _RecordingStopEvent:
+    """Stands in for the refresh thread's stop event: records each wait and ends the loop at once."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        return True
+
+    def set(self) -> None:
+        pass
+
+
+async def test_election_lease_refreshes_a_30s_lease_every_10s():
+    lease = ElectionLease(
+        MemoryElection(ElectionStore()),
+        _caller('memory'),
+        asyncio.get_running_loop(),
+        scope=SCOPE,
+        lease_seconds=30.0,
+        provider_name='memory',
+    )
+    stop_event = _RecordingStopEvent()
+    # Replaced so the refresh thread's wait shows the interval without sleeping it.
+    lease._stop_refreshing = stop_event
+    try:
+        assert await asyncio.to_thread(lease.acquire)
+        await wait_for(lambda: stop_event.waits)
+    finally:
+        await asyncio.to_thread(lease.release)
+
+    assert stop_event.waits[0] == pytest.approx(10.0)

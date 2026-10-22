@@ -36,7 +36,7 @@ from drakkar.fleet.card import sanitize_worker_name
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import CallResult, ResilientCaller
 from drakkar.providers.thread import PROVIDER_STOPPED, ProviderThread
-from drakkar.recorder.archive_lock import DEFAULT_REFRESH_SECONDS, FILESYSTEM_PROVIDER, ArchiveLock
+from drakkar.recorder.archive_lock import FILESYSTEM_PROVIDER, ArchiveLock
 from drakkar.recorder.election_consul import consul_election_factory
 from drakkar.recorder.election_postgres import postgres_election_factory
 from drakkar.recorder.election_redis import redis_election_factory
@@ -60,6 +60,10 @@ LOSS_UNCONFIRMED = 'unconfirmed'
 # How much longer than a call's own bound the archive thread waits for it, so
 # the caller's own timeout, not the thread's wait, normally ends a slow call.
 BRIDGE_SLACK_SECONDS = 1.0
+# The longest gap between two refreshes of a lease, whatever its length.
+MAX_REFRESH_SECONDS = 60.0
+# A lease is refreshed this many times in its length, so one missed refresh does not lose it.
+REFRESHES_PER_LEASE = 3
 
 
 @dataclass(frozen=True)
@@ -250,6 +254,11 @@ BUILTIN_ELECTIONS: dict[str, ElectionFactory] = {
 }
 
 
+def lease_refresh_seconds(lease_seconds: float) -> float:
+    """Seconds between two refreshes of a lease: a third of its length, at most :data:`MAX_REFRESH_SECONDS`."""
+    return min(MAX_REFRESH_SECONDS, lease_seconds / REFRESHES_PER_LEASE)
+
+
 class ElectionLease:
     """The archive thread's synchronous handle on one lease of one scope; one lease serves one pass.
 
@@ -259,7 +268,8 @@ class ElectionLease:
     :data:`BRIDGE_SLACK_SECONDS`. A call that does not finish in that time,
     or does not succeed (``ok`` False), reads as not held.
 
-    While held, a daemon thread refreshes the lease every ``refresh_seconds``.
+    While held, a daemon thread refreshes the lease every ``refresh_seconds``
+    (default: :func:`lease_refresh_seconds` of the lease length).
     It ends on :meth:`release`, and on a refresh that does not answer True;
     from then on :meth:`is_held` answers False without a provider call.
     :attr:`loss_reason` says why a lease reads as not held.
@@ -274,7 +284,7 @@ class ElectionLease:
         scope: str,
         lease_seconds: float,
         provider_name: str,
-        refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
+        refresh_seconds: float | None = None,
         token: str | None = None,
     ) -> None:
         self.token = token if token is not None else secrets.token_hex(8)
@@ -284,7 +294,7 @@ class ElectionLease:
         self._provider = provider
         self._caller = caller
         self._loop = loop
-        self._refresh_seconds = refresh_seconds
+        self._refresh_seconds = lease_refresh_seconds(lease_seconds) if refresh_seconds is None else refresh_seconds
         self._wait_seconds = caller.operation_bound_seconds + BRIDGE_SLACK_SECONDS
         self._acquired_once = False
         # True once the provider answered True to the acquire.
