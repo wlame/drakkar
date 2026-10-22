@@ -632,8 +632,9 @@ The `provider` key names the election provider that made the lock, here
 `filesystem`. A worker of release 2.4.0 reads this body without trouble: it
 looks at `token`, `worker` and `instance` and ignores the other keys.
 
-- **Refresh.** The holder refreshes the lock's modification time every 60
-  seconds while its pass runs. At the end of the pass it deletes the lock,
+- **Refresh.** The holder refreshes the lock's modification time every
+  third of `history.archive.lock_stale_seconds`, at most every 60 seconds,
+  while its pass runs. At the end of the pass it deletes the lock,
   but only while the lock still holds its own token.
 - **Takeover.** A lock older than `history.archive.lock_stale_seconds`
   (default 7200) belongs to a dead archiver. The next worker renames it
@@ -683,8 +684,9 @@ history:
   provider. Workers on different providers cannot see each other's leases,
   so nothing then keeps two of them from archiving at the same time.
 - **The lease length** is `history.archive.lock_stale_seconds` (default
-  7200) whichever provider is used. The holder refreshes the lease every 60
-  seconds. A holder that died stops refreshing, and once the lease length has
+  7200) whichever provider is used. The holder refreshes the lease every
+  third of that length, at most every 60 seconds. A holder that died stops
+  refreshing, and once the lease length has
   passed another worker may take the scope over. With a `consul` provider
   the value may not exceed 86400.
 - **Providers.** `filesystem`, `postgres`, `redis` and `consul` are built in.
@@ -928,11 +930,11 @@ consul](fleet.md#consul) and [Security](security.md#provider-credentials).
   with another's. With the `consul` provider `lock_stale_seconds` is at most
   86400; a larger value fails the load with
   `history.archive.lock_stale_seconds (<n>) must be <= 86400 when history.archive.election.provider is consul`.
-  The holder renews the session every 60 seconds, and Consul may end the
-  session as early as its time to live, half of `lock_stale_seconds`, after
-  the last renew. So keep `lock_stale_seconds` well above 120: with 120 or
-  less the time to live is 60 seconds or less, and the lease can end between
-  two renewals.
+  The holder renews the session every third of `lock_stale_seconds`, at
+  most every 60 seconds. Consul may end the session as early as its time to
+  live, half of `lock_stale_seconds` (at least 10 seconds), after the last
+  renew. The renew interval is always shorter than that, so the lease does
+  not end between two renewals.
 - **Acquire.** The provider creates the session and writes the body to the key
   with `?acquire=<session>`. Consul grants this only to a session when no other
   session holds the key. When another session holds it, the provider destroys
