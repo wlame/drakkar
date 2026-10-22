@@ -274,7 +274,11 @@ next_slot_boundary() {
 # Sleep until the epoch time $1; return at once when it has passed.
 #   sleep_until_epoch <epoch>
 sleep_until_epoch() {
-    sleep "$(python3 -c 'import sys, time; print(f"{max(0.0, float(sys.argv[1]) - time.time()):.3f}")' "$1")"
+    local left
+    # Assigned first: the bash of macOS (3.2) splits a quoted command
+    # substitution with these quotes inside it when it is a command argument.
+    left=$(python3 -c 'import sys, time; print("%.3f" % max(0.0, float(sys.argv[1]) - time.time()))' "$1")
+    sleep "$left"
 }
 
 # True when the epoch time $1 is later than the epoch time $2.
