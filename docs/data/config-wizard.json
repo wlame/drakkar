@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "cpu": {"label": "CPU cores available", "help": "total on machine", "default": 8, "min": 1, "max": 512},
+    "ram": {"label": "RAM available (GB)", "help": "total on machine", "default": 16, "min": 1, "max": 4096},
+    "p80": {"label": "Task duration p80 (ms)", "help": "80th percentile", "default": 500, "min": 1, "max": 600000},
+    "sinks": {"label": "Sink count", "help": "distinct sinks in on_task_complete()", "default": 2, "min": 1, "max": 10},
+    "stdout": {"label": "Avg stdout size (KB)", "help": "per task output", "default": 2, "min": 0, "max": 10240},
+    "workers": {"label": "Workers in cluster", "help": "horizontal instances", "default": 1, "min": 1, "max": 100},
+    "partitions": {"label": "Kafka partitions", "help": "source topic", "default": 50, "min": 1, "max": 1000}
+  },
+  "choices": {
+    "hosts": {
+      "label": "Where do the workers of one cluster run?",
+      "help": "Workers on one host share one folder for their files. Workers on several hosts need a folder that every worker mounts, or a service that every worker reaches.",
+      "values": [
+        {"value": "one", "label": "One host", "help": "All workers of the cluster run on the same machine."},
+        {"value": "many", "label": "Several hosts", "help": "The workers of the cluster run on two or more machines."}
+      ],
+      "default": "one"
+    },
+    "services": {
+      "label": "Which of these does every worker reach?",
+      "help": "Check each one that every worker of the cluster can reach. Check nothing when there is none.",
+      "values": [
+        {"value": "folder", "label": "A folder that every worker mounts", "help": "The same folder at the same path on every host, for example on a network file system."},
+        {"value": "postgres", "label": "Postgres", "help": "A Postgres database."},
+        {"value": "redis", "label": "Redis", "help": "A Redis server."},
+        {"value": "consul", "label": "Consul", "help": "A Consul agent and its HTTP API."}
+      ],
+      "default": []
+    }
+  },
+  "features": {
+    "registry": {"label": "Registry", "help": "How the workers find each other. The workers list and the cache exchange use it."},
+    "election": {"label": "Election", "help": "Which worker runs a cluster task, the archive included, in each slot."}
+  },
+  "providers": {
+    "registry": {
+      "filesystem": {
+        "label": "Files in the shared folder",
+        "needs": [],
+        "fragment": {"fleet": {"registry": {"provider": "filesystem"}}},
+        "explain": "One card file per worker in <shared.dir>/fleet/workers/, or in <storage.dir>/fleet/workers/ when shared.dir is empty. Workers that see the same folder see each other.",
+        "docs": "fleet.md#filesystem"
+      },
+      "none": {
+        "label": "None (no peers)",
+        "needs": [],
+        "fragment": {"fleet": {"registry": {"provider": "none"}}},
+        "explain": "No registry: each worker knows only itself.",
+        "docs": "fleet.md#providers"
+      },
+      "postgres": {
+        "label": "Postgres",
+        "needs": ["postgres"],
+        "fragment": {"fleet": {"registry": {"provider": "postgres", "connection": "main"}}},
+        "explain": "One row per worker in the table fleet_workers of the schema of the connection. The age of a card comes from the clock of the database server.",
+        "docs": "fleet.md#postgres"
+      },
+      "redis": {
+        "label": "Redis",
+        "needs": ["redis"],
+        "fragment": {"fleet": {"registry": {"provider": "redis", "connection": "main"}}},
+        "explain": "One key per worker and an index of the workers, under the key prefix of the connection. The age of a card comes from the clock of the Redis server.",
+        "docs": "fleet.md#redis"
+      },
+      "consul": {
+        "label": "Consul",
+        "needs": ["consul"],
+        "fragment": {"fleet": {"registry": {"provider": "consul", "connection": "main"}}},
+        "explain": "One key per worker under the key prefix of the connection, held by a session of the worker. A worker is online while its key has a session.",
+        "docs": "fleet.md#consul"
+      }
+    },
+    "election": {
+      "filesystem": {
+        "label": "Lock files in the shared folder",
+        "needs": [],
+        "fragment": {"periodic": {"election": {"provider": "filesystem"}}},
+        "explain": "One lock file per cluster task in <shared.dir>/tasks/<cluster>/, or under storage.dir when shared.dir is empty. Only the workers that see the same folder take part in one election.",
+        "docs": "local-databases.md#the-task-lock"
+      },
+      "postgres": {
+        "label": "Postgres",
+        "needs": ["postgres"],
+        "fragment": {"periodic": {"election": {"provider": "postgres", "connection": "main"}}},
+        "explain": "One row per cluster task in the table task_locks of the schema of the connection.",
+        "docs": "local-databases.md#the-postgres-election-provider"
+      },
+      "redis": {
+        "label": "Redis",
+        "needs": ["redis"],
+        "fragment": {"periodic": {"election": {"provider": "redis", "connection": "main"}}},
+        "explain": "One key per cluster task under the key prefix of the connection.",
+        "docs": "local-databases.md#the-redis-election-provider"
+      },
+      "consul": {
+        "label": "Consul",
+        "needs": ["consul"],
+        "fragment": {"periodic": {"election": {"provider": "consul", "connection": "main"}}},
+        "explain": "One key per cluster task under the key prefix of the connection, held by a session.",
+        "docs": "local-databases.md#the-consul-election-provider"
+      }
+    }
+  },
+  "connections": {
+    "postgres": {
+      "fragment": {"connections": {"postgres": {"main": {"schema": "drakkar"}}}},
+      "explain": "connections.postgres.main: the database of the providers. At the first start the worker creates the schema drakkar and its tables.",
+      "docs": "fleet.md#connections",
+      "env": [
+        {"name": "DK_CONNECTIONS__POSTGRES__MAIN__DSN", "path": "connections.postgres.main.dsn", "explain": "The Postgres connection string, with the user and the password. The config does not load while this variable is not set."}
+      ]
+    },
+    "redis": {
+      "fragment": {"connections": {"redis": {"main": {"key_prefix": "drakkar:"}}}},
+      "explain": "connections.redis.main: the Redis server of the providers. Every key of the providers starts with drakkar:.",
+      "docs": "fleet.md#connections",
+      "env": [
+        {"name": "DK_CONNECTIONS__REDIS__MAIN__URL", "path": "connections.redis.main.url", "explain": "The whole Redis URL, with the password when the server needs one. When this variable is not set, the worker uses redis://localhost:6379/0."}
+      ]
+    },
+    "consul": {
+      "fragment": {"connections": {"consul": {"main": {"address": "http://127.0.0.1:8500"}}}},
+      "explain": "connections.consul.main: the Consul agent of the providers. Change the address to the agent that your workers reach.",
+      "docs": "fleet.md#connections",
+      "env": [
+        {"name": "DK_CONNECTIONS__CONSUL__MAIN__TOKEN", "path": "connections.consul.main.token", "explain": "The Consul ACL token. Leave it unset when the agent needs none."}
+      ]
+    }
+  },
+  "shared": {
+    "none": {"fragment": {}},
+    "folder": {
+      "fragment": {"shared": {"dir": "/mnt/drakkar-shared"}},
+      "explain": "shared.dir: change the path to where every worker mounts the folder. The registry cards, the sealed history and the archives go there.",
+      "docs": "local-databases.md#sharing-folders-across-workers"
+    }
+  },
+  "rules": [
+    {"when": {"workers": "one"}, "registry": ["filesystem"], "election": ["filesystem"], "shared": "none"},
+    {"when": {"hosts": "one"}, "registry": ["filesystem"], "election": ["filesystem"], "shared": "none"},
+    {
+      "when": {"services_include": "folder"},
+      "registry": ["consul", "redis", "postgres", "filesystem"],
+      "election": ["consul", "redis", "postgres", "filesystem"],
+      "shared": "folder"
+    },
+    {
+      "when": {},
+      "registry": ["consul", "redis", "postgres", "none"],
+      "election": ["consul", "redis", "postgres", "filesystem"],
+      "shared": "none"
+    }
+  ],
+  "notes": [
+    {
+      "id": "election_per_host",
+      "when": {"hosts": "many", "services_exclude": "folder", "election": "filesystem"},
+      "text": "Without a shared folder or a service, each host elects its own worker. A cluster task runs once per host, not once per cluster.",
+      "docs": "periodic-tasks.md#the-election",
+      "fragment": {}
+    },
+    {
+      "id": "archive_one_host_only",
+      "when": {"hosts": "many", "services_exclude": "folder", "election": ["postgres", "redis", "consul"]},
+      "text": "Without a shared folder, the archive pass reads only the history folder of the host that holds the lease. The sealed files of the other hosts are never archived. So this config turns the archive off with history.archive.enabled: false, and nothing deletes the sealed files. Add a folder that every worker mounts to keep the archive on.",
+      "docs": "local-databases.md#opting-out",
+      "fragment": {"history": {"archive": {"enabled": false}}}
+    },
+    {
+      "id": "registry_none",
+      "when": {"registry": "none"},
+      "text": "With no registry, the workers list shows only the current worker, and the cache exchange pulls nothing.",
+      "docs": "fleet.md#providers",
+      "fragment": {}
+    },
+    {
+      "id": "ui_needed",
+      "when": {"registry": ["filesystem", "postgres", "redis", "consul"]},
+      "text": "The registry needs the UI server. Keep ui.enabled: true, the default.",
+      "docs": "fleet.md#what-you-get-with-the-defaults",
+      "fragment": {}
+    }
+  ],
+  "section_order": ["sources", "executor", "ui", "history", "shared", "connections", "fleet", "periodic"],
+  "base": {"sources": {"kafka": {"enabled": true}}},
+  "examples": []
+}
