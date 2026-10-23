@@ -59,10 +59,13 @@ from drakkar.metrics import (
     recorder_flush_batches_dropped,
     recorder_flush_duration,
     recorder_flush_retries,
+    recorder_memory_evicted_rows,
+    recorder_memory_write_failures,
     recorder_requeue_overflow,
     recorder_seal_failures,
     recorder_unsealed_files,
 )
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder.archive import observe_archive_footprint, run_archive_pass
 from drakkar.recorder.election import ThreadFence
 from drakkar.recorder.helpers import (
@@ -77,10 +80,19 @@ from drakkar.recorder.helpers import (
     sanitize_env_value,
 )
 from drakkar.recorder.history import history_dir
-from drakkar.recorder.memstore import MEMORY_CLOSE_WAIT_SECONDS, MIB, MemoryStore
+from drakkar.recorder.memstore import (
+    EVICT_MIN_INTERVAL_SECONDS,
+    MEMORY_CLOSE_WAIT_SECONDS,
+    MIB,
+    MemoryCoverage,
+    MemoryStore,
+    delete_id_prefix,
+    is_transient_memory_error,
+)
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
+    INSERT_EVENT_SQL,
     SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
     SCHEMA_WORKER_STATE,
@@ -116,16 +128,20 @@ logger = structlog.get_logger()
 _LIVE_RECORDERS: weakref.WeakSet[EventRecorder] = weakref.WeakSet()
 _LAST_BREATH_REGISTERED = False
 
-# Rows per ``executemany`` in one flush. Two jobs: it bounds how long the
+# Rows per ``executemany`` in one stage. Two jobs: it bounds how long the
 # loop is held building row tuples (one ``dict.get`` per column per event,
-# so an unchunked 30k-event flush stalls the loop for tens of milliseconds),
-# and it bounds what a flush that keeps failing can lose — a dropped chunk
-# instead of the whole buffer. 5k rows is ~4 ms of tuple building and, at 19
-# columns, 95k bind parameters, comfortably inside SQLite's limits.
+# so an unchunked 30k-event stage stalls the loop for tens of milliseconds),
+# and it bounds what a write that keeps failing can lose — a dropped chunk
+# instead of the whole buffer. 5k rows is ~4 ms of tuple building and, at 20
+# columns, 100k bind parameters, comfortably inside SQLite's limits.
 FLUSH_CHUNK_ROWS = 5_000
 
-# How often ``_flush_loop`` looks at the buffer while waiting out its
-# interval. Small enough that a burst does not sit until the next tick,
+# The event columns a row tuple takes from the event dict; the recorder
+# puts the id in front.
+_ROW_COLUMNS = EVENT_COLUMNS[1:]
+
+# How often the memory and file loops look at their queues while waiting out
+# their interval. Small enough that a burst does not sit until the next tick,
 # large enough to be invisible next to the workloads the recorder observes.
 FLUSH_POLL_SECONDS = 0.25
 
@@ -156,6 +172,22 @@ def _event_weight(event: dict) -> int:
     makes the flush trigger slightly later than the nominal threshold.
     """
     return sum(len(value) for field in _HEAVY_EVENT_FIELDS if isinstance(value := event.get(field), str))
+
+
+def _row_tuple(row_id: int, event: dict) -> tuple:
+    """The ``events`` row of one recorded event, with its id first, in ``EVENT_COLUMNS`` order.
+
+    ``origin`` is NOT NULL in the schema with a DEFAULT of ``'kafka'``, but
+    the Kafka-path record helpers leave it unset; ``None`` becomes
+    ``'kafka'`` here so the column default never fights an explicit NULL.
+    """
+    return (
+        row_id,
+        *(
+            'kafka' if (column == 'origin' and event.get(column) is None) else event.get(column)
+            for column in _ROW_COLUMNS
+        ),
+    )
 
 
 def _time_left(deadline: float | None) -> float | None:
@@ -273,20 +305,49 @@ class EventRecorder(EventWriter):
         # The memory store; opened in start() when store_events is on,
         # closed last in stop().
         self._memory_store: MemoryStore | None = None
-        self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
-        # Approximate payload bytes appended since the last flush. Reset at
-        # flush rather than decremented per drained row: it exists to decide
-        # "flush now", where over-counting costs one early write and
+        # The intake: events recorded and not yet written to the memory
+        # store. ``_record`` appends (from the main loop and the webapp
+        # loop thread); only stage M pops, on the main loop.
+        self._intake: deque[dict] = deque(maxlen=config.recorder.max_buffer)
+        # The file queue: ``(id, row tuple)`` pairs that stage M wrote to the
+        # memory store and stage F has not yet written to the file. The id
+        # rides next to the row, never inside the event dict: the fan-out may
+        # encode that dict on the UI thread at any time.
+        self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.recorder.max_buffer)
+        # Approximate payload bytes appended since the last stage M. Reset
+        # at the stage rather than decremented per drained row: it exists to
+        # decide "write now", where over-counting costs one early write and
         # under-counting falls back to the interval.
         self._buffered_bytes = 0
-        # Whether an appended event will ever reach a table. The flush loop
-        # is created only when ``store_events`` is on (and only when there
-        # is a recorder file to write to), and ``_flush`` returns early
-        # without one — so in the other configurations an append is a leak:
-        # the deque fills to ``max_buffer`` and every further event counts
-        # as a drop forever. Both inputs are process-lifetime constants, so
-        # this is resolved once here rather than re-read on every event.
-        self._persists_events: bool = self._store.store_events and self._has_file
+        # Whether an appended event will ever reach a table: with
+        # ``store_events`` off there is no memory store and no file table,
+        # so an append would only fill the deque and count drops forever.
+        self._persists_events: bool = self._store.store_events
+        # Row ids, one counter for the process lifetime, assigned when stage
+        # M pops a chunk (one consumer under ``_memory_lock`` gives one
+        # order; ``_record`` runs on two threads). ``_last_id`` is the last
+        # id handed out and kept; ``_floor_id`` the lowest id the memory
+        # store holds (``_last_id + 1`` when it is empty).
+        self._next_id = 1
+        self._last_id = 0
+        self._floor_id = 1
+        self._evicted = False
+        self._evicted_max_ts = 0.0
+        # The memory store holds rows up to this id that must go (a gap
+        # left by a failed or cancelled chunk); the next stage M deletes
+        # them before it writes anything.
+        self._pending_gap_id: int | None = None
+        # The writer may hold an open transaction of a chunk whose write was
+        # cancelled; the next stage M rolls it back first.
+        self._memory_dirty = False
+        # Stage M runs under this lock, stage F under ``_flush_lock``. No
+        # code takes this lock while it holds ``_flush_lock``.
+        self._memory_lock = asyncio.Lock()
+        # The memory loop sets it after each tick so the file loop writes on
+        # the same tick.
+        self._file_wakeup = asyncio.Event()
+        # One line per 60 s for each memory write and eviction log event.
+        self._memory_log = RateLimitedLog(time.monotonic)
         self._db: aiosqlite.Connection | None = None
         # Dedicated reader connection used by the debug UI for SELECTs.
         # aiosqlite serializes ops per connection, so without this the UI
@@ -299,7 +360,8 @@ class EventRecorder(EventWriter):
         # a connection whose WAL has just been torn down.
         self._reader_db: aiosqlite.Connection | None = None
         self._db_path: str = ''
-        self._flush_task: asyncio.Task | None = None
+        self._memory_task: asyncio.Task | None = None
+        self._file_task: asyncio.Task | None = None
         self._rotation_task: asyncio.Task | None = None
         # The sleep of the rotation loop; tests replace it so no test waits for a
         # real interval.
@@ -345,23 +407,15 @@ class EventRecorder(EventWriter):
         self._running = False
         self._state_provider: Callable[[], dict] | None = None
         self._drakkar_config: DrakkarConfig | None = None
-        # Serialize ``_flush`` calls. The periodic ``_flush_loop`` and
-        # debug endpoints (via ``drakkar.concurrency.dispatch_to_loop``)
-        # can both schedule flushes on the main loop. Both paths drain
-        # ``self._buffer`` and observe ``recorder_flush_duration``; without
-        # a lock, two concurrent flushes could each grab half of the
-        # buffer and race on the histogram observation. The lock is
-        # bound to whichever loop first invokes ``_flush`` — on the main
-        # loop for production flows — and is cheap: a plain asyncio.Lock.
+        # Serializes stage F: the file loop, file reads, rotation and stop
+        # can all run it on the main loop, and two at once would each take
+        # part of the file queue and race on the duration histogram.
         self._flush_lock = asyncio.Lock()
-        # Consecutive OperationalError count for the CURRENTLY re-queued
-        # batch. Incremented on each failed flush; reset on any successful
-        # flush OR when a batch is dropped after exceeding
-        # ``max_flush_retries``. The counter is instance-level (not per
-        # batch) because we re-queue the failed rows at the FRONT of the
-        # buffer — the very next flush picks them up again, so a single
-        # counter suffices. New rows appended while we're in a retry loop
-        # simply ride along with the retried batch on the next flush.
+        # Consecutive failures of the file chunk at the front of the file
+        # queue. Reset on a successful stage F or when a chunk is dropped
+        # after ``max_flush_retries``; one counter is enough because a
+        # failed chunk goes back to the FRONT of the file queue and the next
+        # stage F takes it first.
         self._flush_failures: int = 0
         # Read side. Given callables rather than values for the connection
         # and the DB path: both are swapped on every rotation.
@@ -373,7 +427,7 @@ class EventRecorder(EventWriter):
                 cluster_name=cluster_name,
                 reader=lambda: self._reader_db or self._db,
                 db_path=lambda: self._db_path,
-                flush=self._flush,
+                flush=self.flush,
             )
         )
 
@@ -447,27 +501,43 @@ class EventRecorder(EventWriter):
 
     @property
     def reader_db(self) -> aiosqlite.Connection | None:
-        """Return the dedicated reader aiosqlite connection.
+        """The read-only connection of the recorder file; the same as :attr:`file_reader_db`."""
+        return self._reader_db
 
-        The debug UI should use this connection for SELECTs — it runs on a
-        separate aiosqlite worker thread from the writer, so UI reads
-        don't queue behind buffered-event flushes. Returns ``None`` when
-        the recorder has not been started yet or was started without a
-        a file (``persistence='none'``), matching the semantics of
-        ``_db``. Callers should check for ``None`` before executing.
+    @property
+    def file_reader_db(self) -> aiosqlite.Connection | None:
+        """The read-only connection of the live recorder file; ``None`` before start or without a file.
+
+        It runs on its own aiosqlite thread, so file reads do not queue
+        behind the file writes.
         """
         return self._reader_db
 
-    async def flush(self) -> None:
-        """Public entry point to flush pending events to the writer DB.
+    def memory_coverage(self) -> MemoryCoverage | None:
+        """The id range the memory store holds; ``None`` when there is no memory store."""
+        if self._memory_store is None:
+            return None
+        return MemoryCoverage(
+            floor_id=self._floor_id,
+            last_id=self._last_id,
+            evicted=self._evicted,
+            evicted_max_ts=self._evicted_max_ts,
+        )
 
-        Exposed for the debug server — it needs to force a flush before
-        running SELECTs through ``reader_db`` so the UI sees every event
-        recorded up to the query moment. The underlying ``_flush`` method
-        is the same; this alias keeps callers off private attributes and
-        gives us a stable public API to evolve.
+    async def flush(self) -> None:
+        """Write the recorded events to the memory store, then to the file.
+
+        For reads of the file: they see every event recorded up to the
+        call. Each stage runs shielded, so a caller that is cancelled (a
+        read that timed out) never stops a stage halfway; the stage
+        finishes on its own.
         """
-        await self._flush()
+        await asyncio.shield(self._stage_memory(EVICT_MIN_INTERVAL_SECONDS))
+        await asyncio.shield(self._stage_file())
+
+    async def flush_memory(self) -> None:
+        """Write the recorded events to the memory store only, shielded like :meth:`flush`."""
+        await asyncio.shield(self._stage_memory(EVICT_MIN_INTERVAL_SECONDS))
 
     def set_state_provider(self, provider: Callable[[], dict]) -> None:
         """Set callback that returns current worker state (uptime, partitions, pool)."""
@@ -481,7 +551,7 @@ class EventRecorder(EventWriter):
         it is installed as the live writer. Used by :meth:`start` during
         first open and by :meth:`_rotate` to prime the new DB ahead of the
         atomic swap — the race window where the new file was live but
-        schemaless would otherwise let a concurrent ``_flush`` hit
+        schemaless would otherwise let a concurrent stage F hit
         ``no such table: events``.
         """
         if self._store.store_events:
@@ -614,8 +684,8 @@ class EventRecorder(EventWriter):
                 self._running = False
                 raise
             if self._store.store_events:
-                self._flush_task = asyncio.create_task(self._flush_loop())
-                self._watch_background_task(self._flush_task, 'flush')
+                self._file_task = asyncio.create_task(self._file_loop())
+                self._watch_background_task(self._file_task, 'file_flush')
             self._rotation_task = asyncio.create_task(self._rotation_loop())
             self._watch_background_task(self._rotation_task, 'rotation')
             if self._store.store_state:
@@ -631,6 +701,10 @@ class EventRecorder(EventWriter):
                     hint='sealed recorder database files are never deleted automatically; '
                     'prune the folder yourself or set history.archive.enabled: true',
                 )
+        if self._memory_store is not None:
+            # In either mode: the memory store holds the recent events.
+            self._memory_task = asyncio.create_task(self._memory_loop())
+            self._watch_background_task(self._memory_task, 'memory_flush')
         # Outside the file branch on purpose: resource samples still feed
         # WS subscribers, so the sampler runs in memory-only mode too.
         self._host_sample_task = asyncio.create_task(self._host_sample_loop())
@@ -753,21 +827,19 @@ class EventRecorder(EventWriter):
         )
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
-        """Append event to buffer and broadcast to WS subscribers.
+        """Append the event to the intake and broadcast it to WS subscribers.
 
-        Buffering is skipped entirely when this recorder will never persist
-        events (memory-only ``storage.dir: ''``, or ``store_events: false``):
-        nothing would ever drain the deque, so it would pin ``max_buffer``
-        events — ``task_completed`` carries the whole subprocess stdout and
-        stderr — and report every event after that as a drop. The WS
-        fan-out below still runs; the live UI is the point of those modes.
+        The event dict is never changed after this call: its row id is
+        assigned later, by stage M, and rides next to the row. The fan-out
+        may encode the same dict on the UI thread at any time.
 
-        Observability: when the deque is already at capacity, the next
-        append will silently evict the oldest entry. We detect that case
-        BEFORE the append (``len == maxlen``) and increment the drop
-        counter once per dropped event. After the append, the buffer
-        gauge is refreshed to the new depth so operators can watch for
-        contention without scraping internal state.
+        Nothing is appended with ``store_events`` off (no table would ever
+        take the event), nor for ``skip_db`` events.
+
+        Observability: when the intake is already at capacity, the next
+        append silently evicts the oldest entry. That case is detected
+        BEFORE the append (``len == maxlen``) and counted once per dropped
+        event; after the append the buffer gauge is refreshed.
         """
         event['dt'] = format_dt(event['ts'])
         if not skip_db and self._persists_events:
@@ -775,19 +847,19 @@ class EventRecorder(EventWriter):
             # subsequent append drops the leftmost entry. We count one
             # drop per event lost — prometheus_client Counter.inc() is
             # thread-safe so callers from multiple loops/threads are fine.
-            maxlen = self._buffer.maxlen
-            if maxlen is not None and len(self._buffer) >= maxlen:
+            maxlen = self._intake.maxlen
+            if maxlen is not None and len(self._intake) >= maxlen:
                 recorder_dropped_events.inc()
-            self._buffer.append(event)
+            self._intake.append(event)
             self._buffered_bytes += _event_weight(event)
-            recorder_buffer_size.set(len(self._buffer))
+            self._update_buffer_gauge()
         if not skip_ws:
             self._fanout.broadcast(event)
 
     # --- Worker config (autodiscovery) ---
 
     async def write_config(self, drakkar_config: DrakkarConfig) -> None:
-        """Write worker configuration to worker_config table.
+        """Write worker configuration to the worker_config table of the memory store and of the file.
 
         Security note: this SQLite file is downloadable via the debug UI.
         Any value written here is effectively public to anyone who can
@@ -797,8 +869,26 @@ class EventRecorder(EventWriter):
           values have embedded credentials stripped.
         """
         self._drakkar_config = drakkar_config
-        if not self._db or not self._store.store_config:
+        if not self._store.store_config:
             return
+        row = self._config_row(drakkar_config)
+        store = self._memory_store
+        if store is not None:
+            # Under the memory lock: a stage M between its insert and its
+            # commit must not commit, or roll back, this row with its chunk.
+            async with self._memory_lock:
+                await self._insert_config_row(store.writer, row)
+        if self._db:
+            await self._insert_config_row(self._db, row)
+
+    async def _write_config_to_file(self) -> None:
+        """Write the worker_config row into the current file only (a new file after a rotation)."""
+        if self._drakkar_config is None or not self._db or not self._store.store_config:
+            return
+        await self._insert_config_row(self._db, self._config_row(self._drakkar_config))
+
+    def _config_row(self, drakkar_config: DrakkarConfig) -> list[Any]:
+        """The values of worker_config row 1, secrets redacted."""
         env_vars = {name: sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
         sinks: dict[str, list[str]] = {}
         sinks_cfg = drakkar_config.sinks
@@ -816,40 +906,45 @@ class EventRecorder(EventWriter):
         consumer_group = drakkar_config.resolved_consumer_group
 
         now = time.time()
-        await self._db.execute(
+        return [
+            self._worker_name,
+            self._cluster_name or None,
+            detect_worker_ip(),
+            self._config.port,
+            self._config.public_url or None,
+            redact_url(drakkar_config.kafka.brokers),
+            source_topic,
+            consumer_group,
+            drakkar_config.executor.binary_path,
+            drakkar_config.executor.max_executors,
+            drakkar_config.executor.task_timeout_seconds,
+            drakkar_config.executor.max_retries,
+            drakkar_config.executor.window_size,
+            encode_json_str(sinks),
+            encode_json_str(env_vars),
+            now,
+            format_dt(now),
+        ]
+
+    @staticmethod
+    async def _insert_config_row(db: aiosqlite.Connection, row: list[Any]) -> None:
+        """Replace worker_config row 1 on ``db`` and commit."""
+        await db.execute(
             """INSERT OR REPLACE INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
                 source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                self._worker_name,
-                self._cluster_name or None,
-                detect_worker_ip(),
-                self._config.port,
-                self._config.public_url or None,
-                redact_url(drakkar_config.kafka.brokers),
-                source_topic,
-                consumer_group,
-                drakkar_config.executor.binary_path,
-                drakkar_config.executor.max_executors,
-                drakkar_config.executor.task_timeout_seconds,
-                drakkar_config.executor.max_retries,
-                drakkar_config.executor.window_size,
-                encode_json_str(sinks),
-                encode_json_str(env_vars),
-                now,
-                format_dt(now),
-            ],
+            row,
         )
-        await self._db.commit()
+        await db.commit()
 
     # --- Worker state (periodic snapshots) ---
 
     async def _state_sync_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._store.state_sync_interval_seconds)
-            # Same per-iteration guard as ``_flush_loop``: one bad snapshot
+            # Same per-iteration guard as the memory loop: one bad snapshot
             # (a state provider that raises, a locked DB) must not end the
             # loop and freeze ``worker_state`` for the rest of the run.
             try:
@@ -959,7 +1054,8 @@ class EventRecorder(EventWriter):
         self._running = False
         self._archive_stop.set()
         for task in (
-            self._flush_task,
+            self._memory_task,
+            self._file_task,
             self._rotation_task,
             self._state_task,
             self._host_sample_task,
@@ -981,18 +1077,19 @@ class EventRecorder(EventWriter):
         # Drop any pending deferred start events and disarm the shared sweep.
         self._fanout.close()
 
-        # Final flush + state sync are best-effort: a failure in either must
+        # Final stages + state sync are best-effort: a failure in any must
         # not skip the seal and the _LIVE_RECORDERS discard below, or
         # shutdown would leak connections and interpreter exit would try to
-        # flush into a recorder that never tore down.
+        # flush into a recorder that never tore down. Stage M first, then
+        # stage F, each under its own lock.
         try:
-            await self._flush()
+            await self._stage_memory(0.0)
         except Exception as exc:
-            await logger.awarning(
-                'recorder_final_flush_failed',
-                category='recorder',
-                error=str(exc),
-            )
+            await logger.awarning('recorder_final_flush_failed', category='recorder', stage='memory', error=str(exc))
+        try:
+            await self._stage_file()
+        except Exception as exc:
+            await logger.awarning('recorder_final_flush_failed', category='recorder', stage='file', error=str(exc))
         try:
             await self._sync_state()
         except Exception as exc:
@@ -1045,58 +1142,54 @@ class EventRecorder(EventWriter):
         await self._publish(path, meta, timeout=remaining)
 
     def _last_breath_flush(self) -> None:
-        """Synchronous, best-effort buffer flush at interpreter exit.
+        """Synchronous, best-effort write of the waiting rows to the file at interpreter exit.
 
         Reached through the process-wide atexit hook while this recorder
         is in ``_LIVE_RECORDERS`` (added by :meth:`start`, removed by a
         clean :meth:`stop`). It fires exactly when the async machinery
         could not do its job — a startup failure after the recorder came
-        up, an unhandled exception, a stray ``sys.exit`` —
-        and writes the still-buffered rows straight through :mod:`sqlite3`,
-        because at interpreter exit the event loop (and aiosqlite's worker
-        thread) are already gone. The most interesting events of a dying
-        worker are the last ones; this is what keeps them.
+        up, an unhandled exception, a stray ``sys.exit`` — and writes
+        straight through :mod:`sqlite3`, because at interpreter exit the
+        event loop (and aiosqlite's worker thread) are already gone. The
+        most interesting events of a dying worker are the last ones; this
+        is what keeps them.
+
+        The file queue goes first (its rows already carry ids), then the
+        intake with fresh ids, so the file keeps id order. Without a file
+        it does nothing: the memory store dies with the process.
 
         Best-effort by design: a short busy timeout, every failure path
         silent. Cannot fire on SIGKILL / OOM — the watchdog file covers
-        detecting those, and whatever the last periodic flush wrote is
+        detecting those, and whatever the last periodic write wrote is
         what remains.
         """
-        if (
-            not self._running
-            or not self._has_file
-            or not self._buffer
-            or not self._db_path
-            or not self._store.store_events
-        ):
+        if not self._running or not self._has_file or not self._db_path or not self._store.store_events:
             return
-        batch = list(self._buffer)
-        self._buffer.clear()
-
-        columns = list(EVENT_COLUMNS[1:])  # everything but the autoincrement id
-        query = f'INSERT INTO events ({", ".join(columns)}) VALUES ({", ".join(["?"] * len(columns))})'
-        # Same origin coercion as the async flush: NOT NULL column, and the
-        # Kafka-path record helpers legitimately leave it unset.
-        rows = [
-            tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
-            for entry in batch
-        ]
+        if not self._file_queue and not self._intake:
+            return
+        rows = [row for _, row in self._file_queue]
+        self._file_queue.clear()
+        batch = list(self._intake)
+        self._intake.clear()
+        first_id = self._next_id
+        self._next_id += len(batch)
+        rows.extend(_row_tuple(first_id + index, entry) for index, entry in enumerate(batch))
         try:
             conn = sqlite3.connect(self._db_path, timeout=1.0)
             try:
-                conn.executemany(query, rows)
+                conn.executemany(INSERT_EVENT_SQL, rows)
                 conn.commit()
             finally:
                 conn.close()
         except Exception:
             # Interpreter teardown is no place to raise; the periodic
-            # flushes already wrote everything they could.
+            # writes already wrote everything they could.
             return
         with contextlib.suppress(Exception):
             logger.warning(
                 'recorder_last_breath_flush',
                 category='recorder',
-                events=len(batch),
+                events=len(rows),
                 db_path=self._db_path,
                 detail='process exited without a clean recorder stop; buffered events were salvaged synchronously',
             )
@@ -1164,206 +1257,346 @@ class EventRecorder(EventWriter):
         stats['total_events'] = sum(self._counters.values())
         return stats
 
-    # --- Internal flush/retention ---
+    # --- Write path: the memory loop and stage M, the file loop and stage F ---
 
-    async def _wait_until_flush_due(self) -> None:
+    def _update_buffer_gauge(self) -> None:
+        """Report the rows waiting in memory: the intake plus the file queue."""
+        recorder_buffer_size.set(len(self._intake) + len(self._file_queue))
+
+    async def _wait_until_due(
+        self,
+        queue: deque,
+        *,
+        watch_bytes: bool,
+        wakeup: asyncio.Event | None = None,
+    ) -> None:
         """Wait out ``flush_interval_seconds``, or return early on a burst.
 
         The interval alone is not enough at high event rates: a producer
-        filling the buffer faster than one interval's worth would reach
-        ``max_buffer`` and start evicting between ticks. Returning as soon as
-        the buffer is half full turns that into an early write instead of
-        lost events. Polling rather than an ``asyncio.Event`` because
-        ``_record`` is also reached from the webapp's own event loop, and
-        ``Event.set`` is not safe across loops.
+        filling ``queue`` faster than one interval's worth would reach
+        ``max_buffer`` and start evicting between ticks. Returning as soon
+        as it is half full turns that into an early write instead of lost
+        events. ``watch_bytes`` also returns at the payload high-water mark
+        of the intake, and ``wakeup`` when that event is set. The intake is
+        polled rather than signalled because ``_record`` is also reached
+        from the webapp's own event loop, and ``Event.set`` is not safe
+        across loops; ``wakeup`` is set on the main loop only.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._store.flush_interval_seconds
-        maxlen = self._buffer.maxlen
+        maxlen = queue.maxlen
         high_water = maxlen // 2 if maxlen is not None else None
         while self._running:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return
-            await asyncio.sleep(min(remaining, FLUSH_POLL_SECONDS))
-            if high_water is not None and len(self._buffer) >= high_water:
+            pause = min(remaining, FLUSH_POLL_SECONDS)
+            if wakeup is None:
+                await asyncio.sleep(pause)
+            else:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(wakeup.wait(), pause)
+                if wakeup.is_set():
+                    return
+            if high_water is not None and len(queue) >= high_water:
                 return
-            if self._buffered_bytes >= FLUSH_BYTES_HIGH_WATER:
+            if watch_bytes and self._buffered_bytes >= FLUSH_BYTES_HIGH_WATER:
                 return
 
-    async def _flush_loop(self) -> None:
+    async def _memory_loop(self) -> None:
+        """Run stage M on the intake's triggers; a hung disk never holds this loop."""
         while self._running:
-            await self._wait_until_flush_due()
-            # Per-iteration guard: an unexpected raise here would end the
-            # task, silently stopping the recorder from persisting events
-            # for the rest of the process lifetime. Cancellation must still
-            # propagate — that is how ``stop`` ends the loop.
+            await self._wait_until_due(self._intake, watch_bytes=True)
+            # Per-iteration guard: an unexpected raise would end the task and
+            # stop recording for the rest of the process. Cancellation still
+            # propagates — that is how ``stop`` ends the loop.
             try:
-                await self._flush()
+                await self._stage_memory(0.0)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await logger.aerror(
-                    'recorder_flush_loop_iteration_failed',
-                    category='recorder',
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    exc_info=exc,
-                )
+                await self._log_loop_failure('memory', exc)
+            if self._has_file:
+                self._file_wakeup.set()
 
-    async def _flush(self) -> None:
-        """Write the buffered events to the ``events`` table, in chunks.
+    async def _file_loop(self) -> None:
+        """Run stage F on the memory loop's tick, when the file queue is half full, or at the interval."""
+        while self._running:
+            await self._wait_until_due(self._file_queue, watch_bytes=False, wakeup=self._file_wakeup)
+            self._file_wakeup.clear()
+            try:
+                await self._stage_file()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._log_loop_failure('file', exc)
 
-        Chunking is what keeps the flush off the loop's critical path.
-        Turning the whole buffer into row tuples in one comprehension would
-        stall the loop: at the target workload a 5 s interval holds tens of
-        thousands of events, each costing one ``dict.get`` per column, long
-        enough for runtime health to report it as lag. Rows are built one
-        ``FLUSH_CHUNK_ROWS`` slice at a time instead, and the ``await`` on
-        each chunk's write hands the loop back in between.
+    @staticmethod
+    async def _log_loop_failure(stage: str, exc: Exception) -> None:
+        await logger.aerror(
+            'recorder_flush_loop_iteration_failed',
+            category='recorder',
+            stage=stage,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
-        The chunk is also the unit of loss. A chunk that still fails after
-        ``max_flush_retries`` is dropped; before chunking that was the entire
-        buffer, so a fifteen-second SQLite hiccup on a network filesystem
-        could cost every event held. See ``docs/observability.md`` for the
-        ``max_buffer`` sizing rule.
+    async def _stage_memory(self, evict_min_interval: float) -> None:
+        """Stage M: give the intake rows their ids, write them to the memory store, then evict.
+
+        Pops the intake in chunks of at most ``FLUSH_CHUNK_ROWS``. For each
+        chunk: assign ids, build the row tuples once, write and commit them,
+        then, with a file, append the ``(id, row)`` pairs to the file queue.
+        A chunk that fails follows the failure rules of
+        :meth:`_write_memory_chunk`; a transient failure stops the stage
+        and skips the eviction pass (the next tick runs both).
+        ``evict_min_interval`` is the least time between two eviction passes
+        (0 for the loops, rotation and stop).
         """
-        # The lock serializes concurrent flushes. Without it, the periodic
-        # ``_flush_loop`` and a debug-endpoint-initiated flush could
-        # interleave on the same deque and histogram — the second flush
-        # would typically find an empty buffer and early-return, but the
-        # cost of acquiring an uncontended asyncio.Lock is negligible and
-        # the safety is worth it.
-        async with self._flush_lock:
-            # Snapshot ``self._db`` once at the top of the critical section
-            # and use the local ``db`` reference for both ``executemany`` and
-            # ``commit``. Otherwise a concurrent ``_rotate`` (which does NOT
-            # hold ``_flush_lock``) could swap ``self._db`` between the two
-            # awaits — we'd commit on the new connection (no-op, since the
-            # executemany happened on the old one) and then ``old_db.close()``
-            # would discard the uncommitted transaction → data loss.
-            db = self._db
-            if not db or not self._buffer:
+        async with self._memory_lock:
+            store = self._memory_store
+            if store is None or not store.is_open:
                 return
-            columns = list(EVENT_COLUMNS[1:])  # everything but the autoincrement id
-            placeholders = ', '.join(['?'] * len(columns))
-            col_names = ', '.join(columns)
-            query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
-
-            # Observe the full flush body across every chunk — the histogram
-            # surfaces disk-I/O latency tail so operators can alert on p99
-            # regressions before the buffer backs up enough to drop events.
-            flush_start = time.monotonic()
-            # Snapshot the depth: events appended while this flush awaits
+            writer = store.writer
+            await self._settle_previous_chunk(writer)
+            # Snapshot the depth: events appended while this stage awaits
             # ride along on the next tick rather than extending this one
             # indefinitely under a fast producer.
-            pending = len(self._buffer)
-            # Reset before draining, not after: the counter drives the
-            # "flush now" decision only, and the events appended while this
-            # flush awaits are re-counted as they arrive. Resetting after the
-            # drain would discard their weight.
+            pending = len(self._intake)
+            # Reset before draining: the events appended while this stage
+            # awaits are counted again as they arrive.
             self._buffered_bytes = 0
+            completed = True
             while pending > 0:
                 take = min(pending, FLUSH_CHUNK_ROWS)
                 pending -= take
-                # Take a LOCAL snapshot of the rows to flush BEFORE the DB
-                # write. If the write fails (sqlite3.Error) or is interrupted
-                # (cancellation) we re-queue this exact list at the FRONT of
-                # the buffer so ordering is preserved and no events are lost.
-                # A concurrent ``_record`` append lands at the END of the
-                # deque (we drain via ``popleft``) and is unaffected.
-                batch: list[dict] = [self._buffer.popleft() for _ in range(take)]
-                if not await self._write_chunk(db, query, columns, batch):
+                batch = [self._intake.popleft() for _ in range(take)]
+                first_id = self._next_id
+                self._next_id += take
+                rows = [_row_tuple(first_id + index, entry) for index, entry in enumerate(batch)]
+                if not await self._write_memory_chunk(writer, batch, rows):
+                    completed = False
+                    break
+            self._update_buffer_gauge()
+            if completed:
+                await self._evict(evict_min_interval)
+
+    async def _evict(self, evict_min_interval: float) -> None:
+        """The eviction pass at the end of a stage M, under ``_memory_lock``; it removes nothing yet."""
+
+    async def _settle_previous_chunk(self, writer: aiosqlite.Connection) -> None:
+        """Before a stage M writes: roll back a cancelled chunk's transaction and delete a pending gap."""
+        if self._memory_dirty:
+            await self._rollback_memory(writer)
+        if self._pending_gap_id is not None:
+            await self._delete_pending_gap(writer)
+
+    async def _write_memory_chunk(self, writer: aiosqlite.Connection, batch: list[dict], rows: list[tuple]) -> bool:
+        """Write one chunk to the memory store; return whether the stage goes on.
+
+        On any failure the open transaction is rolled back first. A
+        transient error (busy or locked) puts the chunk back at the front of
+        the intake and gives its ids back: the stage stops and the next tick
+        retries it, so nothing is dropped. A final error keeps the store one
+        contiguous range: the chunk goes to the file queue (with a file) or
+        is lost, and every memory row up to its last id is deleted.
+
+        A cancelled write (``stop()``) does only synchronous bookkeeping:
+        without a file the chunk goes back to the intake with its ids, and
+        the final stage M writes it; with a file it goes to the file queue
+        and the memory store moves its floor past it. The next stage M rolls
+        the writer back first either way.
+        """
+        first_id = rows[0][0]
+        last_id = rows[-1][0]
+        settled = False
+        try:
+            await writer.executemany(INSERT_EVENT_SQL, rows)
+            await writer.commit()
+            settled = True
+        except sqlite3.Error as exc:
+            settled = True
+            self._memory_dirty = True
+            if is_transient_memory_error(exc):
+                self._requeue_front(self._intake, batch)
+                self._next_id = first_id
+                await self._rollback_memory(writer)
+                await self._memory_log.emit(
+                    'recorder_memory_write_retry',
+                    logger.awarning,
+                    'recorder_memory_write_retry',
+                    category='recorder',
+                    error=str(exc),
+                    batch_size=len(batch),
+                )
+                return False
+            self._keep_rows_without_memory(rows)
+            recorder_memory_write_failures.inc()
+            await self._rollback_memory(writer)
+            await self._delete_pending_gap(writer)
+            await self._memory_log.emit(
+                'recorder_memory_write_failed',
+                logger.aerror,
+                'recorder_memory_write_failed',
+                category='recorder',
+                error=str(exc),
+                batch_size=len(batch),
+            )
+            return True
+        finally:
+            if not settled:
+                # Cancelled mid-write. Everything here is synchronous: an
+                # await during a cancellation unwind could be cancelled again
+                # and skip the bookkeeping.
+                self._memory_dirty = True
+                if self._has_file:
+                    self._keep_rows_without_memory(rows)
+                else:
+                    self._requeue_front(self._intake, batch)
+                    self._next_id = first_id
+        self._last_id = last_id
+        if self._has_file:
+            self._append_file_queue([(row[0], row) for row in rows])
+        return True
+
+    def _keep_rows_without_memory(self, rows: list[tuple]) -> None:
+        """Account for a chunk that did not reach the memory store: file queue (with a file) and a gap.
+
+        The memory store then starts after the chunk: every row up to its
+        last id is due for deletion (:meth:`_delete_pending_gap`), the floor
+        and ``last_id`` move past it, ``evicted`` is set and
+        ``evicted_max_ts`` rises to the chunk's largest ``ts``, so the read
+        rules stay right. Synchronous.
+        """
+        last_id = rows[-1][0]
+        if self._has_file:
+            self._append_file_queue([(row[0], row) for row in rows])
+        self._pending_gap_id = last_id
+        self._last_id = last_id
+        self._floor_id = last_id + 1
+        self._evicted = True
+        # ``ts`` is the second column of a row tuple.
+        self._evicted_max_ts = max(self._evicted_max_ts, max(row[1] for row in rows))
+
+    async def _delete_pending_gap(self, writer: aiosqlite.Connection) -> None:
+        """Delete the memory rows up to the pending gap id, in eviction batches; keep it pending on failure."""
+        gap_id = self._pending_gap_id
+        if gap_id is None:
+            return
+        result = await delete_id_prefix(writer, gap_id + 1)
+        if result.deleted:
+            recorder_memory_evicted_rows.labels(reason='gap').inc(result.deleted)
+        if result.max_ts is not None:
+            self._evicted_max_ts = max(self._evicted_max_ts, result.max_ts)
+        if result.error is None:
+            self._pending_gap_id = None
+            return
+        await self._memory_log.emit(
+            'recorder_memory_eviction_failed',
+            logger.awarning,
+            'recorder_memory_eviction_failed',
+            category='recorder',
+            error=str(result.error),
+            reason='gap',
+        )
+
+    async def _rollback_memory(self, writer: aiosqlite.Connection) -> None:
+        """Roll back the memory writer's open transaction, if any."""
+        try:
+            await writer.rollback()
+        except sqlite3.Error as exc:
+            await logger.awarning('recorder_memory_rollback_failed', category='recorder', error=str(exc))
+            return
+        self._memory_dirty = False
+
+    def _append_file_queue(self, pairs: list[tuple[int, tuple]]) -> None:
+        """Append ``(id, row)`` pairs to the file queue; pairs pushed out of a full queue count as dropped events."""
+        maxlen = self._file_queue.maxlen
+        if maxlen is not None:
+            overflow = len(self._file_queue) + len(pairs) - maxlen
+            if overflow > 0:
+                recorder_dropped_events.inc(overflow)
+        self._file_queue.extend(pairs)
+
+    async def _stage_file(self) -> None:
+        """Stage F: write the file queue's stored rows to the live file, in chunks.
+
+        Chunking bounds what a write that keeps failing can lose: a chunk
+        that still fails after ``max_flush_retries`` is dropped from the
+        file only (the memory store already holds its rows). See
+        ``docs/observability.md`` for the ``max_buffer`` sizing rule.
+        """
+        if not self._has_file:
+            return
+        async with self._flush_lock:
+            # Snapshot ``self._db`` once and use it for every write and
+            # commit of this stage: a concurrent ``_rotate`` swaps
+            # ``self._db`` under this lock only, so the writes of one stage
+            # always land in one file.
+            db = self._db
+            if not db or not self._file_queue:
+                return
+            # Observe the whole stage across every chunk — the histogram
+            # surfaces the disk-I/O latency tail.
+            flush_start = time.monotonic()
+            # Snapshot the depth, as stage M does.
+            pending = len(self._file_queue)
+            while pending > 0:
+                take = min(pending, FLUSH_CHUNK_ROWS)
+                pending -= take
+                batch = [self._file_queue.popleft() for _ in range(take)]
+                if not await self._write_file_chunk(db, batch):
+                    self._update_buffer_gauge()
                     return
-            # Success path: reset the retry counter and record the histogram.
             self._flush_failures = 0
             recorder_flush_duration.observe(time.monotonic() - flush_start)
-            # Post-drain: the gauge should report the new buffer depth. Usually
-            # zero, but a concurrent _record() during the await could have
-            # appended in between — reading len(self._buffer) is the correct value.
-            recorder_buffer_size.set(len(self._buffer))
+            self._update_buffer_gauge()
 
-    async def _write_chunk(
-        self,
-        db: aiosqlite.Connection,
-        query: str,
-        columns: list[str],
-        batch: list[dict],
-    ) -> bool:
-        """Write one chunk; return whether the flush should keep going.
+    async def _write_file_chunk(self, db: aiosqlite.Connection, batch: list[tuple[int, tuple]]) -> bool:
+        """Write one chunk of ``(id, row)`` pairs to the file; return whether the stage should keep going.
 
         ``False`` means this chunk did not land: it was either re-queued for
         the next tick or dropped at the retry cap. Either way the rest of the
-        buffer stays put — the events still in it are strictly newer, so
-        stopping here preserves order.
+        file queue stays put — its rows are strictly newer, so stopping here
+        preserves order.
         """
-        # ``origin`` is NOT NULL in the schema with a DEFAULT of
-        # ``'kafka'`` — but ``entry.get(col)`` would yield ``None``
-        # when the recording site didn't populate it (Kafka-path
-        # helpers below ``record_task_*`` such as ``record_consumed``,
-        # ``record_arranged``, ``record_committed``, etc., legitimately
-        # leave the new columns out). Coerce ``None`` -> ``'kafka'``
-        # at INSERT time so SQLite's column DEFAULT does not need to
-        # fight an explicit NULL.
-        rows = [
-            tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
-            for entry in batch
-        ]
+        rows = [row for _, row in batch]
         # ``batch_settled`` flips once the popped batch has a final home:
         # committed, re-queued for retry, or deliberately dropped at the
-        # retry cap. Any other exit — a CancelledError from a caller's
-        # timeout or from ``stop()`` cancelling the flush task, or an
-        # unexpected error — reaches the ``finally`` with the flag still
-        # False and re-queues the batch, so cancellation mid-write can
-        # never silently lose it. (No rollback is attempted there: the
-        # write may have landed in the connection's open transaction, so
-        # a retried batch can at worst duplicate rows — acceptable for a
-        # flight recorder, unlike silent loss.)
+        # retry cap. Any other exit — a CancelledError from ``stop()``
+        # cancelling the file loop, or an unexpected error — reaches the
+        # ``finally`` with the flag still False and re-queues the batch, so
+        # cancellation mid-write never silently loses it. The rows may
+        # already sit in the open transaction; ``INSERT OR IGNORE`` makes
+        # the retry a no-op for them.
         batch_settled = False
         try:
-            await db.executemany(query, rows)
+            await db.executemany(INSERT_EVENT_SQL, rows)
             await db.commit()
             batch_settled = True
             return True
         except sqlite3.Error as exc:
-            # ``sqlite3.Error``, not just OperationalError: aiosqlite
-            # raises the stdlib sqlite3 exception classes, and the whole
-            # DatabaseError/IntegrityError/ProgrammingError family must
-            # go through the same retry/drop accounting rather than
-            # bypassing it.
+            # ``sqlite3.Error``, not just OperationalError: aiosqlite raises
+            # the stdlib sqlite3 exception classes, and the whole family must
+            # go through the same retry/drop accounting.
             #
-            # Transient DB errors (``database is locked``, ``disk I/O
-            # error``, ENOSPC, WAL corruption, etc.) should not cost us
-            # the batch. Re-queue the snapshot at the FRONT of the
-            # buffer and let the next flush tick retry.
-            #
-            # Rotation edge case: if ``_rotate`` ran BETWEEN a failed
-            # flush and the retry attempt, the re-queued rows end up
-            # written to the NEW DB. For a flight recorder this is
-            # acceptable — the rows' ``ts`` field records when they
-            # were observed, so their wall-clock position is preserved;
-            # only the file-level window association shifts. The
-            # alternative (dropping rows on rotation) would be
-            # strictly worse — silent data loss with no metric tick.
+            # Rotation edge case: if ``_rotate`` runs between a failed write
+            # and its retry, the re-queued rows end up in the NEW file. Their
+            # ``ts`` keeps their wall-clock position; only the file they sit
+            # in shifts, which beats dropping them.
             self._flush_failures += 1
             recorder_flush_retries.inc()
             if self._flush_failures >= self._store.max_flush_retries:
-                # Give up on this chunk: drop it, reset the counter so
-                # the next chunk starts from a clean slate, and tick
-                # the drop metric. Without the reset, a transient
-                # outage that eventually recovers would leave the
-                # counter at N and the FIRST post-recovery failure
-                # would immediately trip the drop path again.
-                # Bookkeeping runs before the ``await`` on the logger so
-                # a cancellation during the log cannot make the finally
-                # re-queue a batch we decided to drop.
+                # Give up on this chunk: drop it and reset the counter so the
+                # next chunk starts from a clean slate. Bookkeeping runs
+                # before the ``await`` on the logger so a cancellation during
+                # the log cannot make the finally re-queue a dropped batch.
                 batch_settled = True
                 attempt = self._flush_failures
                 self._flush_failures = 0
                 recorder_flush_batches_dropped.inc()
-                # Buffer state unchanged (batch already popped); reflect
-                # the (possibly post-concurrent-append) depth.
-                recorder_buffer_size.set(len(self._buffer))
+                self._update_buffer_gauge()
                 await logger.aerror(
                     'recorder_flush_batch_dropped',
                     category='recorder',
@@ -1372,13 +1605,9 @@ class EventRecorder(EventWriter):
                     error=str(exc),
                 )
                 return False
-            # Not yet at the retry cap — re-queue and let the next tick
-            # try again. Log at WARNING so the operator sees the retry
-            # trail before any drop happens. The re-queue itself is
-            # synchronous and flips ``batch_settled`` before the log
-            # await, so a cancellation during the log cannot re-queue
-            # the batch a second time in the finally.
-            self._requeue_front(batch)
+            # Not yet at the retry cap — re-queue (synchronously, before the
+            # log await) and let the next tick try again.
+            self._requeue_front(self._file_queue, batch)
             batch_settled = True
             await logger.awarning(
                 'recorder_flush_retry',
@@ -1391,59 +1620,50 @@ class EventRecorder(EventWriter):
             return False
         finally:
             if not batch_settled:
-                # Interrupted mid-write — typically CancelledError from a
-                # caller's timeout or from ``stop()`` cancelling the flush
-                # task — with the transaction not committed. Put the batch
-                # back so the next flush tick retries it, and let the
-                # exception propagate. Everything here is synchronous:
-                # awaiting during a cancellation unwind could be cancelled
-                # again and skip the re-queue.
-                self._requeue_front(batch)
+                # Interrupted mid-write with the transaction not committed.
+                # Synchronous: an await during a cancellation unwind could be
+                # cancelled again and skip the re-queue.
+                self._requeue_front(self._file_queue, batch)
 
-    def _requeue_front(self, batch: list[dict]) -> None:
-        """Put a popped-but-unflushed batch back at the FRONT of the buffer.
+    def _requeue_front(self, queue: deque, batch: list) -> None:
+        """Put a popped-but-unwritten batch back at the FRONT of ``queue`` (the intake or the file queue).
 
         ``extendleft`` reverses its iterable, so ``batch`` is pre-reversed to
-        preserve the original FIFO ordering within the re-queued rows. Rows
-        that a concurrent ``_record`` appended while the flush awaited stay
-        at the back — correct, since they are strictly newer.
+        keep its order. Items appended while the write awaited stay at the
+        back — correct, since they are strictly newer.
 
-        Overflow detection: ``self._buffer`` is bounded by
-        ``deque(maxlen=max_buffer)``. If concurrent appends filled the buffer
-        during the flush's await window, ``extendleft`` silently evicts rows
-        from the TAIL (newest events) to honour ``maxlen``. Those rows are
-        lost without any metric tick in ``_record`` (that path only counts
-        drops on the append side), so the potential overflow is measured
-        arithmetically — ``(len_before + batch_len) - maxlen`` — and ticked
-        on ``recorder_requeue_overflow`` so operators can alert on this
-        otherwise silent data-loss path.
+        Overflow detection: the queue is bounded by ``max_buffer``. If
+        appends filled it during the write's await, ``extendleft`` silently
+        evicts items from the TAIL (the newest) to honour ``maxlen``. Those
+        are counted arithmetically — ``(len_before + batch_len) - maxlen`` —
+        on ``recorder_requeue_overflow``.
 
-        Fully synchronous (sync logging included): it also runs from the
-        cancellation unwind in ``_flush``, where an await could itself be
-        cancelled and skip the re-queue.
+        Fully synchronous (sync logging included): it also runs from a
+        cancellation unwind, where an await could itself be cancelled and
+        skip the re-queue.
         """
-        buffer_len_before = len(self._buffer)
+        len_before = len(queue)
         batch_len = len(batch)
-        self._buffer.extendleft(reversed(batch))
-        maxlen = self._buffer.maxlen
+        queue.extendleft(reversed(batch))
+        maxlen = queue.maxlen
         if maxlen is not None:
-            overflow = (buffer_len_before + batch_len) - maxlen
+            overflow = (len_before + batch_len) - maxlen
             if overflow > 0:
                 recorder_requeue_overflow.inc(overflow)
                 logger.warning(
                     'recorder_buffer_overflow_on_requeue',
                     category='recorder',
                     dropped=overflow,
-                    buffer_len_before=buffer_len_before,
+                    buffer_len_before=len_before,
                     batch_size=batch_len,
                     max_buffer=maxlen,
                 )
-        recorder_buffer_size.set(len(self._buffer))
+        self._update_buffer_gauge()
 
     async def _rotation_loop(self) -> None:
         while self._running:
             await self._sleep(self._store.rotation_interval_hours * 3600)
-            # Same guard as ``_flush_loop``: one failed rotation must cost a
+            # Same guard as the memory loop: one failed rotation must cost a
             # single interval, not every rotation from here on.
             try:
                 await self._rotate()
@@ -1577,7 +1797,7 @@ class EventRecorder(EventWriter):
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.
 
         Ordering matters: if we installed ``self._db = new_db`` before
-        creating the schema, a concurrent ``_flush_loop`` iteration (or
+        creating the schema, a concurrent file loop iteration (or
         any debug-triggered flush) could execute ``INSERT INTO events``
         against the freshly-opened but still-empty file and hit
         ``no such table: events``. The fix is to prepare ``new_db``
@@ -1589,8 +1809,10 @@ class EventRecorder(EventWriter):
         """
         if not self._has_file:
             return
-        # flush remaining buffer to current DB
-        await self._flush()
+        # Write what waits into the current file first: stage M, then
+        # stage F, each under its own lock.
+        await self._stage_memory(0.0)
+        await self._stage_file()
 
         # open new DB and initialize schema BEFORE swapping. If schema
         # creation fails, close the orphaned connection and leave
@@ -1642,8 +1864,8 @@ class EventRecorder(EventWriter):
                         await close_quietly(connection)
             raise
         try:
-            if self._drakkar_config:
-                await self.write_config(self._drakkar_config)
+            # The new file needs the config row; the memory store has it.
+            await self._write_config_to_file()
 
             if old_reader:
                 # Close the old reader before sealing: the seal needs the old

@@ -330,7 +330,7 @@ class TestRecorderStoreFlags:
         await rec.stop()
 
     async def test_recorder_empty_storage_dir_is_memory_only(self, tmp_path):
-        """With storage_dir empty, recorder runs in memory-only mode — no crash."""
+        """With storage_dir empty, recorder keeps events and the config row in its memory store."""
         cfg = make_ui_config(
             enabled=True,
             store_events=True,
@@ -344,9 +344,9 @@ class TestRecorderStoreFlags:
         # should not crash despite requesting all storage features
         msg = make_msg()
         rec.record_consumed(msg)
-
-        events = await rec.get_events()
-        assert events == []
+        await rec.flush_memory()
+        _, events = await rec.memory_store.read('SELECT event FROM events')
+        assert events == [('consumed',)]
 
         from drakkar.config import DrakkarConfig, ExecutorConfig
 
@@ -354,8 +354,11 @@ class TestRecorderStoreFlags:
             executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}}
         )
         await rec.write_config(dummy_config)
+        _, config_rows = await rec.memory_store.read('SELECT worker_name FROM worker_config')
+        assert config_rows == [('test',)]
 
         await rec.stop()
+        assert rec.db_path == ''
 
     @pytest.mark.parametrize('store_state', [True, False])
     async def test_recorder_state_sync_respects_flag(self, tmp_path, store_state):

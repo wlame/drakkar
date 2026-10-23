@@ -1,8 +1,9 @@
-"""Tests for recorder flush interruption safety and shutdown resilience.
+"""Tests for recorder write interruption safety and shutdown resilience.
 
-Covers the paths where a flush is interrupted (cancellation, non-operational
-SQLite errors) and where ``stop()`` must finish teardown despite failures in
-the final flush or state sync.
+Covers the paths where a file write is interrupted (cancellation,
+non-operational SQLite errors) and where ``stop()`` must finish teardown
+despite failures in the final stages or state sync. Rows reach the file
+queue through stage M (``flush_memory``) first.
 """
 
 import asyncio
@@ -14,20 +15,28 @@ import pytest
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.core import _LIVE_RECORDERS
+from drakkar.recorder.schema import EVENT_COLUMNS
 from tests.test_recorder import (
     WORKER_NAME,
     make_debug_config,
     make_msg,
 )
 
+OFFSET_INDEX = EVENT_COLUMNS.index('offset')
+
+
+def _queued_offsets(rec: EventRecorder) -> list[int]:
+    """The offsets of the rows waiting in the file queue, in queue order."""
+    return [row[OFFSET_INDEX] for _, row in rec._file_queue]
+
 
 async def test_flush_cancelled_mid_write_requeues_batch(tmp_path):
-    """Cancelling a flush mid-executemany re-queues the popped batch.
+    """Cancelling stage F mid-executemany re-queues the popped batch.
 
-    The batch is snapshot-popped before the DB write; a CancelledError at the
-    write await (e.g. a caller's ``wait_for`` timing out, or ``stop()``
-    cancelling the flush task) must put it back at the FRONT of the buffer in
-    order, so a later flush persists it — not silently drop it.
+    The batch is snapshot-popped before the file write; a CancelledError at
+    the write await (``stop()`` cancelling the file loop) must put it back at
+    the FRONT of the file queue in order, so a later stage F writes it — not
+    silently drop it.
     """
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
@@ -37,7 +46,8 @@ async def test_flush_cancelled_mid_write_requeues_batch(tmp_path):
     try:
         rec.record_consumed(make_msg(partition=0, offset=0))
         rec.record_consumed(make_msg(partition=0, offset=1))
-        assert len(rec._buffer) == 2
+        await rec.flush_memory()
+        assert len(rec._file_queue) == 2
 
         assert rec._db is not None
         original_executemany = rec._db.executemany
@@ -51,19 +61,19 @@ async def test_flush_cancelled_mid_write_requeues_batch(tmp_path):
 
         rec._db.executemany = blocking_executemany  # type: ignore[method-assign]
 
-        flush_task = asyncio.create_task(rec._flush())
+        flush_task = asyncio.create_task(rec._stage_file())
         await entered.wait()
         flush_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await flush_task
 
-        # The batch is back in the buffer, FIFO order preserved.
-        assert [e['offset'] for e in rec._buffer] == [0, 1]
+        # The batch is back in the file queue, FIFO order preserved.
+        assert _queued_offsets(rec) == [0, 1]
 
-        # A later flush (write restored) persists the events exactly once.
+        # A later stage F (write restored) persists the events exactly once.
         rec._db.executemany = original_executemany  # type: ignore[method-assign]
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        await rec._stage_file()
+        assert len(rec._file_queue) == 0
         events = await rec.get_events(partition=0)
         assert sorted(ev['offset'] for ev in events) == [0, 1]
     finally:
@@ -74,8 +84,8 @@ async def test_flush_cancelled_mid_write_requeues_batch(tmp_path):
 async def test_flush_cancelled_requeue_overflow_ticks_counter(tmp_path):
     """The cancellation re-queue path shares the overflow accounting.
 
-    If concurrent appends filled the bounded buffer while the flush was
-    parked at the write await, the re-queue evicts rows from the tail —
+    If stage M filled the bounded file queue while stage F was parked at the
+    write await, the re-queue evicts rows from the tail —
     that loss must tick ``recorder_requeue_overflow`` exactly as the
     error-retry re-queue does.
     """
@@ -84,14 +94,15 @@ async def test_flush_cancelled_requeue_overflow_ticks_counter(tmp_path):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     # Shrink post-construction so overflow is cheap to trigger.
-    rec._buffer = deque(maxlen=3)
+    rec._file_queue = deque(maxlen=3)
     await rec.start()
     entered = asyncio.Event()
     release = asyncio.Event()
     try:
         for off in range(3):
             rec.record_consumed(make_msg(partition=0, offset=off))
-        assert len(rec._buffer) == 3
+        await rec.flush_memory()
+        assert len(rec._file_queue) == 3
 
         assert rec._db is not None
 
@@ -103,18 +114,19 @@ async def test_flush_cancelled_requeue_overflow_ticks_counter(tmp_path):
 
         overflow_before = recorder_requeue_overflow._value.get()
 
-        flush_task = asyncio.create_task(rec._flush())
+        flush_task = asyncio.create_task(rec._stage_file())
         await entered.wait()
-        # Concurrent appends land while the 3-row batch is popped out.
+        # Stage M appends while the 3-row batch is popped out.
         rec.record_consumed(make_msg(partition=0, offset=100))
         rec.record_consumed(make_msg(partition=0, offset=101))
+        await rec.flush_memory()
         flush_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await flush_task
 
         # Re-queue of 3 rows into a maxlen-3 deque holding 2 → 2 evicted.
         assert recorder_requeue_overflow._value.get() == overflow_before + 2
-        assert len(rec._buffer) == 3
+        assert len(rec._file_queue) == 3
     finally:
         release.set()
         await rec.stop()
@@ -139,6 +151,7 @@ async def test_flush_non_operational_sqlite_error_requeues_batch(tmp_path, exc_t
     try:
         rec.record_consumed(make_msg(partition=0, offset=0))
         rec.record_consumed(make_msg(partition=0, offset=1))
+        await rec.flush_memory()
 
         assert rec._db is not None
         original_executemany = rec._db.executemany
@@ -154,15 +167,15 @@ async def test_flush_non_operational_sqlite_error_requeues_batch(tmp_path, exc_t
 
         retries_before = recorder_flush_retries._value.get()
 
-        # First flush: handled, re-queued, retry counter ticked.
-        await rec._flush()
-        assert [e['offset'] for e in rec._buffer] == [0, 1]
+        # First stage F: handled, re-queued, retry counter ticked.
+        await rec._stage_file()
+        assert _queued_offsets(rec) == [0, 1]
         assert rec._flush_failures == 1
         assert recorder_flush_retries._value.get() == retries_before + 1
 
-        # Second flush succeeds and resets the counter.
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        # Second stage F succeeds and resets the counter.
+        await rec._stage_file()
+        assert len(rec._file_queue) == 0
         assert rec._flush_failures == 0
         events = await rec.get_events(partition=0)
         assert sorted(ev['offset'] for ev in events) == [0, 1]
@@ -171,16 +184,17 @@ async def test_flush_non_operational_sqlite_error_requeues_batch(tmp_path, exc_t
 
 
 async def test_stop_completes_teardown_when_final_flush_fails(tmp_path):
-    """A failing final flush must not skip the closes and live-set cleanup."""
+    """Failing final stages must not skip the closes and live-set cleanup."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     assert rec in _LIVE_RECORDERS
 
-    async def exploding_flush():
+    async def exploding_stage(*_args):
         raise RuntimeError('simulated flush failure')
 
-    rec._flush = exploding_flush  # type: ignore[method-assign]
+    rec._stage_memory = exploding_stage  # type: ignore[method-assign]
+    rec._stage_file = exploding_stage  # type: ignore[method-assign]
 
     await rec.stop()
 
@@ -236,10 +250,11 @@ async def test_flush_writes_in_bounded_chunks(tmp_path, monkeypatch):
 
         rec._db.executemany = counting_executemany  # type: ignore[method-assign]
 
-        await rec._flush()
+        await rec.flush()
 
         assert chunk_sizes == [100, 100, 50]
-        assert len(rec._buffer) == 0
+        assert len(rec._intake) == 0
+        assert len(rec._file_queue) == 0
         events = await rec.get_events(partition=0, limit=1000)
         assert len(events) == 250
     finally:
@@ -247,8 +262,8 @@ async def test_flush_writes_in_bounded_chunks(tmp_path, monkeypatch):
 
 
 async def test_flush_ignores_events_appended_while_it_runs(tmp_path, monkeypatch):
-    """The chunk loop works off the depth it saw on entry, so a producer
-    faster than the writer cannot hold one flush open indefinitely.
+    """Stage M works off the intake depth it saw on entry, so a producer
+    faster than the writer cannot hold one stage open indefinitely.
     """
     monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 2)
     config = make_debug_config(tmp_path)
@@ -258,20 +273,20 @@ async def test_flush_ignores_events_appended_while_it_runs(tmp_path, monkeypatch
         for offset in range(4):
             rec.record_committed(partition=0, offset=offset)
 
-        assert rec._db is not None
-        original = rec._db.executemany
+        writer = rec.memory_store.writer
+        original = writer.executemany
 
         async def appending_executemany(query, rows):
-            # A concurrent record() landing mid-flush, every chunk.
+            # A concurrent record() landing mid-stage, every chunk.
             rec.record_committed(partition=1, offset=99)
             return await original(query, rows)
 
-        rec._db.executemany = appending_executemany  # type: ignore[method-assign]
+        writer.executemany = appending_executemany  # type: ignore[method-assign]
 
-        await rec._flush()
+        await rec.flush_memory()
 
         # Two chunks ran, each appending one event; both wait for the next tick.
-        assert len(rec._buffer) == 2
+        assert len(rec._intake) == 2
     finally:
         await rec.stop()
 
@@ -290,6 +305,7 @@ async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
     try:
         for offset in range(30):
             rec.record_committed(partition=0, offset=offset)
+        await rec.flush_memory()
 
         assert rec._db is not None
 
@@ -300,16 +316,16 @@ async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
         dropped_before = recorder_flush_batches_dropped._value.get()
 
         # First failure: the chunk goes back, nothing is lost yet.
-        await rec._flush()
-        assert len(rec._buffer) == 30
+        await rec._stage_file()
+        assert len(rec._file_queue) == 30
         assert recorder_flush_batches_dropped._value.get() == dropped_before
 
         # Second failure hits the cap: exactly one chunk is dropped.
-        await rec._flush()
-        assert len(rec._buffer) == 20
+        await rec._stage_file()
+        assert len(rec._file_queue) == 20
         assert recorder_flush_batches_dropped._value.get() == dropped_before + 1
         # The oldest events went; the rest kept their order.
-        assert [event['offset'] for event in rec._buffer][:3] == [10, 11, 12]
+        assert _queued_offsets(rec)[:3] == [10, 11, 12]
     finally:
         await rec.stop()
 
@@ -325,14 +341,14 @@ async def test_flush_wait_returns_early_when_the_buffer_is_half_full(tmp_path):
     """
     config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
-    # Deliberately not started: the real flush loop calls this same method
+    # Deliberately not started: the real memory loop calls this same method
     # and would drain the buffer out from under the assertion.
     rec._running = True
     for offset in range(600):  # high water is max_buffer // 2
         rec.record_committed(partition=0, offset=offset)
 
     # Returns on the buffer depth, not on the ten-minute interval.
-    await asyncio.wait_for(rec._wait_until_flush_due(), timeout=5.0)
+    await asyncio.wait_for(rec._wait_until_due(rec._intake, watch_bytes=True), timeout=5.0)
 
 
 async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_path):
@@ -346,4 +362,4 @@ async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_p
         rec.record_committed(partition=0, offset=offset)
 
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(rec._wait_until_flush_due(), timeout=0.6)
+        await asyncio.wait_for(rec._wait_until_due(rec._intake, watch_bytes=True), timeout=0.6)

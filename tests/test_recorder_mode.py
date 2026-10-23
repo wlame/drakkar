@@ -1,6 +1,7 @@
 """The recorder's explicit persistence mode: folders do not depend on the file."""
 
 import os
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,10 +54,14 @@ async def test_none_recorder_with_storage_dir_writes_no_recorder_file(tmp_path):
     recorder = _recorder('none', storage_dir=str(storage))
 
     await recorder.start()
+    recorder._record({'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': 1})
+    await recorder.flush()
+    _, rows = await recorder.memory_store.read('SELECT id, offset FROM events')
     await recorder.stop()
 
     assert os.listdir(storage) == []
     assert recorder.db_path == ''
+    assert rows == [(1, 1)]
 
 
 def test_sqlite_recorder_without_storage_dir_raises():

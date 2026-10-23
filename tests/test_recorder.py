@@ -14,7 +14,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
@@ -41,6 +40,7 @@ from drakkar.recorder import (
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.fanout import WSSubscriber
 from drakkar.recorder.helpers import open_connection, open_reader
+from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.recorder.writer import _byte_len, _capped_stdin
 from drakkar.recorder.writer import logger as writer_logger
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
@@ -51,6 +51,12 @@ class _RecData(BaseModel):
 
 
 WORKER_NAME = 'test-worker'
+OFFSET_INDEX = EVENT_COLUMNS.index('offset')
+
+
+def _queued_offsets(rec: EventRecorder) -> list[int]:
+    """The offsets of the rows waiting in the file queue, in queue order."""
+    return [row[OFFSET_INDEX] for _, row in rec._file_queue]
 
 
 @pytest.fixture
@@ -153,7 +159,7 @@ async def test_start_creates_timestamped_db(tmp_path):
 async def test_record_consumed_and_flush(recorder):
     recorder.record_consumed(make_msg(partition=3, offset=42))
     recorder.record_consumed(make_msg(partition=3, offset=43))
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(partition=3)
     assert len(events) == 2
@@ -165,7 +171,7 @@ async def test_record_arranged(recorder):
     msgs = [make_msg(offset=10), make_msg(offset=11)]
     tasks = [make_task('t1', offsets=[10]), make_task('t2', offsets=[11])]
     recorder.record_arranged(partition=0, messages=msgs, tasks=tasks)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='arranged')
     assert len(events) == 1
@@ -178,7 +184,7 @@ async def test_record_arranged(recorder):
 async def test_record_task_started(recorder):
     task = make_task('t1', args=['--pattern', 'error'])
     recorder.record_task_started(task, partition=5)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_started')
     assert len(events) == 1
@@ -199,7 +205,7 @@ async def test_record_task_started_sanitizes_env_secrets(recorder):
         'API_TOKEN': 'abc123',
     }
     recorder.record_task_started(task, partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_started')
     meta = json.loads(events[0]['metadata'])
@@ -247,7 +253,7 @@ async def test_record_task_started_env_redaction_coverage(recorder, name: str, e
     # Non-empty value so the redaction produces '***' (empty stays empty).
     task.env = {name: 'test-value-123'}
     recorder.record_task_started(task, partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_started')
     meta = json.loads(events[0]['metadata'])
@@ -276,7 +282,7 @@ async def test_record_task_started_env_sanitize_does_not_mutate_task(recorder):
     task = make_task('t1')
     task.env = {'DB_PASSWORD': 'supersecret', 'PUBLIC_URL': 'https://example.com'}
     recorder.record_task_started(task, partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     # Task object itself must be unchanged.
     assert task.env == {'DB_PASSWORD': 'supersecret', 'PUBLIC_URL': 'https://example.com'}
@@ -289,7 +295,7 @@ async def test_record_task_started_empty_env_no_metadata_key(recorder):
     task = make_task('t1')
     # ExecutorTask.env default_factory=dict, so task.env is already {} here.
     recorder.record_task_started(task, partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_started')
     meta = json.loads(events[0]['metadata'])
@@ -299,7 +305,7 @@ async def test_record_task_started_empty_env_no_metadata_key(recorder):
 async def test_record_task_completed_without_output(recorder):
     result = make_result('t1')
     recorder.record_task_completed(result, partition=2)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_completed')
     assert len(events) == 1
@@ -317,11 +323,11 @@ async def test_record_task_completed_carries_stdout_lines_on_ws_entry_only(recor
     recorder.subscribe()
     result = make_result('t1')  # stdout is 'line1\nline2\n'
     recorder.record_task_completed(result, partition=2)
-    entry = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    entry = next(e for e in recorder._intake if e['event'] == 'task_completed')
     assert entry['stdout_lines'] == 2
     assert entry['stdout_size'] == len(b'line1\nline2\n')
 
-    await recorder._flush()
+    await recorder.flush()
     events = await recorder.get_events(event_type='task_completed')
     assert 'stdout_lines' not in events[0]
 
@@ -343,11 +349,11 @@ async def test_line_counts_are_not_computed_without_a_live_client(recorder, monk
     recorder.record_task_completed(make_result('t-no-client'), partition=0)
 
     assert calls == [], 'line counting ran with no subscriber to read it'
-    started = next(e for e in recorder._buffer if e.get('task_id') == 't-no-client')
+    started = next(e for e in recorder._intake if e.get('task_id') == 't-no-client')
     assert started['stdin_lines'] is None
     # The byte sizes are real columns and stay exact.
     assert started['stdin_size'] == len(b'first\nsecond\n')
-    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    completed = next(e for e in recorder._intake if e['event'] == 'task_completed')
     assert completed['stdout_lines'] is None
     assert completed['stdout_size'] == len(b'line1\nline2\n')
 
@@ -364,9 +370,9 @@ async def test_line_counts_are_computed_once_a_client_subscribes(recorder):
     # which is its own case below.
     recorder.record_task_completed(make_result('t-other'), partition=0)
 
-    started = next(e for e in recorder._buffer if e.get('task_id') == 't-with-client')
+    started = next(e for e in recorder._intake if e.get('task_id') == 't-with-client')
     assert started['stdin_lines'] == 2
-    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    completed = next(e for e in recorder._intake if e['event'] == 'task_completed')
     assert completed['stdout_lines'] == 2
 
 
@@ -385,7 +391,7 @@ async def test_completed_line_count_skipped_when_the_frame_is_not_sent(recorder,
     recorder.record_task_completed(result, partition=0)
 
     assert calls == [], 'stdout was walked for a frame nobody receives'
-    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    completed = next(e for e in recorder._intake if e['event'] == 'task_completed')
     assert completed['stdout_lines'] is None
 
 
@@ -412,7 +418,7 @@ async def test_record_task_completed_with_output(tmp_path):
 
     result = make_result('t1')
     rec.record_task_completed(result, partition=0)
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.get_events(event_type='task_completed')
     assert events[0]['stdout'] == 'line1\nline2\n'
@@ -423,7 +429,7 @@ async def test_record_task_failed(recorder):
     task = make_task('t1')
     error = ExecutorError(task=task, exit_code=1, stderr='bad input')
     recorder.record_task_failed(task, error, partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_failed')
     assert len(events) == 1
@@ -432,7 +438,7 @@ async def test_record_task_failed(recorder):
 
 async def test_record_task_started_includes_queue_wait(recorder):
     recorder.record_task_started(make_task(), partition=0, queue_wait_ms=12.5)
-    await recorder._flush()
+    await recorder.flush()
     events = await recorder.get_events(event_type='task_started')
     assert json.loads(events[0]['metadata'])['queue_wait_ms'] == 12.5
 
@@ -441,7 +447,7 @@ async def test_record_task_started_omits_stdin_by_default(recorder):
     task = make_task()
     task.stdin = 'payload line\n'
     recorder.record_task_started(task, partition=0)
-    await recorder._flush()
+    await recorder.flush()
     events = await recorder.get_events(event_type='task_started')
     assert 'stdin' not in json.loads(events[0]['metadata'])
 
@@ -454,7 +460,7 @@ async def test_record_task_started_stores_capped_stdin_when_enabled(tmp_path):
         task = make_task()
         task.stdin = 'x' * 20
         rec.record_task_started(task, partition=0)
-        await rec._flush()
+        await rec.flush()
         events = await rec.get_events(event_type='task_started')
         meta = json.loads(events[0]['metadata'])
         assert meta['stdin'] == 'x' * 10
@@ -469,7 +475,7 @@ async def test_record_task_failed_always_stores_stdin(recorder):
     task.stdin = 'payload line\n'
     error = ExecutorError(task=task, exit_code=1, stderr='bad input')
     recorder.record_task_failed(task, error, partition=0)
-    await recorder._flush()
+    await recorder.flush()
     events = await recorder.get_events(event_type='task_failed')
     meta = json.loads(events[0]['metadata'])
     assert meta['stdin'] == 'payload line\n'
@@ -479,7 +485,7 @@ async def test_record_task_failed_always_stores_stdin(recorder):
 async def test_record_produced(recorder):
     msg = KafkaPayload(key=b'k', data=_RecData())
     recorder.record_produced(msg, source_partition=3, source_offset=42)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='produced')
     assert len(events) == 1
@@ -489,7 +495,7 @@ async def test_record_produced(recorder):
 
 async def test_record_committed(recorder):
     recorder.record_committed(partition=5, offset=100)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='committed')
     assert len(events) == 1
@@ -500,7 +506,7 @@ async def test_record_committed(recorder):
 async def test_record_assigned_and_revoked(recorder):
     recorder.record_assigned([0, 1, 2])
     recorder.record_revoked([1])
-    await recorder._flush()
+    await recorder.flush()
 
     assigned = await recorder.get_events(event_type='assigned')
     assert len(assigned) == 3
@@ -517,7 +523,7 @@ async def test_get_events_filtering(recorder):
     recorder.record_consumed(make_msg(partition=0, offset=0))
     recorder.record_consumed(make_msg(partition=1, offset=0))
     recorder.record_committed(partition=0, offset=1)
-    await recorder._flush()
+    await recorder.flush()
 
     all_events = await recorder.get_events()
     assert len(all_events) == 3
@@ -532,7 +538,7 @@ async def test_get_events_filtering(recorder):
 async def test_get_events_pagination(recorder):
     for i in range(20):
         recorder.record_consumed(make_msg(offset=i))
-    await recorder._flush()
+    await recorder.flush()
 
     page1 = await recorder.get_events(limit=5, offset=0)
     assert len(page1) == 5
@@ -548,7 +554,7 @@ async def test_get_trace(recorder):
     recorder.record_task_started(task, partition=3)
     recorder.record_task_completed(make_result('t-42', task=task), partition=3)
     recorder.record_committed(partition=3, offset=43)
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert len(trace) >= 2
@@ -580,7 +586,7 @@ async def test_record_annotation_message_scope_anchors_on_offset(recorder):
         metadata_json=annotation_envelope(scope='message', data={'files': ['a']}),
         offset=42,
     )
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
     assert row['partition'] == 3
@@ -596,7 +602,7 @@ async def test_record_annotation_task_scope_anchors_on_task_id(recorder):
         metadata_json=annotation_envelope(scope='task'),
         task_id='t-9',
     )
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
     assert row['offset'] is None
@@ -609,7 +615,7 @@ async def test_record_annotation_window_scope_has_no_anchor_column(recorder):
         partition=3,
         metadata_json=annotation_envelope(offsets=[42, 43]),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
     assert row['offset'] is None
@@ -624,7 +630,7 @@ async def test_record_annotation_encodes_labels(recorder):
         metadata_json=annotation_envelope(),
         labels={'request_id': 'abc'},
     )
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
     assert json.loads(row['labels']) == {'request_id': 'abc'}
@@ -632,7 +638,7 @@ async def test_record_annotation_encodes_labels(recorder):
 
 async def test_record_annotation_without_labels_stores_null(recorder):
     recorder.record_annotation(kind='k', partition=0, metadata_json=annotation_envelope())
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
     assert row['labels'] is None
@@ -646,7 +652,7 @@ async def test_get_trace_includes_message_scoped_annotation(recorder):
         metadata_json=annotation_envelope(scope='message'),
         offset=42,
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'annotation' in [e['event'] for e in trace]
@@ -661,7 +667,7 @@ async def test_get_trace_includes_task_scoped_annotation(recorder):
         metadata_json=annotation_envelope(scope='task'),
         task_id='t-42',
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'annotation' in [e['event'] for e in trace]
@@ -676,7 +682,7 @@ async def test_get_trace_includes_window_scoped_annotation_via_offsets(recorder)
         partition=3,
         metadata_json=annotation_envelope(offsets=[41, 42, 43]),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'annotation' in [e['event'] for e in trace]
@@ -689,7 +695,7 @@ async def test_get_trace_excludes_window_annotation_from_another_window(recorder
         partition=3,
         metadata_json=annotation_envelope(offsets=[900, 901]),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'annotation' not in [e['event'] for e in trace]
@@ -702,7 +708,7 @@ async def test_get_trace_excludes_window_annotation_from_another_partition(recor
         partition=7,
         metadata_json=annotation_envelope(offsets=[42]),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'annotation' not in [e['event'] for e in trace]
@@ -719,7 +725,7 @@ async def test_get_trace_includes_message_scoped_offload_event(recorder):
         status='ok',
         offset=42,
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'offload' in [e['event'] for e in trace]
@@ -739,7 +745,7 @@ async def test_get_trace_includes_window_scoped_offload_via_offsets(recorder):
         window_id=7,
         offsets=(41, 42, 43),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     offload_rows = [e for e in trace if e['event'] == 'offload']
@@ -762,7 +768,7 @@ async def test_get_trace_excludes_offload_from_another_window(recorder):
         status='ok',
         offsets=(900, 901),
     )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'offload' not in [e['event'] for e in trace]
@@ -779,7 +785,7 @@ async def test_record_offload_outside_hooks_persists_unanchored(recorder):
         queued=0.0,
         status='ok',
     )
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='offload', limit=10)
     assert len(events) == 1
@@ -794,7 +800,7 @@ async def test_get_trace_still_excludes_arranged_rows(recorder):
     # it would start appearing in every trace.
     recorder.record_arranged(3, [make_msg(partition=3, offset=42)], [], window_id=1)
     recorder.record_consumed(make_msg(partition=3, offset=42))
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=42)
     assert 'arranged' not in [e['event'] for e in trace]
@@ -802,7 +808,7 @@ async def test_get_trace_still_excludes_arranged_rows(recorder):
 
 async def test_record_arranged_metadata_includes_window_id(recorder):
     recorder.record_arranged(0, [make_msg(offset=1)], [make_task('t1', offsets=[1])], window_id=17)
-    await recorder._flush()
+    await recorder.flush()
 
     row = next(e for e in await recorder.get_events() if e['event'] == 'arranged')
     assert json.loads(row['metadata'])['window_id'] == 17
@@ -815,7 +821,7 @@ async def test_get_partition_summary(recorder):
     recorder.record_committed(partition=0, offset=2)
     task = make_task('t1', offsets=[0])
     recorder.record_task_completed(make_result('t1', task), partition=0)
-    await recorder._flush()
+    await recorder.flush()
 
     summary = await recorder.get_partition_summary()
     assert len(summary) == 2
@@ -831,7 +837,7 @@ async def test_get_stats(recorder):
     task = make_task('t1')
     recorder.record_task_completed(make_result('t1', task), partition=0)
     recorder.record_committed(partition=0, offset=2)
-    await recorder._flush()
+    await recorder.flush()
 
     stats = await recorder.get_stats()
     assert stats['total_events'] == 4
@@ -855,28 +861,31 @@ async def test_get_events_no_db():
 # --- Buffering when nothing will ever drain the buffer ---
 
 
-async def test_record_memory_only_does_not_buffer_or_count_drops():
-    """``storage_dir: ''`` means no flush loop is ever created and ``_flush``
-    returns early, so an appended event is never drained. Buffering there
-    fills the deque to ``max_buffer`` and then counts every further event
-    as a drop — a permanently firing alert plus a large dead buffer, since
-    ``task_completed`` entries carry the whole subprocess stdout/stderr.
+async def test_record_memory_only_keeps_events_in_the_memory_store():
+    """Persistence ``none`` still buffers: the memory loop drains the intake
+    into the memory store, so no event counts as a drop.
     """
-    config = make_ui_config(enabled=True)
+    config = make_ui_config(enabled=True, flush_interval_seconds=60)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
+    await rec.start()
     before = recorder_dropped_events._value.get()
+    try:
+        for offset in range(64):
+            rec.record_committed(partition=0, offset=offset)
+        assert len(rec._intake) == 64
 
-    for offset in range(64):
-        rec.record_committed(partition=0, offset=offset)
+        await rec.flush_memory()
 
-    assert len(rec._buffer) == 0
-    assert recorder_dropped_events._value.get() == before
+        assert len(rec._intake) == 0
+        _, rows = await rec.memory_store.read('SELECT count(*) FROM events')
+        assert rows[0][0] == 64
+        assert recorder_dropped_events._value.get() == before
+    finally:
+        await rec.stop()
 
 
 async def test_record_memory_only_still_fans_out_to_websockets():
-    """Not buffering must not cost the live UI its events — the WS fan-out
-    is the whole point of memory-only mode.
-    """
+    """The WS fan-out runs in memory-only mode as it does with a file."""
     config = make_ui_config(enabled=True)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     sub = rec.subscribe()
@@ -884,7 +893,7 @@ async def test_record_memory_only_still_fans_out_to_websockets():
     rec.record_committed(partition=3, offset=9)
 
     assert sub.queue.qsize() == 1
-    assert len(rec._buffer) == 0
+    assert len(rec._intake) == 1
 
 
 async def test_record_store_events_off_does_not_buffer(tmp_path):
@@ -899,7 +908,7 @@ async def test_record_store_events_off_does_not_buffer(tmp_path):
     for offset in range(64):
         rec.record_committed(partition=0, offset=offset)
 
-    assert len(rec._buffer) == 0
+    assert len(rec._intake) == 0
     assert recorder_dropped_events._value.get() == before
     await rec.stop()
 
@@ -921,7 +930,7 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path, unique_db_paths):
     assert rec._db is not None  # new DB connection open
     assert os.path.exists(rec.db_path)
     # buffer was cleared during rotation flush
-    assert len(rec._buffer) == 0
+    assert len(rec._intake) == 0
 
     await rec.stop()
 
@@ -1019,9 +1028,9 @@ async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path, unique_
         # is the one most likely to land in the swap-then-schema window
         # under the old (broken) ordering.
         await asyncio.gather(
-            rec._flush(),
+            rec.flush(),
             rec._rotate(),
-            rec._flush(),
+            rec.flush(),
         )
 
         # No exception means the race didn't surface — there was no
@@ -1056,7 +1065,7 @@ async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
     # Restore the real _create_schema so _flush's writes (which go to the
     # old, still-schema-ful DB) and cleanup work.
     del rec._create_schema
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.get_events()
     assert any(e['offset'] == 42 for e in events)
@@ -1129,8 +1138,7 @@ def _hold_next_rotation(rec, monkeypatch, moment: str) -> _HeldRotation:
         monkeypatch.setattr(rec, '_create_schema', wait_until_cancelled)
     else:
         # After the swap: the config is written to the new file first.
-        monkeypatch.setattr(rec, '_drakkar_config', MagicMock())
-        monkeypatch.setattr(rec, 'write_config', wait_until_cancelled)
+        monkeypatch.setattr(rec, '_write_config_to_file', wait_until_cancelled)
     return _HeldRotation(waiting, lambda: None)
 
 
@@ -1283,7 +1291,7 @@ async def test_reader_sees_writer_writes(tmp_path):
 
     # Buffer an event, then flush to force a writer commit.
     rec.record_consumed(make_msg(partition=7, offset=123))
-    await rec._flush()
+    await rec.flush()
 
     # Query via the reader (not the writer) and assert the row is visible.
     async with rec._reader_db.execute(
@@ -1321,7 +1329,7 @@ async def test_rotate_rotates_reader_too(tmp_path, unique_db_paths):
     # The new reader must be usable — write via the writer then SELECT
     # via the reader to confirm both point at the same (new) file.
     rec.record_consumed(make_msg(partition=1, offset=999))
-    await rec._flush()
+    await rec.flush()
     async with rec._reader_db.execute(
         'SELECT partition, offset FROM events WHERE event = ?',
         ('consumed',),
@@ -1347,7 +1355,7 @@ async def test_concurrent_reader_and_writer_no_deadlock(tmp_path):
     # writer is committing the next batch concurrently.
     for offset in range(50):
         rec.record_consumed(make_msg(offset=offset))
-    await rec._flush()
+    await rec.flush()
 
     # Second batch not yet flushed — the writer work below will flush it.
     for offset in range(50, 100):
@@ -1361,7 +1369,7 @@ async def test_concurrent_reader_and_writer_no_deadlock(tmp_path):
 
     async def writer_task():
         # Flush the buffered second batch to the writer.
-        await rec._flush()
+        await rec.flush()
 
     # Run both concurrently under a generous timeout. If WAL isolation
     # were missing OR connections shared a worker thread, this could
@@ -1445,7 +1453,7 @@ async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
 
     # Sanity: still usable after the failed rotate.
     rec.record_consumed(make_msg(offset=7))
-    await rec._flush()
+    await rec.flush()
     events = await rec.get_events()
     assert any(e['offset'] == 7 for e in events)
 
@@ -1484,7 +1492,7 @@ async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path,
     assert rec._db is not None
     assert rec._reader_db is not None
     rec.record_consumed(make_msg(partition=2, offset=99))
-    await rec._flush()
+    await rec.flush()
     async with rec._reader_db.execute(
         'SELECT partition, offset FROM events WHERE event = ?',
         ('consumed',),
@@ -1505,7 +1513,7 @@ async def test_task_started_includes_pool_stats(tmp_path):
 
     task = make_task('t1')
     rec.record_task_started(task, partition=0, pool_active=5, pool_waiting=12)
-    await rec._flush()
+    await rec.flush()
 
     queue = rec.subscribe()
     # re-record to check WS event
@@ -1731,7 +1739,7 @@ async def test_ws_event_omits_captured_output(tmp_path):
     assert event['stdout_size'] == 4096, 'the size must survive — the timeline shows it'
 
     # The DB copy keeps the output for the task-detail page.
-    await rec._flush()
+    await rec.flush()
     assert rec._db is not None
     async with rec._db.execute("SELECT stdout, stderr FROM events WHERE event = 'task_completed'") as cur:
         row = await cur.fetchone()
@@ -1751,7 +1759,7 @@ async def test_no_broadcast_without_subscribers(tmp_path):
 
     assert len(rec.fanout.subscribers) == 0
     rec.record_consumed(make_msg(offset=0))  # should not raise
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.get_events()
     assert len(events) == 1
@@ -1782,7 +1790,7 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
     recorder.record_sink_error(sink_type='http', sink_name='wh', error='timeout', attempt=1)
 
-    await recorder._flush()
+    await recorder.flush()
 
     all_events = await recorder.get_events(limit=50)
     event_types = {e['event'] for e in all_events}
@@ -1807,7 +1815,7 @@ async def test_all_event_types_persisted(recorder):
 async def test_task_complete_persisted(recorder):
     """task_complete event stores task_id, duration, and output_message_count."""
     recorder.record_task_complete(task_id='t-cc', partition=2, duration=0.123, output_message_count=5)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_complete')
     assert len(events) == 1
@@ -1832,7 +1840,7 @@ async def test_message_complete_persisted(recorder):
         replaced=1,
         output_message_count=2,
     )
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='message_complete')
     assert len(events) == 1
@@ -1858,7 +1866,7 @@ async def test_window_complete_persisted(recorder):
         task_count=10,
         output_message_count=0,
     )
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='window_complete')
     assert len(events) == 1
@@ -1884,7 +1892,7 @@ async def test_rotation_no_event_loss(tmp_path, unique_db_paths):
     # phase 1: record before rotation
     rec.record_consumed(make_msg(offset=0))
     rec.record_consumed(make_msg(offset=1))
-    await rec._flush()
+    await rec.flush()
 
     # verify pre-rotation events
     pre_events = await rec.get_events()
@@ -1908,7 +1916,7 @@ async def test_rotation_no_event_loss(tmp_path, unique_db_paths):
     # phase 3: record after rotation → goes to new DB
     rec.record_consumed(make_msg(offset=4))
     rec.record_consumed(make_msg(offset=5))
-    await rec._flush()
+    await rec.flush()
 
     new_events = await rec.get_events()
     assert len(new_events) == 2
@@ -1933,7 +1941,7 @@ async def test_rotation_queries_work_on_new_db(tmp_path, unique_db_paths):
     rec.record_task_started(task, partition=0)
     rec.record_task_completed(make_result('t-rot', task=task), partition=0)
     rec.record_committed(partition=0, offset=101)
-    await rec._flush()
+    await rec.flush()
 
     # all query methods should return data
     events = await rec.get_events()
@@ -1983,7 +1991,7 @@ async def test_rotation_new_db_has_schema(tmp_path, unique_db_paths):
 
 async def test_record_sink_delivery(recorder):
     recorder.record_sink_delivery(sink_type='kafka', sink_name='results', payload_count=5, duration=0.042)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='sink_delivered')
     assert len(events) == 1
@@ -1997,7 +2005,7 @@ async def test_record_sink_delivery(recorder):
 
 async def test_record_sink_error(recorder):
     recorder.record_sink_error(sink_type='postgres', sink_name='main-db', error='connection refused', attempt=2)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='sink_error')
     assert len(events) == 1
@@ -2013,7 +2021,7 @@ async def test_sink_events_in_all_event_types(recorder):
     """sink_delivered and sink_error survive the buffer → flush → SQLite round-trip."""
     recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
     recorder.record_sink_error(sink_type='http', sink_name='webhook', error='timeout', attempt=1)
-    await recorder._flush()
+    await recorder.flush()
 
     all_events = await recorder.get_events(limit=50)
     event_types = {e['event'] for e in all_events}
@@ -2570,9 +2578,9 @@ async def test_counters_survive_flush(tmp_path):
     await rec.start()
 
     rec.record_consumed(make_msg(offset=0))
-    await rec._flush()
+    await rec.flush()
     rec.record_consumed(make_msg(offset=1))
-    await rec._flush()
+    await rec.flush()
 
     assert rec.counters['consumed'] == 2
     await rec.stop()
@@ -2588,7 +2596,7 @@ async def test_store_events_false_queries_return_empty(tmp_path):
     await rec.start()
 
     rec.record_consumed(make_msg(offset=0))
-    await rec._flush()
+    await rec.flush()
 
     assert await rec.get_events() == []
     assert await rec.get_trace(partition=0, msg_offset=0) == []
@@ -2620,10 +2628,10 @@ async def test_store_events_false_flush_is_a_noop(tmp_path):
     try:
         rec.record_consumed(make_msg(offset=0))
         rec.record_consumed(make_msg(offset=1))
-        assert len(rec._buffer) == 0
+        assert len(rec._intake) == 0
 
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        await rec.flush()
+        assert len(rec._intake) == 0
     finally:
         await rec.stop()
 
@@ -2644,13 +2652,14 @@ async def test_store_events_false_ws_broadcast_still_works(tmp_path):
     await rec.stop()
 
 
-async def test_store_events_false_no_flush_task(tmp_path):
-    """Flush loop task is not started when store_events=False."""
+async def test_store_events_false_no_write_loops(tmp_path):
+    """Neither the memory loop nor the file loop starts when store_events=False."""
     config = make_debug_config(tmp_path, store_events=False)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
-    assert rec._flush_task is None
+    assert rec._memory_task is None
+    assert rec._file_task is None
     await rec.stop()
 
 
@@ -2829,7 +2838,7 @@ async def test_cross_trace_finds_in_current_worker(recorder):
     recorder.record_consumed(make_msg(partition=3, offset=42))
     task = make_task('t-42', offsets=[42])
     recorder.record_task_started(task, partition=3)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.cross_trace(partition=3, msg_offset=42)
     assert len(events) >= 2
@@ -2928,8 +2937,8 @@ async def test_ws_deferred_start_not_sent_immediately(tmp_path):
     # start event is deferred — WS queue should be empty right after
     assert q.empty()
     # but it IS written to the DB buffer
-    assert len(rec._buffer) == 1
-    assert rec._buffer[0]['event'] == 'task_started'
+    assert len(rec._intake) == 1
+    assert rec._intake[0]['event'] == 'task_started'
     rec.unsubscribe(q)
     await rec.stop()
 
@@ -3063,8 +3072,8 @@ async def test_labels_stored_in_task_started_event(tmp_path):
     task.labels = {'request_id': 'req-abc', 'user': 'alice'}
     rec.record_task_started(task, partition=0)
 
-    assert len(rec._buffer) == 1
-    entry = rec._buffer[0]
+    assert len(rec._intake) == 1
+    entry = rec._intake[0]
     # Compare semantically: the exact byte layout differs between orjson
     # (compact) and stdlib json (spaces after ``:`` / ``,``). Both produce
     # valid JSON that decodes to the same dict.
@@ -3083,7 +3092,7 @@ async def test_labels_stored_in_task_completed_event(tmp_path):
     result = make_result(task=task)
     rec.record_task_completed(result, partition=0)
 
-    entry = rec._buffer[0]
+    entry = rec._intake[0]
     assert json.loads(entry['labels']) == {'request_id': 'req-xyz'}
     await rec.stop()
 
@@ -3114,7 +3123,7 @@ async def test_labels_none_when_empty(tmp_path):
     task = make_task('t-no-labels')
     rec.record_task_started(task, partition=0)
 
-    entry = rec._buffer[0]
+    entry = rec._intake[0]
     assert entry['labels'] is None
     await rec.stop()
 
@@ -3152,7 +3161,7 @@ async def test_labels_persisted_to_db(tmp_path):
     task = make_task('t-db-labels')
     task.labels = {'request_id': 'req-db', 'env': 'prod'}
     rec.record_task_started(task, partition=0)
-    await rec._flush()
+    await rec.flush()
 
     async with rec._db.execute('SELECT labels FROM events WHERE task_id = ?', ['t-db-labels']) as cur:
         row = await cur.fetchone()
@@ -3184,7 +3193,7 @@ async def test_trace_by_label_finds_matching_tasks(tmp_path):
     task3 = make_task('t-no-labels')
     rec.record_task_started(task3, partition=0)
 
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.trace_by_label('request_id', 'req-find-me')
     task_ids = {e['task_id'] for e in events}
@@ -3207,7 +3216,7 @@ async def test_trace_by_label_returns_empty_for_no_match(tmp_path):
     task = make_task('t-x')
     task.labels = {'user': 'alice'}
     rec.record_task_started(task, partition=0)
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.trace_by_label('user', 'bob')
     assert events == []
@@ -3223,7 +3232,7 @@ async def test_trace_by_label_returns_empty_for_unknown_key(tmp_path):
     task = make_task('t-y')
     task.labels = {'request_id': 'abc'}
     rec.record_task_started(task, partition=0)
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.trace_by_label('nonexistent_key', 'abc')
     assert events == []
@@ -3238,8 +3247,8 @@ async def test_event_threshold_zero_saves_all(tmp_path):
 
     rec.record_task_completed(make_fast_result(), partition=0)
 
-    assert len(rec._buffer) == 1
-    assert rec._buffer[0]['event'] == 'task_completed'
+    assert len(rec._intake) == 1
+    assert rec._intake[0]['event'] == 'task_completed'
     await rec.stop()
 
 
@@ -3251,7 +3260,7 @@ async def test_event_threshold_skips_fast_task(tmp_path):
 
     rec.record_task_completed(make_fast_result(), partition=0)
 
-    assert len(rec._buffer) == 0
+    assert len(rec._intake) == 0
     await rec.stop()
 
 
@@ -3263,7 +3272,7 @@ async def test_event_threshold_saves_slow_task(tmp_path):
 
     rec.record_task_completed(make_slow_result(), partition=0)
 
-    assert len(rec._buffer) == 1
+    assert len(rec._intake) == 1
     await rec.stop()
 
 
@@ -3275,8 +3284,8 @@ async def test_output_threshold_excludes_args_for_fast_task(tmp_path):
 
     rec.record_task_completed(make_fast_result(), partition=0)
 
-    assert len(rec._buffer) == 1
-    assert 'args' not in rec._buffer[0]
+    assert len(rec._intake) == 1
+    assert 'args' not in rec._intake[0]
     await rec.stop()
 
 
@@ -3288,8 +3297,8 @@ async def test_output_threshold_includes_args_for_slow_task(tmp_path):
 
     rec.record_task_completed(make_slow_result(), partition=0)
 
-    assert len(rec._buffer) == 1
-    assert 'args' in rec._buffer[0]
+    assert len(rec._intake) == 1
+    assert 'args' in rec._intake[0]
     await rec.stop()
 
 
@@ -3302,8 +3311,8 @@ async def test_output_threshold_excludes_stdout_stderr_for_fast_task(tmp_path):
     rec.record_task_completed(make_slow_result('t-slow'), partition=0)
     rec.record_task_completed(make_fast_result('t-fast'), partition=0)
 
-    slow_entry = rec._buffer[0]
-    fast_entry = rec._buffer[1]
+    slow_entry = rec._intake[0]
+    fast_entry = rec._intake[1]
 
     assert slow_entry['stdout'] == 'slow output\n'
     assert slow_entry['stderr'] == 'warn'
@@ -3320,7 +3329,7 @@ async def test_output_threshold_store_output_false_no_stdout(tmp_path):
 
     rec.record_task_completed(make_slow_result(), partition=0)
 
-    entry = rec._buffer[0]
+    entry = rec._intake[0]
     assert 'args' in entry  # output_min_duration_ms=0 so args included
     assert 'stdout' not in entry  # store_output=False suppresses this
     assert 'stderr' not in entry
@@ -3381,8 +3390,8 @@ async def test_failed_with_duration_applies_thresholds(tmp_path):
 
     # buffer has task_started (always written to DB) but not task_failed
     # (skipped by event_min_duration_ms=500)
-    assert len(rec._buffer) == 1
-    assert rec._buffer[0]['event'] == 'task_started'
+    assert len(rec._intake) == 1
+    assert rec._intake[0]['event'] == 'task_started'
     events = []
     while not q.empty():
         events.append(q.get_nowait())
@@ -3411,8 +3420,8 @@ async def test_failed_slow_task_recorded_with_duration(tmp_path):
 
     rec.record_task_failed(task, error, partition=0, duration_seconds=1.5)
 
-    assert len(rec._buffer) == 1
-    entry = rec._buffer[0]
+    assert len(rec._intake) == 1
+    entry = rec._intake[0]
     assert entry['duration'] == 1.5
     assert 'args' in entry
     assert entry['stderr'] == 'slow error'
@@ -3440,8 +3449,8 @@ async def test_failed_without_duration_records_everything(tmp_path):
     rec.record_task_failed(task, error, partition=0)
 
     # without duration: everything recorded
-    assert len(rec._buffer) == 1
-    entry = rec._buffer[0]
+    assert len(rec._intake) == 1
+    entry = rec._intake[0]
     assert 'duration' not in entry
     assert 'args' in entry
     assert entry['stderr'] == 'unknown duration error'
@@ -3466,8 +3475,8 @@ async def test_failed_output_threshold_excludes_args_stderr(tmp_path):
 
     rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
 
-    assert len(rec._buffer) == 1
-    entry = rec._buffer[0]
+    assert len(rec._intake) == 1
+    entry = rec._intake[0]
     assert 'args' not in entry
     assert 'stderr' not in entry
     await rec.stop()
@@ -3529,7 +3538,7 @@ async def test_counters_always_increment_regardless_of_thresholds(tmp_path):
     assert rec.counters['completed'] == 2
     assert rec.counters['failed'] == 1
     # buffer should be empty (fast tasks, event_min_duration_ms=500)
-    assert len(rec._buffer) == 0
+    assert len(rec._intake) == 0
     await rec.stop()
 
 
@@ -3557,7 +3566,7 @@ async def test_threshold_boundary_exact_match(tmp_path):
 
     # 500ms >= 500ms threshold → included
     assert not q.empty()
-    assert 'args' in rec._buffer[0]
+    assert 'args' in rec._intake[0]
     rec.unsubscribe(q)
     await rec.stop()
 
@@ -3578,9 +3587,9 @@ async def test_threshold_zero_means_include_all(tmp_path):
     q = rec.subscribe()
     rec.record_task_completed(make_fast_result(), partition=0)
 
-    assert len(rec._buffer) == 1
+    assert len(rec._intake) == 1
     assert not q.empty()
-    entry = rec._buffer[0]
+    entry = rec._intake[0]
     assert 'args' in entry
     assert 'stdout' in entry
     rec.unsubscribe(q)
@@ -3630,7 +3639,7 @@ def test_detect_worker_ip_closes_socket_when_getsockname_raises():
 
 
 async def test_recorder_buffer_gauge_tracks_length_after_append(tmp_path):
-    """Gauge reflects ``len(self._buffer)`` after each ``_record`` call."""
+    """Gauge reflects ``len(self._intake)`` after each ``_record`` call."""
     from drakkar.metrics import recorder_buffer_size
 
     config = make_debug_config(tmp_path)
@@ -3658,7 +3667,7 @@ async def test_recorder_buffer_gauge_reflects_zero_after_flush(tmp_path):
         rec.record_consumed(make_msg(offset=offset))
     assert recorder_buffer_size._value.get() == 5
 
-    await rec._flush()
+    await rec.flush()
     assert recorder_buffer_size._value.get() == 0
 
     await rec.stop()
@@ -3678,7 +3687,7 @@ async def test_recorder_dropped_events_increments_on_overflow(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     # Shrink post-construction to keep the test fast; validates the drop
     # path without pushing 1000+ events through the recorder.
-    rec._buffer = deque(maxlen=3)
+    rec._intake = deque(maxlen=3)
     await rec.start()
 
     before = recorder_dropped_events._value.get()
@@ -3693,7 +3702,7 @@ async def test_recorder_dropped_events_increments_on_overflow(tmp_path):
     rec.record_consumed(make_msg(offset=4))
     assert recorder_dropped_events._value.get() == before + 2
     # Buffer length stays at maxlen — deque silently rolled the window.
-    assert len(rec._buffer) == 3
+    assert len(rec._intake) == 3
 
     await rec.stop()
 
@@ -3729,7 +3738,7 @@ async def test_recorder_flush_duration_histogram_observed(tmp_path):
     # return when buffer is empty).
     for offset in range(5):
         rec.record_consumed(make_msg(offset=offset))
-    await rec._flush()
+    await rec.flush()
 
     # Histogram must have observed exactly one sample with a positive
     # duration. Sum strictly > before guards against a zero-valued
@@ -3754,7 +3763,7 @@ async def test_recorder_flush_skipped_when_buffer_empty_no_histogram_observation
     await rec.start()
 
     before_count = _histogram_count(recorder_flush_duration)
-    await rec._flush()
+    await rec.flush()
     assert _histogram_count(recorder_flush_duration) == before_count
 
     await rec.stop()
@@ -3766,7 +3775,7 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
 
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
-    rec._buffer = deque(maxlen=2)
+    rec._intake = deque(maxlen=2)
     await rec.start()
 
     # Pre-fill to cap so any append would normally drop one event.
@@ -3786,9 +3795,9 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
 #
 # Production recorders will sometimes hit aiosqlite ``OperationalError`` —
 # under contention (``database is locked``) or disk failure (``disk I/O
-# error``). ``_flush`` now takes a local snapshot of the batch BEFORE the
-# DB write, and on ``OperationalError`` re-queues the snapshot at the
-# FRONT of the buffer so the next flush retries the same rows. After
+# error``). Stage F takes a local snapshot of the batch BEFORE the file
+# write, and on ``OperationalError`` re-queues the snapshot at the FRONT
+# of the file queue so the next stage F retries the same rows. After
 # ``max_flush_retries`` consecutive failures the batch is dropped and
 # the ``drakkar_recorder_flush_batches_dropped_total`` counter ticks.
 # Each failed attempt ticks ``drakkar_recorder_flush_retries_total``.
@@ -3797,7 +3806,7 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
 #   - transient failure → re-queue → next-flush success
 #   - persistent failure → N retries → drop + counter tick + no mem leak
 #   - rotation DURING a failed flush (re-queued rows go to the new DB —
-#     acceptable for a flight recorder; see the ``_flush`` comment).
+#     acceptable for a flight recorder; see the ``_write_file_chunk`` comment).
 #   - commit never reached when executemany fails (narrow regression check).
 
 
@@ -3817,7 +3826,7 @@ async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
     try:
         rec.record_consumed(make_msg(partition=0, offset=0))
         rec.record_consumed(make_msg(partition=0, offset=1))
-        assert len(rec._buffer) == 2
+        assert len(rec._intake) == 2
 
         assert rec._db is not None
         original_executemany = rec._db.executemany
@@ -3834,22 +3843,20 @@ async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
         retries_before = recorder_flush_retries._value.get()
 
         # First flush: swallows the OperationalError and re-queues.
-        await rec._flush()
+        await rec.flush()
 
-        # Rows are back in the buffer — no data lost.
-        assert len(rec._buffer) == 2
+        # Rows are back in the file queue — no data lost.
+        assert len(rec._file_queue) == 2
         # Order preserved: offset 0 at the front, offset 1 behind it.
-        buffered = list(rec._buffer)
-        assert buffered[0]['offset'] == 0
-        assert buffered[1]['offset'] == 1
+        assert _queued_offsets(rec) == [0, 1]
         # Retry counter incremented once.
         assert recorder_flush_retries._value.get() == retries_before + 1
         # Instance-level failure counter reflects the single failure.
         assert rec._flush_failures == 1
 
         # Second flush: real executemany runs, rows land in the DB.
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        await rec.flush()
+        assert len(rec._file_queue) == 0
         # Retry counter reset on success.
         assert rec._flush_failures == 0
 
@@ -3864,19 +3871,19 @@ async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
 async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
     """Requeue that overflows ``max_buffer`` ticks ``recorder_requeue_overflow``.
 
-    Scenario: an OperationalError during flush forces a re-queue via
-    ``extendleft``. If concurrent ``_record`` appends filled the buffer
-    during the flush's await window, ``extendleft`` silently evicts rows
+    Scenario: an OperationalError during stage F forces a re-queue via
+    ``extendleft``. If stage M filled the file queue during the stage's
+    await window, ``extendleft`` silently evicts rows
     from the tail to honour the deque's ``maxlen``. This was previously
     uncounted data loss; the new counter surfaces it.
 
     Test construction:
-      - Shrink ``rec._buffer`` to a tiny ``maxlen`` so overflow is cheap
-        to trigger deterministically.
-      - Populate with 3 rows and take a snapshot of executemany to fail.
-      - Simulate concurrent appends during the failed flush by refilling
-        the buffer BEFORE the requeue lands (we hook the failing
-        executemany to push more rows in).
+      - Shrink ``rec._file_queue`` to a tiny ``maxlen`` so overflow is
+        cheap to trigger deterministically.
+      - Queue 3 rows and make the file executemany fail.
+      - Simulate stage M during the failed write by refilling the file
+        queue BEFORE the requeue lands (the failing executemany runs
+        stage M on 2 more rows).
     """
     from drakkar.metrics import recorder_requeue_overflow
 
@@ -3884,13 +3891,14 @@ async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     # Shrink post-construction so the overflow path is reachable without
     # pushing thousands of events through the recorder.
-    rec._buffer = deque(maxlen=3)
+    rec._file_queue = deque(maxlen=3)
     await rec.start()
     try:
-        # Seed the buffer with 3 rows (at capacity).
+        # Seed the file queue with 3 rows (at capacity).
         for off in range(3):
             rec.record_consumed(make_msg(partition=0, offset=off))
-        assert len(rec._buffer) == 3
+        await rec.flush_memory()
+        assert len(rec._file_queue) == 3
 
         assert rec._db is not None
 
@@ -3903,21 +3911,22 @@ async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
             # 2 rows must be evicted from the tail.
             for off in range(100, 102):
                 rec.record_consumed(make_msg(partition=0, offset=off))
+            await rec.flush_memory()
             raise aiosqlite.OperationalError('database is locked')
 
         rec._db.executemany = failing_and_filling  # type: ignore[method-assign]
 
         overflow_before = recorder_requeue_overflow._value.get()
 
-        # Trigger the flush: drains 3 rows into the batch, call fails,
-        # 2 concurrent rows land in the buffer, then extendleft(3 batch
+        # Trigger stage F: drains 3 rows into the batch, call fails,
+        # 2 rows land in the file queue, then extendleft(3 batch
         # rows) overflows by (2 + 3) - 3 = 2.
-        await rec._flush()
+        await rec.flush()
 
         # Counter ticked by the overflow count (2).
         assert recorder_requeue_overflow._value.get() == overflow_before + 2
-        # Buffer is pinned at maxlen — the deque rolled the window.
-        assert len(rec._buffer) == 3
+        # The queue is pinned at maxlen — the deque rolled the window.
+        assert len(rec._file_queue) == 3
     finally:
         await rec.stop()
 
@@ -3941,7 +3950,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
     try:
         rec.record_consumed(make_msg(partition=0, offset=0))
         rec.record_consumed(make_msg(partition=0, offset=1))
-        assert len(rec._buffer) == 2
+        assert len(rec._intake) == 2
 
         assert rec._db is not None
 
@@ -3955,15 +3964,15 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
 
         # Attempts 1..N-1: re-queue each time, counter climbs.
         for attempt in range(1, config.recorder.max_flush_retries):
-            await rec._flush()
+            await rec.flush()
             assert rec._flush_failures == attempt
-            # Rows still in buffer — no data loss yet.
-            assert len(rec._buffer) == 2
+            # Rows still in the file queue — no data loss yet.
+            assert len(rec._file_queue) == 2
 
         # Attempt N (max_flush_retries): give up, drop the batch.
-        await rec._flush()
-        # Buffer is empty (no memory leak; the batch was discarded).
-        assert len(rec._buffer) == 0
+        await rec.flush()
+        # The file queue is empty (no memory leak; the batch was discarded).
+        assert len(rec._file_queue) == 0
         # Instance counter reset so the NEXT batch starts from zero.
         assert rec._flush_failures == 0
         # Drop counter ticked exactly once.
@@ -3978,8 +3987,8 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         rec._db.executemany = type(rec._db).executemany.__get__(rec._db)  # type: ignore[method-assign]
 
         rec.record_consumed(make_msg(partition=0, offset=2))
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        await rec.flush()
+        assert len(rec._file_queue) == 0
         assert rec._flush_failures == 0
 
         events = await rec.get_events(partition=0)
@@ -4009,7 +4018,7 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
     try:
         old_db_path = rec.db_path
         rec.record_consumed(make_msg(partition=0, offset=0))
-        assert len(rec._buffer) == 1
+        assert len(rec._intake) == 1
 
         # First flush fails, rows re-queued.
         assert rec._db is not None
@@ -4018,8 +4027,8 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
             raise aiosqlite.OperationalError('database is locked')
 
         rec._db.executemany = failing_executemany  # type: ignore[method-assign]
-        await rec._flush()
-        assert len(rec._buffer) == 1
+        await rec.flush()
+        assert len(rec._file_queue) == 1
 
         # Force a distinct rotated DB path deterministically, without the
         # ~1.1s real-time sleep that the previous implementation needed to
@@ -4039,15 +4048,15 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         await rec._rotate()
         new_db_path = rec.db_path
         assert new_db_path != old_db_path
-        assert len(rec._buffer) >= 1
+        assert len(rec._file_queue) >= 1
 
         # The new DB opens cleanly — no patched executemany carried over.
         # The instance counter carries over from the pre-rotation failures
         # (first _flush + the _flush inside _rotate both bumped it), but
         # since the default ``max_flush_retries`` is 3 we still have one
         # more attempt available. A successful flush resets the counter.
-        await rec._flush()
-        assert len(rec._buffer) == 0
+        await rec.flush()
+        assert len(rec._file_queue) == 0
         assert rec._flush_failures == 0
 
         # Re-queued row is visible through the recorder (new DB).
@@ -4097,12 +4106,12 @@ async def test_recorder_flush_executemany_failure_does_not_commit(tmp_path):
         rec._db.executemany = locked_executemany  # type: ignore[method-assign]
 
         # No longer raises — the handler catches the error and re-queues.
-        await rec._flush()
+        await rec.flush()
 
         # commit must not have been called — executemany failed first.
         assert commit_called['n'] == 0
         # Rows re-queued so nothing is lost.
-        assert len(rec._buffer) == 1
+        assert len(rec._file_queue) == 1
     finally:
         # Restore originals so stop()'s own _flush drain + close work.
         if rec._db is not None:
@@ -4297,7 +4306,7 @@ async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
     task.labels = {'request_id': 'req-local'}
     rec.record_task_started(task, partition=0)
     rec.record_task_completed(make_result(task=task), partition=0)
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.cross_trace_by_label('request_id', 'req-local')
     assert len(events) >= 2
@@ -4337,7 +4346,7 @@ async def test_get_task_events_returns_chronological(tmp_path):
     # Some unrelated event for a different task — must not appear.
     other = make_task('t-other')
     rec.record_task_started(other, partition=2)
-    await rec._flush()
+    await rec.flush()
 
     events = await rec.get_task_events('t-lifecycle')
     assert len(events) == 2
@@ -4375,7 +4384,7 @@ async def test_record_task_started_includes_stdin_metadata(recorder):
     task.stdin = 'first line\nsecond line\n'
     recorder.record_task_started(task, partition=0)
 
-    target = next(e for e in recorder._buffer if e.get('task_id') == 't-stdin')
+    target = next(e for e in recorder._intake if e.get('task_id') == 't-stdin')
     assert target['stdin_size'] == len(b'first line\nsecond line\n')
     # Two newline-terminated lines → exactly 2 lines.
     assert target['stdin_lines'] == 2
@@ -4390,7 +4399,7 @@ async def test_record_task_started_stdin_without_trailing_newline(recorder):
     task.stdin = 'line-a\nline-b'  # no trailing newline
     recorder.record_task_started(task, partition=0)
 
-    target = next(e for e in recorder._buffer if e.get('task_id') == 't-stdin-no-trailing')
+    target = next(e for e in recorder._intake if e.get('task_id') == 't-stdin-no-trailing')
     assert target['stdin_lines'] == 2
 
 
@@ -4399,7 +4408,7 @@ async def test_record_task_started_precomputed_marker(recorder):
     so downstream queries can filter precomputed outcomes."""
     task = make_task('t-precomputed-start')
     recorder.record_task_started(task, partition=0, precomputed=True)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_started')
     target = next(e for e in events if e['task_id'] == 't-precomputed-start')
@@ -4413,7 +4422,7 @@ async def test_record_task_completed_precomputed_marker(recorder):
     task = make_task('t-precomputed-end')
     result = make_result(task=task)
     recorder.record_task_completed(result, partition=0, precomputed=True)
-    await recorder._flush()
+    await recorder.flush()
 
     events = await recorder.get_events(event_type='task_completed')
     target = next(e for e in events if e['task_id'] == 't-precomputed-end')
@@ -4577,7 +4586,7 @@ async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
     # New writer must be live and usable.
     assert rec._db is not None
     rec.record_consumed(make_msg(partition=4, offset=77))
-    await rec._flush()
+    await rec.flush()
     events = await rec.get_events()
     assert any(e.get('partition') == 4 and e.get('offset') == 77 for e in events)
     await rec.stop()
@@ -4601,10 +4610,10 @@ async def test_flush_public_alias_drains_buffer(recorder):
     lets external callers force the buffer to disk without touching the
     private name."""
     recorder.record_consumed(make_msg(offset=11))
-    assert len(recorder._buffer) >= 1
+    assert len(recorder._intake) >= 1
 
     await recorder.flush()
-    assert len(recorder._buffer) == 0
+    assert len(recorder._intake) == 0
     events = await recorder.get_events()
     assert any(e.get('offset') == 11 for e in events)
 
@@ -4663,7 +4672,7 @@ async def test_get_trace_does_not_leak_a_sibling_messages_annotation(recorder):
             ),
             offset=offset,
         )
-    await recorder._flush()
+    await recorder.flush()
 
     trace = await recorder.get_trace(partition=3, msg_offset=90)
     kinds = [json.loads(e['metadata'])['kind'] for e in trace if e['event'] == 'annotation']
@@ -4678,7 +4687,11 @@ class TestBackgroundLoopResilience:
     so in the log.
     """
 
-    async def test_flush_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
+    @pytest.mark.parametrize(
+        ('loop_name', 'stage_name', 'stage'),
+        [('_memory_loop', '_stage_memory', 'memory'), ('_file_loop', '_stage_file', 'file')],
+    )
+    async def test_write_loop_keeps_running_after_an_iteration_raises(self, tmp_path, loop_name, stage_name, stage):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
         # model_copy skips validation, so the loop can tick fast without
@@ -4688,16 +4701,16 @@ class TestBackgroundLoopResilience:
 
         calls = 0
 
-        async def flaky_flush() -> None:
+        async def flaky_stage(*_args) -> None:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise ValueError('flush blew up')
 
-        rec._flush = flaky_flush  # type: ignore[method-assign]
+        setattr(rec, stage_name, flaky_stage)
 
         with capture_logs() as cap:
-            loop_task = asyncio.create_task(rec._flush_loop())
+            loop_task = asyncio.create_task(getattr(rec, loop_name)())
             try:
                 await wait_for(lambda: calls >= 3)
             finally:
@@ -4706,12 +4719,13 @@ class TestBackgroundLoopResilience:
                 with contextlib.suppress(asyncio.CancelledError):
                     await loop_task
 
-        # The loop survived the raise and flushed again on later ticks.
+        # The loop survived the raise and ran its stage again on later ticks.
         assert calls >= 3
         failures = [e for e in cap if e['event'] == 'recorder_flush_loop_iteration_failed']
         assert len(failures) == 1
         assert failures[0]['log_level'] == 'error'
         assert failures[0]['error_type'] == 'ValueError'
+        assert failures[0]['stage'] == stage
 
     async def test_rotation_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)
@@ -4900,7 +4914,7 @@ class TestResourceSample:
 
         rec._resource_sample()
 
-        event = rec._buffer[-1]
+        event = rec._intake[-1]
         assert event['event'] == 'resource_sample'
         assert json.loads(event['metadata']) == {'rss_bytes': 7, 'load1': 1.5}
 
@@ -4940,7 +4954,7 @@ class TestRuntimeEpisodeAndProbeRows:
             evidence={'cpu_throttled_ms': 4200.0, 'load1': 31.5},
         )
 
-        event = rec._buffer[-1]
+        event = rec._intake[-1]
         assert event['event'] == 'runtime_lag_episode'
         assert event['duration'] == 12.5
         meta = json.loads(event['metadata'])
@@ -4969,7 +4983,7 @@ class TestRuntimeEpisodeAndProbeRows:
             unit_count=10,
         )
 
-        meta = json.loads(rec._buffer[-1]['metadata'])
+        meta = json.loads(rec._intake[-1]['metadata'])
         assert 'cpu_ms' not in meta
         assert 'cpu_ratio' not in meta
 
@@ -4984,7 +4998,7 @@ class TestRuntimeEpisodeAndProbeRows:
             stacks=[{'stack': 'File y', 'location': 'y.py:9', 'count': 1}],
         )
 
-        event = rec._buffer[-1]
+        event = rec._intake[-1]
         assert event['event'] == 'runtime_probe'
         meta = json.loads(event['metadata'])
         assert meta['lag_ms'] == 12.0
@@ -5077,7 +5091,7 @@ class TestLastBreathFlush:
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
         await rec.start()
         rec.record_consumed(make_msg(partition=3, offset=77))
-        assert len(rec._buffer) > 0
+        assert len(rec._intake) > 0
 
         rec._last_breath_flush()  # what atexit would run after a crash
 
@@ -5089,7 +5103,7 @@ class TestLastBreathFlush:
         finally:
             conn.close()
         assert rows == [(3, 77)]
-        assert len(rec._buffer) == 0
+        assert len(rec._intake) == 0
         await rec.stop()
 
     async def test_noop_after_clean_stop(self, tmp_path):
@@ -5100,7 +5114,7 @@ class TestLastBreathFlush:
         db_path = os.path.join(rec.history_dir, os.path.basename(rec.db_path))
         await rec.stop()
         # Simulate a stray late event after shutdown — it must NOT reopen the DB.
-        rec._buffer.append({'ts': time.time(), 'dt': 'x', 'event': 'consumed'})
+        rec._intake.append({'ts': time.time(), 'dt': 'x', 'event': 'consumed'})
 
         rec._last_breath_flush()
 
@@ -5180,7 +5194,7 @@ async def test_task_completed_stdout_size_counts_bytes_of_the_decoded_string(rec
         task=make_task('t-out'),
     )
     recorder.record_task_completed(result, partition=0)
-    assert recorder._buffer[-1]['stdout_size'] == expected_size
+    assert recorder._intake[-1]['stdout_size'] == expected_size
 
 
 @pytest.mark.parametrize(
@@ -5198,7 +5212,7 @@ async def test_task_started_stdin_size_counts_bytes_not_characters(recorder, std
     recorder.subscribe()  # the line count exists for live clients only
     task = ExecutorTask(task_id='t-stdin', args=[], source_offsets=[0], stdin=stdin or None)
     recorder.record_task_started(task, partition=0)
-    entry = recorder._buffer[-1]
+    entry = recorder._intake[-1]
     assert entry['stdin_size'] == expected_size
     assert entry['stdin_lines'] == expected_lines
 
@@ -5306,7 +5320,7 @@ async def test_the_db_buffer_still_holds_the_full_output(output_recorder):
     result.stdout = 'x' * 100_000
     output_recorder.record_task_completed(result, partition=0)
 
-    buffered = next(e for e in output_recorder._buffer if e['event'] == 'task_completed')
+    buffered = next(e for e in output_recorder._intake if e['event'] == 'task_completed')
     assert buffered['stdout'] == 'x' * 100_000
 
 
@@ -5327,7 +5341,7 @@ async def test_flush_is_triggered_by_buffered_bytes_not_only_by_event_count(outp
         result.stdout = 'x' * 30_000
         output_recorder.record_task_completed(result, partition=0)
 
-    assert len(output_recorder._buffer) < (output_recorder._buffer.maxlen or 0) // 2, (
+    assert len(output_recorder._intake) < (output_recorder._intake.maxlen or 0) // 2, (
         'the event-count high-water mark must not be what fires here'
     )
     assert output_recorder._buffered_bytes >= 100_000
@@ -5355,7 +5369,7 @@ async def test_the_byte_counter_resets_on_flush(output_recorder):
     output_recorder.record_task_completed(result, partition=0)
     assert output_recorder._buffered_bytes >= 50_000
 
-    await output_recorder._flush()
+    await output_recorder.flush()
     assert output_recorder._buffered_bytes == 0
 
 

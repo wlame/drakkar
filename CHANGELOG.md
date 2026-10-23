@@ -70,7 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_recorder_memory_evicted_rows_total` and
   `drakkar_recorder_memory_write_failures_total`. The `recorder_started` log
   line gains `persistence`, the memory bounds, and, with persistence `none`,
-  `ignored_keys`.
+  `ignored_keys`. The recorder now gives each row its id and writes the row
+  with the same id to the memory store and to the file. Two separate loops
+  write the memory store and the file, so a slow disk does not stop the
+  memory store. With persistence `none`, events are buffered and kept in the
+  memory store. A memory write that fails because the store is busy or
+  locked is tried again on the next tick and loses nothing
+  (`recorder_memory_write_retry`). Any other failed memory write deletes the
+  memory rows up to that chunk, and the chunk still goes to the file
+  (`recorder_memory_write_failed`, `recorder_memory_eviction_failed`). Each of
+  these log lines appears at most once per 60 seconds.
+  `drakkar_recorder_buffer_size` now counts the events that wait for the
+  memory store plus the rows that wait for the file. The log events
+  `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
+  gain a `stage` field (`memory` or `file`).
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part

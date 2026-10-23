@@ -165,4 +165,4 @@ def test_broadcast_throughput_frame_shape(tmp_path):
     assert frame['event'] == 'throughput'
     assert frame['dt']
     assert json.loads(frame['metadata']) == {'windows': windows}
-    assert len(rec._buffer) == 0  # broadcast-only: never touches the DB buffer
+    assert len(rec._intake) == 0  # broadcast-only: never touches the DB buffer

@@ -11,10 +11,12 @@ from structlog.testing import capture_logs
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import memstore as memstore_mod
 from drakkar.recorder.memstore import (
+    EVICT_BATCH_ROWS,
     MemoryCoverage,
     MemoryStore,
     MemoryStoreUnavailableError,
     arm_read_limit,
+    delete_id_prefix,
     is_read_interrupted,
     is_transient_memory_error,
     memory_store_uri,
@@ -545,3 +547,45 @@ async def test_memory_store_property_follows_the_recorder_lifetime():
     finally:
         await rec.stop()
     assert rec.memory_store is None
+
+
+async def _fill_events(store: MemoryStore, count: int) -> None:
+    await store.writer.executemany(
+        'INSERT INTO events (id, ts, dt, event) VALUES (?, ?, ?, ?)',
+        [(row_id, float(row_id), '2026-11-01 00:00:00', 'consumed') for row_id in range(1, count + 1)],
+    )
+    await store.writer.commit()
+
+
+async def test_delete_id_prefix_deletes_in_batches_and_reports_the_largest_ts(store):
+    await _fill_events(store, 12_000)
+
+    result = await delete_id_prefix(store.writer, 11_001)
+
+    assert (result.deleted, result.max_ts, result.error) == (11_000, 11_000.0, None)
+    _, rows = await store.read('SELECT MIN(id), count(*) FROM events')
+    assert rows == [(11_001, 1000)]
+
+
+async def test_delete_id_prefix_keeps_committed_batches_when_a_later_one_fails(store, monkeypatch):
+    await _fill_events(store, 12_000)
+    writer = store.writer
+    real_execute = writer.execute
+    deletes = []
+
+    def execute(sql, params=()):
+        if sql.startswith('DELETE'):
+            deletes.append(params)
+            if len(deletes) == 2:
+                raise sqlite3.OperationalError('database or disk is full')
+        return real_execute(sql, params)
+
+    monkeypatch.setattr(writer, 'execute', execute)
+
+    result = await delete_id_prefix(writer, 12_001)
+
+    assert result.deleted == EVICT_BATCH_ROWS
+    assert result.max_ts == float(EVICT_BATCH_ROWS)
+    assert isinstance(result.error, sqlite3.OperationalError)
+    _, rows = await store.read('SELECT MIN(id) FROM events')
+    assert rows == [(EVICT_BATCH_ROWS + 1,)]

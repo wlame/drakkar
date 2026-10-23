@@ -73,8 +73,8 @@ def mock_recorder():
     rec._db = None
     rec._reader_db = None
     rec.reader_db = None
-    rec._flush = AsyncMock()
-    rec._buffer = []
+    rec.flush = AsyncMock()
+    rec._intake = []
     return rec
 
 

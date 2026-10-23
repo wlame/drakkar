@@ -153,12 +153,12 @@ async def test_rotation_keeps_the_rows_of_a_flush_already_writing_the_old_file(t
     rec = make_recorder()
     await rec.start()
     old_name = os.path.basename(rec.db_path)
-    real_write_chunk = rec._write_chunk
+    real_write_chunk = rec._write_file_chunk
     release = asyncio.Event()
 
-    async def slow_write_chunk(db, query, columns, batch):
+    async def slow_write_chunk(db, batch):
         await release.wait()
-        return await real_write_chunk(db, query, columns, batch)
+        return await real_write_chunk(db, batch)
 
     real_create_schema = rec._create_schema
     late_flushes: list[asyncio.Task] = []
@@ -166,11 +166,12 @@ async def test_rotation_keeps_the_rows_of_a_flush_already_writing_the_old_file(t
     async def create_schema_then_flush(db):
         await real_create_schema(db)
         if db is not rec._db and not late_flushes:
-            # A flush that starts after rotation's own flush and captures
-            # the old writer before the swap.
-            rec._write_chunk = slow_write_chunk
+            # A file write that starts after rotation's own stages and
+            # captures the old writer before the swap.
+            rec._write_file_chunk = slow_write_chunk
             rec.record_consumed(_message(9))
-            late_flushes.append(asyncio.create_task(rec._flush()))
+            await rec.flush_memory()
+            late_flushes.append(asyncio.create_task(rec._stage_file()))
             await asyncio.sleep(0)
 
     rec._create_schema = create_schema_then_flush
@@ -304,7 +305,7 @@ async def test_a_seal_failure_keeps_the_file_in_the_backlog_and_the_next_tick_re
     await rec.start()
     old_path = rec.db_path
     rec.record_consumed(_message(0))
-    await rec._flush()
+    await rec.flush()
     # Another connection inside a read transaction: the journal mode cannot change.
     other = sqlite3.connect(old_path)
     other.execute('BEGIN')

@@ -145,6 +145,14 @@ EVENT_COLUMNS: tuple[str, ...] = (
     'request_id',
 )
 
+# The one insert of event rows, into the memory store and into the file. The
+# recorder assigns ``id``, so a row has the same id in both. ``OR IGNORE``
+# makes a retried chunk whose rows already landed (written, then the commit
+# cancelled or failed) a no-op for those rows instead of a primary-key error.
+INSERT_EVENT_SQL = (
+    f'INSERT OR IGNORE INTO events ({", ".join(EVENT_COLUMNS)}) VALUES ({", ".join(["?"] * len(EVENT_COLUMNS))})'
+)
+
 
 class RecorderSchemaError(RuntimeError):
     """Raised at recorder open when the existing DB predates required columns.

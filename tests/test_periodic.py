@@ -891,7 +891,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
 
     assert call_count >= 2
     # check buffer has periodic_run events
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) >= 2
     assert periodic_events[0]['task_id'] == 'test_recorded'
     assert periodic_events[0]['exit_code'] == 0
@@ -917,14 +917,14 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
             name='test_err_recorded', coro_fn=failing_task, interval=0.05, on_error='continue', recorder=rec
         )
     )
-    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._intake))
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) >= 1
     err_event = periodic_events[0]
     assert err_event['exit_code'] == 1
@@ -960,14 +960,14 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
             system=True,
         )
     )
-    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._intake))
     t.cancel()
     try:
         await t
     except asyncio.CancelledError:
         pass
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) >= 1
     ev = periodic_events[0]
     meta = json.loads(ev['metadata'])
@@ -1001,14 +1001,14 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
             recorder=rec,
         )
     )
-    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._intake))
     t.cancel()
     try:
         await t
     except asyncio.CancelledError:
         pass
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) >= 1
     ev = periodic_events[0]
     meta = json.loads(ev['metadata'])
@@ -1026,7 +1026,7 @@ def test_recorder_record_periodic_run_system_true_stores_in_metadata(tmp_path):
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='cache.flush', duration=0.01, status='ok', system=True)
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) == 1
     meta = json.loads(periodic_events[0]['metadata'])
     assert meta['system'] is True
@@ -1046,7 +1046,7 @@ def test_recorder_record_periodic_run_system_false_omits_key(tmp_path):
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='user.task', duration=0.01, status='ok')
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) == 1
     meta = json.loads(periodic_events[0]['metadata'])
     assert 'system' not in meta
@@ -1069,7 +1069,7 @@ def test_recorder_record_periodic_run_system_true_with_error(tmp_path):
         system=True,
     )
 
-    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    periodic_events = [e for e in rec._intake if e['event'] == 'periodic_run']
     assert len(periodic_events) == 1
     meta = json.loads(periodic_events[0]['metadata'])
     assert meta['system'] is True

@@ -107,6 +107,49 @@ class MemoryCoverage:
         return self.last_id - self.floor_id + 1
 
 
+@dataclass(frozen=True)
+class PrefixDeletion:
+    """What :func:`delete_id_prefix` removed: the row count, the largest ``ts`` among them, and the error that ended it."""
+
+    deleted: int
+    max_ts: float | None
+    error: sqlite3.Error | None = None
+
+
+async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixDeletion:
+    """Delete every event row with ``id < below_id``, in committed batches of at most :data:`EVICT_BATCH_ROWS`.
+
+    Before each batch, ``MAX(ts)`` of the rows about to go is read, so the
+    caller can keep the largest removed ``ts``. A failed statement rolls
+    back the open batch and ends the deletion; the batches committed before
+    it stay deleted and are counted in the result, with the error.
+    """
+    deleted = 0
+    max_ts: float | None = None
+    try:
+        while True:
+            async with conn.execute('SELECT MIN(id) FROM events') as cursor:
+                row = await cursor.fetchone()
+            lowest = row[0] if row else None
+            if lowest is None or lowest >= below_id:
+                break
+            bound = min(below_id, lowest + EVICT_BATCH_ROWS)
+            async with conn.execute('SELECT MAX(ts) FROM events NOT INDEXED WHERE id < ?', (bound,)) as cursor:
+                row = await cursor.fetchone()
+            batch_max_ts = row[0] if row else None
+            async with conn.execute('DELETE FROM events WHERE id < ?', (bound,)) as cursor:
+                batch_deleted = cursor.rowcount
+            await conn.commit()
+            deleted += batch_deleted
+            if batch_max_ts is not None:
+                max_ts = batch_max_ts if max_ts is None else max(max_ts, batch_max_ts)
+    except sqlite3.Error as exc:
+        with contextlib.suppress(sqlite3.Error):
+            await conn.rollback()
+        return PrefixDeletion(deleted, max_ts, exc)
+    return PrefixDeletion(deleted, max_ts)
+
+
 def _primary_code(exc: sqlite3.Error) -> int | None:
     code = getattr(exc, 'sqlite_errorcode', None)
     return None if code is None else code & _PRIMARY_CODE_MASK
