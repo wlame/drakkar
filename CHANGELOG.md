@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recorder memory store.** When `ui.recorder.store_events` is on, the
+  recorder opens an in-memory SQLite database for recent events. It opens
+  before the recorder file and closes last at stop. A SQLite library without
+  the memdb VFS fails the start with a clear message. A read of the store
+  stops after 2 seconds. New metrics: `drakkar_recorder_memory_rows`,
+  `drakkar_recorder_memory_bytes`, `drakkar_recorder_memory_allocated_bytes`,
+  `drakkar_recorder_memory_oldest_age_seconds`,
+  `drakkar_recorder_memory_evicted_rows_total` and
+  `drakkar_recorder_memory_write_failures_total`. The `recorder_started` log
+  line gains `persistence`, the memory bounds, and, with persistence `none`,
+  `ignored_keys`.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part

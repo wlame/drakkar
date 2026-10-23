@@ -222,3 +222,27 @@ async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_r
     await file_app._lifecycle._start_ui_and_recorder()
     await file_app._recorder.stop()
     warned.assert_called_once()
+
+
+async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkeypatch):
+    app = _app(
+        tmp_path,
+        ui={
+            'enabled': True,
+            'port': 8123,
+            'release': {'enabled': False},
+            'recorder': {'memory': {'window_seconds': 60, 'rows_per_executor': 200, 'max_mib': 16}},
+        },
+        executor={'binary_path': '/usr/bin/echo', 'max_executors': 4},
+    )
+    (tmp_path / 'storage').mkdir()
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._start_ui_and_recorder()
+    try:
+        assert app._recorder is not None
+        assert app._recorder._memory_window_seconds == 60
+        assert app._recorder._memory_max_rows == 800
+        assert app._recorder._memory_max_bytes == 16777216
+    finally:
+        await app._recorder.stop()

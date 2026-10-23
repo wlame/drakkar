@@ -869,3 +869,66 @@ def test_cluster_periodic_task_metrics_have_their_names_types_labels_and_help():
     assert periodic_cluster_mismatch_peers._documentation == (
         "Online peers of this worker's cluster whose cluster periodic task definitions differ"
     )
+
+
+def test_recorder_memory_metrics_names_and_help_texts():
+    from prometheus_client import Counter, Gauge
+
+    from drakkar.metrics import (
+        recorder_memory_allocated_bytes,
+        recorder_memory_bytes,
+        recorder_memory_evicted_rows,
+        recorder_memory_oldest_age_seconds,
+        recorder_memory_rows,
+        recorder_memory_write_failures,
+    )
+
+    expected = [
+        (
+            recorder_memory_rows,
+            Gauge,
+            'drakkar_recorder_memory_rows',
+            (),
+            'Rows in the events table of the recorder memory store',
+        ),
+        (
+            recorder_memory_bytes,
+            Gauge,
+            'drakkar_recorder_memory_bytes',
+            (),
+            'Bytes of data in the recorder memory store: pages in use times the page size',
+        ),
+        (
+            recorder_memory_allocated_bytes,
+            Gauge,
+            'drakkar_recorder_memory_allocated_bytes',
+            (),
+            'Database size of the recorder memory store, free pages included; the memory it holds is at least this',
+        ),
+        (
+            recorder_memory_oldest_age_seconds,
+            Gauge,
+            'drakkar_recorder_memory_oldest_age_seconds',
+            (),
+            'Age in seconds of the oldest event in the recorder memory store, 0 when it is empty',
+        ),
+        (
+            recorder_memory_evicted_rows,
+            Counter,
+            'drakkar_recorder_memory_evicted_rows',
+            ('reason',),
+            'Rows removed from the recorder memory store, by reason',
+        ),
+        (
+            recorder_memory_write_failures,
+            Counter,
+            'drakkar_recorder_memory_write_failures',
+            (),
+            'Event chunks that could not be written to the recorder memory store',
+        ),
+    ]
+    for metric, kind, name, labels, help_text in expected:
+        assert isinstance(metric, kind)
+        assert metric._name == name
+        assert metric._labelnames == labels
+        assert metric._documentation == help_text

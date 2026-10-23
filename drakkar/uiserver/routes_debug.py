@@ -365,7 +365,7 @@ def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats) -> dict[
 
 
 def _all_archives(shared_dir: str) -> list[dict[str, Any]]:
-    """Archives of every cluster folder, newest window end first; none in memory-only mode. Blocking."""
+    """Archives of every cluster folder, newest window end first; none when no shared folder is set. Blocking."""
     shared = _db_root(shared_dir)
     if shared is None:
         return []

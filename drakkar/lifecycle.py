@@ -90,6 +90,7 @@ from drakkar.recorder.election import (
     ElectionContext,
 )
 from drakkar.recorder.history import history_dir
+from drakkar.recorder.memstore import MIB
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
@@ -575,6 +576,7 @@ class AppLifecycle:
                     history_dir(app._config.resolved_shared_dir, app._cluster_name),
                 )
 
+            memory = app._config.ui.recorder.memory
             app._recorder = EventRecorder(
                 app._config.ui,
                 worker_name=app._worker_id,
@@ -585,6 +587,9 @@ class AppLifecycle:
                 instance=app._instance,
                 archive=app._config.history.archive,
                 merged_retention_days=app._config.history.merged_retention_days,
+                memory_window_seconds=memory.window_seconds,
+                memory_max_rows=memory.rows_per_executor * app._config.executor.max_executors,
+                memory_max_bytes=memory.max_mib * MIB,
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()

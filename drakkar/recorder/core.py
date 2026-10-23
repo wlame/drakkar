@@ -42,6 +42,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +50,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import HistoryArchiveConfig, UIConfig
-from drakkar.config.ui import PERSISTENCE_SQLITE, Persistence
+from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -76,6 +77,7 @@ from drakkar.recorder.helpers import (
     sanitize_env_value,
 )
 from drakkar.recorder.history import history_dir
+from drakkar.recorder.memstore import MIB, MemoryStore
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -224,6 +226,9 @@ class EventRecorder(EventWriter):
         instance: str = '',
         archive: HistoryArchiveConfig | None = None,
         merged_retention_days: int = 0,
+        memory_window_seconds: int = 120,
+        memory_max_rows: int = 3000,
+        memory_max_bytes: int = 256 * MIB,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -239,6 +244,12 @@ class EventRecorder(EventWriter):
         empty). ``archive`` is ``history.archive``; the defaults apply when
         omitted. ``merged_retention_days`` is how long the archive pass keeps
         UI merge results (0 keeps them).
+
+        ``memory_window_seconds``, ``memory_max_rows`` and
+        ``memory_max_bytes`` bound the memory store, which holds the recent
+        events whenever ``store_events`` is on: its time window, its row cap
+        (the caller multiplies the per-executor cap by the executor count)
+        and its data budget in bytes.
 
         The archive pass runs as the cluster task
         :meth:`archive_cluster_task` returns; the worker's election decides
@@ -256,6 +267,12 @@ class EventRecorder(EventWriter):
         self._instance = instance or secrets.token_hex(8)
         self._archive = archive if archive is not None else HistoryArchiveConfig()
         self._merged_retention_days = merged_retention_days
+        self._memory_window_seconds = memory_window_seconds
+        self._memory_max_rows = memory_max_rows
+        self._memory_max_bytes = memory_max_bytes
+        # The memory store; opened in start() when store_events is on,
+        # closed last in stop().
+        self._memory_store: MemoryStore | None = None
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         # Approximate payload bytes appended since the last flush. Reset at
         # flush rather than decremented per drained row: it exists to decide
@@ -264,7 +281,7 @@ class EventRecorder(EventWriter):
         self._buffered_bytes = 0
         # Whether an appended event will ever reach a table. The flush loop
         # is created only when ``store_events`` is on (and only when there
-        # is a ``storage_dir`` to open a DB in), and ``_flush`` returns early
+        # is a recorder file to write to), and ``_flush`` returns early
         # without one — so in the other configurations an append is a leak:
         # the deque fills to ``max_buffer`` and every further event counts
         # as a drop forever. Both inputs are process-lifetime constants, so
@@ -402,6 +419,23 @@ class EventRecorder(EventWriter):
         return self._config
 
     @property
+    def memory_reader_db(self) -> aiosqlite.Connection | None:
+        """The read-only connection of the memory store; ``None`` when there is no open store."""
+        store = self._memory_store
+        return store.reader if store is not None and store.is_open else None
+
+    def open_memory_reader(self) -> AbstractContextManager[sqlite3.Connection | None]:
+        """Open a short-lived connection to the memory store by name, for a worker thread.
+
+        The context yields ``None`` when there is no memory store or it is
+        already closed; no read ever creates a new, empty store. See
+        :meth:`MemoryStore.open_by_name`.
+        """
+        if self._memory_store is None:
+            return contextlib.nullcontext(None)
+        return self._memory_store.open_by_name()
+
+    @property
     def reader_db(self) -> aiosqlite.Connection | None:
         """Return the dedicated reader aiosqlite connection.
 
@@ -493,6 +527,16 @@ class EventRecorder(EventWriter):
 
     async def start(self) -> None:
         self._running = True
+        if self._store.store_events:
+            # Before the file: the memory store holds the recent events in
+            # either mode. A SQLite library without memdb fails the start.
+            store = MemoryStore(self._instance, store_config=self._store.store_config)
+            try:
+                await store.open()
+            except BaseException:
+                self._running = False
+                raise
+            self._memory_store = store
         if self._has_file:
             await self._warn_if_storage_dir_world_writable()
             await self._warn_if_storage_dir_network_fs()
@@ -556,6 +600,7 @@ class EventRecorder(EventWriter):
                     with contextlib.suppress(Exception):
                         await self._db.close()
                     self._db = None
+                await self._close_memory_store()
                 self._running = False
                 raise
             if self._store.store_events:
@@ -576,7 +621,7 @@ class EventRecorder(EventWriter):
                     hint='sealed recorder database files are never deleted automatically; '
                     'prune the folder yourself or set history.archive.enabled: true',
                 )
-        # Outside the storage_dir branch on purpose: resource samples still feed
+        # Outside the file branch on purpose: resource samples still feed
         # WS subscribers, so the sampler runs in memory-only mode too.
         self._host_sample_task = asyncio.create_task(self._host_sample_loop())
         self._watch_background_task(self._host_sample_task, 'host_sample')
@@ -591,7 +636,34 @@ class EventRecorder(EventWriter):
             'recorder_started',
             category='recorder',
             db_path=self._db_path or '(memory only)',
+            **self._started_fields(),
         )
+
+    def _started_fields(self) -> dict[str, Any]:
+        """The mode and memory fields of ``recorder_started``.
+
+        The memory bounds appear only when there is a memory store
+        (``store_events``). With ``none``, ``ignored_keys`` lists the keys
+        that only act on a recorder file: ``rotation_interval_hours``
+        always, ``store_state`` when it is on.
+        """
+        fields: dict[str, Any] = {'persistence': self._persistence}
+        if self._store.store_events:
+            fields['memory_window_seconds'] = self._memory_window_seconds
+            fields['memory_max_rows'] = self._memory_max_rows
+            fields['memory_max_bytes'] = self._memory_max_bytes
+        if self._persistence == PERSISTENCE_NONE:
+            ignored = ['rotation_interval_hours']
+            if self._store.store_state:
+                ignored.append('store_state')
+            fields['ignored_keys'] = sorted(ignored)
+        return fields
+
+    async def _close_memory_store(self) -> None:
+        """Close the memory store, if there is one; its connection closes never raise."""
+        store, self._memory_store = self._memory_store, None
+        if store is not None:
+            await store.close()
 
     def _watch_background_task(self, task: asyncio.Task, name: str) -> None:
         """Log when a recorder background loop ends while still running.
@@ -941,6 +1013,9 @@ class EventRecorder(EventWriter):
         # Last: an archive pass still running in its thread checks its lease
         # through the election, which the worker stops after this wait.
         await self._wait_for_archive_pass(deadline, reserve_seconds)
+        # The memory store goes last: by-name readers still open get up to
+        # MEMORY_CLOSE_WAIT_SECONDS to finish, and later opens get nothing.
+        await self._close_memory_store()
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.
@@ -1377,6 +1452,7 @@ class EventRecorder(EventWriter):
 
         Whether the worker runs it is decided by its periodic roster
         (``PeriodicRoster.runs_archive``): archiving on, a storage folder,
+        the effective persistence ``sqlite`` (only then are files sealed),
         and the UI on (the recorder exists only then).
 
         A won slot runs the archive pass on the recorder's own archive

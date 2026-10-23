@@ -794,6 +794,40 @@ recorder_flush_duration = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
 
+# The recorder memory store (an in-memory SQLite database of the recent
+# events). The gauges are set after each eviction pass; the byte gauges come
+# from the page counts, so they need no table scan.
+recorder_memory_rows = Gauge(
+    'drakkar_recorder_memory_rows',
+    'Rows in the events table of the recorder memory store',
+)
+
+recorder_memory_bytes = Gauge(
+    'drakkar_recorder_memory_bytes',
+    'Bytes of data in the recorder memory store: pages in use times the page size',
+)
+
+recorder_memory_allocated_bytes = Gauge(
+    'drakkar_recorder_memory_allocated_bytes',
+    'Database size of the recorder memory store, free pages included; the memory it holds is at least this',
+)
+
+recorder_memory_oldest_age_seconds = Gauge(
+    'drakkar_recorder_memory_oldest_age_seconds',
+    'Age in seconds of the oldest event in the recorder memory store, 0 when it is empty',
+)
+
+recorder_memory_evicted_rows = Counter(
+    'drakkar_recorder_memory_evicted_rows_total',
+    'Rows removed from the recorder memory store, by reason',
+    ['reason'],
+)
+
+recorder_memory_write_failures = Counter(
+    'drakkar_recorder_memory_write_failures_total',
+    'Event chunks that could not be written to the recorder memory store',
+)
+
 # Recorder flush retry observability.
 #
 # ``_flush`` catches ``OperationalError`` (disk full, WAL contention,
