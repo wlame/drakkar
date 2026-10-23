@@ -1068,15 +1068,6 @@ def test_the_archive_task_is_the_system_cluster_task_history_archive(tmp_path):
     assert _make_recorder(tmp_path).archive_cluster_task().interval == 3600
 
 
-@pytest.mark.parametrize('storage', [True, False], ids=['archiving-disabled', 'memory-only'])
-def test_no_archive_task_when_archiving_is_off(tmp_path, storage):
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=not storage))
-    if not storage:
-        rec._storage_dir = ''
-
-    assert rec.archive_cluster_task() is None
-
-
 async def test_archive_slot_won_runs_the_pass_with_a_fence_and_records_history_archive_row(tmp_path, monkeypatch):
     archive = HistoryArchiveConfig(lease_seconds=900)
     rec = _make_recorder(tmp_path, archive=archive)

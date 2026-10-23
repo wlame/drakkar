@@ -54,7 +54,6 @@ from drakkar.recorder.election import (
 from drakkar.schedule import (
     ACQUIRE_WINDOW_SECONDS,
     MIN_HOLD_SECONDS,
-    ClusterTaskDefinition,
     next_cron_slot,
     next_interval_slot,
     task_scope,
@@ -352,12 +351,6 @@ class ClusterTask:
     on_error: OnErrorPolicy
     system: bool = False
     on_skip: Callable[[str], None] | None = None
-
-    def definition(self) -> ClusterTaskDefinition:
-        """The task as the definition hash sees it: its name, its schedule and its lease."""
-        return ClusterTaskDefinition(
-            name=self.name, interval=self.interval, cron=self.cron, lease_seconds=self.lease_seconds
-        )
 
     def next_slot(self, now: float) -> int:
         """The first slot of this task strictly after ``now`` truncated to the second."""

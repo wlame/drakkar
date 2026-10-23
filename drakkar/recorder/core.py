@@ -1346,8 +1346,12 @@ class EventRecorder(EventWriter):
             # their move. Due windows wait for the next archive slot.
             self._start_sealing()
 
-    def archive_cluster_task(self) -> ClusterTask | None:
-        """The system cluster task ``history.archive``; ``None`` unless archiving is on and there is a storage folder.
+    def archive_cluster_task(self) -> ClusterTask:
+        """The system cluster task ``history.archive``.
+
+        Whether the worker runs it is decided by its periodic roster
+        (``PeriodicRoster.runs_archive``): archiving on, a storage folder,
+        and the UI on (the recorder exists only then).
 
         A won slot runs the archive pass on the recorder's own archive
         thread and waits for it; the pass checks the slot's lease through a
@@ -1357,8 +1361,6 @@ class EventRecorder(EventWriter):
         this worker does not win refreshes the footprint gauges on the same
         thread, without waiting, when that thread is idle.
         """
-        if not self._archives():
-            return None
         # Function-local: drakkar.cluster_tasks imports the recorder package.
         from drakkar.cluster_tasks import ClusterTask
 
@@ -1418,10 +1420,6 @@ class EventRecorder(EventWriter):
         if self._archive_executor is None:
             self._archive_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drakkar-archive')
         return self._archive_executor
-
-    def _archives(self) -> bool:
-        """Whether archive passes run at all: archiving is on and there is a storage folder."""
-        return self._archive.enabled and bool(self._storage_dir)
 
     async def _wait_for_archive_pass(self, deadline: float | None, reserve_seconds: float) -> None:
         """Wait for an archive pass still running in its thread, until only ``reserve_seconds`` of ``deadline`` are left.

@@ -11,7 +11,7 @@ from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ThreadFence
-from tests.archive_helpers import run_won_slot
+from tests.archive_helpers import idle_archive_task, run_won_slot
 from tests.conftest import wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 from tests.test_lifecycle_sources import StubSource
@@ -122,8 +122,9 @@ def _runnable_app(tmp_path, monkeypatch) -> tuple[DrakkarApp, MagicMock, list[st
 
     recorder = MagicMock()
     recorder.stop = AsyncMock()
-    # A plain method on the real recorder; no archive task runs here.
-    recorder.archive_cluster_task = MagicMock(return_value=None)
+    # A plain method on the real recorder. The stand-in task's first slot is an hour away at most,
+    # and a won slot would do nothing, so no archive work runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=idle_archive_task())
     recorder.start_leftover_sealing = MagicMock(side_effect=lambda: order.append('leftover_sealing'))
     real_start_sources = app._lifecycle._start_sources
 

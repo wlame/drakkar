@@ -43,7 +43,7 @@ from drakkar.fleet.service import PeerView
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED, ElectionContext, ThreadFence
-from drakkar.schedule import MIN_HOLD_SECONDS, ClusterTaskDefinition, task_scope
+from drakkar.schedule import MIN_HOLD_SECONDS, task_scope
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
 CLUSTER = 'search-fleet'
@@ -914,17 +914,6 @@ async def test_failing_on_skip_hook_is_logged_and_the_loop_goes_on(logs):
         (SLOT + 30, SLOT_HELD_ELSEWHERE, 'error'),
     ]
     assert len(logs.named('periodic_slot_skipped')) == 2
-
-
-def test_cluster_task_definition_carries_name_schedule_and_lease():
-    async def body(ctx: SlotContext) -> None:
-        return None
-
-    task = make_task('refresh_rates', body, interval=None, cron='0 * * * *', lease_seconds=120)
-
-    assert task.definition() == ClusterTaskDefinition(
-        name='refresh_rates', interval=None, cron='0 * * * *', lease_seconds=120
-    )
 
 
 # --- the slot lease and the election service ---

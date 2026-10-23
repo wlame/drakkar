@@ -84,7 +84,6 @@ from drakkar.recorder.election import (
 )
 from drakkar.recorder.history import history_dir
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
-from drakkar.schedule import DEFAULT_LEASE_SECONDS
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -154,9 +153,17 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
 
 
 def user_cluster_task(roster_task: RosterTask) -> ClusterTask:
-    """The slot loop's view of a handler's cluster task: a won slot calls the bound method."""
+    """The slot loop's view of a handler's cluster task: a won slot calls the bound method.
+
+    The schedule and the lease come from the roster's definition of the task.
+
+    Raises:
+        ValueError: ``roster_task`` is a worker task (it has no definition).
+    """
     method = roster_task.method
-    meta = roster_task.meta
+    definition = roster_task.definition
+    if definition is None:
+        raise ValueError(f"periodic task '{roster_task.name}' is not a cluster task")
 
     async def run(_ctx: SlotContext) -> None:
         await method()
@@ -164,10 +171,10 @@ def user_cluster_task(roster_task: RosterTask) -> ClusterTask:
     return ClusterTask(
         name=roster_task.name,
         run=run,
-        interval=int(meta.interval) if meta.interval is not None else None,
-        cron=meta.cron,
-        lease_seconds=meta.lease_seconds if meta.lease_seconds is not None else DEFAULT_LEASE_SECONDS,
-        on_error=meta.on_error,
+        interval=definition.interval,
+        cron=definition.cron,
+        lease_seconds=definition.lease_seconds,
+        on_error=roster_task.meta.on_error,
     )
 
 
@@ -1020,13 +1027,12 @@ class AppLifecycle:
         app._periodic_tasks.append(task)
 
     def _start_archive_task(self) -> None:
-        """Start the slot loop of the system cluster task ``history.archive``, when the worker runs it."""
+        """Start the slot loop of the system cluster task ``history.archive``, when the roster says the worker runs it."""
         app = self._app
-        if app._recorder is None:
+        roster = app._periodic_roster
+        if roster is None or not roster.runs_archive or app._recorder is None:
             return
-        archive_task = app._recorder.archive_cluster_task()
-        if archive_task is not None:
-            self._start_cluster_task(archive_task)
+        self._start_cluster_task(app._recorder.archive_cluster_task())
 
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.

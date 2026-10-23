@@ -39,14 +39,16 @@ class PeriodicConfigError(ValueError):
 class RosterTask:
     """One enabled periodic task: its name, its bound method and its settings after the overrides.
 
-    A cluster task's ``meta`` carries whole numbers as ``int`` and its lease
-    filled in (the default lease when neither the decorator nor an override
-    gives one).
+    A cluster task also has its ``definition`` (``None`` for a worker task):
+    its schedule with whole numbers as ``int`` and its lease filled in (the
+    default lease when neither the decorator nor an override gives one).
+    Its ``meta`` carries the same interval and lease.
     """
 
     name: str
     method: Callable[[], Awaitable[Any]]
     meta: PeriodicMeta
+    definition: ClusterTaskDefinition | None = None
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,9 @@ class PeriodicRoster:
     """The worker's enabled periodic tasks and the hash of its cluster task definitions.
 
     ``definitions`` holds the user cluster tasks and, when ``runs_archive``,
-    the system task ``history.archive``.
+    the system task ``history.archive``. ``runs_archive`` is the one place
+    that decides whether this worker runs ``history.archive``; the worker
+    starts its loop only then.
     """
 
     worker_tasks: tuple[RosterTask, ...]
@@ -123,15 +127,15 @@ def resolve_periodic_roster(handler: object, config: DrakkarConfig, *, now_epoch
         for name in enabled
         if merged[name].scope == 'worker'
     )
+    user_definitions = tuple(
+        _cluster_definition(name, merged[name]) for name in enabled if merged[name].scope == 'cluster'
+    )
     cluster_tasks = tuple(
-        RosterTask(name=name, method=declared[name][0], meta=_cluster_meta(merged[name]))
-        for name in enabled
-        if merged[name].scope == 'cluster'
+        _cluster_task(declared[definition.name][0], merged[definition.name], definition)
+        for definition in user_definitions
     )
     runs_archive = archive_task_runs(config)
-    definitions = tuple(_definition(task) for task in cluster_tasks) + (
-        (archive_definition(config),) if runs_archive else ()
-    )
+    definitions = user_definitions + ((archive_definition(config),) if runs_archive else ())
     return PeriodicRoster(
         worker_tasks=worker_tasks,
         cluster_tasks=cluster_tasks,
@@ -153,24 +157,26 @@ def _apply_override(meta: PeriodicMeta, override: PeriodicTaskOverride) -> Perio
     return dataclasses.replace(meta, **changes)
 
 
-def _cluster_meta(meta: PeriodicMeta) -> PeriodicMeta:
-    """A checked cluster task's meta with whole numbers as ``int`` and the lease filled in.
+def _cluster_task(
+    method: Callable[[], Awaitable[Any]], meta: PeriodicMeta, definition: ClusterTaskDefinition
+) -> RosterTask:
+    """A cluster task of the roster; its meta takes the interval and the lease of its definition."""
+    normalised = dataclasses.replace(meta, interval=definition.interval, lease_seconds=definition.lease_seconds)
+    return RosterTask(name=definition.name, method=method, meta=normalised, definition=definition)
 
-    The rules already accepted the values, so an interval and a lease are
-    whole numbers (``30.0`` from a decorator, ``600`` read as a float from
-    YAML); the definition hash needs JSON integers.
+
+def _cluster_definition(name: str, meta: PeriodicMeta) -> ClusterTaskDefinition:
+    """The definition of a checked user cluster task, as the hash sees it.
+
+    The one conversion of the roster: the rules already accepted the values,
+    so an interval and a lease are whole numbers (``30.0`` from a decorator,
+    ``600`` read as a float from YAML), and the definition hash needs JSON
+    integers. A missing lease is the default lease.
     """
     lease = meta.lease_seconds if meta.lease_seconds is not None else DEFAULT_LEASE_SECONDS
-    interval = int(meta.interval) if meta.interval is not None else None
-    return dataclasses.replace(meta, interval=interval, lease_seconds=int(lease))
-
-
-def _definition(task: RosterTask) -> ClusterTaskDefinition:
-    """The definition of a user cluster task, as the hash sees it."""
-    meta = task.meta
     return ClusterTaskDefinition(
-        name=task.name,
+        name=name,
         interval=int(meta.interval) if meta.interval is not None else None,
         cron=meta.cron,
-        lease_seconds=int(meta.lease_seconds if meta.lease_seconds is not None else DEFAULT_LEASE_SECONDS),
+        lease_seconds=int(lease),
     )

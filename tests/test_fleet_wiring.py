@@ -32,7 +32,15 @@ from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContex
 from drakkar.recorder.election_postgres import PostgresElection
 from drakkar.schedule import ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS, ClusterTaskDefinition, cluster_tasks_hash
 from drakkar.sources import kafka as kafka_source_module
-from tests.archive_helpers import CLUSTER, SteppingClock, due_start, election_calls, history_folder, make_sealed_db
+from tests.archive_helpers import (
+    CLUSTER,
+    SteppingClock,
+    due_start,
+    election_calls,
+    history_folder,
+    idle_archive_task,
+    make_sealed_db,
+)
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore
 from tests.test_cluster_tasks import NOW, SLOT, RecordingLogger, VirtualClock
@@ -455,8 +463,9 @@ def _runnable_app(
     ui_server.stop = AsyncMock(side_effect=lambda: order.append('ui_server.stop'))
     recorder = MagicMock()
     recorder.stop = AsyncMock(side_effect=lambda **_kwargs: order.append('recorder.stop'))
-    # A plain method on the real recorder; no archive task runs here.
-    recorder.archive_cluster_task = MagicMock(return_value=None)
+    # A plain method on the real recorder. The stand-in task's first slot is an hour away at most,
+    # and a won slot would do nothing, so no archive work runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=idle_archive_task())
 
     async def start_ui_and_recorder() -> None:
         order.append('ui_and_recorder')

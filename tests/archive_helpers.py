@@ -13,7 +13,7 @@ from drakkar.cluster_tasks import SLOT_WON, ClusterElection, ClusterTask, SlotCo
 from drakkar.metrics import provider_calls
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, format_dt
 from drakkar.recorder.history import history_dir, meta_path, write_meta
-from drakkar.schedule import ACQUIRE_WINDOW_SECONDS, task_scope
+from drakkar.schedule import ACQUIRE_WINDOW_SECONDS, ARCHIVE_TASK_NAME, task_scope
 
 HOUR = 3600.0
 DAY = 24 * HOUR
@@ -103,3 +103,14 @@ class SteppingClock:
             await asyncio.Event().wait()
         self.now += seconds
         await asyncio.sleep(0)
+
+
+def idle_archive_task() -> ClusterTask:
+    """A stand-in ``history.archive`` task for a stand-in recorder: hourly slots whose won run does nothing."""
+
+    async def run(_ctx: SlotContext) -> None:
+        return None
+
+    return ClusterTask(
+        name=ARCHIVE_TASK_NAME, run=run, interval=3600, cron=None, lease_seconds=60, on_error='continue', system=True
+    )

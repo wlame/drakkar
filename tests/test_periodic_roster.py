@@ -10,8 +10,8 @@ from structlog.testing import capture_logs
 from drakkar.app import DrakkarApp
 from drakkar.cluster_tasks import ClusterTask, SlotContext
 from drakkar.config import DrakkarConfig
-from drakkar.lifecycle import user_cluster_task
 from drakkar.cronexpr import CronNeverFiresError
+from drakkar.lifecycle import user_cluster_task
 from drakkar.periodic import PeriodicMeta, periodic
 from drakkar.periodic_roster import PeriodicConfigError, RosterTask, archive_definition, resolve_periodic_roster
 from drakkar.schedule import ARCHIVE_TASK_NAME, ClusterTaskDefinition, cluster_tasks_hash
@@ -346,3 +346,30 @@ async def test_cancelled_periodic_loop_logs_nothing(tmp_path):
         await _settle(loop_task)
 
     assert [entry for entry in captured if entry['event'] == 'periodic_loop_ended'] == []
+
+
+@pytest.mark.parametrize(
+    ('archive', 'storage', 'started'),
+    [(True, True, True), (False, True, False), (True, False, False)],
+    ids=['archiving-on', 'archiving-disabled', 'memory-only'],
+)
+def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, archive, storage, started):
+    app = DrakkarApp(
+        handler=KafkaOnlyHandler(),
+        config=DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            storage={'dir': str(tmp_path) if storage else ''},
+            ui={'enabled': True, 'release': {'enabled': False}},
+            history={'archive': {'enabled': archive}},
+        ),
+        worker_id='w-1',
+    )
+    app._lifecycle._build_periodic_roster()
+    app._recorder = MagicMock()
+    started_tasks: list[ClusterTask] = []
+    app._lifecycle._start_cluster_task = started_tasks.append
+
+    app._lifecycle._start_archive_task()
+
+    assert app._periodic_roster is not None and app._periodic_roster.runs_archive is started
+    assert started_tasks == ([app._recorder.archive_cluster_task.return_value] if started else [])
