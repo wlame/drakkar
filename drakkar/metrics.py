@@ -830,9 +830,9 @@ recorder_memory_write_failures = Counter(
 
 # Recorder flush retry observability.
 #
-# ``_flush`` catches ``OperationalError`` (disk full, WAL contention,
-# DB locked, etc.), re-queues the drained batch at the FRONT of the
-# buffer, and retries on the next flush tick. These two counters surface
+# The file write (stage F) catches ``sqlite3.Error`` (disk full, WAL
+# contention, DB locked, etc.), re-queues the drained batch at the FRONT of
+# the file queue, and retries on the next tick. These two counters surface
 # the retry path:
 #
 #   recorder_flush_retries_total          — ticks once per failed attempt
@@ -876,13 +876,13 @@ recorder_flush_batches_dropped = Counter(
 # Requeue-overflow observability — surfaces a data-loss path that would
 # otherwise stay silent.
 #
-# When ``_flush`` catches an ``OperationalError`` it re-queues the failed
-# batch at the FRONT of the bounded ``deque(maxlen=max_buffer)`` via
-# ``extendleft``. If concurrent ``_record`` appends filled the buffer while
-# the flush was in flight, ``extendleft`` would silently evict rows from
-# the TAIL of the deque (newest events) to honour ``maxlen``. Those drops
-# are NOT counted by ``recorder_dropped_events`` — that counter only ticks
-# inside ``_record`` when the buffer is full at append time. This metric
+# When a recorder write fails it re-queues the failed batch at the FRONT of
+# its bounded ``deque(maxlen=max_buffer)`` (the intake or the file queue)
+# via ``extendleft``. If appends filled the queue while the write was in
+# flight, ``extendleft`` would silently evict rows from the TAIL of the
+# deque (newest events) to honour ``maxlen``. Those drops are NOT counted
+# by ``recorder_dropped_events`` — that counter only ticks when a queue is
+# full at append time. This metric
 # closes the observability gap so operators can alert on data loss along
 # the requeue path.
 #

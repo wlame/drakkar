@@ -77,8 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory store. A memory write that fails because the store is busy or
   locked is tried again on the next tick and loses nothing
   (`recorder_memory_write_retry`). Any other failed memory write deletes the
-  memory rows up to that chunk, and the chunk still goes to the file
-  (`recorder_memory_write_failed`, `recorder_memory_eviction_failed`). Each of
+  memory rows up to that chunk (`recorder_memory_write_failed`,
+  `recorder_memory_eviction_failed`). With persistence `sqlite` the chunk
+  still goes to the file; with persistence `none` it is lost. Each of
   these log lines appears at most once per 60 seconds.
   `drakkar_recorder_buffer_size` now counts the events that wait for the
   memory store plus the rows that wait for the file. The log events
