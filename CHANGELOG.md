@@ -103,8 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_periodic_cluster_mismatch_peers`. New log events:
   `periodic_slot_skipped`, `periodic_lease_lost`,
   `periodic_lease_refresh_failed`, `periodic_skip_hook_failed`,
-  `periodic_cluster_mismatch`, `periodic_cluster_check_off` and
-  `periodic_election_stop_failed`. The `periodic_run` row of a cluster run
+  `periodic_cluster_mismatch`, `periodic_cluster_check_off`,
+  `periodic_election_stop_failed` and `periodic_loop_ended` (the loop of a
+  worker or cluster task ended on an error outside a run). The `periodic_run` row of a cluster run
   has the metadata keys `scope` and `slot`, and an archive pass writes a
   `periodic_run` row named `history.archive`. New modules:
   `drakkar.cronexpr`, `drakkar.schedule`, `drakkar.cluster_tasks` and
@@ -264,6 +265,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A periodic run whose recorder row fails is counted once.** It counted as
+  both `ok` and `error` in `drakkar_periodic_task_runs_total`; it now counts
+  as `error` only.
 - **Archive lease refresh follows the lease.** A lease is now refreshed at a third of
   its length, at most every 60 seconds. A short lease no longer lets a long
   archive pass lose it.

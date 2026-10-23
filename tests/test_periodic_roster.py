@@ -1,16 +1,19 @@
 """The periodic roster: discovery, the ``periodic.tasks`` overrides, the startup checks and the definition hash."""
 
+import asyncio
 import time
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
-from drakkar.cluster_tasks import SlotContext
+from drakkar.cluster_tasks import ClusterTask, SlotContext
 from drakkar.config import DrakkarConfig
 from drakkar.lifecycle import user_cluster_task
-from drakkar.periodic import periodic
-from drakkar.periodic_roster import PeriodicConfigError, archive_definition, resolve_periodic_roster
+from drakkar.cronexpr import CronNeverFiresError
+from drakkar.periodic import PeriodicMeta, periodic
+from drakkar.periodic_roster import PeriodicConfigError, RosterTask, archive_definition, resolve_periodic_roster
 from drakkar.schedule import ARCHIVE_TASK_NAME, ClusterTaskDefinition, cluster_tasks_hash
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -270,3 +273,76 @@ def test_a_cluster_task_without_an_election_gets_no_loop(tmp_path):
     app._lifecycle._start_cluster_task(user_cluster_task(roster_task))
 
     assert app._periodic_tasks == []
+
+
+class _NeverFiringTask(ClusterTask):
+    """A cluster task whose slot math raises, as a cron with no fire time left would."""
+
+    def next_slot(self, now: float) -> int:
+        raise CronNeverFiresError('the expression has no fire time left')
+
+
+async def _settle(task: asyncio.Task) -> None:
+    """Wait for a loop task to end without raising its exception here."""
+    await asyncio.wait({task})
+    # The done callbacks run on the next turn of the loop.
+    await asyncio.sleep(0)
+
+
+async def test_cluster_loop_that_raises_outside_a_run_logs_periodic_loop_ended(tmp_path):
+    app = DrakkarApp(
+        handler=RatesKafkaHandler(),
+        config=DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            storage={'dir': str(tmp_path)},
+            ui={'enabled': False, 'release': {'enabled': False}},
+        ),
+        worker_id='w-1',
+    )
+    app._lifecycle._build_periodic_roster()
+
+    async def body(_ctx: SlotContext) -> None:
+        return None
+
+    task = _NeverFiringTask(name='broken', run=body, interval=30, cron=None, lease_seconds=60, on_error='continue')
+    with capture_logs() as captured:
+        app._lifecycle._start_cluster_task(task)
+        await _settle(app._periodic_tasks[-1])
+
+    [ended] = [entry for entry in captured if entry['event'] == 'periodic_loop_ended']
+    assert (ended['log_level'], ended['category'], ended['name']) == ('error', 'periodic', 'broken')
+    assert ended['error'] == 'the expression has no fire time left'
+
+
+async def test_worker_loop_that_raises_outside_a_run_logs_periodic_loop_ended(tmp_path):
+    app = _kafka_app(tmp_path)
+
+    async def method() -> None:
+        return None
+
+    # Neither schedule: the loop raises before its first run.
+    meta = PeriodicMeta(interval=None, cron=None, scope='worker', lease_seconds=None, on_error='continue')
+    with capture_logs() as captured:
+        app._lifecycle._start_worker_task(RosterTask(name='unscheduled', method=method, meta=meta))
+        await _settle(app._periodic_tasks[-1])
+
+    [ended] = [entry for entry in captured if entry['event'] == 'periodic_loop_ended']
+    assert ended['name'] == 'unscheduled'
+    assert 'exactly one of interval and cron' in ended['error']
+
+
+async def test_cancelled_periodic_loop_logs_nothing(tmp_path):
+    app = _kafka_app(tmp_path)
+
+    async def method() -> None:
+        return None
+
+    meta = PeriodicMeta(interval=3600, cron=None, scope='worker', lease_seconds=None, on_error='continue')
+    with capture_logs() as captured:
+        app._lifecycle._start_worker_task(RosterTask(name='hourly', method=method, meta=meta))
+        loop_task = app._periodic_tasks[-1]
+        await asyncio.sleep(0)
+        loop_task.cancel()
+        await _settle(loop_task)
+
+    assert [entry for entry in captured if entry['event'] == 'periodic_loop_ended'] == []

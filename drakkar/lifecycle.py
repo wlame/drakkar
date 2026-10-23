@@ -171,6 +171,28 @@ def user_cluster_task(roster_task: RosterTask) -> ClusterTask:
     )
 
 
+def watch_periodic_loop(task: asyncio.Task, name: str) -> None:
+    """Log ``periodic_loop_ended`` when the loop of the periodic task ``name`` ends on an exception.
+
+    Each run is guarded, so reaching this means something outside the run
+    (the slot math, a skip, the lease setup) ended the loop. Nothing awaits
+    the loop until shutdown, so without this line the task would stop
+    running with no trace. A cancelled loop and a loop that returned (a
+    failed run under ``on_error='stop'``, already logged) stay silent.
+    """
+
+    def on_done(finished: asyncio.Task) -> None:
+        if finished.cancelled():
+            return
+        exc = finished.exception()
+        if exc is None:
+            return
+        # Sync logger: done callbacks run on the loop and cannot await.
+        logger.error('periodic_loop_ended', category='periodic', name=name, error=str(exc), exc_info=exc)
+
+    task.add_done_callback(on_done)
+
+
 class AppLifecycle:
     """Lifecycle driver for :class:`DrakkarApp` (internal use).
 
@@ -976,6 +998,7 @@ class AppLifecycle:
             ),
             name=f'periodic:{roster_task.name}',
         )
+        watch_periodic_loop(task, roster_task.name)
         app._periodic_tasks.append(task)
 
     def _start_cluster_task(self, cluster_task: ClusterTask) -> None:
@@ -993,6 +1016,7 @@ class AppLifecycle:
             ),
             name=f'periodic:{cluster_task.name}',
         )
+        watch_periodic_loop(task, cluster_task.name)
         app._periodic_tasks.append(task)
 
     def _start_archive_task(self) -> None:
