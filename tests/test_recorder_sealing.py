@@ -59,6 +59,7 @@ async def make_recorder(tmp_path):
             config,
             worker_name=worker,
             cluster_name=cluster,
+            persistence='sqlite' if storage else 'none',
             storage_dir=str(storage_dir) if storage else '',
             shared_dir=str(tmp_path / 'shared'),
             instance=INSTANCE,
@@ -460,7 +461,14 @@ async def test_the_live_file_is_never_a_leftover_however_the_folder_is_spelled(t
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'storage').mkdir()
     config = make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60)
-    rec = EventRecorder(config, worker_name=WORKER, cluster_name='search', storage_dir='./storage', instance=INSTANCE)
+    rec = EventRecorder(
+        config,
+        worker_name=WORKER,
+        cluster_name='search',
+        persistence='sqlite',
+        storage_dir='./storage',
+        instance=INSTANCE,
+    )
     await rec.start()
     try:
         stamp = time.time() - OLD_ENOUGH_SECONDS

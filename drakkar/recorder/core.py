@@ -49,6 +49,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import HistoryArchiveConfig, UIConfig
+from drakkar.config.ui import PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -217,6 +218,7 @@ class EventRecorder(EventWriter):
         worker_name: str = 'worker',
         cluster_name: str = '',
         *,
+        persistence: Persistence,
         storage_dir: str = '',
         shared_dir: str = '',
         instance: str = '',
@@ -225,10 +227,14 @@ class EventRecorder(EventWriter):
     ) -> None:
         """Wire a recorder without opening anything.
 
-        ``storage_dir`` is the worker's own folder (``storage.dir``); empty
-        runs memory-only. ``shared_dir`` is the folder every worker of the
-        fleet sees (``shared.dir``); sealed files go to its
-        ``history/<cluster>/``, and it falls back to ``storage_dir``.
+        ``persistence`` is the effective mode: ``'sqlite'`` writes the
+        recorder file in ``storage_dir``, ``'none'`` writes no file. The
+        caller passes ``DrakkarConfig.resolved_persistence``; the recorder
+        never derives it. ``storage_dir`` is the worker's own folder
+        (``storage.dir``); ``'sqlite'`` needs it. ``shared_dir`` is the
+        folder every worker of the fleet sees (``shared.dir``); sealed files
+        go to its ``history/<cluster>/``, and it falls back to
+        ``storage_dir``. Both folders resolve the same way in either mode.
         ``instance`` names this process in the meta files (random when
         empty). ``archive`` is ``history.archive``; the defaults apply when
         omitted. ``merged_retention_days`` is how long the archive pass keeps
@@ -238,7 +244,11 @@ class EventRecorder(EventWriter):
         :meth:`archive_cluster_task` returns; the worker's election decides
         which worker of the cluster runs each slot.
         """
+        if persistence == PERSISTENCE_SQLITE and not storage_dir:
+            raise ValueError('recorder: persistence sqlite needs a storage_dir')
         super().__init__(config)
+        self._persistence: Persistence = persistence
+        self._has_file: bool = persistence == PERSISTENCE_SQLITE
         self._worker_name = worker_name
         self._cluster_name = cluster_name
         self._storage_dir = storage_dir
@@ -259,7 +269,7 @@ class EventRecorder(EventWriter):
         # the deque fills to ``max_buffer`` and every further event counts
         # as a drop forever. Both inputs are process-lifetime constants, so
         # this is resolved once here rather than re-read on every event.
-        self._persists_events: bool = bool(self._store.store_events and self._storage_dir)
+        self._persists_events: bool = self._store.store_events and self._has_file
         self._db: aiosqlite.Connection | None = None
         # Dedicated reader connection used by the debug UI for SELECTs.
         # aiosqlite serializes ops per connection, so without this the UI
@@ -341,7 +351,7 @@ class EventRecorder(EventWriter):
         self._queries = EventQueries(
             QueryContext(
                 config=config,
-                storage_dir=storage_dir,
+                storage_dir=storage_dir if self._has_file else '',
                 worker_name=worker_name,
                 cluster_name=cluster_name,
                 reader=lambda: self._reader_db or self._db,
@@ -355,6 +365,16 @@ class EventRecorder(EventWriter):
         return self._db_path
 
     @property
+    def persistence(self) -> Persistence:
+        """The effective persistence mode, ``'none'`` or ``'sqlite'``."""
+        return self._persistence
+
+    @property
+    def has_file(self) -> bool:
+        """Whether this recorder writes a recorder file."""
+        return self._has_file
+
+    @property
     def storage_dir(self) -> str:
         """The worker's own folder (``storage.dir``); ``''`` in memory-only mode."""
         return self._storage_dir
@@ -365,13 +385,13 @@ class EventRecorder(EventWriter):
 
     @property
     def shared_dir(self) -> str:
-        """The folder every worker of the fleet sees; ``''`` in memory-only mode."""
-        return self._shared_dir if self._storage_dir else ''
+        """The folder every worker of the fleet sees; ``''`` when no folder is set."""
+        return self._shared_dir
 
     @property
     def history_dir(self) -> str:
-        """Where this recorder's sealed files go; ``''`` in memory-only mode."""
-        return history_dir(self._shared_dir, self._cluster_name) if self._storage_dir else ''
+        """Where this recorder's sealed files go; ``''`` when no folder is set."""
+        return history_dir(self._shared_dir, self._cluster_name) if self._shared_dir else ''
 
     @property
     def config(self) -> UIConfig:
@@ -389,7 +409,7 @@ class EventRecorder(EventWriter):
         separate aiosqlite worker thread from the writer, so UI reads
         don't queue behind buffered-event flushes. Returns ``None`` when
         the recorder has not been started yet or was started without a
-        ``storage_dir`` (memory-only mode), matching the semantics of
+        a file (``persistence='none'``), matching the semantics of
         ``_db``. Callers should check for ``None`` before executing.
         """
         return self._reader_db
@@ -473,7 +493,7 @@ class EventRecorder(EventWriter):
 
     async def start(self) -> None:
         self._running = True
-        if self._storage_dir:
+        if self._has_file:
             await self._warn_if_storage_dir_world_writable()
             await self._warn_if_storage_dir_network_fs()
             # Normalized so it compares equal to the leftover scan's paths
@@ -804,7 +824,7 @@ class EventRecorder(EventWriter):
         )
 
     async def _sync_state(self) -> None:
-        if not self._db or not self._store.store_state:
+        if not self._has_file or not self._db or not self._store.store_state:
             return
         app_state = self._state_provider() if self._state_provider else {}
         now = time.time()
@@ -953,7 +973,13 @@ class EventRecorder(EventWriter):
         detecting those, and whatever the last periodic flush wrote is
         what remains.
         """
-        if not self._running or not self._buffer or not self._db_path or not self._store.store_events:
+        if (
+            not self._running
+            or not self._has_file
+            or not self._buffer
+            or not self._db_path
+            or not self._store.store_events
+        ):
             return
         batch = list(self._buffer)
         self._buffer.clear()
@@ -1468,10 +1494,10 @@ class EventRecorder(EventWriter):
         completely before the atomic swap, so any concurrent writer only
         ever sees a ready connection.
 
-        Memory-only mode (no ``storage_dir``) has nothing to rotate: without
+        Without a file (``persistence='none'``) there is nothing to rotate: without
         this guard the new file name would resolve into the current folder.
         """
-        if not self._storage_dir:
+        if not self._has_file:
             return
         # flush remaining buffer to current DB
         await self._flush()
@@ -1659,7 +1685,7 @@ class EventRecorder(EventWriter):
         floor: a crashed earlier process, or a stop without time left to
         move the file.
         """
-        if not self._storage_dir:
+        if not self._has_file:
             return
         # Snapshots taken first: a file that fails in this job waits for
         # the next one instead of being retried right away.
@@ -1708,7 +1734,7 @@ class EventRecorder(EventWriter):
 
     def _start_sealing(self) -> None:
         """Start the background sealing job unless one still runs (it takes new files next time)."""
-        if not self._storage_dir or (self._sealing_task is not None and not self._sealing_task.done()):
+        if not self._has_file or (self._sealing_task is not None and not self._sealing_task.done()):
             return
         self._sealing_task = asyncio.create_task(self._run_job('sealing', self._seal_pending()))
 
@@ -1736,7 +1762,7 @@ class EventRecorder(EventWriter):
         a file from a quick restart is sealed within minutes rather than
         at the next rotation.
         """
-        if not self._storage_dir or self._leftover_task is not None:
+        if not self._has_file or self._leftover_task is not None:
             return
         self._leftover_task = asyncio.create_task(self._run_job('leftover_sealing', self._leftover_sealing()))
 

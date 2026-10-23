@@ -26,7 +26,7 @@ def _client(*, token: str = '', allowed: list[str] | None = None) -> AsyncClient
     drakkar_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
     config = make_ui_config(enabled=True, port=8080, auth_token=token, allowed_ws_origins=allowed or [])
-    recorder = MagicMock(storage_dir='', shared_dir='', db_path='')
+    recorder = MagicMock(storage_dir='', shared_dir='', db_path='', has_file=False)
     app = create_ui_app(config, recorder, drakkar_app)
     return AsyncClient(transport=ASGITransport(app=app), base_url='http://10.0.0.1:8080')
 

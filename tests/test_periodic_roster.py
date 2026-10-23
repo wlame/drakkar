@@ -373,3 +373,23 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
 
     assert app._periodic_roster is not None and app._periodic_roster.runs_archive is started
     assert started_tasks == ([app._recorder.archive_cluster_task.return_value] if started else [])
+
+
+def test_cluster_hash_of_a_none_worker_equals_the_hash_with_archive_disabled():
+    none_worker = DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
+        storage={'dir': '/data'},
+        ui={'enabled': True, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
+    )
+    archive_off = DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
+        storage={'dir': '/data'},
+        ui={'enabled': True, 'release': {'enabled': False}},
+        history={'archive': {'enabled': False}},
+    )
+
+    none_roster = resolve_periodic_roster(RatesHandler(), none_worker, now_epoch=NOW_EPOCH)
+    off_roster = resolve_periodic_roster(RatesHandler(), archive_off, now_epoch=NOW_EPOCH)
+
+    assert not none_roster.runs_archive
+    assert none_roster.cluster_hash == off_roster.cluster_hash

@@ -1030,6 +1030,7 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> 
         config,
         worker_name='worker-1',
         cluster_name=CLUSTER,
+        persistence='sqlite',
         storage_dir=str(tmp_path / 'storage'),
         shared_dir=str(tmp_path / 'shared'),
         instance=INSTANCE,

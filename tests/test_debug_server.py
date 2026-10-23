@@ -651,7 +651,7 @@ def ws_recv_frame(ws) -> dict:
 
 async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
     """WebSocket endpoint streams recorder events to connected clients."""
-    real_recorder = EventRecorder(debug_config)
+    real_recorder = EventRecorder(debug_config, persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -675,7 +675,7 @@ async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
 
 async def test_websocket_multiple_events(debug_config, mock_recorder, mock_app):
     """WebSocket receives multiple events in order."""
-    real_recorder = EventRecorder(debug_config)
+    real_recorder = EventRecorder(debug_config, persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -703,7 +703,7 @@ async def test_websocket_event_filter_limits_the_stream(debug_config, mock_recor
     ``task_complete`` event a handler emits once per task — on a fan-out
     workload that is the largest event class by count.
     """
-    real_recorder = EventRecorder(debug_config)
+    real_recorder = EventRecorder(debug_config, persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -728,7 +728,7 @@ async def test_websocket_reports_dropped_events(debug_config, mock_recorder, moc
     """
     import queue as queue_mod
 
-    real_recorder = EventRecorder(debug_config)
+    real_recorder = EventRecorder(debug_config, persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -750,7 +750,7 @@ async def test_websocket_reports_dropped_events(debug_config, mock_recorder, moc
 
 async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock_app):
     """Subscriber queue is removed when WebSocket disconnects."""
-    real_recorder = EventRecorder(debug_config)
+    real_recorder = EventRecorder(debug_config, persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -783,7 +783,7 @@ async def _start_live_recorder(tmp_path):
     from drakkar.recorder import EventRecorder
 
     cfg = make_ui_config(enabled=True, flush_interval_seconds=60)
-    rec = EventRecorder(cfg, worker_name='test-arrange-tasks', storage_dir=str(tmp_path))
+    rec = EventRecorder(cfg, worker_name='test-arrange-tasks', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     return rec
 
@@ -3074,7 +3074,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3095,7 +3095,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=['https://ops.internal'],
         )
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3117,7 +3117,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3136,7 +3136,7 @@ class TestWebSocketAuth:
         still be accepted on an untokened worker reached over the network.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3154,7 +3154,7 @@ class TestWebSocketAuth:
     def test_ws_without_a_token_accepts_a_same_origin_page(self, mock_recorder, mock_app):
         """The served SPA — the normal case — must keep working."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3177,7 +3177,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=['https://ops.internal'],
         )
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3195,7 +3195,7 @@ class TestWebSocketAuth:
     def test_ws_no_auth_configured_still_works(self, mock_recorder, mock_app):
         """Default dev workflow: ``auth_token=''`` → connection accepted without token."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3215,7 +3215,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3242,7 +3242,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3267,7 +3267,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3293,7 +3293,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, storage_dir='/tmp')
+        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 

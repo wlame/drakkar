@@ -92,14 +92,16 @@ def shared(tmp_path):
     return tmp_path / 'shared'
 
 
-def _app(tmp_path, *, memory_only: bool = False, merge_enabled: bool = True):
+def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merge_enabled: bool = True):
+    """``memory_only``: no folder at all. ``shared_only``: no recorder file, a shared folder."""
     config = make_ui_config(enabled=True, port=8080, merge_enabled=merge_enabled)
     recorder = EventRecorder(
         config,
         worker_name='w-1',
         cluster_name=CLUSTER,
-        storage_dir='' if memory_only else str(tmp_path / 'storage'),
-        shared_dir=str(tmp_path / 'shared'),
+        persistence='none' if memory_only or shared_only else 'sqlite',
+        storage_dir='' if memory_only or shared_only else str(tmp_path / 'storage'),
+        shared_dir='' if memory_only else str(tmp_path / 'shared'),
     )
     recorder._db_path = str(tmp_path / 'storage' / LIVE_NAME)
     drakkar_app = MagicMock()
@@ -125,6 +127,19 @@ async def test_memory_only_databases_answer_is_empty(tmp_path):
         resp = await c.get('/api/v1/debug/databases')
 
     assert resp.json() == {'own': [], 'history': {'folders': []}}
+
+
+async def test_databases_lists_history_folders_for_a_none_worker_with_shared_dir(tmp_path, shared):
+    sealed = _sealed(shared, CLUSTER, 'w-1-2026-10-13__08_00_00.db')
+    app, _recorder = _app(tmp_path, shared_only=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+        answer = (await c.get('/api/v1/debug/databases')).json()
+
+    assert answer['own'] == []
+    folders = answer['history']['folders']
+    assert [(f['folder'], [row['name'] for row in f['files']]) for f in folders] == [
+        (f'history/{CLUSTER}', [os.path.basename(sealed)])
+    ]
 
 
 async def test_databases_lists_own_files_with_measured_stats(client, storage):
@@ -391,3 +406,24 @@ async def test_shared_paths_are_resolved_off_the_ui_loop(tmp_path, storage, shar
         await c.post('/api/v1/debug/merge', json={'filenames': paths})
 
     assert on_loop == []
+
+
+async def test_trace_history_merge_download_and_archives_work_for_a_none_worker(tmp_path, shared):
+    first = _sealed(shared, CLUSTER, 'w-1-2026-10-13__08_00_00.db')
+    second = _sealed(shared, CLUSTER, 'w-2-2026-10-13__08_00_00.db', worker='w-2')
+    archive = _archive(shared, CLUSTER, datetime(2026, 10, 12, tzinfo=UTC).timestamp())
+    app, _recorder = _app(tmp_path, shared_only=True)
+    paths = [f'history/{CLUSTER}/{os.path.basename(first)}', f'history/{CLUSTER}/{os.path.basename(second)}']
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+        trace = await c.get('/api/v1/debug/trace', params={'partition': 3, 'offset': 77, 'history': 1})
+        download = await c.get(f'/api/v1/debug/download/{paths[0]}')
+        merge = await c.post('/api/v1/debug/merge', json={'filenames': paths})
+        archives = await c.get('/api/v1/debug/archives')
+        live = await c.get('/api/v1/debug/download-live')
+
+    assert sorted(row['worker_name'] for row in trace.json()) == ['w-1', 'w-2']
+    assert download.status_code == 200
+    assert merge.status_code == 200
+    assert [a['name'] for a in archives.json()['archives']] == [os.path.basename(archive)]
+    assert live.status_code == 404

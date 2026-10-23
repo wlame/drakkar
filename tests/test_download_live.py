@@ -42,6 +42,7 @@ def _client(tmp_path, *, memory_only: bool = False) -> tuple[AsyncClient, EventR
         config,
         worker_name='w-1',
         cluster_name='search',
+        persistence='none' if memory_only else 'sqlite',
         storage_dir='' if memory_only else str(tmp_path / 'storage'),
         shared_dir=str(tmp_path / 'shared'),
     )

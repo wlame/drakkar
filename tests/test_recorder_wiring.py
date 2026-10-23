@@ -183,3 +183,42 @@ async def test_the_recorder_stops_with_the_shutdown_time_that_is_left(tmp_path, 
     timeout = call.kwargs['timeout']
     assert 0 < timeout <= DRAIN_TIMEOUT_SECONDS
     assert timeout >= DRAIN_TIMEOUT_SECONDS - (time.monotonic() - signalled) - 0.1
+
+
+async def test_lifecycle_creates_storage_dir_and_starts_no_leftover_sealing_with_none(tmp_path, monkeypatch):
+    app = _app(
+        tmp_path, ui={'enabled': True, 'port': 8123, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}}
+    )
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._prepare_storage()
+    await app._lifecycle._start_ui_and_recorder()
+    try:
+        assert app._recorder is not None
+        assert app._recorder.persistence == 'none'
+        app._recorder.start_leftover_sealing()
+        assert app._recorder._leftover_task is None
+        assert (tmp_path / 'storage').is_dir()
+        assert list((tmp_path / 'storage').iterdir()) == []
+        assert app._recorder.history_dir == str(tmp_path / 'shared' / 'history' / 'search')
+    finally:
+        await app._recorder.stop()
+
+
+async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_run(tmp_path, monkeypatch):
+    warned = MagicMock()
+    monkeypatch.setattr('drakkar.lifecycle.warn_if_archives_unbounded', warned)
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    none_app = _app(
+        tmp_path,
+        ui={'enabled': True, 'port': 8123, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
+    )
+    await none_app._lifecycle._start_ui_and_recorder()
+    await none_app._recorder.stop()
+    warned.assert_not_called()
+
+    file_app = _app(tmp_path)
+    (tmp_path / 'storage').mkdir(exist_ok=True)
+    await file_app._lifecycle._start_ui_and_recorder()
+    await file_app._recorder.stop()
+    warned.assert_called_once()

@@ -348,15 +348,20 @@ def _history_answer(shared: Path) -> list[dict[str, Any]]:
 
 
 def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats) -> dict[str, Any]:
-    """The ``/debug/databases`` answer: own files measured now, then the shared history. Blocking."""
-    if not recorder.storage_dir:
-        return {'own': [], 'history': {'folders': []}}
-    live = os.path.normpath(recorder.db_path) if recorder.db_path else ''
-    own = [
-        _own_db_row(stats, 'live' if stats.path == live else 'backlog')
-        for stats in own_stats.measure(own_db_files(recorder.storage_dir, recorder.worker_name))
-    ]
-    return {'own': own, 'history': {'folders': _history_answer(Path(recorder.shared_dir))}}
+    """The ``/debug/databases`` answer: own files measured now, then the shared history. Blocking.
+
+    The two parts are independent: a recorder without a file has no own rows
+    but still lists the shared history when a shared folder is set.
+    """
+    own: list[dict[str, Any]] = []
+    if recorder.has_file:
+        live = os.path.normpath(recorder.db_path) if recorder.db_path else ''
+        own = [
+            _own_db_row(stats, 'live' if stats.path == live else 'backlog')
+            for stats in own_stats.measure(own_db_files(recorder.storage_dir, recorder.worker_name))
+        ]
+    folders = _history_answer(Path(recorder.shared_dir)) if recorder.shared_dir else []
+    return {'own': own, 'history': {'folders': folders}}
 
 
 def _all_archives(shared_dir: str) -> list[dict[str, Any]]:
@@ -698,10 +703,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     async def debug_download_live():
         """Download a consistent snapshot of this worker's live recorder file.
 
-        404 in memory-only mode or before the first file exists; 500 when
+        404 without a recorder file or before the first file exists; 500 when
         the snapshot fails. See :func:`_snapshot_live_file`.
         """
-        live_path = recorder.db_path if recorder.storage_dir else ''
+        live_path = recorder.db_path if recorder.has_file else ''
         if not live_path or not await asyncio.to_thread(os.path.isfile, live_path):
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
         try:

@@ -255,7 +255,9 @@ class TestPartitionProcessorRecorderModes:
             committed.append((pid, offset))
 
         debug_cfg = make_ui_config(enabled=True, flush_interval_seconds=60)
-        recorder = EventRecorder(debug_cfg, worker_name='test-w', cluster_name='', storage_dir=str(tmp_path))
+        recorder = EventRecorder(
+            debug_cfg, worker_name='test-w', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path)
+        )
         await recorder.start()
 
         proc = PartitionProcessor(
@@ -305,7 +307,7 @@ class TestRecorderStoreFlags:
             store_state=store_state,
             flush_interval_seconds=60,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path))
         await rec.start()
 
         # record some events regardless of flags
@@ -336,7 +338,7 @@ class TestRecorderStoreFlags:
             store_state=True,
             flush_interval_seconds=60,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir='')
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='none', storage_dir='')
         await rec.start()
 
         # should not crash despite requesting all storage features
@@ -366,7 +368,7 @@ class TestRecorderStoreFlags:
             flush_interval_seconds=60,
             state_sync_interval_seconds=1,
         )
-        rec = EventRecorder(cfg, worker_name='test', cluster_name='', storage_dir=str(tmp_path))
+        rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path))
         rec.set_state_provider(
             lambda: {
                 'uptime_seconds': 1.0,

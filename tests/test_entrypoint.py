@@ -65,7 +65,7 @@ def test_different_workers_produce_different_filenames():
 
 async def test_stop_keeps_the_db_file_in_the_history_folder(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name=WORKER, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     db_file = rec.db_path
@@ -78,7 +78,7 @@ async def test_stop_keeps_the_db_file_in_the_history_folder(tmp_path):
 
 async def test_stop_flushes_before_sealing(tmp_path):
     config = _make_config(tmp_path)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name=WORKER, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     from drakkar.models import SourceMessage
@@ -106,7 +106,7 @@ async def test_stop_flushes_before_sealing(tmp_path):
 
 async def test_no_db_file_when_storage_dir_empty():
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name=WORKER, storage_dir='')
+    rec = EventRecorder(config, worker_name=WORKER, persistence='none', storage_dir='')
     await rec.start()
     assert rec.db_path == ''
     await rec.stop()

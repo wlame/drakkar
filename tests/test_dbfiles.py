@@ -129,7 +129,9 @@ def test_secure_db_file_survives_unwritable_directory(tmp_path):
 
 async def test_recorder_db_and_wal_sidecars_are_owner_only(tmp_path):
     """Start + a real write, so the -wal/-shm sidecars actually exist."""
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        make_recorder_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path)
+    )
     await rec.start()
     try:
         rec.record_committed(partition=0, offset=1)
@@ -157,7 +159,9 @@ async def test_recorder_rotation_keeps_the_new_db_owner_only(tmp_path, monkeypat
         lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
     )
 
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        make_recorder_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path)
+    )
     await rec.start()
     try:
         original_path = rec.db_path
@@ -256,7 +260,9 @@ async def test_recorder_writer_uses_normal_synchronous(tmp_path):
     most recent transactions on a host power loss — acceptable for a flight
     recorder. See docs/local-databases.md.
     """
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        make_recorder_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path)
+    )
     await rec.start()
     try:
         async with rec._db.execute('PRAGMA synchronous') as cur:
@@ -273,7 +279,9 @@ async def test_rotated_recorder_writer_uses_normal_synchronous(tmp_path, monkeyp
     monkeypatch.setattr(
         recorder_core, 'make_db_path', lambda folder, worker: os.path.join(folder, f'{worker}-{next(names)}.db')
     )
-    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME, storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        make_recorder_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path)
+    )
     await rec.start()
     try:
         await rec._rotate()

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from drakkar.config.ui import PERSISTENCE_SQLITE
 from drakkar.metrics import periodic_cluster_mismatch_peers, periodic_cluster_slots
 from drakkar.periodic import SYSTEM_CLOCK, Clock, OnErrorPolicy, run_task_once, sleep_until
 from drakkar.providers.resilience import (
@@ -84,10 +85,16 @@ _STOPPED = CallResult(ok=False, value=None, outcome=OUTCOME_NOT_STARTED, attempt
 def archive_task_runs(config: DrakkarConfig) -> bool:
     """Whether this worker runs the system cluster task ``history.archive``.
 
-    It needs the recorder (``ui.enabled``), archiving on, and a storage
-    folder whose sealed files reach the shared history folder.
+    It needs the recorder (``ui.enabled``), archiving on, a recorder file
+    (effective persistence ``sqlite``), and a storage folder whose sealed
+    files reach the shared history folder.
     """
-    return config.ui.enabled and config.history.archive.enabled and bool(config.storage.dir)
+    return (
+        config.ui.enabled
+        and config.history.archive.enabled
+        and config.resolved_persistence == PERSISTENCE_SQLITE
+        and bool(config.storage.dir)
+    )
 
 
 class ClusterElection:

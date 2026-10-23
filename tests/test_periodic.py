@@ -870,7 +870,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     call_count = 0
@@ -906,7 +906,7 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     async def failing_task():
@@ -944,7 +944,7 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     async def task():
@@ -986,7 +986,7 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     async def task():
@@ -1023,7 +1023,7 @@ def test_recorder_record_periodic_run_system_true_stores_in_metadata(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='cache.flush', duration=0.01, status='ok', system=True)
 
     periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
@@ -1043,7 +1043,7 @@ def test_recorder_record_periodic_run_system_false_omits_key(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='user.task', duration=0.01, status='ok')
 
     periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
@@ -1060,7 +1060,7 @@ def test_recorder_record_periodic_run_system_true_with_error(tmp_path):
     from drakkar.recorder import EventRecorder
 
     config = make_ui_config(enabled=True)
-    rec = EventRecorder(config, worker_name='test', storage_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(
         name='cache.sync',
         duration=0.05,

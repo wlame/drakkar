@@ -51,7 +51,14 @@ from drakkar.app import (
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
-from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, ClusterTask, SlotContext, run_cluster_task
+from drakkar.cluster_tasks import (
+    ClusterElection,
+    ClusterHashChecker,
+    ClusterTask,
+    SlotContext,
+    archive_task_runs,
+    run_cluster_task,
+)
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.plugins import resolve_provider_factory
@@ -560,16 +567,19 @@ class AppLifecycle:
             warn_if_ui_unauthenticated(app._config)
             # Archives are the one recorder artifact nothing else reclaims,
             # so "keep forever" is stated at startup rather than discovered
-            # when a volume fills.
-            warn_if_archives_unbounded(
-                app._config.history.archive,
-                history_dir(app._config.resolved_shared_dir, app._cluster_name),
-            )
+            # when a volume fills. Only a worker that runs the archive task
+            # produces them.
+            if archive_task_runs(app._config):
+                warn_if_archives_unbounded(
+                    app._config.history.archive,
+                    history_dir(app._config.resolved_shared_dir, app._cluster_name),
+                )
 
             app._recorder = EventRecorder(
                 app._config.ui,
                 worker_name=app._worker_id,
                 cluster_name=app._cluster_name,
+                persistence=app._config.resolved_persistence,
                 storage_dir=app._config.storage.dir,
                 shared_dir=app._config.resolved_shared_dir,
                 instance=app._instance,

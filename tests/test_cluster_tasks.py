@@ -1250,3 +1250,22 @@ async def test_mismatch_logs_again_for_a_peer_that_left_the_listing_and_came_bac
     await checker.check([returning])
 
     assert len(log.named('periodic_cluster_mismatch')) == 2
+
+
+def _archive_config(**ui_recorder):
+    from drakkar.config import DrakkarConfig
+
+    return DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
+        storage={'dir': '/data'},
+        ui={'enabled': True, 'release': {'enabled': False}, 'recorder': ui_recorder},
+    )
+
+
+def test_archive_task_runs_is_true_with_a_recorder_file_and_a_storage_dir():
+    assert cluster_tasks.archive_task_runs(_archive_config(persistence='sqlite'))
+    assert cluster_tasks.archive_task_runs(_archive_config())
+
+
+def test_archive_task_runs_is_false_with_none():
+    assert not cluster_tasks.archive_task_runs(_archive_config(persistence='none'))

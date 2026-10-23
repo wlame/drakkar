@@ -135,6 +135,7 @@ async def recorder(tmp_path):
         config,
         worker_name='w-1',
         cluster_name=CLUSTER,
+        persistence='sqlite',
         storage_dir=str(tmp_path / 'storage'),
         shared_dir=str(tmp_path / 'shared'),
     )
