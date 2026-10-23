@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Config wizard.** The calculator page is now the Config Wizard (the URL
+  `calculator/` stays). It also asks how many workers run, on one host or on
+  several, and which services every worker reaches. It prints the fleet part
+  of the config (`connections`, `fleet.registry`, `periodic.election`,
+  `shared.dir`) and the `DK_` variables that hold the secrets. The link keeps
+  every answer. The rules are one data file, `docs/data/config-wizard.json`,
+  and a test loads every combination it prints.
+
 - **Cluster periodic tasks.** `@periodic(..., scope='cluster')` runs each
   slot of a task on exactly one worker of the cluster, and
   `@periodic(cron='<five fields>')` schedules a task by a cron expression in
