@@ -148,6 +148,10 @@ docs-serve:
 docs-build:
     uv run mkdocs build --strict
 
+# Run the config wizard script against its golden examples and URL cases, in a Bun container (not part of ci).
+docs-wizard-check:
+    docker run --rm --network=none -v "{{justfile_directory()}}:/app:ro" -w /app oven/bun:1 bun tests/js/check_config_wizard.js
+
 # Publish the docs to the gh-pages branch (requires a configured git remote).
 docs-deploy:
     uv run mkdocs gh-deploy --strict
