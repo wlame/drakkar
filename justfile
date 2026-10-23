@@ -8,6 +8,11 @@ set shell := ["bash", "-uc"]
 # [tool.coverage.report] fail_under in pyproject.toml.
 coverage_min := "95"
 
+# Every Python the package supports and CI's stable matrix tests. Add a new
+# version here and in .github/workflows/ci.yml together
+# (tests/test_ci_workflows.py keeps the two lists equal).
+python_versions := "3.13 3.14"
+
 # List all recipes
 default:
     @just --list --unsorted
@@ -115,6 +120,18 @@ test *args:
 cover:
     uv run pytest {{ test_parallel }} --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
+# Run the unit suite once on every supported Python. Each version gets its own
+# environment (.venv-<version>), so the project .venv is never rebuilt on
+# another interpreter. A local `just ci` uses one Python only; this is how a
+# change that breaks an older one is caught before a push.
+test-pythons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for version in {{ python_versions }}; do
+        echo "== Python ${version}"
+        UV_PROJECT_ENVIRONMENT=".venv-${version}" uv run --locked --python="${version}" pytest {{ test_parallel }} -q
+    done
+
 # Unit tests of the integration-harness handlers. Separate from `test`
 # because pyproject's testpaths is tests/ only, so the harness handlers
 # would otherwise never run in any gate.
@@ -133,8 +150,9 @@ gen-event-vocabulary:
 # Exactly what GitHub CI enforces, same order: lock → format → lint → types → tests+coverage → harness → docs
 ci: lock-check fmt-check lint typecheck cover test-harness docs-build
 
-# Full pre-push battery: ci + the CVE scan CI keeps in a job of its own
-check: ci audit
+# Full pre-push battery: ci + the CVE scan CI keeps in a job of its own + the
+# unit suite on every supported Python
+check: ci audit test-pythons
 
 # ---------------------------------------------------------------------------
 # Docs

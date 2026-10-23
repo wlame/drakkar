@@ -207,3 +207,17 @@ def test_a_pull_request_builds_the_docs() -> None:
     assert any('docs-build' in run for run in commands), (
         'ci.yml never builds the docs, so docs breakage is found only after merge'
     )
+
+
+def test_local_python_list_matches_the_stable_ci_matrix() -> None:
+    """``just test-pythons`` (part of ``just check``) must test the same
+    Pythons as CI's stable lanes. A version added to one list only is either
+    never tested before a push or tested locally but not in CI.
+    """
+    match = re.search(r'^python_versions := "([^"]*)"$', JUSTFILE.read_text(), re.MULTILINE)
+    assert match is not None, 'the justfile defines no python_versions variable'
+    local = match.group(1).split()
+    matrix = load('ci.yml')['jobs']['test']['strategy']['matrix']
+    assert local == matrix['python-version'], (
+        f'justfile python_versions {local} differs from the ci.yml stable matrix {matrix["python-version"]}'
+    )
