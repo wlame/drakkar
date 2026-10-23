@@ -263,14 +263,12 @@ horizontally once one worker saturates".
 If your workload is inherently high-rate, small, CPU-bound tasks —
 thousands per second of 5-20ms work — no amount of tuning makes a
 single Python event loop comfortable, and the right fix may be a
-different runtime rather than more workers. A Go implementation of
-Drakkar (`drakkar-go`) exists with a byte-for-byte identical surface —
-same config format, same wire contracts, same HTTP API — though it is
-not yet publicly released. Go's runtime schedules orchestration across
-all cores instead of one GIL-held loop, which suits exactly this
-profile. If you are hitting the per-worker ceiling with short CPU-bound
-tasks, consider porting your business logic; the framework surface you
-would port it to is the same one documented here.
+different runtime rather than more workers. Drakkar orchestrates every
+task on one event loop per worker, and that loop runs on one core. If
+you are hitting the per-worker ceiling with short CPU-bound tasks, move
+that work into the subprocess (where it runs in parallel), batch more
+messages per task, or run that part of the workload on a runtime that
+schedules work across all cores.
 
 ---
 

@@ -91,7 +91,7 @@ Knobs that stretch what one worker delivers within that envelope (all documented
 - **Larger `window_size`** enables larger batches in `arrange()`.
 - **`orjson`** cuts recorder encoding overhead (see [Available optimization: `orjson`](performance.md#available-optimization-orjson-opt-in)).
 
-Past the ceiling, scale horizontally: more workers, each with its own event loop. And if your workload is inherently high-rate, small, CPU-bound tasks, a Go implementation of Drakkar (`drakkar-go`) exists with a byte-for-byte identical config and API surface — not yet publicly released — whose runtime schedules orchestration across all cores instead of one GIL-held loop; consider porting your business logic to it for that profile.
+Past the ceiling, scale horizontally: more workers, each with its own event loop. If your workload is inherently high-rate, small, CPU-bound tasks, one Python event loop per worker stays the limit; see [When Python is the wrong tool](performance.md#when-python-is-the-wrong-tool).
 
 Use the [Config Calculator](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
 
