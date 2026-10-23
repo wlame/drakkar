@@ -211,13 +211,17 @@ class SlotLease:
         """Why the lease reads as not held: ``taken_over`` or ``unconfirmed``; ``None`` before."""
         return self._loss_reason
 
-    async def acquire(self, deadline_seconds: float) -> tuple[str, str | None]:
+    async def acquire(self, deadline_seconds: float, *, release_by: float | None = None) -> tuple[str, str | None]:
         """Take the lease within ``deadline_seconds``; the slot outcome and, for ``election_failed``, an error text.
 
         ``won`` when the provider answered True, ``held_elsewhere`` when it
         answered False. When the call failed after an attempt, the provider
         may still have taken the lease, so it is released at once rather
         than left to expire; the error text is ``acquire <caller outcome>``.
+        That release must end by the clock time ``release_by`` when one is
+        given (the slot loop gives the end of the slot's minimum hold, so
+        the release cannot make the loop miss its next slot); with no time
+        left it makes no call and is counted as ``timeout``.
         """
         provider = self._election.provider
         caller = self._election.caller
@@ -229,7 +233,12 @@ class SlotLease:
         if not result.ok:
             # A spent deadline or an open breaker made no call: there is nothing to give back.
             if result.attempts > 0:
-                await caller.call('release', lambda: provider.release(self.scope, self.token))
+                release_deadline = None if release_by is None else max(release_by - self._clock.time(), 0.0)
+                await caller.call(
+                    'release',
+                    lambda: provider.release(self.scope, self.token),
+                    deadline_seconds=release_deadline,
+                )
             return SLOT_ELECTION_FAILED, f'acquire {result.outcome}'
         if result.value is not True:
             return SLOT_HELD_ELSEWHERE, None
@@ -406,12 +415,17 @@ async def run_cluster_task(
 
 
 async def _contest_slot(election: ClusterElection, lease: SlotLease, slot: int, clock: Clock) -> tuple[str, str | None]:
-    """Start the provider if needed and take the lease, both before the acquire window ends."""
+    """Start the provider if needed and take the lease, both before the acquire window ends.
+
+    A release after an unclear acquire must end by ``slot + MIN_HOLD_SECONDS``:
+    after that the lease is no longer this slot's to give back, and the next
+    slot may already be due.
+    """
     window_end = slot + ACQUIRE_WINDOW_SECONDS
     started = await election.ensure_started(window_end - clock.time())
     if not started.ok:
         return SLOT_ELECTION_FAILED, f'start {started.outcome}'
-    return await lease.acquire(window_end - clock.time())
+    return await lease.acquire(window_end - clock.time(), release_by=slot + MIN_HOLD_SECONDS)
 
 
 async def _skip_slot(

@@ -43,7 +43,7 @@ from drakkar.fleet.service import PeerView
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED, ElectionContext, ThreadFence
-from drakkar.schedule import ClusterTaskDefinition, task_scope
+from drakkar.schedule import MIN_HOLD_SECONDS, ClusterTaskDefinition, task_scope
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
 CLUSTER = 'search-fleet'
@@ -491,14 +491,15 @@ async def test_cluster_slot_unclear_acquire_releases_and_counts_election_failed(
     provider = ScriptedElection(clock, acquire=(ConnectionError('election service unreachable'),))
     starts: list[tuple[float, int]] = []
     task = make_task('unclear_acquire', sleeping_body(clock, 1, starts))
+    election = make_election(provider, logs)
 
-    await run_until(
-        clock, run_cluster_task(task, make_election(provider, logs), cluster=CLUSTER, clock=clock), SLOT + 5
-    )
+    await run_until(clock, run_cluster_task(task, election, cluster=CLUSTER, clock=clock), SLOT + 5)
 
     assert starts == []
-    # The provider may have taken the lease before its answer was lost: it is given back at once.
+    # The provider may have taken the lease before its answer was lost: it is given back at once,
+    # bounded by the end of the slot's minimum hold.
     assert provider.at['release'] == [SLOT]
+    assert [deadline for op, deadline in election.caller.deadlines if op == 'release'] == [MIN_HOLD_SECONDS]
     assert slots('unclear_acquire', SLOT_ELECTION_FAILED) == 1
     [skipped] = logs.named('periodic_slot_skipped')
     assert skipped['outcome'] == SLOT_ELECTION_FAILED
@@ -947,6 +948,22 @@ async def test_slot_lease_acquire_with_a_spent_deadline_makes_no_call_and_releas
     assert await lease.acquire(0) == (SLOT_ELECTION_FAILED, 'acquire timeout')
 
     assert provider.calls == {}
+
+
+async def test_slot_lease_unclear_acquire_after_the_hold_ended_sends_no_release():
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock, acquire=(ConnectionError('election service unreachable'),))
+    election = make_election(provider)
+    lease = SlotLease(election, scope=task_scope(CLUSTER, 'hold_ended'), lease_seconds=60, clock=clock)
+    labels = {'feature': 'election', 'provider': PROVIDER, 'op': 'release', 'outcome': 'timeout'}
+    timeouts_before = sample('drakkar_provider_calls_total', **labels)
+
+    outcome = await lease.acquire(10, release_by=NOW - 1)
+
+    assert outcome == (SLOT_ELECTION_FAILED, 'acquire error')
+    assert provider.at['release'] == []
+    assert [deadline for op, deadline in election.caller.deadlines if op == 'release'] == [0.0]
+    assert sample('drakkar_provider_calls_total', **labels) == timeouts_before + 1
 
 
 async def test_slot_lease_is_held_follows_the_provider_and_ends_after_a_loss():
