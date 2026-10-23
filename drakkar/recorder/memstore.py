@@ -264,22 +264,37 @@ class MemoryStore:
                 self._open_by_name_count -= 1
                 self._guard.notify_all()
 
-    def _shut_guard(self) -> bool:
-        """Refuse new by-name opens, then wait for the counted ones; False when the wait ran out."""
+    def _refuse_new_opens(self) -> None:
+        """Set the open flag false: from now on by-name opens get nothing."""
+        # Held only while a by-name open checks the flag and connects, so
+        # taking it on the loop is brief.
         with self._guard:
             self._is_open = False
-            return self._guard.wait_for(lambda: self._open_by_name_count == 0, timeout=MEMORY_CLOSE_WAIT_SECONDS)
 
-    async def close(self) -> None:
+    def _wait_for_open_by_name(self, wait_seconds: float) -> bool:
+        """Wait for the counted by-name connections to close; False when the wait ran out."""
+        with self._guard:
+            return self._guard.wait_for(lambda: self._open_by_name_count == 0, timeout=wait_seconds)
+
+    async def close(self, wait_seconds: float | None = None) -> None:
         """Close the store: refuse new by-name opens, wait for open ones, close the reader, then the writer.
 
-        The wait for by-name connections is at most
-        :data:`MEMORY_CLOSE_WAIT_SECONDS`. A connection still open after it
-        keeps the store alive until it closes, and then the store is gone.
-        Safe to call when the store never opened.
+        The wait for by-name connections is at most ``wait_seconds``
+        (``None``: :data:`MEMORY_CLOSE_WAIT_SECONDS`; never below 0). A
+        connection still open after it keeps the store alive until it
+        closes, and then the store is gone. The reader and the writer close
+        even when the caller is cancelled during the wait. Safe to call when
+        the store never opened.
         """
-        await asyncio.to_thread(self._shut_guard)
-        await self._close_connections()
+        limit = MEMORY_CLOSE_WAIT_SECONDS if wait_seconds is None else max(wait_seconds, 0.0)
+        # On the loop, before anything can be cancelled: once the
+        # connections close below, no by-name open may find the flag true.
+        self._refuse_new_opens()
+        try:
+            await asyncio.to_thread(self._wait_for_open_by_name, limit)
+        finally:
+            # Shielded: a second cancellation cannot leave a connection open.
+            await asyncio.shield(self._close_connections())
 
     async def _close_connections(self) -> None:
         # Reader first: the writer is the keeper of the database.

@@ -77,7 +77,7 @@ from drakkar.recorder.helpers import (
     sanitize_env_value,
 )
 from drakkar.recorder.history import history_dir
-from drakkar.recorder.memstore import MIB, MemoryStore
+from drakkar.recorder.memstore import MEMORY_CLOSE_WAIT_SECONDS, MIB, MemoryStore
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -419,8 +419,18 @@ class EventRecorder(EventWriter):
         return self._config
 
     @property
+    def memory_store(self) -> MemoryStore | None:
+        """The memory store; ``None`` before start, after stop, or with ``store_events`` off."""
+        return self._memory_store
+
+    @property
     def memory_reader_db(self) -> aiosqlite.Connection | None:
-        """The read-only connection of the memory store; ``None`` when there is no open store."""
+        """The read-only connection of the memory store; ``None`` when there is no open store.
+
+        Run statements through :meth:`MemoryStore.read` (see
+        :attr:`memory_store`), not on this connection directly: ``read``
+        arms the read limit before each statement.
+        """
         store = self._memory_store
         return store.reader if store is not None and store.is_open else None
 
@@ -659,11 +669,11 @@ class EventRecorder(EventWriter):
             fields['ignored_keys'] = sorted(ignored)
         return fields
 
-    async def _close_memory_store(self) -> None:
-        """Close the memory store, if there is one; its connection closes never raise."""
+    async def _close_memory_store(self, wait_seconds: float | None = None) -> None:
+        """Close the memory store, if there is one, waiting at most ``wait_seconds`` for by-name readers."""
         store, self._memory_store = self._memory_store, None
         if store is not None:
-            await store.close()
+            await store.close(wait_seconds)
 
     def _watch_background_task(self, task: asyncio.Task, name: str) -> None:
         """Log when a recorder background loop ends while still running.
@@ -1014,8 +1024,12 @@ class EventRecorder(EventWriter):
         # through the election, which the worker stops after this wait.
         await self._wait_for_archive_pass(deadline, reserve_seconds)
         # The memory store goes last: by-name readers still open get up to
-        # MEMORY_CLOSE_WAIT_SECONDS to finish, and later opens get nothing.
-        await self._close_memory_store()
+        # MEMORY_CLOSE_WAIT_SECONDS, inside the shutdown time left, to
+        # finish, and later opens get nothing.
+        left = _time_left(deadline)
+        await self._close_memory_store(
+            MEMORY_CLOSE_WAIT_SECONDS if left is None else min(MEMORY_CLOSE_WAIT_SECONDS, left)
+        )
         # Clean shutdown flushed everything above — leave the live set so
         # interpreter exit does not reopen the closed DB. Discarding a
         # never-added recorder (start() not reached) is a no-op.

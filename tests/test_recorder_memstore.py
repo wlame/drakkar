@@ -452,3 +452,96 @@ async def test_recorder_started_logs_the_memory_fields(tmp_path):
     assert no_events_line['persistence'] == 'none'
     for key in ('memory_window_seconds', 'memory_max_rows', 'memory_max_bytes'):
         assert key not in no_events_line
+
+
+async def test_cancelled_close_still_closes_both_connections():
+    store = MemoryStore(INSTANCE, store_config=False)
+    await store.open()
+    reader, writer = store.reader, store.writer
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with store.open_by_name() as conn:
+            assert conn is not None
+            entered.set()
+            release.wait(THREAD_JOIN_SECONDS)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, THREAD_JOIN_SECONDS)
+        close = asyncio.create_task(store.close())
+        await asyncio.sleep(0.05)
+        close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+        assert reader._connection is None
+        assert writer._connection is None
+        assert not store.is_open
+        with store.open_by_name() as conn:
+            assert conn is None
+    finally:
+        release.set()
+        holder.join(THREAD_JOIN_SECONDS)
+
+
+async def test_close_with_a_zero_wait_does_not_wait_for_a_counted_reader():
+    store = MemoryStore(INSTANCE, store_config=False)
+    await store.open()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with store.open_by_name() as conn:
+            assert conn is not None
+            entered.set()
+            release.wait(THREAD_JOIN_SECONDS)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, THREAD_JOIN_SECONDS)
+        started = time.monotonic()
+        await store.close(wait_seconds=-1.0)
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        holder.join(THREAD_JOIN_SECONDS)
+
+
+async def test_stop_with_almost_no_time_left_does_not_wait_for_a_counted_reader():
+    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    await rec.start()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with rec.open_memory_reader() as conn:
+            assert conn is not None
+            entered.set()
+            release.wait(THREAD_JOIN_SECONDS)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, THREAD_JOIN_SECONDS)
+        started = time.monotonic()
+        await rec.stop(timeout=0.05)
+        assert time.monotonic() - started < 1.0
+        assert rec.memory_store is None
+    finally:
+        release.set()
+        holder.join(THREAD_JOIN_SECONDS)
+
+
+async def test_memory_store_property_follows_the_recorder_lifetime():
+    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    assert rec.memory_store is None
+    await rec.start()
+    try:
+        assert isinstance(rec.memory_store, MemoryStore)
+        assert rec.memory_store.is_open
+    finally:
+        await rec.stop()
+    assert rec.memory_store is None
