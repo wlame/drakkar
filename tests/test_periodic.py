@@ -7,6 +7,7 @@ import warnings
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from drakkar.cronexpr import CRON_FIELDS_MESSAGE
@@ -24,6 +25,7 @@ from drakkar.periodic import (
     discover_periodic_tasks,
     periodic,
     run_periodic_task,
+    run_task_once,
 )
 from tests.conftest import make_ui_config, wait_for
 
@@ -604,6 +606,41 @@ async def test_recorder_error_on_the_ok_path_is_a_failed_run(on_error, expected_
 
     assert recorder.statuses == expected_statuses
     assert errors._value.get() == errors_before + len(expected_statuses) // 2
+
+
+async def test_run_task_once_with_a_failing_ok_row_counts_the_run_once_as_error():
+    from drakkar.metrics import periodic_task_duration, periodic_task_runs
+
+    name = 'counted_once'
+    ok = periodic_task_runs.labels(name=name, status='ok')
+    errors = periodic_task_runs.labels(name=name, status='error')
+    ok_before, errors_before = ok._value.get(), errors._value.get()
+    durations_before = _histogram_count(periodic_task_duration, name)
+
+    async def body():
+        return None
+
+    must_stop = await run_task_once(
+        name,
+        body,
+        recorder=RecorderThatFailsOnOk(),  # type: ignore[arg-type]
+        system=False,
+        on_error='continue',
+        log=structlog.get_logger(),
+    )
+
+    assert must_stop is False
+    assert (ok._value.get(), errors._value.get()) == (ok_before, errors_before + 1)
+    assert _histogram_count(periodic_task_duration, name) == durations_before + 1
+
+
+def _histogram_count(histogram, name: str) -> float:
+    """How many samples the histogram holds for the task ``name``."""
+    for metric in histogram.collect():
+        for sample in metric.samples:
+            if sample.name.endswith('_count') and sample.labels.get('name') == name:
+                return sample.value
+    return 0.0
 
 
 @pytest.mark.parametrize(

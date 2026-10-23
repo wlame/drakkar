@@ -255,15 +255,14 @@ async def _run_counted(
 ) -> Exception | None:
     """Run the task once, count it in the metrics and the recorder; return the error it raised.
 
-    The ok-path metrics and recorder row are inside the ``try``: an error
-    while counting a run is counted as a failed run, like an error of the task.
+    The ok-path recorder row is inside the ``try``: an error while recording
+    a run is counted as a failed run, like an error of the task. The ok
+    metrics come after the row, so such a run is counted once, as ``error``.
     """
     start = time.monotonic()
     try:
         await coro_fn()
         duration = time.monotonic() - start
-        periodic_task_runs.labels(name=name, status='ok').inc()
-        periodic_task_duration.labels(name=name).observe(duration)
         if recorder:
             recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok', system=system, slot=slot)
     except asyncio.CancelledError:
@@ -282,6 +281,8 @@ async def _run_counted(
                 slot=slot,
             )
         return exc
+    periodic_task_runs.labels(name=name, status='ok').inc()
+    periodic_task_duration.labels(name=name).observe(duration)
     return None
 
 
