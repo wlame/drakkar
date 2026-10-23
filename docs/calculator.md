@@ -1,8 +1,13 @@
-# Config Calculator
+# Config Wizard
 
-Interactive calculator that recommends Drakkar [configuration](configuration.md) based on your
-hardware and workload characteristics. See [Performance Tuning](performance.md) for
-detailed bottleneck analysis and tuning strategies.
+This page builds a starting [configuration](configuration.md) for your workers.
+It asks for the hardware and the task timing of one worker, then for the
+workers of one cluster: how many, on one host or on several, and which
+services every worker reaches. It prints one YAML block, the environment
+variables that hold the secrets, and a link that keeps every answer. Open the
+link again to get the same config. See [Performance Tuning](performance.md)
+for detailed bottleneck analysis and tuning strategies, and
+[Fleet registry](fleet.md) for the providers.
 
 !!! warning "Starting point, not a final answer"
     These are **estimated values** to use as a starting point for tuning.
@@ -12,54 +17,107 @@ detailed bottleneck analysis and tuning strategies.
     recommendations as initial config, then iterate based on the
     [metrics to watch](#what-to-watch-after-deploying) section below.
 
-<div id="calc" style="font-family: inherit;">
+The printed config is not complete: add your brokers, topics, sinks and
+worker names (see [Configuration](configuration.md)). It never holds a
+password or a token. Set those in the worker's environment.
 
-### Inputs
+<noscript>
+<p>This page needs JavaScript. Without it, see <a href="../configuration/">Configuration</a> and <a href="../fleet/">Fleet registry</a>.</p>
+</noscript>
 
+<div id="calc">
+<div id="wizard-body" hidden>
+<nav class="wizard-steps" aria-label="Wizard steps">
+<button type="button" data-step="workload">Workload</button>
+<button type="button" data-step="hosts" hidden>Hosts</button>
+<button type="button" data-step="services" hidden>Services</button>
+<button type="button" data-step="choose" hidden>Providers</button>
+<button type="button" data-step="result" hidden>Result</button>
+</nav>
+<p id="wizard-notice" class="wizard-notice" role="status" hidden></p>
+<section data-step="workload">
+<h3 tabindex="-1">Workload</h3>
+<fieldset>
+<legend>Hardware and task timing of one worker</legend>
 <div class="row">
-  <label>CPU cores available</label>
-  <input type="number" id="in-cpu" value="8" min="1" max="512">
-  <span class="hint">total on machine</span>
-</div>
-<div class="row">
-  <label>RAM available (GB)</label>
-  <input type="number" id="in-ram" value="16" min="1" max="4096">
-  <span class="hint">total on machine</span>
-</div>
-<div class="row">
-  <label>Task duration p80 (ms)</label>
-  <input type="number" id="in-p80" value="500" min="1" max="600000">
-  <span class="hint">80th percentile</span>
-</div>
-<div class="row">
-  <label>Sink count</label>
-  <input type="number" id="in-sinks" value="2" min="1" max="10">
-  <span class="hint">distinct sinks in on_task_complete()</span>
-</div>
-<div class="row">
-  <label>Avg stdout size (KB)</label>
-  <input type="number" id="in-stdout" value="2" min="0" max="10240">
-  <span class="hint">per task output</span>
+  <label for="in-cpu">CPU cores available</label>
+  <input type="number" id="in-cpu" data-input="cpu" value="8" min="1" max="512" step="1" aria-describedby="hint-cpu">
+  <span class="hint" id="hint-cpu">total on machine</span>
 </div>
 <div class="row">
-  <label>Workers in cluster</label>
-  <input type="number" id="in-workers" value="1" min="1" max="100">
-  <span class="hint">horizontal instances</span>
+  <label for="in-ram">RAM available (GB)</label>
+  <input type="number" id="in-ram" data-input="ram" value="16" min="1" max="4096" step="1" aria-describedby="hint-ram">
+  <span class="hint" id="hint-ram">total on machine</span>
 </div>
 <div class="row">
-  <label>Kafka partitions</label>
-  <input type="number" id="in-partitions" value="50" min="1" max="1000">
-  <span class="hint">source topic</span>
+  <label for="in-p80">Task duration p80 (ms)</label>
+  <input type="number" id="in-p80" data-input="p80" value="500" min="1" max="600000" step="1" aria-describedby="hint-p80">
+  <span class="hint" id="hint-p80">80th percentile</span>
 </div>
-
-<button onclick="drakkarCalc()">Calculate</button>
-
-<div class="result" id="calc-result" style="display:none;">
-  <pre id="calc-yaml"></pre>
+<div class="row">
+  <label for="in-sinks">Sink count</label>
+  <input type="number" id="in-sinks" data-input="sinks" value="2" min="1" max="10" step="1" aria-describedby="hint-sinks">
+  <span class="hint" id="hint-sinks">distinct sinks in on_task_complete()</span>
 </div>
-
-<div class="explain" id="calc-explain" style="display:none;"></div>
-
+<div class="row">
+  <label for="in-stdout">Avg stdout size (KB)</label>
+  <input type="number" id="in-stdout" data-input="stdout" value="2" min="0" max="10240" step="1" aria-describedby="hint-stdout">
+  <span class="hint" id="hint-stdout">per task output</span>
+</div>
+<div class="row">
+  <label for="in-workers">Workers in cluster</label>
+  <input type="number" id="in-workers" data-input="workers" value="1" min="1" max="100" step="1" aria-describedby="hint-workers">
+  <span class="hint" id="hint-workers">horizontal instances</span>
+</div>
+<div class="row">
+  <label for="in-partitions">Kafka partitions</label>
+  <input type="number" id="in-partitions" data-input="partitions" value="50" min="1" max="1000" step="1" aria-describedby="hint-partitions">
+  <span class="hint" id="hint-partitions">source topic</span>
+</div>
+</fieldset>
+</section>
+<section data-step="hosts" hidden>
+<h3 tabindex="-1">Hosts</h3>
+<div id="wizard-hosts"></div>
+</section>
+<section data-step="services" hidden>
+<h3 tabindex="-1">Services</h3>
+<div id="wizard-services"></div>
+</section>
+<section data-step="choose" hidden>
+<h3 tabindex="-1">Providers</h3>
+<div id="wizard-reg"></div>
+<div id="wizard-elect"></div>
+</section>
+<section data-step="result" hidden>
+<h3 tabindex="-1">Result</h3>
+<div aria-live="polite">
+<div id="wizard-warnings"></div>
+<p id="wizard-status"></p>
+</div>
+<p id="wizard-rules-error" hidden>The rules file could not be loaded; the fleet part is not shown.</p>
+<h4>YAML</h4>
+<div class="result"><pre id="calc-yaml"></pre></div>
+<button type="button" data-copy="calc-yaml">Copy YAML</button>
+<div id="wizard-env-section">
+<h4>Environment</h4>
+<p id="wizard-env-intro">Set these in the worker's environment, never in the YAML file. See <a href="../security/#provider-credentials">Provider credentials</a>.</p>
+<p id="wizard-env-none" hidden>This config needs no secret in the environment.</p>
+<div id="wizard-env-block">
+<div class="result"><pre id="wizard-env"></pre></div>
+<button type="button" data-copy="wizard-env">Copy environment</button>
+</div>
+</div>
+<h4>Link</h4>
+<p><code id="wizard-link"></code></p>
+<button type="button" data-copy="wizard-link">Copy link</button>
+<div class="explain" id="calc-explain"></div>
+</section>
+<div class="wizard-buttons">
+<button type="button" id="wizard-back" hidden>Back</button>
+<button type="button" id="wizard-next">Next</button>
+</div>
+</div>
 </div>
 
 

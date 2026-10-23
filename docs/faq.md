@@ -57,7 +57,7 @@ The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g.
 
 ### How much CPU does a worker need? How many cores should I allocate?
 
-Depends on task shape (fast/slow), executor pool size, and input throughput. Use the [Config Calculator](calculator.md) to get a starting point, then tune via [Performance Recommendations](performance.md#configuration-recommendations). Rule of thumb: one Python process can saturate ~1 core for the event loop + expect (max_executors × task CPU share) for subprocess work.
+Depends on task shape (fast/slow), executor pool size, and input throughput. Use the [Config Wizard](calculator.md) to get a starting point, then tune via [Performance Recommendations](performance.md#configuration-recommendations). Rule of thumb: one Python process can saturate ~1 core for the event loop + expect (max_executors × task CPU share) for subprocess work.
 
 ### How much memory per worker?
 
@@ -93,7 +93,7 @@ Knobs that stretch what one worker delivers within that envelope (all documented
 
 Past the ceiling, scale horizontally: more workers, each with its own event loop. If your workload is inherently high-rate, small, CPU-bound tasks, one Python event loop per worker stays the limit; see [When Python is the wrong tool](performance.md#when-python-is-the-wrong-tool).
 
-Use the [Config Calculator](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
+Use the [Config Wizard](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
 
 ### What benefit does separating pipelines by partition give?
 

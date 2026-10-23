@@ -572,7 +572,7 @@ The total subprocess capacity across the cluster is
 
 ## Monitoring Throughput
 
-Key [Prometheus](observability.md#prometheus-metrics) queries for identifying bottlenecks (use the [Config Calculator](calculator.md) for initial tuning values):
+Key [Prometheus](observability.md#prometheus-metrics) queries for identifying bottlenecks (use the [Config Wizard](calculator.md) for initial tuning values):
 
 ```promql
 # Messages consumed per second (are we keeping up?)

@@ -87,7 +87,7 @@ nav:
   - Fleet Registry (how workers find each other): fleet.md
   - Performance: performance.md
   - Deployment: deployment.md
-  - Config Calculator: calculator.md
+  - Config Wizard: calculator.md
   - Integration Tests: integration.md
   - Data Flow: data-flow.md
   - Config Reference: config-reference.md

@@ -442,9 +442,9 @@ def canonical_query(table: dict[str, Any], raw_answers: Answers) -> str:
         service_values = [item['value'] for item in table['choices']['services']['values']]
         parts.append('svc=' + ','.join(value for value in service_values if value in answers.services))
     resolution = resolve(table, answers)
-    if answers.reg is not None and answers.reg != resolution.registry_allowed[0]:
+    if answers.reg in resolution.registry_allowed[1:]:
         parts.append(f'reg={answers.reg}')
-    if answers.elect is not None and answers.elect != resolution.election_allowed[0]:
+    if answers.elect in resolution.election_allowed[1:]:
         parts.append(f'elect={answers.elect}')
     return '&'.join(parts)
 
@@ -604,6 +604,20 @@ def test_every_docs_link_points_at_an_existing_heading():
         assert anchor in heading_anchors(path.read_text(encoding='utf-8')), link
 
 
+def test_page_inputs_match_the_table():
+    page = PAGE_PATH.read_text(encoding='utf-8')
+    pattern = re.compile(
+        r'<label for="in-(\w+)">([^<]*)</label>\s*'
+        r'<input type="number" id="in-\1" data-input="\1" value="(\d+)" min="(\d+)" max="(\d+)" step="1" '
+        r'aria-describedby="hint-\1">\s*<span class="hint" id="hint-\1">([^<]*)</span>'
+    )
+    found = {
+        name: {'label': label, 'help': hint, 'default': int(value), 'min': int(low), 'max': int(high)}
+        for name, label, value, low, high, hint in pattern.findall(page)
+    }
+    assert found == TABLE['inputs']
+
+
 def test_combinations_cover_every_provider():
     registries = {answers.reg for answers in COMBINATIONS.values()}
     elections = {answers.elect for answers in COMBINATIONS.values()}
@@ -722,3 +736,34 @@ def test_url_rules_give_the_canonical_query(case):
     assert canonical_query(TABLE, answers) == case['canonical']
     assert invalid == case['invalid']
     assert parse_query(TABLE, case['canonical']) == (answers, [])
+
+
+def test_there_are_golden_examples_for_the_main_cases():
+    names = {example['name'] for example in TABLE['examples']}
+    assert {
+        'defaults',
+        'one host',
+        'several hosts with a folder',
+        'several hosts with every service',
+        'several hosts with none',
+        'several hosts without a folder',
+    } <= names
+
+
+@pytest.mark.parametrize('example', TABLE['examples'], ids=[example['name'] for example in TABLE['examples']])
+def test_golden_example_matches_the_computed_fleet_part(example, tmp_path, clean_environment):
+    answers, invalid = parse_query(TABLE, example['query'])
+    resolution = resolve(TABLE, answers)
+    loaded = yaml.safe_load(example['yaml'])
+
+    assert invalid == []
+    assert canonical_query(TABLE, answers) == example['query']
+    fleet_keys = {key: value for key, value in loaded.items() if key in resolution.fleet}
+    assert fleet_keys == resolution.fleet
+    assert loaded['sources']['kafka']['enabled'] is True
+    assert set(loaded) - set(resolution.fleet) <= {'sources', 'executor', 'ui'}
+    assert serialize_yaml(loaded) == example['yaml']
+    assert example['env'] == resolution.env
+    for name in resolution.env:
+        clean_environment.setenv(name, ENV_PLACEHOLDERS[name])
+    write_and_load(tmp_path / 'drakkar.yaml', loaded)

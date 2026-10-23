@@ -250,7 +250,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Threads & Pools](threads.md) | Map of the worker's execution mechanisms — event loop, subprocess pool, two thread pools — and their sizing rules |
 | [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, the cache exchange wire format, mixed-fleet support |
 | [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
-| [Config Calculator](calculator.md) | Interactive calculator for recommended config values |
+| [Config Wizard](calculator.md) | Recommended config values, and the fleet part of a config for the services you run |
 | [Integration Tests](integration.md) | Docker Compose test environment, chaos test scenario |
 | [Data Flow](data-flow.md) | End-to-end pipeline walkthrough: poll through commit |
 | [Config Reference](config-reference.md) | Annotated `drakkar.yaml` with every field + env override |
