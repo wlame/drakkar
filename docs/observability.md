@@ -236,8 +236,7 @@ The provider log events:
 | `provider_breaker_opened` | warning | A breaker opened (once per opening; a failed probe does not log it again). |
 | `provider_breaker_closed` | info | A probe succeeded and the breaker closed. |
 | `fleet_registry_iteration_failed` | error | A registry loop iteration raised outside a provider call. At most once a minute per loop, with `suppressed`. |
-| `periodic_lock_taken_over` | warning | A worker took over the lease of a cluster task (the archive included) whose holder died. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. Written by the `filesystem` and `postgres` election providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server deleted. |
-| `periodic_lock_put_back_failed` | warning | Two workers took over one `filesystem` lock at once, and a third worker's lock came first, so the lock moved aside could not be put back. Fields `scope`, `folder`, `error`. The holder of the moved lock is fenced at its next check. |
+| `periodic_lock_taken_over`, `periodic_lock_put_back_failed` | warning | Lease takeovers of the election providers; see the [periodic task log events](#periodic-log-events). |
 
 #### Webapp
 
@@ -1269,7 +1268,7 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
     - `on_error='continue'` (default) -- the exception is logged, and the task continues scheduling on the next interval.
     - `on_error='stop'` -- the exception is logged, and this specific periodic task is permanently cancelled. Other periodic tasks and the main processing loop are unaffected.
 
-### Log events
+### Log events {#periodic-log-events}
 
 All in category `periodic`.
 
@@ -1278,14 +1277,15 @@ All in category `periodic`.
 | `periodic_task_started` | info | A task's loop started. Fields `periodic_task`, `scope` (`worker` or `cluster`), and `interval_seconds` or `cron`. |
 | `periodic_task_failed` | error | A run raised; carries the exception. |
 | `periodic_task_stopped` | warning | A run raised and the task has `on_error='stop'`: its loop ended. |
+| `periodic_loop_ended` | error | A task's loop ended on an error outside a run (the slot math, a skipped slot, the lease setup); the task does not run again on this worker until it restarts. Fields `name`, `error`; carries the exception. |
 | `periodic_slot_skipped` | debug or warning | A cluster slot this worker does not run. Fields `name`, `slot` (epoch second), `outcome`. Debug for `held_elsewhere` (the normal case on every worker but one). Warning for `late` (field `late_seconds`) and `election_failed` (field `error`: the operation and its outcome, such as `start timeout`, `acquire error` or `acquire skipped_open`). At most one warning line per task per 60 seconds; `suppressed` counts the lines left out since the last one. |
 | `periodic_lease_lost` | warning | A refresh of a running slot's lease did not confirm it. Fields `name`, `slot`, `reason` (`taken_over`: another worker holds it; `unconfirmed`: the provider did not answer). Once per slot; the run goes on. |
 | `periodic_lease_refresh_failed` | error | The lease refresher of a running slot raised outside a provider call. Field `scope`. |
 | `periodic_skip_hook_failed` | error | The framework's hook for a skipped slot raised (for the archive: starting the footprint update). Fields `name`, `slot`, `outcome`. The slot is skipped either way. |
 | `periodic_cluster_mismatch` | warning | An online peer of this worker's cluster has another [definition hash](periodic-tasks.md#definition-hash). Fields `peer`, `own_hash`, `peer_hash`. Once per peer and hash; again when the peer leaves the registry listing and comes back. |
 | `periodic_cluster_check_off` | info | The worker has cluster tasks but no worker registry, so it cannot compare definitions. Fields `cluster_tasks` (count), `reason`. Once at startup. |
-| `periodic_lock_taken_over` | warning | A lease whose holder died was taken over. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. `filesystem` and `postgres` providers only. |
-| `periodic_lock_put_back_failed` | warning | A `filesystem` lock moved aside by a contested takeover could not be put back. Fields `scope`, `folder`, `error`. |
+| `periodic_lock_taken_over` | warning | A worker took over the lease of a cluster task (the archive included) whose holder died. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. Written by the `filesystem` and `postgres` election providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server deleted. |
+| `periodic_lock_put_back_failed` | warning | Two workers took over one `filesystem` lock at once, and a third worker's lock came first, so the lock moved aside could not be put back. Fields `scope`, `folder`, `error`. The holder of the moved lock is fenced at its next check. |
 | `periodic_election_stop_failed` | warning | Stopping the election at shutdown raised. Field `error`. The rest of the shutdown still runs. |
 
 The election's provider calls are counted and logged like every provider

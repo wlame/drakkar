@@ -112,7 +112,9 @@ would run a task at different times.
 | day of week | `0`-`6` (`0` is Sunday) | `SUN`-`SAT`, any letter case |
 
 - The fields are separated by exactly one space: no space at the start or at
-  the end, no double space, no tab, no line break.
+  the end, no double space, no tab, no line break. A tab or a line break is
+  not a separator: it becomes part of a field, and the message depends on
+  the field count that is left (see [Cron messages](#cron-messages)).
 - Each field is a comma list. Each element is one of `*`, `*/s`, `v`,
   `a-b` (with `a` lower than `b`) or `a-b/s`.
 - `v`, `a` and `b` are decimal numbers without a sign or a leading zero, or a
@@ -156,9 +158,9 @@ day rule, then each field from left to right.
 
 | Problem | Message |
 |---|---|
-| Not five fields, an empty field, or other white space | `cron '<expr>' must have 5 fields separated by single spaces` |
+| A field count other than 5 when split on single spaces, or an empty field (a space at the start or the end, a double space) | `cron '<expr>' must have 5 fields separated by single spaces` |
 | Day of month and day of week both restricted | `cron '<expr>' restricts both the day of month and the day of week; make one of them *` |
-| An element of another shape | `cron '<expr>': <field> element '<item>' is not one of *, */s, v, a-b, a-b/s` |
+| An element of another shape, a tab or a line break inside a field included | `cron '<expr>': <field> element '<item>' is not one of *, */s, v, a-b, a-b/s` |
 | A value out of range or an unknown name | `cron '<expr>': <field> value '<token>' is not one of <allowed>` |
 | A range whose end is not above its start | `cron '<expr>': <field> range '<item>' must go from a lower to a higher value` |
 | A step out of range | `cron '<expr>': <field> step '<step>' must be from 1 to <max>` |
@@ -370,8 +372,9 @@ comes back with the same hash, the line is logged again. The gauge
 `drakkar_periodic_cluster_mismatch_peers` counts the online peers with
 another hash. The worker keeps running either way.
 
-Without a [worker registry](fleet.md) (provider `none`, or the UI off) there
-is nothing to compare. A worker with at least one cluster task then logs
+Without a [worker registry](fleet.md) (provider `none`, the UI off, or the
+`filesystem` provider with no folder for the cards) there is nothing to
+compare. A worker with at least one cluster task then logs
 `periodic_cluster_check_off` (info; fields `cluster_tasks`, the count of its
 cluster tasks, and `reason`) once at startup.
 
@@ -414,11 +417,12 @@ worker-scope system tasks: every worker runs its own.
 | `periodic_slot_skipped` | log | A cluster slot this worker does not run. Debug for `held_elsewhere`; warning for `late` (field `late_seconds`) and `election_failed` (field `error`, such as `start timeout` or `acquire error`). At most one warning line per task per 60 seconds; `suppressed` counts the lines left out. |
 | `periodic_lease_lost` | log, warning | The lease of a running slot is lost. Fields `name`, `slot`, `reason` (`taken_over` or `unconfirmed`). |
 | `periodic_task_failed`, `periodic_task_stopped` | log | A run raised; with `on_error='stop'` the loop then ends. |
+| `periodic_loop_ended` | log, error | A task's loop ended on an error outside a run; the task does not run again on this worker until it restarts. Fields `name`, `error`. |
 
 The `periodic_run` row of the [flight recorder](observability.md#events-processing-events)
 of a cluster run has the metadata keys `"scope": "cluster"` and
 `"slot": <epoch second>`. The full list of log events is on
-[Observability](observability.md#periodic-tasks).
+[Observability](observability.md#periodic-log-events).
 
 ## Upgrading
 
