@@ -107,7 +107,7 @@
   "connections": {
     "postgres": {
       "fragment": {"connections": {"postgres": {"main": {"schema": "drakkar"}}}},
-      "explain": "connections.postgres.main: the database of the providers. At the first start the worker creates the schema drakkar and its tables.",
+      "explain": "The database of the providers. At the first start the worker creates the schema drakkar and its tables.",
       "docs": "fleet.md#connections",
       "env": [
         {"name": "DK_CONNECTIONS__POSTGRES__MAIN__DSN", "path": "connections.postgres.main.dsn", "explain": "The Postgres connection string, with the user and the password. The config does not load while this variable is not set."}
@@ -115,7 +115,7 @@
     },
     "redis": {
       "fragment": {"connections": {"redis": {"main": {"key_prefix": "drakkar:"}}}},
-      "explain": "connections.redis.main: the Redis server of the providers. Every key of the providers starts with drakkar:.",
+      "explain": "The Redis server of the providers. Every key of the providers starts with drakkar:.",
       "docs": "fleet.md#connections",
       "env": [
         {"name": "DK_CONNECTIONS__REDIS__MAIN__URL", "path": "connections.redis.main.url", "explain": "The whole Redis URL, with the password when the server needs one. When this variable is not set, the worker uses redis://localhost:6379/0."}
@@ -123,7 +123,7 @@
     },
     "consul": {
       "fragment": {"connections": {"consul": {"main": {"address": "http://127.0.0.1:8500"}}}},
-      "explain": "connections.consul.main: the Consul agent of the providers. Change the address to the agent that your workers reach.",
+      "explain": "The Consul agent of the providers. Change the address to the agent that your workers reach.",
       "docs": "fleet.md#connections",
       "env": [
         {"name": "DK_CONNECTIONS__CONSUL__MAIN__TOKEN", "path": "connections.consul.main.token", "explain": "The Consul ACL token. Leave it unset when the agent needs none."}
@@ -134,7 +134,7 @@
     "none": {"fragment": {}},
     "folder": {
       "fragment": {"shared": {"dir": "/mnt/drakkar-shared"}},
-      "explain": "shared.dir: change the path to where every worker mounts the folder. The registry cards, the sealed history and the archives go there.",
+      "explain": "Change the path to where every worker mounts the folder. The registry cards, the sealed history and the archives go there.",
       "docs": "local-databases.md#sharing-folders-across-workers"
     }
   },
@@ -159,8 +159,7 @@
       "id": "election_per_host",
       "when": {"hosts": "many", "services_exclude": "folder", "election": "filesystem"},
       "text": "Without a shared folder or a service, each host elects its own worker. A cluster task runs once per host, not once per cluster.",
-      "docs": "periodic-tasks.md#the-election",
-      "fragment": {}
+      "docs": "periodic-tasks.md#the-election"
     },
     {
       "id": "archive_one_host_only",
@@ -173,15 +172,13 @@
       "id": "registry_none",
       "when": {"registry": "none"},
       "text": "With no registry, the workers list shows only the current worker, and the cache exchange pulls nothing.",
-      "docs": "fleet.md#providers",
-      "fragment": {}
+      "docs": "fleet.md#providers"
     },
     {
       "id": "ui_needed",
       "when": {"registry": ["filesystem", "postgres", "redis", "consul"]},
       "text": "The registry needs the UI server. Keep ui.enabled: true, the default.",
-      "docs": "fleet.md#what-you-get-with-the-defaults",
-      "fragment": {}
+      "docs": "fleet.md#what-you-get-with-the-defaults"
     }
   ],
   "section_order": ["sources", "executor", "ui", "history", "shared", "connections", "fleet", "periodic"],
