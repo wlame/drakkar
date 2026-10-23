@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.24"
+  version: "1.25"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -601,21 +601,38 @@ paths:
     get:
       tags: [debug-tools]
       operationId: getDownloadLive
-      summary: Download a snapshot of the live recorder file
+      summary: Download a snapshot of the live recorder file or the memory store
       description: >-
-        A consistent snapshot of the serving worker's live recorder file,
-        made with the SQLite backup API, as an attachment named like the
-        live file, with Cache-Control no-store. 404 in memory-only mode or
-        when no live file is open. The bearer token may ride as ?token=
-        (v1.23).
+        A consistent snapshot of the serving worker's live recorder file or
+        (v1.25) of its memory store, as an attachment with Cache-Control
+        no-store. The file snapshot is named like the live file; the memory
+        snapshot is named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC).
+        `source` defaults to `file` when a live file is open, else `memory`.
+        404 `{"error": "No live recorder file on this worker"}` for
+        source=file without a live file; 404 `{"error": "No memory store on
+        this worker"}` for source=memory without an open memory store; 400
+        `{"error": "source must be memory or file"}` for any other value.
+        The bearer token may ride as ?token= (v1.23).
+      parameters:
+        - name: source
+          in: query
+          required: false
+          schema: {type: string, enum: [memory, file]}
       responses:
         '200':
           description: The snapshot.
           content:
             application/x-sqlite3:
               schema: {type: string, format: binary}
+        '400':
+          description: 'source is not memory or file ("source must be memory or file").'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '404':
-          description: No live file on this worker.
+          description: >-
+            No live file on this worker ("No live recorder file on this
+            worker") or no memory store ("No memory store on this worker").
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -1915,13 +1932,15 @@ components:
     OwnDatabase:
       type: object
       description: >-
-        One of the serving worker's own files in storage.dir: the live file
-        or a file closed but not sealed yet.
+        One of the serving worker's own recorder stores: the memory store
+        (v1.25; not a file, first in the list, filename is a label and
+        size_bytes is the data in use, not the RAM held), the live file, or a
+        file in storage.dir closed but not sealed yet.
       properties:
         filename: {type: string}
         worker_name: {type: string}
         cluster_name: {type: [string, 'null']}
-        kind: {type: string, enum: [live, backlog]}
+        kind: {type: string, enum: [memory, live, backlog]}
         event_count: {type: integer}
         event_counts:
           type: object
