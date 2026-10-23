@@ -33,6 +33,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
+from tests.archive_helpers import idle_archive_task
 from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
@@ -473,8 +474,9 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
     lifecycle = app._lifecycle
 
     recorder = AsyncMock()
-    # A plain method on the real recorder; no archive task runs here.
-    recorder.archive_cluster_task = MagicMock(return_value=None)
+    # A plain method on the real recorder. The stand-in task's first slot is an hour away at most,
+    # and a won slot would do nothing, so no archive work runs here.
+    recorder.archive_cluster_task = MagicMock(return_value=idle_archive_task())
     cache_engine = AsyncMock()
     # ``features`` is a plain method on the real engine; the registry reads it at every publish.
     cache_engine.features = MagicMock(return_value={})
