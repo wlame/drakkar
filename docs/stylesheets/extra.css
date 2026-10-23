@@ -89,3 +89,6 @@
 #calc .wizard-buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 #calc #wizard-link { word-break: break-all; }
 #calc input[aria-invalid="true"] { border-color: var(--md-typeset-del-color, #c62828); }
+#calc .wizard-error { flex-basis: 100%; font-size: 13px; }
+#calc .wizard-error:empty { display: none; }
+#calc button:disabled { opacity: 0.5; cursor: not-allowed; }

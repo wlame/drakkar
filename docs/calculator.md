@@ -41,38 +41,45 @@ password or a token. Set those in the worker's environment.
 <legend>Hardware and task timing of one worker</legend>
 <div class="row">
   <label for="in-cpu">CPU cores available</label>
-  <input type="number" id="in-cpu" data-input="cpu" value="8" min="1" max="512" step="1" aria-describedby="hint-cpu">
+  <input type="number" id="in-cpu" data-input="cpu" value="8" min="1" max="512" step="1" aria-describedby="hint-cpu error-cpu">
   <span class="hint" id="hint-cpu">total on machine</span>
+  <span class="wizard-error" id="error-cpu"></span>
 </div>
 <div class="row">
   <label for="in-ram">RAM available (GB)</label>
-  <input type="number" id="in-ram" data-input="ram" value="16" min="1" max="4096" step="1" aria-describedby="hint-ram">
+  <input type="number" id="in-ram" data-input="ram" value="16" min="1" max="4096" step="1" aria-describedby="hint-ram error-ram">
   <span class="hint" id="hint-ram">total on machine</span>
+  <span class="wizard-error" id="error-ram"></span>
 </div>
 <div class="row">
   <label for="in-p80">Task duration p80 (ms)</label>
-  <input type="number" id="in-p80" data-input="p80" value="500" min="1" max="600000" step="1" aria-describedby="hint-p80">
+  <input type="number" id="in-p80" data-input="p80" value="500" min="1" max="600000" step="1" aria-describedby="hint-p80 error-p80">
   <span class="hint" id="hint-p80">80th percentile</span>
+  <span class="wizard-error" id="error-p80"></span>
 </div>
 <div class="row">
   <label for="in-sinks">Sink count</label>
-  <input type="number" id="in-sinks" data-input="sinks" value="2" min="1" max="10" step="1" aria-describedby="hint-sinks">
+  <input type="number" id="in-sinks" data-input="sinks" value="2" min="1" max="10" step="1" aria-describedby="hint-sinks error-sinks">
   <span class="hint" id="hint-sinks">distinct sinks in on_task_complete()</span>
+  <span class="wizard-error" id="error-sinks"></span>
 </div>
 <div class="row">
   <label for="in-stdout">Avg stdout size (KB)</label>
-  <input type="number" id="in-stdout" data-input="stdout" value="2" min="0" max="10240" step="1" aria-describedby="hint-stdout">
+  <input type="number" id="in-stdout" data-input="stdout" value="2" min="0" max="10240" step="1" aria-describedby="hint-stdout error-stdout">
   <span class="hint" id="hint-stdout">per task output</span>
+  <span class="wizard-error" id="error-stdout"></span>
 </div>
 <div class="row">
   <label for="in-workers">Workers in cluster</label>
-  <input type="number" id="in-workers" data-input="workers" value="1" min="1" max="100" step="1" aria-describedby="hint-workers">
+  <input type="number" id="in-workers" data-input="workers" value="1" min="1" max="100" step="1" aria-describedby="hint-workers error-workers">
   <span class="hint" id="hint-workers">horizontal instances</span>
+  <span class="wizard-error" id="error-workers"></span>
 </div>
 <div class="row">
   <label for="in-partitions">Kafka partitions</label>
-  <input type="number" id="in-partitions" data-input="partitions" value="50" min="1" max="1000" step="1" aria-describedby="hint-partitions">
+  <input type="number" id="in-partitions" data-input="partitions" value="50" min="1" max="1000" step="1" aria-describedby="hint-partitions error-partitions">
   <span class="hint" id="hint-partitions">source topic</span>
+  <span class="wizard-error" id="error-partitions"></span>
 </div>
 </fieldset>
 </section>
@@ -95,7 +102,7 @@ password or a token. Set those in the worker's environment.
 <div id="wizard-warnings"></div>
 <p id="wizard-status"></p>
 </div>
-<p id="wizard-rules-error" hidden>The rules file could not be loaded; the fleet part is not shown.</p>
+<p id="wizard-rules-error" hidden>The rules file could not be loaded; the fleet part is not shown. The page does not change the link, so the link still holds every answer: reload it later to see the fleet part.</p>
 <h4>YAML</h4>
 <div class="result"><pre id="calc-yaml"></pre></div>
 <button type="button" data-copy="calc-yaml">Copy YAML</button>

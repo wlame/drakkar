@@ -8,6 +8,7 @@ examples and the URL rules stay as written. The page script runs the same
 examples and URL cases (``just docs-wizard-check``).
 """
 
+import copy
 import itertools
 import json
 import os
@@ -19,7 +20,7 @@ from typing import Any, Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.configmeta import build_config_metadata, dump_by_yaml_key
@@ -130,7 +131,7 @@ class Note(Strict):
     when: NoteWhen
     text: str
     docs: str
-    fragment: dict[str, Any]
+    fragment: dict[str, Any] = Field(default_factory=dict)
 
 
 class Example(Strict):
@@ -290,7 +291,7 @@ def resolve(table: dict[str, Any], raw_answers: Answers) -> Resolution:
     merge_fragment(fleet, table['providers']['registry'][registry]['fragment'])
     merge_fragment(fleet, table['providers']['election'][election]['fragment'])
     for note in notes:
-        merge_fragment(fleet, note['fragment'])
+        merge_fragment(fleet, note.get('fragment', {}))
     env = [entry['name'] for kind in kinds for entry in table['connections'][kind]['env']]
     return Resolution(registry_allowed, election_allowed, registry, election, notes, fleet, env)
 
@@ -494,9 +495,10 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
 def write_and_load(path: Path, document: dict[str, Any]) -> DrakkarConfig:
     """Write the document with the test-only keys added and load it like an operator's file."""
-    data = yaml.safe_load(serialize_yaml(document))
+    data = copy.deepcopy(document)
     merge_fragment(data, TEST_ONLY_YAML)
-    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
+    # The file holds the bytes the page prints, with the test-only key in the ``ui`` section.
+    path.write_text(serialize_yaml(data), encoding='utf-8')
     return load_config(path)
 
 
@@ -569,7 +571,7 @@ def test_section_order_covers_every_top_level_key():
     fragments = [TABLE['base'], *(entry['fragment'] for entry in TABLE['shared'].values())]
     fragments += [entry['fragment'] for entry in TABLE['connections'].values()]
     fragments += [provider['fragment'] for feature in TABLE['providers'].values() for provider in feature.values()]
-    fragments += [note['fragment'] for note in TABLE['notes']]
+    fragments += [note.get('fragment', {}) for note in TABLE['notes']]
     keys = {key for fragment in fragments for key in fragment}
     assert keys <= set(TABLE['section_order'])
     assert len(TABLE['section_order']) == len(set(TABLE['section_order']))
@@ -609,7 +611,8 @@ def test_page_inputs_match_the_table():
     pattern = re.compile(
         r'<label for="in-(\w+)">([^<]*)</label>\s*'
         r'<input type="number" id="in-\1" data-input="\1" value="(\d+)" min="(\d+)" max="(\d+)" step="1" '
-        r'aria-describedby="hint-\1">\s*<span class="hint" id="hint-\1">([^<]*)</span>'
+        r'aria-describedby="hint-\1 error-\1">\s*<span class="hint" id="hint-\1">([^<]*)</span>\s*'
+        r'<span class="wizard-error" id="error-\1"></span>'
     )
     found = {
         name: {'label': label, 'help': hint, 'default': int(value), 'min': int(low), 'max': int(high)}
@@ -662,10 +665,10 @@ def test_fragment_leaves_are_never_secret_and_every_secret_has_an_env_entry():
             parts[2] = '*'
         return '.'.join(parts)
 
-    fragments = [entry['fragment'] for entry in TABLE['shared'].values()]
+    fragments = [TABLE['base'], *(entry['fragment'] for entry in TABLE['shared'].values())]
     fragments += [entry['fragment'] for entry in TABLE['connections'].values()]
     fragments += [provider['fragment'] for feature in TABLE['providers'].values() for provider in feature.values()]
-    fragments += [note['fragment'] for note in TABLE['notes']]
+    fragments += [note.get('fragment', {}) for note in TABLE['notes']]
     for fragment in fragments:
         for path, _value in leaf_paths(fragment):
             entry = metadata.get(metadata_path(path))

@@ -24,6 +24,8 @@
   var RESERVED_WORDS = ['true', 'false', 'yes', 'no', 'on', 'off', 'null', '~'];
   var CALCULATOR_SECTIONS = ['sources', 'executor', 'ui'];
   var TABLE_URL = '../data/config-wizard.json';
+  // A table that has not arrived by then counts as not loaded, so the calculator still appears.
+  var TABLE_TIMEOUT_MS = 5000;
 
   // ------------------------------------------------------------ calculator
 
@@ -268,7 +270,7 @@
     kinds.forEach(function (kind) { mergeFragment(fleet, table.connections[kind].fragment, ''); });
     mergeFragment(fleet, table.providers.registry[registry].fragment, '');
     mergeFragment(fleet, table.providers.election[election].fragment, '');
-    notes.forEach(function (note) { mergeFragment(fleet, note.fragment, ''); });
+    notes.forEach(function (note) { mergeFragment(fleet, note.fragment || {}, ''); });
     var env = [];
     kinds.forEach(function (kind) { table.connections[kind].env.forEach(function (entry) { env.push(entry); }); });
     return {
@@ -473,12 +475,20 @@
   /** The table, fetched once per page load of the site; null when it cannot be loaded. */
   function loadTable() {
     if (!tablePromise) {
-      tablePromise = fetch(new URL(TABLE_URL, root.location.href).href)
+      var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      var timer = controller ? setTimeout(function () { controller.abort(); }, TABLE_TIMEOUT_MS) : null;
+      tablePromise = fetch(new URL(TABLE_URL, root.location.href).href, controller ? { signal: controller.signal } : {})
         .then(function (response) {
           if (!response.ok) { throw new Error('status ' + response.status); }
           return response.json();
         })
-        .catch(function () { tablePromise = null; return null; });
+        .then(function (table) { clearTimeout(timer); return table; })
+        .catch(function (error) {
+          clearTimeout(timer);
+          root.console.warn('config wizard: the rules file could not be loaded:', error);
+          tablePromise = null;
+          return null;
+        });
     }
     return tablePromise;
   }
@@ -506,6 +516,11 @@
     var parsed = parseQuery(table, root.location.search);
     var state = parsed.answers;
     var byId = function (id) { return container.querySelector('#' + id); };
+    // Run the table paths once before any listener is attached: a broken table then fails
+    // here, and the caller can start again without it.
+    buildOutput(table, state);
+    shownSteps(table, state);
+    var refused = {};
 
     if (parsed.invalid.length) {
       var notice = byId('wizard-notice');
@@ -515,8 +530,19 @@
     byId('wizard-rules-error').hidden = hasRules(table);
 
     function writeUrl() {
+      // Without the table the page cannot read the fleet answers of the link. It leaves the
+      // link as it came, so a reload after the table is back still has every answer.
+      if (!hasRules(table)) { return; }
+      var before = root.location.href.split('#')[0];
       var url = root.location.pathname + '?' + canonicalQuery(table, state) + root.location.hash;
       root.history.replaceState(root.history.state, '', url);
+      // The theme writes the in-page links (table of contents) as absolute URLs when the page
+      // loads; move them to the new query so a click does not reload the page's old answers.
+      var after = root.location.href.split('#')[0];
+      if (after === before) { return; }
+      Array.prototype.forEach.call(document.links, function (link) {
+        if (link.href.indexOf(before + '#') === 0) { link.href = after + link.href.slice(before.length); }
+      });
     }
 
     function dropPicksNotAllowed() {
@@ -528,15 +554,20 @@
 
     function updateNavigation() {
       var shown = shownSteps(table, state);
+      // While a typed number is refused, the other steps would show values for the last
+      // accepted number, not the one on screen, so only the workload step can be reached.
+      var blocked = Object.keys(refused).length > 0;
       Array.prototype.forEach.call(container.querySelectorAll('.wizard-steps button'), function (button) {
         var step = button.getAttribute('data-step');
         button.hidden = shown.indexOf(step) < 0;
+        button.disabled = blocked && step !== 'workload';
         if (step === state.step) { button.setAttribute('aria-current', 'step'); }
         else { button.removeAttribute('aria-current'); }
       });
       var index = shown.indexOf(state.step);
       byId('wizard-back').hidden = index <= 0;
       byId('wizard-next').hidden = index >= shown.length - 1;
+      byId('wizard-next').disabled = blocked;
     }
 
     function changed() {
@@ -620,9 +651,9 @@
 
     // --- result step
 
-    function addLink(parent, link) {
+    function addLink(parent, link, topic) {
       parent.appendChild(document.createTextNode(' '));
-      parent.appendChild(element('a', { href: docsHref(link) }, 'More'));
+      parent.appendChild(element('a', { href: docsHref(link), 'aria-label': 'More about ' + topic }, 'More'));
     }
 
     function addDefinitions(target, title, items) {
@@ -631,7 +662,7 @@
       items.forEach(function (item) {
         list.appendChild(element('dt', {}, item.term));
         var definition = element('dd', {}, item.text);
-        if (item.docs) { addLink(definition, item.docs); }
+        if (item.docs) { addLink(definition, item.docs, item.term); }
         list.appendChild(definition);
       });
       target.appendChild(list);
@@ -663,7 +694,7 @@
       (resolution ? resolution.notes : []).forEach(function (note) {
         var box = element('div', { 'class': 'admonition warning' });
         var paragraph = element('p', {}, 'Warning: ' + note.text);
-        addLink(paragraph, note.docs);
+        addLink(paragraph, note.docs, 'this warning: ' + note.text.split('. ')[0]);
         box.appendChild(paragraph);
         warnings.appendChild(box);
       });
@@ -690,12 +721,14 @@
     var builders = { hosts: buildHosts, services: buildServices, choose: buildChoose, result: buildResult };
 
     function showStep(step, moveFocus) {
+      if (step !== 'workload' && Object.keys(refused).length) { return; }
       state.step = step;
       writeUrl();
-      if (builders[step]) { builders[step](); }
+      // The section is shown before it is filled, so its live region announces the warnings.
       Array.prototype.forEach.call(container.querySelectorAll('section[data-step]'), function (section) {
         section.hidden = section.getAttribute('data-step') !== step;
       });
+      if (builders[step]) { builders[step](); }
       byId('wizard-status').textContent = '';
       updateNavigation();
       if (moveFocus) { container.querySelector('section[data-step="' + step + '"] h3').focus(); }
@@ -717,7 +750,14 @@
         var text = input.value.trim();
         var valid = INTEGER_TEXT.test(text) && Number(text) >= spec.min && Number(text) <= spec.max;
         input.setAttribute('aria-invalid', valid ? 'false' : 'true');
-        if (!valid) { return; }
+        byId('error-' + name).textContent = valid ? '' : 'Enter a whole number from ' + spec.min + ' to ' + spec.max
+          + '. Until then the last accepted value, ' + state.numbers[name] + ', is used and the other steps are locked.';
+        if (!valid) {
+          refused[name] = true;
+          updateNavigation();
+          return;
+        }
+        delete refused[name];
         state.numbers[name] = Number(text);
         changed();
       });
@@ -753,7 +793,15 @@
     var container = document.getElementById('calc');
     if (!container || container.getAttribute('data-started')) { return; }
     container.setAttribute('data-started', 'true');
-    loadTable().then(function (table) { startWizard(container, table); });
+    loadTable().then(function (table) {
+      try {
+        startWizard(container, table);
+      } catch (error) {
+        // A table that loads but does not fit the script: run the calculator without it.
+        root.console.warn('config wizard: the rules file could not be used:', error);
+        startWizard(container, null);
+      }
+    });
   }
 
   if (typeof root.document$ !== 'undefined') {
