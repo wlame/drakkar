@@ -72,7 +72,8 @@ class HistoryArchiveConfig(BaseModel):
         default=True,
         description=(
             'Fold sealed recorder files into one compressed archive per cluster and window, then '
-            'delete the files. Off, nothing removes sealed files.'
+            'delete the files. Off, nothing removes sealed files. Used only with ui.recorder.persistence sqlite; '
+            'with none the history.archive keys load and are ignored.'
         ),
     )
     window_hours: int = Field(

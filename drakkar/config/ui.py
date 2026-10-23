@@ -9,12 +9,49 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+Persistence = Literal['none', 'sqlite']
+PERSISTENCE_NONE: Persistence = 'none'
+PERSISTENCE_SQLITE: Persistence = 'sqlite'
+
+
+class UIRecorderMemoryConfig(BaseModel):
+    """Bounds of the in-memory recorder store (used when ``ui.recorder.store_events`` is on)."""
+
+    window_seconds: int = Field(
+        default=120,
+        ge=10,
+        le=86400,
+        description='Keep recorder events in memory for this many seconds.',
+    )
+    rows_per_executor: int = Field(
+        default=3000,
+        ge=100,
+        le=1_000_000,
+        description=(
+            'Row cap per executor slot: the store holds at most this many rows times executor.max_executors. '
+            'The cap does not scale with the window; a longer window needs a larger value '
+            '(rows per executor per window is about 4 x window / average task seconds).'
+        ),
+    )
+    max_mib: int = Field(
+        default=256,
+        ge=16,
+        le=512,
+        description=(
+            'Budget for the data in the memory store, in MiB (pages in use). It bounds the data, '
+            'not the memory the store holds; free pages and one write stage can exceed it. At most 512 '
+            'so the store stays under the 1 GiB limit of the SQLite in-memory database.'
+        ),
+    )
+
 
 class UIRecorderConfig(BaseModel):
     """Flight-recorder persistence settings — the UI's data store.
 
-    The recorder writes into ``storage.dir``; with ``storage.dir: ""`` it
-    runs memory-only and writes no file.
+    With ``persistence: sqlite`` the recorder also writes SQLite files into
+    ``storage.dir``; with ``none`` it keeps recent events in memory only and
+    writes no file. Unset, the mode follows ``storage.dir`` (a folder means
+    ``sqlite``, an empty ``storage.dir`` means ``none``).
 
     Granular persistence flags (all need a ``storage.dir``):
     - ``store_events``: write processing events to the ``events`` table.
@@ -23,6 +60,15 @@ class UIRecorderConfig(BaseModel):
     - ``store_state``: periodically dump counters to ``worker_state``.
     """
 
+    persistence: Persistence | None = Field(
+        default=None,
+        description=(
+            'Where recorder events live besides the memory store: sqlite writes recorder files into '
+            'storage.dir; none keeps events in memory only. Unset, it is sqlite when storage.dir is set '
+            'and none when it is empty. sqlite with an empty storage.dir fails the load.'
+        ),
+    )
+    memory: UIRecorderMemoryConfig = Field(default_factory=UIRecorderMemoryConfig)
     store_events: bool = Field(
         default=True,
         description=(
@@ -41,7 +87,7 @@ class UIRecorderConfig(BaseModel):
         default=True,
         description=(
             'Periodically snapshot worker counters (uptime, partitions, pool utilization, '
-            'queue depth) to the worker_state table.'
+            'queue depth) to the worker_state table. Used only with sqlite; with none the key loads and is ignored.'
         ),
     )
     state_sync_interval_seconds: int = Field(
@@ -51,7 +97,13 @@ class UIRecorderConfig(BaseModel):
             'Seconds between worker_state snapshots — also the heartbeat cadence worker liveness is judged by.'
         ),
     )
-    rotation_interval_hours: int = Field(default=1, ge=1, description='How often to roll over to a new SQLite file.')
+    rotation_interval_hours: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            'How often to roll over to a new SQLite file. Used only with sqlite; with none the key loads and is ignored.'
+        ),
+    )
     store_output: bool = Field(
         default=True,
         description='Store subprocess stdout/stderr content in task events. Off drops output content from all of them.',
@@ -79,14 +131,15 @@ class UIRecorderConfig(BaseModel):
     flush_interval_seconds: int = Field(
         default=5,
         ge=1,
-        description='Seconds between recorder buffer flushes to SQLite.',
+        description='Seconds between recorder buffer flushes: the tick of both the memory loop and the file loop.',
     )
     max_buffer: int = Field(
         default=50_000,
         ge=1000,
         description=(
             'In-memory event buffer capacity. When full, the oldest events are evicted and '
-            'counted in drakkar_recorder_dropped_events_total.'
+            'counted in drakkar_recorder_dropped_events_total. The intake buffer and, with sqlite, the file queue '
+            'each hold at most this many rows.'
         ),
     )
     # Maximum consecutive ``OperationalError`` failures tolerated on a single
@@ -101,7 +154,8 @@ class UIRecorderConfig(BaseModel):
         ge=1,
         description=(
             'Consecutive failed flush attempts tolerated per batch before it is dropped '
-            '(counted in drakkar_recorder_flush_batches_dropped_total).'
+            '(counted in drakkar_recorder_flush_batches_dropped_total). Used only with sqlite; with none the key loads '
+            'and is ignored.'
         ),
     )
     event_min_duration_ms: int = Field(

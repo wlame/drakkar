@@ -31,8 +31,13 @@ from drakkar.config.runtime import (
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
 from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
-from drakkar.config.ui import UIConfig
+from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_SQLITE, Persistence, UIConfig
 from drakkar.config.webapp import WebAppConfig
+
+PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE = (
+    'ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, '
+    'or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only'
+)
 
 
 class DrakkarConfig(BaseSettings):
@@ -157,6 +162,13 @@ class DrakkarConfig(BaseSettings):
         return self
 
     @model_validator(mode='after')
+    def _validate_recorder_persistence(self) -> 'DrakkarConfig':
+        """An explicit ``sqlite`` needs a ``storage.dir``, whatever ``ui.enabled`` says."""
+        if self.ui.recorder.persistence == PERSISTENCE_SQLITE and not self.storage.dir:
+            raise ValueError(PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE)
+        return self
+
+    @model_validator(mode='after')
     def _validate_history_vs_rotation(self) -> 'DrakkarConfig':
         """Archive windows and the due delay must be at least one rotation long.
 
@@ -195,6 +207,13 @@ class DrakkarConfig(BaseSettings):
             'periodic.election.connection', election.provider, election.connection, self.connections
         )
         return self
+
+    @property
+    def resolved_persistence(self) -> Persistence:
+        """The effective recorder mode: the explicit key, else ``sqlite`` with a ``storage.dir``, else ``none``."""
+        if self.ui.recorder.persistence is not None:
+            return self.ui.recorder.persistence
+        return PERSISTENCE_SQLITE if self.storage.dir else PERSISTENCE_NONE
 
     @property
     def resolved_shared_dir(self) -> str:
@@ -310,6 +329,12 @@ class DrakkarConfig(BaseSettings):
         storage_part = self.storage.dir or 'mem'
         shared_token = f' shared={self.shared.dir}' if self.shared.dir and self.shared.dir != self.storage.dir else ''
 
+        recorder_token = (
+            f' recorder={PERSISTENCE_NONE}'
+            if self.resolved_persistence == PERSISTENCE_NONE and self.storage.dir
+            else ''
+        )
+
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
 
         if not self.dlq_enabled:
@@ -341,6 +366,7 @@ class DrakkarConfig(BaseSettings):
             f' ui={ui_part}'
             f' storage={storage_part}'
             f'{shared_token}'
+            f'{recorder_token}'
             f' fleet={self.fleet_summary}'
             f'{self.election_summary}'
             f' cache={cache_part}'

@@ -468,6 +468,54 @@
       "worker": "w-1",
       "cluster": "",
       "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "persistence_none_with_storage_dir",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "none"
+          }
+        },
+        "storage": {
+          "dir": "/var/lib/drakkar"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=none fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "persistence_none_memory_only",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "none"
+          }
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "persistence_sqlite_explicit",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "sqlite"
+          }
+        },
+        "storage": {
+          "dir": "/var/lib/drakkar"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -1151,6 +1199,170 @@
         }
       },
       "message": "periodic.tasks.refresh_rates has no value; write {} to keep the declared settings"
+    },
+    {
+      "name": "persistence_sqlite_without_storage_dir",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "sqlite"
+          }
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
+    },
+    {
+      "name": "persistence_checked_before_rotation",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "sqlite",
+            "rotation_interval_hours": 2
+          }
+        },
+        "storage": {
+          "dir": ""
+        },
+        "history": {
+          "archive": {
+            "window_hours": 1
+          }
+        }
+      },
+      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
+    },
+    {
+      "name": "persistence_sqlite_by_env_without_storage_dir",
+      "yaml": {},
+      "env": {
+        "DK_UI__RECORDER__PERSISTENCE": "sqlite",
+        "DK_STORAGE__DIR": ""
+      },
+      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
+    },
+    {
+      "name": "persistence_unknown",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres"
+          }
+        }
+      },
+      "path": "ui.recorder.persistence"
+    },
+    {
+      "name": "persistence_empty",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": ""
+          }
+        }
+      },
+      "path": "ui.recorder.persistence"
+    },
+    {
+      "name": "persistence_empty_by_env",
+      "yaml": {},
+      "env": {
+        "DK_UI__RECORDER__PERSISTENCE": ""
+      },
+      "path": "ui.recorder.persistence"
+    },
+    {
+      "name": "memory_window_too_short",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "window_seconds": 9
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.window_seconds"
+    },
+    {
+      "name": "memory_window_too_long",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "window_seconds": 86401
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.window_seconds"
+    },
+    {
+      "name": "memory_rows_too_small",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "rows_per_executor": 99
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.rows_per_executor"
+    },
+    {
+      "name": "memory_rows_too_large",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "rows_per_executor": 1000001
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.rows_per_executor"
+    },
+    {
+      "name": "memory_max_mib_too_small",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "max_mib": 15
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.max_mib"
+    },
+    {
+      "name": "memory_max_mib_too_large",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "max_mib": 513
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.max_mib"
+    },
+    {
+      "name": "memory_window_fraction",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "window_seconds": 30.5
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.window_seconds"
     }
   ],
   "load_values": [
@@ -1222,6 +1434,53 @@
       },
       "path": "periodic.election.provider",
       "value": "redis"
+    },
+    {
+      "name": "persistence_default_null",
+      "yaml": {},
+      "path": "ui.recorder.persistence",
+      "value": null
+    },
+    {
+      "name": "memory_window_default",
+      "yaml": {},
+      "path": "ui.recorder.memory.window_seconds",
+      "value": 120
+    },
+    {
+      "name": "memory_rows_default",
+      "yaml": {},
+      "path": "ui.recorder.memory.rows_per_executor",
+      "value": 3000
+    },
+    {
+      "name": "memory_max_mib_default",
+      "yaml": {},
+      "path": "ui.recorder.memory.max_mib",
+      "value": 256
+    },
+    {
+      "name": "memory_window_whole_float",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "memory": {
+              "window_seconds": 120.0
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.memory.window_seconds",
+      "value": 120
+    },
+    {
+      "name": "persistence_none_by_env",
+      "yaml": {},
+      "env": {
+        "DK_UI__RECORDER__PERSISTENCE": "none"
+      },
+      "path": "ui.recorder.persistence",
+      "value": "none"
     }
   ]
 }
