@@ -342,9 +342,9 @@ def _probe_busy_response(exc: ProbeBusyError) -> JSONResponse:
 
 
 def _db_root(db_dir: str) -> Path | None:
-    """The recorder directory as an absolute path, or None when there is none.
+    """The folder as an absolute path, or None when no folder is set.
 
-    ``storage.dir: ""`` is the documented memory-only mode. It used
+    An empty folder string (no shared folder set) used
     to be an arbitrary-file-read hole in every endpoint that joined a name
     onto it: ``os.path.join('', name)`` is just ``name``, and
     ``os.path.realpath('')`` is the worker's current directory, so a
@@ -352,7 +352,7 @@ def _db_root(db_dir: str) -> Path | None:
     next to the process — its own ``drakkar.yaml``, with SASL passwords and
     sink DSNs, included. Merge had the same hole in the write direction.
 
-    There is no directory to serve from in that mode, so callers answer 404
+    There is no folder to serve from then, so callers answer 404
     rather than trying to contain a path that has no root.
 
     Blocking: ``resolve`` is ``realpath`` (an lstat per path component), and
@@ -400,7 +400,7 @@ def _shared_file_path(root: Path, relative: str) -> Path | None:
 
 
 def _existing_shared_file(shared_dir: str, relative: str) -> Path | None:
-    """:func:`_shared_file_path` for a file that exists; None in memory-only mode. Blocking."""
+    """:func:`_shared_file_path` for a file that exists; None when no shared folder is set. Blocking."""
     root = _db_root(shared_dir)
     if root is None:
         return None
@@ -513,8 +513,9 @@ def _databases_answer(
 ) -> dict[str, Any]:
     """The ``/debug/databases`` answer: the memory row, own files measured now, then the shared history. Blocking.
 
-    The parts are independent. ``coverage`` is the memory coverage, read on
-    the main loop; with it, the memory row comes first, read on a by-name
+    The parts are independent. ``coverage`` is the memory coverage, read by
+    the route handler on the UI server's loop (four values; at worst the
+    row count is one chunk behind); with it, the memory row comes first, read on a by-name
     connection through the open guard (no row once the store is closed).
     The file rows follow when the recorder writes a file, and the shared
     history is listed whenever a shared folder is set. ``on_read_stopped``
@@ -694,7 +695,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # The random suffix keeps two merges in the same second apart.
         output_name = f'merged-{ts}-{secrets.token_hex(8)}.db'
 
-        # Memory-only recorder: no folder to read sources from, and — the
+        # No shared folder set: no folder to read sources from, and — the
         # part that mattered — none to write the output into either. The
         # whole check-and-merge runs in a thread: it resolves paths on the
         # shared mount.
@@ -762,11 +763,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """
         # Always the memory store: the label keys of recent rows are
         # enough for the dropdown, whatever the persistence mode.
-        # No try/except: ``recorder_select_on`` already maps "no answer" to
-        # ``None`` (handled below) and any real exception here is a bug
-        # (malformed SQL, recorder internal state corruption) that should
-        # surface loudly rather than be silently hidden behind an empty
-        # response. Fail-loud beats a silently-empty label dropdown.
+        # No try/except: ``recorder_select_on`` answers ``None`` (handled
+        # below) for no answer and for any read error; an error is logged
+        # as ``ui_main_loop_dispatch_failed`` and the route answers its
+        # empty shape.
         result = await deps.recorder_select_on(SOURCE_MEMORY, query, (), endpoint='/api/v1/debug/label-keys')
         if result is None:
             return JSONResponse([])
@@ -811,9 +811,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             ORDER BY ts DESC
             LIMIT {PERIODIC_HISTORY_ROWS}
         """
-        # No try/except — see ``api_debug_label_keys`` for rationale.
-        # ``recorder_select`` returns ``None`` when there is no answer; any
-        # raised exception is a real bug and should surface.
+        # No try/except — see ``api_debug_label_keys``: ``recorder_select``
+        # answers ``None`` for no answer and for a read error (logged as
+        # ``ui_main_loop_dispatch_failed``), and the route answers its
+        # empty shape.
         result = await deps.recorder_select(
             query,
             (),
