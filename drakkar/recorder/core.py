@@ -50,7 +50,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import HistoryArchiveConfig, UIConfig
-from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
+from drakkar.config.ui import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -70,7 +70,8 @@ from drakkar.metrics import (
     recorder_seal_failures,
     recorder_unsealed_files,
 )
-from drakkar.providers.resilience import RateLimitedLog
+from drakkar.providers.postgres import POSTGRES_PROVIDER, RECORDER_FEATURE
+from drakkar.providers.resilience import RateLimitedLog, ResilientCaller, describe_error
 from drakkar.recorder.archive import observe_archive_footprint, run_archive_pass
 from drakkar.recorder.election import ThreadFence
 from drakkar.recorder.helpers import (
@@ -97,6 +98,7 @@ from drakkar.recorder.memstore import (
     run_eviction_pass,
 )
 from drakkar.recorder.postgres import PostgresQueue, QueuedPair, RecorderPostgresSettings
+from drakkar.recorder.postgres_writer import OpenPool, PostgresLoopThread, PostgresWriter
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -166,6 +168,15 @@ FLUSH_BYTES_HIGH_WATER = 64 * 1024 * 1024
 # Event keys whose values can be arbitrarily large. Summed for the byte
 # high-water mark above; everything else in a row is bounded and small.
 _HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
+
+# The name of the thread whose event loop runs stage P with ``postgres``.
+POSTGRES_THREAD_NAME = 'drakkar-recorder-postgres'
+# The least time the stop gives the stage P thread to answer each step, even
+# with the shutdown time spent: the final stage then makes no COPY attempt,
+# but it still counts and logs the rows it drops.
+POSTGRES_STOP_ANSWER_SECONDS = 0.1
+# The bound of the wait for the stage P thread to end when the stop has no deadline.
+POSTGRES_THREAD_STOP_SECONDS = 5.0
 
 # The ``detail`` of ``recorder_archive_pass_abandoned``; the text is part of the log contract.
 ARCHIVE_PASS_ABANDONED_DETAIL = 'the pass is fenced at its next check and its lease expires on its own'
@@ -270,6 +281,7 @@ class EventRecorder(EventWriter):
         memory_max_rows: int = 3000,
         memory_max_bytes: int = 256 * MIB,
         postgres: RecorderPostgresSettings | None = None,
+        postgres_open_pool: OpenPool | None = None,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -293,7 +305,10 @@ class EventRecorder(EventWriter):
         and its data budget in bytes.
 
         ``postgres`` holds the table settings of the ``'postgres'`` mode,
-        which needs them; the other modes ignore it.
+        which needs them; the other modes ignore it. ``postgres_open_pool``
+        replaces the function that opens the write pool of that mode
+        (``None``: :func:`drakkar.providers.postgres.open_pool`, looked up
+        when the pool opens).
 
         The archive pass runs as the cluster task
         :meth:`archive_cluster_task` returns; the worker's election decides
@@ -339,9 +354,16 @@ class EventRecorder(EventWriter):
             if self._postgres is not None
             else None
         )
-        # Set on the main loop when an append leaves the P queue at least half
-        # full, so stage P writes before the next tick.
+        # Set on the main loop after each memory tick and when an append
+        # leaves the P queue at least half full; the Postgres loop, also on
+        # the main loop, waits on it and then posts one stage P run.
         self._pg_wakeup = asyncio.Event()
+        self._postgres_open_pool = postgres_open_pool
+        # Stage P: its writer and the thread whose loop runs it; made in
+        # start() when there is a P queue and a memory store to feed it.
+        self._pg_thread: PostgresLoopThread | None = None
+        self._pg_writer: PostgresWriter | None = None
+        self._postgres_task: asyncio.Task | None = None
         # Pairs the P queue dropped and no log line has reported yet; stage M
         # reports them when it ends (the append itself may not await).
         self._pg_unlogged_drops = 0
@@ -491,6 +513,11 @@ class EventRecorder(EventWriter):
     def has_file(self) -> bool:
         """Whether this recorder writes a recorder file."""
         return self._has_file
+
+    @property
+    def postgres_settings(self) -> RecorderPostgresSettings | None:
+        """The table settings of the ``postgres`` mode; ``None`` in the other modes."""
+        return self._postgres
 
     @property
     def storage_dir(self) -> str:
@@ -818,6 +845,8 @@ class EventRecorder(EventWriter):
             # In either mode: the memory store holds the recent events.
             self._memory_task = asyncio.create_task(self._memory_loop())
             self._watch_background_task(self._memory_task, 'memory_flush')
+            if self._pg_queue is not None:
+                self._start_postgres_stage()
         # Outside the file branch on purpose: resource samples still feed
         # WS subscribers, so the sampler runs in memory-only mode too.
         self._host_sample_task = asyncio.create_task(self._host_sample_loop())
@@ -836,20 +865,46 @@ class EventRecorder(EventWriter):
             **self._started_fields(),
         )
 
+    def _start_postgres_stage(self) -> None:
+        """Make the stage P writer, its thread and the Postgres loop; nothing connects before the first run."""
+        settings = self._postgres
+        queue = self._pg_queue
+        assert settings is not None and queue is not None
+        caller = ResilientCaller(
+            settings.resilience, feature=RECORDER_FEATURE, provider=POSTGRES_PROVIDER, category='recorder'
+        )
+        self._pg_writer = PostgresWriter(
+            settings,
+            cluster=self._cluster_name,
+            worker=self._worker_name,
+            instance=self._instance,
+            queue=queue,
+            caller=caller,
+            open_pool=self._postgres_open_pool,
+        )
+        self._pg_thread = PostgresLoopThread(POSTGRES_THREAD_NAME)
+        self._postgres_task = asyncio.create_task(self._postgres_loop())
+        self._watch_background_task(self._postgres_task, 'postgres_flush')
+
     def _started_fields(self) -> dict[str, Any]:
         """The mode and memory fields of ``recorder_started``.
 
         The memory bounds appear only when there is a memory store
-        (``store_events``). With ``none``, ``ignored_keys`` lists the keys
-        that only act on a recorder file: ``rotation_interval_hours``
-        always, ``store_state`` when it is on.
+        (``store_events``). With ``postgres``, ``postgres_connection`` and
+        ``postgres_table`` (schema-qualified) name the table. Without a
+        file, ``ignored_keys`` lists the keys that only act on a recorder
+        file: ``rotation_interval_hours`` always, ``store_state`` when it is
+        on.
         """
         fields: dict[str, Any] = {'persistence': self._persistence}
         if self._store.store_events:
             fields['memory_window_seconds'] = self._memory_window_seconds
             fields['memory_max_rows'] = self._memory_max_rows
             fields['memory_max_bytes'] = self._memory_max_bytes
-        if self._persistence == PERSISTENCE_NONE:
+        if self._postgres is not None:
+            fields['postgres_connection'] = self._postgres.connection_name
+            fields['postgres_table'] = self._postgres.qualified_table
+        if not self._has_file:
             ignored = ['rotation_interval_hours']
             if self._store.store_state:
                 ignored.append('store_state')
@@ -1202,6 +1257,7 @@ class EventRecorder(EventWriter):
         self._archive_stop.set()
         for task in (
             self._memory_task,
+            self._postgres_task,
             self._file_task,
             self._rotation_task,
             self._state_task,
@@ -1233,6 +1289,7 @@ class EventRecorder(EventWriter):
             await self._stage_memory(0.0)
         except Exception as exc:
             await logger.awarning('recorder_final_flush_failed', category='recorder', stage='memory', error=str(exc))
+        await self._stop_postgres_stage(deadline, reserve_seconds)
         # From the final stage F to the end of the seal, ``_flush_lock`` is
         # held: a stage F run queued by a read meanwhile then waits, finds no
         # writer once it gets the lock, and never writes into the file
@@ -1262,6 +1319,45 @@ class EventRecorder(EventWriter):
         # never-added recorder (start() not reached) is a no-op.
         _LIVE_RECORDERS.discard(self)
         await logger.ainfo('recorder_stopped', category='recorder')
+
+    async def _stop_postgres_stage(self, deadline: float | None, reserve_seconds: float) -> None:
+        """The final stage P, the write pool close and the thread stop, all within the shutdown time left.
+
+        Each COPY of the final stage gets the time left minus
+        ``reserve_seconds`` and the answer time; each wait for the thread
+        gets the whole time left, but at least
+        ``POSTGRES_STOP_ANSWER_SECONDS``, so a thread that does not answer
+        never holds the stop. Each step is best-effort: a failure is logged
+        and the next step runs.
+        """
+
+        def answer_seconds(no_deadline: float | None) -> float | None:
+            left = _time_left(deadline)
+            return no_deadline if left is None else max(left, POSTGRES_STOP_ANSWER_SECONDS)
+
+        thread, writer = self._pg_thread, self._pg_writer
+        if thread is None or writer is None:
+            return
+        self._pg_thread = self._pg_writer = None
+        left = _time_left(deadline)
+        # The thread answers after the last COPY attempt ends, so the attempts
+        # leave it the answer time inside the time left.
+        copy_seconds = None if left is None else max(left - reserve_seconds - POSTGRES_STOP_ANSWER_SECONDS, 0.0)
+        steps: tuple[Callable[[], Coroutine[Any, Any, None]], ...] = (lambda: writer.final(copy_seconds), writer.close)
+        for factory in steps:
+            try:
+                await thread.run(factory, answer_seconds(None))
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_final_flush_failed', category='recorder', stage='postgres', error=describe_error(exc)
+                )
+        if not await thread.stop(answer_seconds(POSTGRES_THREAD_STOP_SECONDS) or POSTGRES_THREAD_STOP_SECONDS):
+            await logger.awarning(
+                'recorder_final_flush_failed',
+                category='recorder',
+                stage='postgres',
+                error='the stage P thread did not end in the shutdown time left',
+            )
 
     async def _final_file_stage(self) -> None:
         """The last stage F, the state sync and the reader close at stop; ``_flush_lock`` is held by the caller.
@@ -1480,6 +1576,28 @@ class EventRecorder(EventWriter):
                 await self._log_loop_failure('memory', exc)
             if self._has_file:
                 self._file_wakeup.set()
+            if self._pg_queue is not None:
+                self._pg_wakeup.set()
+
+    async def _postgres_loop(self) -> None:
+        """Post one stage P run to its thread on the memory loop's tick, a half-full P queue, or the interval.
+
+        The run's result is awaited before the next one is posted, so two
+        runs never overlap; each COPY attempt has its own time limit, so a
+        run always ends.
+        """
+        thread, writer = self._pg_thread, self._pg_writer
+        assert thread is not None and writer is not None
+        while self._running:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._pg_wakeup.wait(), self._store.flush_interval_seconds)
+            self._pg_wakeup.clear()
+            try:
+                await thread.run(writer.run_once, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._log_loop_failure('postgres', exc)
 
     async def _file_loop(self) -> None:
         """Run stage F on the memory loop's tick, when the file queue is half full, or at the interval."""

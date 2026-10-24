@@ -1,0 +1,426 @@
+"""Stage P: the writer that takes chunks from the P queue and COPYs them into the recorder events table.
+
+Stage P runs on a thread of its own with its own event loop
+(:class:`PostgresLoopThread`), which owns the one-connection write pool. A
+COPY encodes every record of a chunk on the loop that runs it, and on a slow
+CPU that work alone can hold a loop long enough to delay the worker's own
+pipeline. The main loop therefore only posts runs to the thread and waits for
+their results; it never builds a record or runs a COPY.
+
+One run (:meth:`PostgresWriter.run_once`):
+
+1. start when not started yet: open the pool, then make the table available;
+   a failure ends the run and the next run tries again;
+2. the partition upkeep when it is due; its outcome never ends the run;
+3. until the slot and the queue are empty: form a chunk into the slot when it
+   is empty, and COPY it. A written chunk empties the slot and the loop goes
+   on, so a backlog drains as fast as Postgres takes it; any other outcome
+   ends the run;
+4. set ``drakkar_recorder_postgres_queue_rows`` to the rows of the queue plus
+   the slot.
+
+A chunk is dropped only after ``POSTGRES_CHUNK_FINAL_FAILURES`` final COPY
+errors; a transient failure, an open breaker or a writer that has not started
+never drops it. At stop, :meth:`PostgresWriter.final` makes one attempt per
+chunk within the time left and drops what is left with ``shutdown``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import threading
+import time
+from collections.abc import Awaitable, Callable, Coroutine
+from enum import StrEnum
+from typing import Any
+
+import asyncpg
+import structlog
+
+from drakkar.config.connections import PostgresConnectionConfig
+from drakkar.metrics import recorder_postgres_dropped_rows, recorder_postgres_queue_rows, recorder_postgres_rows_written
+from drakkar.providers import postgres as postgres_providers
+from drakkar.providers.postgres import (
+    COPY_COLUMNS,
+    PARTITION_MAINTENANCE_SECONDS,
+    POSTGRES_CHUNK_FINAL_FAILURES,
+    POSTGRES_CHUNK_MAX_BYTES,
+    POSTGRES_PROVIDER,
+    RECORDER_FEATURE,
+    RECORDER_STATEMENT_TEMPLATES,
+    SET_LOCAL_VALUES,
+    SETTING_SYNCHRONOUS_COMMIT,
+    SQLSTATE_CHECK_VIOLATION,
+    SQLSTATE_UNIQUE_VIOLATION,
+    borrow_transaction,
+    ensure_recorder_table,
+)
+from drakkar.providers.resilience import OUTCOME_NOT_STARTED, RateLimitedLog, ResilientCaller, describe_error
+from drakkar.recorder.postgres import PendingChunk, PostgresQueue, RecorderPostgresSettings, build_record
+
+logger = structlog.get_logger()
+
+LOG_CATEGORY = 'recorder'
+DROP_REASON_REJECTED = 'rejected'
+DROP_REASON_NO_PARTITION = 'no_partition'
+DROP_REASON_SHUTDOWN = 'shutdown'
+COPY_REJECTED_LOG_KEY = 'copy_rejected'
+# How long the thread's loop gets to finish the coroutines it cancels when it ends.
+LOOP_DRAIN_SECONDS = 1.0
+
+OpenPool = Callable[[PostgresConnectionConfig], Awaitable[Any]]
+CopyAnswer = tuple['CopyOutcome', str | None, str]
+
+
+class CopyOutcome(StrEnum):
+    """What one COPY of a chunk came to."""
+
+    WRITTEN = 'written'
+    ALREADY_WRITTEN = 'already_written'
+    KEPT = 'kept'
+    REJECTED = 'rejected'
+
+
+WRITTEN_OUTCOMES = frozenset((CopyOutcome.WRITTEN, CopyOutcome.ALREADY_WRITTEN))
+
+
+class PostgresLoopThread:
+    """A daemon thread that runs its own event loop; stage P and its pool live there.
+
+    Other loops post coroutines with :meth:`submit` or :meth:`run`. A daemon,
+    so a thread that never answers cannot keep the process from exiting: the
+    stop waits for it with a bound and then leaves it.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._serve, name=name, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_forever()
+            # Coroutines still on the loop (a call its caller gave up on) are
+            # cancelled, so none is destroyed while pending.
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.wait(pending, timeout=LOOP_DRAIN_SECONDS))
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            self._loop.run_until_complete(self._loop.shutdown_default_executor())
+        finally:
+            self._loop.close()
+
+    def submit(self, factory: Callable[[], Coroutine[Any, Any, Any]]) -> concurrent.futures.Future:
+        """Run ``factory()`` on the thread's loop; cancelling the returned future cancels the coroutine."""
+        coroutine = factory()
+        try:
+            return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except RuntimeError:
+            # The loop is closed: the coroutine never runs, so close it here.
+            coroutine.close()
+            raise
+
+    async def run(self, factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float | None) -> Any:
+        """Run ``factory()`` on the thread and wait at most ``timeout`` seconds for its result.
+
+        A timeout or a cancellation of the waiting task cancels the coroutine
+        on the thread.
+        """
+        return await asyncio.wait_for(asyncio.wrap_future(self.submit(factory)), timeout)
+
+    async def stop(self, timeout: float) -> bool:
+        """Stop the loop and wait at most ``timeout`` seconds for the thread; False when it did not end."""
+        if self.thread.is_alive():
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                pass
+        await asyncio.to_thread(self.thread.join, max(timeout, 0.0))
+        return not self.thread.is_alive()
+
+
+class PostgresWriter:
+    """Stage P of one recorder: the start, the COPY of each chunk, the upkeep and the final stage at stop.
+
+    Every method runs on one loop (the stage P thread's), one at a time:
+    :meth:`run_once` and :meth:`final` take the writer's own lock.
+    ``open_pool`` replaces :func:`drakkar.providers.postgres.open_pool`;
+    ``None`` looks that function up when the pool opens.
+    """
+
+    def __init__(
+        self,
+        settings: RecorderPostgresSettings,
+        *,
+        cluster: str,
+        worker: str,
+        instance: str,
+        queue: PostgresQueue,
+        caller: ResilientCaller,
+        open_pool: OpenPool | None = None,
+        now_monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._settings = settings
+        self._cluster = cluster
+        self._worker = worker
+        self._instance = instance
+        self._queue = queue
+        self._caller = caller
+        self._open_pool = open_pool
+        self._now_monotonic = now_monotonic
+        self._pool: Any = None
+        self._started = False
+        self._slot: PendingChunk | None = None
+        # The error text of the last final COPY error of the chunk in the slot.
+        self._slot_error = ''
+        # True after a start and after a check violation: the next run upkeeps first.
+        self._upkeep_requested = False
+        self._last_upkeep_at: float | None = None
+        self._lock = asyncio.Lock()
+        self._copy_rejected_log = RateLimitedLog(now_monotonic)
+        self._drop_log = RateLimitedLog(now_monotonic)
+        # Rows dropped per reason that no log line reported yet: a line the
+        # rate limit holds back keeps its rows for the next line.
+        self._unlogged_drops: dict[str, int] = {}
+
+    # --- the run ---
+
+    async def start(self) -> bool:
+        """Open the pool and make the table available, as one ``start`` operation; True once started."""
+        result = await self._caller.call('start', self._start_attempt)
+        if not result.ok:
+            return False
+        self._started = True
+        self._upkeep_requested = True
+        await logger.ainfo(
+            'provider_started',
+            category=LOG_CATEGORY,
+            feature=RECORDER_FEATURE,
+            provider=POSTGRES_PROVIDER,
+        )
+        return True
+
+    async def _start_attempt(self) -> None:
+        if self._pool is None:
+            opener = self._open_pool if self._open_pool is not None else postgres_providers.open_pool
+            # One connection: stage P runs one statement at a time, and a pool
+            # replaces a connection that broke.
+            entry = self._settings.connection.model_copy(update={'pool_min': 1, 'pool_max': 1})
+            self._pool = await opener(entry)
+        settings = self._settings
+        await ensure_recorder_table(
+            self._pool,
+            schema=settings.schema,
+            table=settings.table,
+            retention_hours=settings.retention_hours,
+            manage_schema=settings.connection.manage_schema,
+            connection=settings.connection_name,
+            prefix=settings.table_prefix,
+        )
+
+    async def run_once(self) -> None:
+        """One stage P run; see the module docstring."""
+        async with self._lock:
+            try:
+                if not self._started and not await self.start():
+                    return
+                if self.upkeep_due():
+                    self._upkeep_requested = False
+                    await self.upkeep()
+                    self._last_upkeep_at = self._now_monotonic()
+                while self._fill_slot():
+                    if await self._write_slot() not in WRITTEN_OUTCOMES:
+                        return
+            finally:
+                self._set_queue_gauge()
+
+    def upkeep_due(self) -> bool:
+        """True after a start or a check violation, and when the upkeep interval has passed since the last one."""
+        if self._upkeep_requested:
+            return True
+        return (
+            self._last_upkeep_at is not None
+            and self._now_monotonic() - self._last_upkeep_at >= PARTITION_MAINTENANCE_SECONDS
+        )
+
+    async def upkeep(self) -> None:
+        """The partition upkeep: creates the partitions ahead and drops the expired ones."""
+        return None
+
+    def _fill_slot(self) -> bool:
+        """Form a chunk into an empty slot; True when the slot holds one."""
+        if self._slot is not None:
+            return True
+        pairs = self._queue.take_chunk(self._settings.batch_rows, POSTGRES_CHUNK_MAX_BYTES)
+        if not pairs:
+            return False
+        records = [
+            build_record(
+                row,
+                cluster=self._cluster,
+                worker=self._worker,
+                instance=self._instance,
+                store_output=self._settings.store_output,
+            )
+            for _, row in pairs
+        ]
+        self._slot = PendingChunk(pairs=pairs, records=records)
+        self._slot_error = ''
+        return True
+
+    async def _write_slot(self, *, attempts: int | None = None, deadline_seconds: float | None = None) -> CopyOutcome:
+        """COPY the chunk in the slot as one ``copy`` operation and act on the outcome."""
+        slot = self._slot
+        assert slot is not None
+        result = await self._caller.call(
+            'copy', lambda: self._copy(slot.records), attempts=attempts, deadline_seconds=deadline_seconds
+        )
+        if not result.ok:
+            return CopyOutcome.KEPT
+        outcome, sqlstate, error = result.value
+        if outcome in WRITTEN_OUTCOMES:
+            recorder_postgres_rows_written.inc(len(slot.pairs))
+            self._slot = None
+            return outcome
+        await self._reject(slot, sqlstate, error)
+        return outcome
+
+    async def _copy(self, records: list[tuple]) -> CopyAnswer:
+        """One COPY attempt in one transaction; a final Postgres error comes back as a value.
+
+        The error is caught outside the transaction block, after its rollback.
+        A transient error leaves the block as ``TransientError`` and is not
+        caught, so the caller retries it; a final one is no breaker failure.
+        """
+        settings = self._settings
+        try:
+            async with borrow_transaction(self._pool) as conn:
+                await conn.execute(
+                    RECORDER_STATEMENT_TEMPLATES['set_local'],
+                    SETTING_SYNCHRONOUS_COMMIT,
+                    SET_LOCAL_VALUES[SETTING_SYNCHRONOUS_COMMIT],
+                )
+                await conn.copy_records_to_table(
+                    settings.table, schema_name=settings.schema, columns=COPY_COLUMNS, records=records
+                )
+        except asyncpg.PostgresError as exc:
+            # asyncpg sets ``sqlstate`` on each error class, but its type stubs do not declare it.
+            sqlstate = getattr(exc, 'sqlstate', None)
+            if sqlstate == SQLSTATE_UNIQUE_VIOLATION:
+                # An earlier attempt of this same record set landed and its answer was lost.
+                return CopyOutcome.ALREADY_WRITTEN, sqlstate, ''
+            return CopyOutcome.REJECTED, sqlstate, describe_error(exc)
+        return CopyOutcome.WRITTEN, None, ''
+
+    async def _reject(self, slot: PendingChunk, sqlstate: str | None, error: str) -> None:
+        """Count a final COPY error against the chunk; drop it at the limit."""
+        slot.final_failures += 1
+        slot.last_sqlstate = sqlstate
+        self._slot_error = error
+        if sqlstate == SQLSTATE_CHECK_VIOLATION:
+            # A row with no partition: the next run creates partitions first.
+            self._upkeep_requested = True
+        await self._copy_rejected_log.emit(
+            COPY_REJECTED_LOG_KEY,
+            logger.awarning,
+            'recorder_postgres_copy_rejected',
+            category=LOG_CATEGORY,
+            sqlstate=sqlstate,
+            error=error,
+            rows=len(slot.pairs),
+            final_failures=slot.final_failures,
+        )
+        if slot.final_failures < POSTGRES_CHUNK_FINAL_FAILURES:
+            return
+        reason = DROP_REASON_NO_PARTITION if sqlstate == SQLSTATE_CHECK_VIOLATION else DROP_REASON_REJECTED
+        self._slot = None
+        await self._drop(reason, len(slot.pairs), error)
+
+    # --- the final stage P and the close ---
+
+    async def final(self, deadline_seconds: float | None) -> None:
+        """The final stage P at stop: no upkeep, one attempt per chunk within ``deadline_seconds``.
+
+        Stops at the first chunk that is not written (time spent, an open
+        breaker, a failure) and drops every row left in the slot and the
+        queue with ``shutdown``. A writer that never started makes no start
+        attempt: it counts one ``copy`` as ``not_started`` when rows wait.
+        """
+        deadline_at = None if deadline_seconds is None else self._now_monotonic() + deadline_seconds
+        try:
+            async with asyncio.timeout(deadline_seconds):
+                await self._lock.acquire()
+        except TimeoutError:
+            await self._drop_everything_left()
+            return
+        try:
+            if not self._started:
+                if self._slot is not None or len(self._queue):
+                    self._caller.skip('copy', OUTCOME_NOT_STARTED)
+                return
+            while self._fill_slot():
+                left = None if deadline_at is None else deadline_at - self._now_monotonic()
+                if await self._write_slot(attempts=1, deadline_seconds=left) not in WRITTEN_OUTCOMES:
+                    return
+        finally:
+            try:
+                await self._drop_everything_left()
+            finally:
+                self._lock.release()
+
+    async def _drop_everything_left(self) -> None:
+        """Drop the slot and the queue with ``shutdown``, one log line for all of them."""
+        rows = 0
+        if self._slot is not None:
+            rows += len(self._slot.pairs)
+            self._slot = None
+        while pairs := self._queue.take_chunk(len(self._queue) + 1, 2**62):
+            rows += len(pairs)
+        self._set_queue_gauge()
+        if rows:
+            await self._drop(DROP_REASON_SHUTDOWN, rows, '')
+
+    async def close(self) -> None:
+        """Close the write pool; a close that is cancelled terminates its connections."""
+        pool, self._pool = self._pool, None
+        if pool is None:
+            return
+        try:
+            await postgres_providers.close_pool(pool)
+        except asyncio.CancelledError:
+            pool.terminate()
+            raise
+
+    # --- metrics and logs ---
+
+    def _set_queue_gauge(self) -> None:
+        slot_rows = len(self._slot.pairs) if self._slot is not None else 0
+        recorder_postgres_queue_rows.set(len(self._queue) + slot_rows)
+
+    async def _drop(self, reason: str, rows: int, error: str) -> None:
+        """Count dropped rows and log them, at most one line per 60 s per reason."""
+        recorder_postgres_dropped_rows.labels(reason=reason).inc(rows)
+        unlogged = self._unlogged_drops.get(reason, 0) + rows
+        self._unlogged_drops[reason] = unlogged
+        written = False
+
+        async def log_and_note(event: str, **fields: Any) -> None:
+            nonlocal written
+            written = True
+            await logger.awarning(event, **fields)
+
+        await self._drop_log.emit(
+            reason,
+            log_and_note,
+            'recorder_postgres_rows_dropped',
+            category=LOG_CATEGORY,
+            reason=reason,
+            rows=unlogged,
+            error=error,
+        )
+        if written:
+            self._unlogged_drops[reason] -= unlogged

@@ -8,12 +8,14 @@ from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
 from drakkar.metrics import provider_calls
 from drakkar.providers import lookup
+from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ThreadFence
 from tests.archive_helpers import idle_archive_task, run_won_slot
 from tests.conftest import wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
+from tests.recorder_pg_fake import RecorderFakePostgres
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -244,5 +246,63 @@ async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkey
         assert app._recorder._memory_window_seconds == 60
         assert app._recorder._memory_max_rows == 800
         assert app._recorder._memory_max_bytes == 16777216
+    finally:
+        await app._recorder.stop()
+
+
+async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_path, monkeypatch):
+    fake = RecorderFakePostgres()
+    monkeypatch.setattr(postgres_providers, 'open_pool', fake.open_pool)
+    app = _app(
+        tmp_path,
+        storage={'dir': ''},
+        ui={
+            'enabled': True,
+            'port': 8123,
+            'release': {'enabled': False},
+            'recorder': {
+                'persistence': 'postgres',
+                'flush_interval_seconds': 1,
+                'postgres': {
+                    'connection': 'history',
+                    'table_prefix': 'fast',
+                    'retention_hours': 12,
+                    'store_output': True,
+                    'batch_rows': 200,
+                    'queue_max_mib': 32,
+                    'resilience': {'retries': 1},
+                },
+            },
+        },
+        connections={'postgres': {'history': {'dsn': 'postgresql://drakkar:secret@db:5432/drakkar', 'schema': 'rec'}}},
+    )
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._start_ui_and_recorder()
+    try:
+        settings = app._recorder.postgres_settings
+        assert settings is not None
+        assert (settings.connection_name, settings.connection.dsn, settings.qualified_table) == (
+            'history',
+            'postgresql://drakkar:secret@db:5432/drakkar',
+            'rec.fast_recorder_events',
+        )
+        assert (settings.retention_hours, settings.store_output, settings.batch_rows) == (12, True, 200)
+        assert settings.queue_max_bytes == 32 * 1024 * 1024
+        assert settings.resilience.retries == 1
+        await wait_for(lambda: len(fake.opened) == 1)
+        assert (fake.opened[0].pool_min, fake.opened[0].pool_max) == (1, 1)
+    finally:
+        await app._recorder.stop()
+
+
+async def test_lifecycle_passes_no_postgres_settings_in_the_other_modes(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    (tmp_path / 'storage').mkdir()
+    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._start_ui_and_recorder()
+    try:
+        assert app._recorder.postgres_settings is None
     finally:
         await app._recorder.stop()

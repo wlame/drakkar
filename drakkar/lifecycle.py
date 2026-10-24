@@ -59,6 +59,7 @@ from drakkar.cluster_tasks import (
     archive_task_runs,
     run_cluster_task,
 )
+from drakkar.config.ui import PERSISTENCE_POSTGRES
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.plugins import resolve_provider_factory
@@ -91,6 +92,7 @@ from drakkar.recorder.election import (
 )
 from drakkar.recorder.history import history_dir
 from drakkar.recorder.memstore import MIB
+from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
@@ -158,6 +160,28 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     }
     build = builders.get(election.provider, lambda: dict(election.plugin_options))
     return build()
+
+
+def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSettings | None:
+    """The table settings of the ``postgres`` recorder mode, or ``None`` when the effective mode is another.
+
+    The DSN and the schema come from the connection entry that
+    ``ui.recorder.postgres.connection`` names; the config load already
+    checked that it is declared.
+    """
+    if config.resolved_persistence != PERSISTENCE_POSTGRES:
+        return None
+    section = config.ui.recorder.postgres
+    return RecorderPostgresSettings(
+        connection_name=section.connection,
+        connection=config.connections.postgres[section.connection],
+        table_prefix=section.table_prefix,
+        retention_hours=section.retention_hours,
+        store_output=section.store_output,
+        batch_rows=section.batch_rows,
+        queue_max_bytes=section.queue_max_mib * MIB,
+        resilience=section.resilience,
+    )
 
 
 def user_cluster_task(roster_task: RosterTask) -> ClusterTask:
@@ -590,6 +614,7 @@ class AppLifecycle:
                 memory_window_seconds=memory.window_seconds,
                 memory_max_rows=memory.rows_per_executor * app._config.executor.max_executors,
                 memory_max_bytes=memory.max_mib * MIB,
+                postgres=recorder_postgres_settings(app._config),
             )
             app._recorder.set_state_provider(app._get_worker_state)
             await app._recorder.start()

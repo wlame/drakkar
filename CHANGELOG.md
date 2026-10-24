@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder mode `postgres` (config, table DDL and the row queue so far).**
+- **Recorder mode `postgres` (config, table DDL, the row queue and the writer so far).**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys
   `connection` (`main`), `table_prefix`, `retention_hours` (6),
@@ -75,7 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.recorder.max_buffer` rows and by `queue_max_mib`. When it is full, the
   oldest rows are dropped and counted in
   `drakkar_recorder_postgres_dropped_rows_total{reason="queue_full"}`, and
-  `recorder_postgres_rows_dropped` is logged. New metrics:
+  `recorder_postgres_rows_dropped` is logged. Stage P writes the queue to
+  the table with one COPY per chunk, on a thread of its own with one
+  connection. It starts on the first tick and tries again on each tick while
+  Postgres is down; rows wait in the queue. A chunk is dropped only after two
+  final COPY errors (`reason` `no_partition` or `rejected`); each final error
+  logs `recorder_postgres_copy_rejected`. At stop, the rows that stage P
+  cannot write in the time left are dropped with `reason` `shutdown`.
+  `recorder_started` names `postgres_connection` and `postgres_table`.
+  New metrics:
   `drakkar_recorder_postgres_queue_rows`,
   `drakkar_recorder_postgres_rows_written_total` and
   `drakkar_recorder_postgres_dropped_rows_total`.

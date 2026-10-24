@@ -35,7 +35,8 @@ from drakkar.recorder.postgres import (
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.recorder.writer import EventWriter
 from drakkar.webapp.models import WebRequestContext
-from tests.conftest import make_ui_config
+from tests.conftest import make_ui_config, wait_for
+from tests.recorder_pg_fake import RecorderFakePostgres
 
 WORKER = 'w-1'
 CLUSTER = 'c'
@@ -63,7 +64,7 @@ def _settings(*, store_output: bool = False, queue_max_bytes: int = 128 * MIB) -
     )
 
 
-def _recorder(*, queue_max_bytes: int = 128 * MIB, **ui) -> EventRecorder:
+def _recorder(*, queue_max_bytes: int = 128 * MIB, fake: RecorderFakePostgres | None = None, **ui) -> EventRecorder:
     settings = {'enabled': True, 'store_output': False, 'flush_interval_seconds': 60}
     settings.update(ui)
     return EventRecorder(
@@ -73,7 +74,15 @@ def _recorder(*, queue_max_bytes: int = 128 * MIB, **ui) -> EventRecorder:
         persistence='postgres',
         instance=INSTANCE,
         postgres=_settings(queue_max_bytes=queue_max_bytes),
+        postgres_open_pool=(fake if fake is not None else _unreachable_postgres()).open_pool,
     )
+
+
+def _unreachable_postgres() -> RecorderFakePostgres:
+    """A write pool that never opens, so stage P never starts and the rows wait in the P queue."""
+    fake = RecorderFakePostgres()
+    fake.open_error = OSError('connection refused')
+    return fake
 
 
 @pytest.fixture
@@ -443,30 +452,32 @@ async def test_cancelled_memory_write_with_postgres_goes_back_to_the_intake(post
     assert _queue_ids(rec._pg_queue) == [1, 2, 3]
 
 
-async def test_p_queue_past_half_sets_the_wakeup():
-    rec = _recorder(max_buffer=1000)
+async def test_p_queue_past_half_wakes_stage_p():
+    fake = RecorderFakePostgres()
+    rec = _recorder(max_buffer=1000, fake=fake)
     await rec.start()
     try:
         _record_many(rec, 499)
         await rec.flush_memory()
-        assert not rec._pg_wakeup.is_set()
+        await asyncio.sleep(0.1)
+        assert fake.copy_calls() == []
 
         _record_many(rec, 1, first_offset=499)
         await rec.flush_memory()
-        assert rec._pg_wakeup.is_set()
+        await wait_for(lambda: len(fake.copied) == 500)
     finally:
         await rec.stop()
 
 
-async def test_p_queue_past_half_of_the_byte_bound_sets_the_wakeup():
-    rec = _recorder(max_buffer=1000, queue_max_bytes=1000)
+async def test_p_queue_past_half_of_the_byte_bound_wakes_stage_p():
+    fake = RecorderFakePostgres()
+    rec = _recorder(max_buffer=1000, queue_max_bytes=1000, fake=fake)
     await rec.start()
     try:
         rec._record(_event(0, args='x' * 600))
         await rec.flush_memory()
 
-        assert len(rec._pg_queue) == 1
-        assert rec._pg_wakeup.is_set()
+        await wait_for(lambda: fake.copied_ids() == [1])
     finally:
         await rec.stop()
 
