@@ -298,6 +298,13 @@ services:
       # worker-3's, and the cluster-tasks scenario checks that worker-2
       # shows worker-1 with cluster_tasks_match false.
       DK_HISTORY__ARCHIVE__ENABLED: "false"
+      # worker-1 keeps its recorder events in memory only and writes no
+      # recorder file; worker-2 and worker-3 keep the file (persistence
+      # sqlite, derived from storage.dir), so sealing and the archive still
+      # run. The short window lets the recorder-memory scenario see the
+      # window eviction within a few minutes of the start.
+      DK_UI__RECORDER__PERSISTENCE: "none"
+      DK_UI__RECORDER__MEMORY__WINDOW_SECONDS: "60"
     ports:
       - "9090:9090"
       - "8081:8081"

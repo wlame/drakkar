@@ -77,7 +77,7 @@ checks.
 
 | Worker | Operator UI | Metrics | Webapp | Config |
 |--------|----------|---------|--------|--------|
-| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled** |
+| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled**, recorder in memory only |
 | worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | -- | 4 executors, all 6 sinks |
 | worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | -- | 4 executors, all 6 sinks |
 
@@ -555,8 +555,9 @@ is a pass/fail gate, not an invitation to read three dashboards.
 
 ## Provider outage scenarios
 
-Five scripts check how the main cluster's registry and cluster tasks
-behave when their provider, the network or a worker fails. Start the harness with a
+Six scripts check how the main cluster's registry and cluster tasks
+behave when their provider, the network or a worker fails, and how the
+recorder memory store works with and without a recorder file. Start the harness with a
 provider, wait until the workers are healthy, then run the scenarios with
 the same provider:
 
@@ -566,7 +567,7 @@ just integration-scenarios provider=redis
 just integration-down
 ```
 
-`just integration-scenarios` runs the five scripts in the order below and
+`just integration-scenarios` runs the six scripts in the order below and
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
@@ -581,7 +582,7 @@ A run with `postgres`, `redis` or `consul` and the `full` profile takes about tw
 the producer take about 7 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
-scenario does not apply, and the other four take a few minutes each (the
+scenario does not apply, and the other five take a few minutes each (the
 cluster-tasks scenario watches its slots for about five minutes).
 
 | Script | What it does | What it proves |
@@ -591,6 +592,7 @@ cluster-tasks scenario watches its slots for about five minutes).
 | `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The second half tests the archive election; see [The election half](#the-election-half). |
 | `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token, and the config reference lists the three connections, with `connections.consul.main.token` masked. Runs with every provider. |
 | `scenario-cluster-tasks.sh` | Watches 8 slots of `harness_cluster_tick`, a cluster task of the harness handler with a slot every 30 s of epoch time, and 15 s after the last of them. Each run logs `harness_cluster_tick` with its slot. Then it reads `/api/v1/workers` on worker-2. | No slot ran on two workers, and at least 7 of the 8 slots ran exactly once (a slot whose lease does not come within its 10 s acquire window is skipped, so one missed slot is allowed). worker-2 lists worker-1 with `cluster_tasks_match: false` (worker-1 turns the archive off, so its cluster task definitions differ), and worker-3 and itself with `true`. worker-3 matches only because worker-2 and worker-3 run the archive with the same settings and the same handler: a config change on one of them makes the check fail. Runs with every provider. |
+| `scenario-recorder-memory.sh` | Reads `/api/v1/debug/databases`, `/api/v1/events`, the metrics and `/api/v1/debug/download-live` of worker-1, which keeps its recorder events in memory only (`DK_UI__RECORDER__PERSISTENCE: "none"`, a memory window of 60 s), and of worker-2, which keeps the recorder file. When the shared history folder is still empty (a fresh harness, the script run alone), it first plants one small due window with `integration/plant_history.py`. | worker-1 lists exactly one own database, the memory store, and no live file, and it lists the shared history folders. Its events answer has rows. Once it has run for 90 s, `drakkar_recorder_memory_rows` is above 0, `drakkar_recorder_memory_evicted_rows_total{reason="window"}` is above 0, `drakkar_recorder_memory_oldest_age_seconds` is at most 75 (the window, one flush interval and slack), and `drakkar_recorder_memory_allocated_bytes` is at least `drakkar_recorder_memory_bytes`. Its `download-live` without `source` answers a SQLite database (the memory store), and with `source=file` 404. worker-2 lists a memory row and a live row, and both `source=file` and `source=memory` download a SQLite database. The verdict line carries worker-1's memory numbers and the count of `ui_read_memory_timed_out` lines in the logs of the three workers. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
@@ -619,7 +621,10 @@ of `integration/worker/drakkar.yaml` (`history.archive`):
 
 Worker-1 is the observer of every scenario and sets
 `DK_HISTORY__ARCHIVE__ENABLED: "false"` in `docker-compose.yml`, so it never
-runs the archive and never holds its lock. The lock is in
+runs the archive and never holds its lock. It also keeps its recorder events in memory only
+(`DK_UI__RECORDER__PERSISTENCE: "none"`), so it writes no recorder file
+and seals nothing; worker-2 and worker-3 keep the file, seal it and archive
+it. The lock is in
 `tasks/main_cluster/history.archive.lock` in the shared folder
 (`filesystem`), in the `drakkar.task_locks` table (`postgres`), under the key
 `drakkar:task-locks:main_cluster/history.archive` (`redis`) or under the key
@@ -668,7 +673,7 @@ just integration-matrix profile=quick
 For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
 `integration-down` does not clear), starts the harness with
-`integration-up`, waits with `wait-ready.sh`, runs the five scenarios and
+`integration-up`, waits with `wait-ready.sh`, runs the six scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
 provider and step, and exits non-zero when any step failed. `N/A` means the
