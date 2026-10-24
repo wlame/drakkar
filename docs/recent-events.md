@@ -199,6 +199,13 @@ named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC time of the snapshot).
 - With `storage.dir` empty, or when no temporary file can be made there, the
   worker copies the store in RAM. The download then holds one more copy of the
   store in memory, up to its used size plus free pages, while it runs.
+  The worker logs `debug_download_live_in_ram` (info, with `reason`
+  `storage_dir_unset` or `storage_dir_unusable`) for each such copy.
+
+One memory snapshot runs at a time. Another memory download waits for it, up
+to 30 seconds, and then answers 500 with the reason `another memory snapshot
+is still running`. Parallel downloads therefore never make two copies at the
+same time. A finished copy stays in memory until its download ends.
 
 Answers:
 

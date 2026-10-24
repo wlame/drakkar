@@ -10,15 +10,18 @@ in RAM otherwise.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
 import sqlite3
+import threading
 import time
 from unittest.mock import MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from structlog.testing import capture_logs
 
 from drakkar.config import DrakkarConfig
 from drakkar.recorder import EventRecorder, memstore
@@ -403,3 +406,130 @@ async def test_memory_download_falls_back_to_ram_when_the_storage_folder_is_miss
     with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
         _assert_recorder_copy(conn, events=3)
     assert not missing.exists()
+
+
+async def test_memory_download_in_ram_logs_why(tmp_path, started):
+    missing = tmp_path / 'not-created'
+    unusable = await started('none', storage_dir=str(missing), events=1)
+    unset = await started('none', events=1)
+
+    with capture_logs() as cap:
+        for rec in (unusable, unset):
+            async with _client_of(rec) as client:
+                assert (await client.get('/api/v1/debug/download-live')).status_code == 200
+
+    lines = [e for e in cap if e['event'] == 'debug_download_live_in_ram']
+    assert [(e['log_level'], e['category'], e['source'], e['reason']) for e in lines] == [
+        ('info', 'debug', 'memory', 'storage_dir_unusable'),
+        ('info', 'debug', 'memory', 'storage_dir_unset'),
+    ]
+
+
+async def test_concurrent_memory_downloads_never_copy_at_the_same_time(tmp_path, started, monkeypatch):
+    rec = await started('none', events=2)
+    real_snapshot = routes_debug._snapshot_memory
+    copies_running = 0
+    most_at_once = 0
+    count_lock = threading.Lock()
+
+    def slow_snapshot(recorder):
+        nonlocal copies_running, most_at_once
+        with count_lock:
+            copies_running += 1
+            most_at_once = max(most_at_once, copies_running)
+        try:
+            # Long enough that two unguarded copies would overlap.
+            time.sleep(0.2)
+            return real_snapshot(recorder)
+        finally:
+            with count_lock:
+                copies_running -= 1
+
+    monkeypatch.setattr(routes_debug, '_snapshot_memory', slow_snapshot)
+
+    async with _client_of(rec) as client:
+        first, second = await asyncio.gather(
+            client.get('/api/v1/debug/download-live?source=memory'),
+            client.get('/api/v1/debug/download-live?source=memory'),
+        )
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert most_at_once == 1
+    for resp in (first, second):
+        with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+            _assert_recorder_copy(conn, events=2)
+
+
+async def test_memory_download_answers_500_after_waiting_the_limit_for_another_snapshot(started, monkeypatch):
+    rec = await started('none', events=1)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
+    real_snapshot = routes_debug._snapshot_memory
+    first_copy_started = threading.Event()
+    first_copy_may_end = threading.Event()
+
+    def held_snapshot(recorder):
+        first_copy_started.set()
+        first_copy_may_end.wait(timeout=10)
+        return real_snapshot(recorder)
+
+    monkeypatch.setattr(routes_debug, '_snapshot_memory', held_snapshot)
+
+    async with _client_of(rec) as client:
+        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
+        assert await asyncio.to_thread(first_copy_started.wait, 5)
+        with capture_logs() as cap:
+            second = await client.get('/api/v1/debug/download-live?source=memory')
+        first_copy_may_end.set()
+        first_resp = await first
+
+    assert (second.status_code, second.json()) == (
+        500,
+        {'error': 'Snapshot failed: another memory snapshot is still running'},
+    )
+    failed = [e for e in cap if e['event'] == 'debug_download_live_failed']
+    assert [(e['source'], e['error']) for e in failed] == [('memory', 'another memory snapshot is still running')]
+    assert first_resp.status_code == 200
+
+
+async def test_a_memory_download_whose_client_left_keeps_the_slot_until_its_copy_ends(started, monkeypatch):
+    rec = await started('none', events=1)
+    real_snapshot = routes_debug._snapshot_memory
+    first_copy_started = threading.Event()
+    first_copy_may_end = threading.Event()
+    copies_running = 0
+    most_at_once = 0
+    count_lock = threading.Lock()
+    calls = 0
+
+    def counted_snapshot(recorder):
+        nonlocal copies_running, most_at_once, calls
+        with count_lock:
+            calls += 1
+            is_first = calls == 1
+            copies_running += 1
+            most_at_once = max(most_at_once, copies_running)
+        try:
+            if is_first:
+                first_copy_started.set()
+                first_copy_may_end.wait(timeout=10)
+            return real_snapshot(recorder)
+        finally:
+            with count_lock:
+                copies_running -= 1
+
+    monkeypatch.setattr(routes_debug, '_snapshot_memory', counted_snapshot)
+
+    async with _client_of(rec) as client:
+        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
+        assert await asyncio.to_thread(first_copy_started.wait, 5)
+        # The client of the first download goes away mid-copy.
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
+        await asyncio.sleep(0.05)
+        first_copy_may_end.set()
+        second_resp = await second
+
+    assert second_resp.status_code == 200
+    assert most_at_once == 1

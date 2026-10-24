@@ -332,6 +332,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One memory snapshot at a time.** Parallel
+  `GET /api/v1/debug/download-live?source=memory` requests each made a copy
+  of the memory store, in RAM without `storage.dir`. A second request now
+  waits for the running copy, up to 30 seconds, and then answers 500
+  `Snapshot failed: another memory snapshot is still running`. A copy in RAM
+  is logged as `debug_download_live_in_ram`.
 - **The task detail and the two trace reads give up after 5 seconds.**
   `/api/v1/task/{task_id}`, `/api/v1/debug/trace` and
   `/api/v1/debug/trace-by-label` waited with no limit for the recorder file

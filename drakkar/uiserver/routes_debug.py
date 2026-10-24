@@ -109,6 +109,12 @@ DATABASES_ENDPOINT = '/api/v1/debug/databases'
 BAD_SOURCE_ERROR = 'source must be memory or file'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
+# The reason of the 500 answer of a memory download that waited the whole
+# snapshot limit for the snapshot already running.
+MEMORY_SNAPSHOT_BUSY_REASON = 'another memory snapshot is still running'
+# The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
+IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
+IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
 
 # Rows of ``/api/v1/debug/periodic``: the newest periodic runs, by ``ts``.
 PERIODIC_HISTORY_ROWS = 500
@@ -250,18 +256,36 @@ def _snapshot_memory(recorder: EventRecorder) -> tuple[BinaryIO, str] | None:
     """A snapshot of the memory store and its attachment name; ``None`` when there is no open store. Blocking.
 
     With ``storage.dir`` set, a stepped copy into a temp file there;
-    without it, or when no temp file can be created there, a copy in RAM.
-    The by-name connection goes through the open guard, so a snapshot that
-    races the stop never creates a new, empty store.
+    without it, or when no temp file can be created there, a copy in RAM,
+    logged as ``debug_download_live_in_ram`` so an operator can tell why
+    the memory of the worker grew. The by-name connection goes through the
+    open guard, so a snapshot that races the stop never creates a new,
+    empty store.
     """
     with recorder.open_memory_reader() as conn:
         if conn is None:
             return None
+        reason = IN_RAM_REASON_NO_FOLDER
         if recorder.storage_dir:
             stepped = _snapshot_memory_stepped(conn, recorder.storage_dir, recorder.worker_name)
             if stepped is not None:
                 return stepped
+            reason = IN_RAM_REASON_FOLDER_UNUSABLE
+        logger.info('debug_download_live_in_ram', category='debug', source=DOWNLOAD_SOURCE_MEMORY, reason=reason)
         return io.BytesIO(_snapshot_memory_serialized(conn)), _memory_snapshot_name(recorder.worker_name)
+
+
+class _MemorySnapshotBusyError(Exception):
+    """Another memory snapshot held the slot for the whole snapshot limit."""
+
+
+def _close_unsent_snapshot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
+    """Close the copy of a memory download whose request went away before the copy ended."""
+    if copy.cancelled() or copy.exception() is not None:
+        return
+    snapshot = copy.result()
+    if snapshot is not None:
+        snapshot[0].close()
 
 
 def _stream_size(handle: BinaryIO) -> int:
@@ -612,6 +636,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     # (no-op without a token). The per-route Depends below predate the
     # router-level gate and are kept as explicit markers.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
+    # One memory snapshot at a time on this recorder: a copy in RAM costs
+    # one more image of the store, so parallel downloads must not multiply
+    # it. An asyncio lock, so a waiting request holds no thread.
+    memory_snapshot_slot = asyncio.Lock()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -880,8 +908,9 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         a live file is open, else ``memory`` (so a worker before its first
         file serves the memory store). 400 for another value;
         404 without a live file (``file``) or without an open memory store
-        (``memory``); 500 when the snapshot fails. See
-        :func:`_snapshot_live_file` and :func:`_snapshot_memory`.
+        (``memory``); 500 when the snapshot fails, or when another memory
+        snapshot still runs after the snapshot limit. See
+        :func:`_snapshot_live_file` and :func:`_snapshot_memory_alone`.
         """
         if source is None:
             source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
@@ -909,10 +938,38 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
         return _snapshot_response(handle, os.path.basename(live_path))
 
+    def _release_memory_snapshot_slot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
+        """Free the slot once the copy thread has ended; mark its error as seen."""
+        memory_snapshot_slot.release()
+        if not copy.cancelled():
+            copy.exception()
+
+    async def _snapshot_memory_alone() -> tuple[BinaryIO, str] | None:
+        """Run :func:`_snapshot_memory` in a thread while no other memory snapshot runs.
+
+        Waits for the running snapshot at most :data:`SNAPSHOT_LIMIT_SECONDS`
+        and then raises :class:`_MemorySnapshotBusyError`. The slot is freed
+        when the copy thread ends, not when the request ends: a request that
+        goes away mid-copy cannot let a second copy start beside the first.
+        """
+        try:
+            async with asyncio.timeout(memstore.SNAPSHOT_LIMIT_SECONDS):
+                await memory_snapshot_slot.acquire()
+        except TimeoutError:
+            raise _MemorySnapshotBusyError(MEMORY_SNAPSHOT_BUSY_REASON) from None
+        copy = asyncio.ensure_future(asyncio.to_thread(_snapshot_memory, recorder))
+        copy.add_done_callback(_release_memory_snapshot_slot)
+        try:
+            # Shielded: a cancelled request leaves the copy running to its end.
+            return await asyncio.shield(copy)
+        except asyncio.CancelledError:
+            copy.add_done_callback(_close_unsent_snapshot)
+            raise
+
     async def _download_memory_store():
         try:
-            snapshot = await asyncio.to_thread(_snapshot_memory, recorder)
-        except (OSError, sqlite3.Error) as exc:
+            snapshot = await _snapshot_memory_alone()
+        except (OSError, sqlite3.Error, _MemorySnapshotBusyError) as exc:
             # OSError covers the TimeoutError of a copy that kept restarting.
             await logger.awarning('debug_download_live_failed', category='debug', source='memory', error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
