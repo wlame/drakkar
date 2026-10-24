@@ -9,9 +9,21 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Persistence = Literal['none', 'sqlite']
+from drakkar.config.resilience import ResilienceConfig
+
+Persistence = Literal['none', 'sqlite', 'postgres']
 PERSISTENCE_NONE: Persistence = 'none'
 PERSISTENCE_SQLITE: Persistence = 'sqlite'
+PERSISTENCE_POSTGRES: Persistence = 'postgres'
+
+# The recorder table prefix: empty, or a lower-case letter and up to 23 more
+# lower-case letters, digits or underscores. Matched with ``re.fullmatch``
+# (a ``$`` anchor would accept a trailing newline).
+TABLE_PREFIX_RE = r'^[a-z][a-z0-9_]{0,23}$'
+TABLE_PREFIX_MESSAGE = (
+    "ui.recorder.postgres.table_prefix '{value}' must be empty, or a lower-case letter followed by "
+    'at most 23 lower-case letters, digits or underscores'
+)
 
 
 class UIRecorderMemoryConfig(BaseModel):
@@ -45,12 +57,71 @@ class UIRecorderMemoryConfig(BaseModel):
     )
 
 
+class UIRecorderPostgresConfig(BaseModel):
+    """Settings of the ``postgres`` recorder mode: the table that holds the history of all workers.
+
+    The DSN and the schema come from ``connections.postgres.<connection>``. The keys load and do
+    nothing unless the effective mode is ``postgres``.
+    """
+
+    connection: str = Field(
+        default='main',
+        description='Name of the entry under connections.postgres that holds the DSN and the schema.',
+    )
+    table_prefix: str = Field(
+        default='',
+        description=(
+            'Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 '
+            'lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.'
+        ),
+    )
+    retention_hours: int = Field(
+        default=6,
+        ge=1,
+        le=168,
+        description=(
+            'Hours of history the table keeps. Read only when this worker creates the table; after that '
+            'the value stored with the table rules. At most 168: one partition per hour, and a trace '
+            'search visits every partition.'
+        ),
+    )
+    store_output: bool = Field(
+        default=False,
+        description='Send the stdout and stderr columns to Postgres. Off, both columns are written empty.',
+    )
+    batch_rows: int = Field(
+        default=5000,
+        ge=100,
+        le=50000,
+        description='Most rows in one COPY.',
+    )
+    queue_max_mib: int = Field(
+        default=128,
+        ge=16,
+        le=1024,
+        description='Most text data, in MiB, waiting for Postgres. When full, the oldest rows are dropped and counted.',
+    )
+    resilience: ResilienceConfig = Field(
+        default_factory=ResilienceConfig,
+        description='Timeout, retries, backoff and breaker of the recorder calls to Postgres.',
+    )
+
+    @field_validator('table_prefix')
+    @classmethod
+    def _check_table_prefix(cls, value: str) -> str:
+        """Refuse a prefix that is not empty and not a short lower-case identifier."""
+        if value and not re.fullmatch(TABLE_PREFIX_RE, value):
+            raise ValueError(TABLE_PREFIX_MESSAGE.format(value=value))
+        return value
+
+
 class UIRecorderConfig(BaseModel):
     """Flight-recorder persistence settings — the UI's data store.
 
     With ``persistence: sqlite`` the recorder also writes SQLite files into
     ``storage.dir``; with ``none`` it keeps recent events in memory only and
-    writes no file. Unset, the mode follows ``storage.dir`` (a folder means
+    writes no file; with ``postgres`` it also writes the events to a table in
+    Postgres (``postgres.*``). Never derived: ``postgres`` is always explicit. Unset, the mode follows ``storage.dir`` (a folder means
     ``sqlite``, an empty ``storage.dir`` means ``none``).
 
     Granular flags of what the recorder keeps:
@@ -69,10 +140,12 @@ class UIRecorderConfig(BaseModel):
         description=(
             'Where recorder events live besides the memory store: sqlite writes recorder files into '
             'storage.dir; none keeps events in memory only. Unset, it is sqlite when storage.dir is set '
-            'and none when it is empty. sqlite with an empty storage.dir fails the load.'
+            'and none when it is empty. sqlite with an empty storage.dir fails the load. postgres writes the '
+            'events to a table named by the postgres section and is never derived.'
         ),
     )
     memory: UIRecorderMemoryConfig = Field(default_factory=UIRecorderMemoryConfig)
+    postgres: UIRecorderPostgresConfig = Field(default_factory=UIRecorderPostgresConfig)
     store_events: bool = Field(
         default=True,
         description=(
@@ -135,7 +208,10 @@ class UIRecorderConfig(BaseModel):
     flush_interval_seconds: int = Field(
         default=5,
         ge=1,
-        description='Seconds between recorder buffer flushes: the tick of both the memory loop and the file loop.',
+        description=(
+            'Seconds between recorder buffer flushes: the tick of the memory loop and the file loop, '
+            'and of the Postgres loop with postgres.'
+        ),
     )
     max_buffer: int = Field(
         default=50_000,
@@ -143,7 +219,7 @@ class UIRecorderConfig(BaseModel):
         description=(
             'In-memory event buffer capacity. When full, the oldest events are evicted and '
             'counted in drakkar_recorder_dropped_events_total. The intake buffer and, with sqlite, the file queue '
-            'each hold at most this many rows.'
+            'each hold at most this many rows; with postgres, the Postgres queue holds at most this many rows too.'
         ),
     )
     # Maximum consecutive ``OperationalError`` failures tolerated on a single
@@ -697,12 +773,17 @@ class UITraceConfig(BaseModel):
     history_max_files: int = Field(
         default=256,
         ge=1,
-        description='Most sealed history files one trace request with history=1 opens, newest first.',
+        description=(
+            'Most sealed history files one trace request with history=1 opens, newest first. Ignored with postgres.'
+        ),
     )
     history_max_seconds: float = Field(
         default=10.0,
         gt=0,
-        description='Time limit for one trace request with history=1; the search stops and returns what it found.',
+        description=(
+            'Time limit for one trace request with history=1; the search stops and returns what it found. '
+            'With postgres it is also the time limit of the Postgres history search.'
+        ),
     )
 
 

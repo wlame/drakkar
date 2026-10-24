@@ -516,6 +516,52 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "persistence_postgres_memory_only",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres"
+          }
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://drakkar:secret@db:5432/drakkar"
+            }
+          }
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem recorder=postgres fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "persistence_postgres_with_storage_dir",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres"
+          }
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://drakkar:secret@db:5432/drakkar"
+            }
+          }
+        },
+        "storage": {
+          "dir": "/var/lib/drakkar"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=postgres fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -1248,7 +1294,7 @@
       "yaml": {
         "ui": {
           "recorder": {
-            "persistence": "postgres"
+            "persistence": "files"
           }
         }
       },
@@ -1363,6 +1409,167 @@
         }
       },
       "path": "ui.recorder.memory.window_seconds"
+    },
+    {
+      "name": "persistence_postgres_without_connection",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres"
+          }
+        }
+      },
+      "message": "ui.recorder.postgres.connection 'main' is not defined under connections.postgres"
+    },
+    {
+      "name": "postgres_table_prefix_invalid",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres",
+            "postgres": {
+              "table_prefix": "Heavy"
+            }
+          }
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://drakkar:secret@db:5432/drakkar"
+            }
+          }
+        }
+      },
+      "message": "ui.recorder.postgres.table_prefix 'Heavy' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
+    },
+    {
+      "name": "postgres_table_prefix_trailing_newline",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres",
+            "postgres": {
+              "table_prefix": "a\n"
+            }
+          }
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://drakkar:secret@db:5432/drakkar"
+            }
+          }
+        }
+      },
+      "message": "ui.recorder.postgres.table_prefix 'a\n' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
+    },
+    {
+      "name": "persistence_postgres_checked_before_rotation",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "persistence": "postgres",
+            "rotation_interval_hours": 2
+          }
+        },
+        "history": {
+          "archive": {
+            "window_hours": 1
+          }
+        }
+      },
+      "message": "ui.recorder.postgres.connection 'main' is not defined under connections.postgres"
+    },
+    {
+      "name": "postgres_retention_too_small",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "retention_hours": 0
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.retention_hours"
+    },
+    {
+      "name": "postgres_retention_too_large",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "retention_hours": 169
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.retention_hours"
+    },
+    {
+      "name": "postgres_batch_rows_too_small",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "batch_rows": 99
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.batch_rows"
+    },
+    {
+      "name": "postgres_batch_rows_too_large",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "batch_rows": 50001
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.batch_rows"
+    },
+    {
+      "name": "postgres_queue_too_small",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "queue_max_mib": 15
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.queue_max_mib"
+    },
+    {
+      "name": "postgres_queue_too_large",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "queue_max_mib": 1025
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.queue_max_mib"
+    },
+    {
+      "name": "postgres_retention_fraction",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "retention_hours": 30.5
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.retention_hours"
     }
   ],
   "load_values": [
@@ -1481,6 +1688,66 @@
       },
       "path": "ui.recorder.persistence",
       "value": "none"
+    },
+    {
+      "name": "postgres_connection_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.connection",
+      "value": "main"
+    },
+    {
+      "name": "postgres_table_prefix_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.table_prefix",
+      "value": ""
+    },
+    {
+      "name": "postgres_retention_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.retention_hours",
+      "value": 6
+    },
+    {
+      "name": "postgres_store_output_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.store_output",
+      "value": false
+    },
+    {
+      "name": "postgres_batch_rows_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.batch_rows",
+      "value": 5000
+    },
+    {
+      "name": "postgres_queue_default",
+      "yaml": {},
+      "path": "ui.recorder.postgres.queue_max_mib",
+      "value": 128
+    },
+    {
+      "name": "postgres_retention_whole_float",
+      "yaml": {
+        "ui": {
+          "recorder": {
+            "postgres": {
+              "retention_hours": 24.0
+            }
+          }
+        }
+      },
+      "path": "ui.recorder.postgres.retention_hours",
+      "value": 24
+    },
+    {
+      "name": "persistence_postgres_by_env",
+      "yaml": {},
+      "env": {
+        "DK_UI__RECORDER__PERSISTENCE": "postgres",
+        "DK_CONNECTIONS__POSTGRES__MAIN__DSN": "postgresql://drakkar:secret@db:5432/drakkar"
+      },
+      "path": "ui.recorder.persistence",
+      "value": "postgres"
     }
   ]
 }

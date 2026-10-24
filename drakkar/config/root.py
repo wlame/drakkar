@@ -31,7 +31,7 @@ from drakkar.config.runtime import (
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
 from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
-from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_SQLITE, Persistence, UIConfig
+from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence, UIConfig
 from drakkar.config.webapp import WebAppConfig
 
 PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE = (
@@ -163,9 +163,19 @@ class DrakkarConfig(BaseSettings):
 
     @model_validator(mode='after')
     def _validate_recorder_persistence(self) -> 'DrakkarConfig':
-        """An explicit ``sqlite`` needs a ``storage.dir``, whatever ``ui.enabled`` says."""
+        """An explicit ``sqlite`` needs a ``storage.dir``; ``postgres`` needs its connection declared.
+
+        Both checks run whatever ``ui.enabled`` says.
+        """
         if self.ui.recorder.persistence == PERSISTENCE_SQLITE and not self.storage.dir:
             raise ValueError(PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE)
+        if self.resolved_persistence == PERSISTENCE_POSTGRES:
+            _require_declared_connection(
+                'ui.recorder.postgres.connection',
+                PERSISTENCE_POSTGRES,
+                self.ui.recorder.postgres.connection,
+                self.connections,
+            )
         return self
 
     @model_validator(mode='after')
@@ -210,7 +220,10 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def resolved_persistence(self) -> Persistence:
-        """The effective recorder mode: the explicit key, else ``sqlite`` with a ``storage.dir``, else ``none``."""
+        """The effective recorder mode: the explicit key, else ``sqlite`` with a ``storage.dir``, else ``none``.
+
+        ``postgres`` is never derived; it is the mode only when the key says so.
+        """
         if self.ui.recorder.persistence is not None:
             return self.ui.recorder.persistence
         return PERSISTENCE_SQLITE if self.storage.dir else PERSISTENCE_NONE
@@ -329,11 +342,13 @@ class DrakkarConfig(BaseSettings):
         storage_part = self.storage.dir or 'mem'
         shared_token = f' shared={self.shared.dir}' if self.shared.dir and self.shared.dir != self.storage.dir else ''
 
-        recorder_token = (
-            f' recorder={PERSISTENCE_NONE}'
-            if self.resolved_persistence == PERSISTENCE_NONE and self.storage.dir
-            else ''
-        )
+        mode = self.resolved_persistence
+        if mode == PERSISTENCE_POSTGRES:
+            recorder_token = f' recorder={PERSISTENCE_POSTGRES}'
+        elif mode == PERSISTENCE_NONE and self.storage.dir:
+            recorder_token = f' recorder={PERSISTENCE_NONE}'
+        else:
+            recorder_token = ''
 
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
 
