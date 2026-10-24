@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.25"
+  version: "1.26"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -670,7 +670,10 @@ paths:
         Without history, searches the serving worker's own live file and
         own unsealed files. With history=1, searches only the sealed files of
         history/<own cluster>, newest first, within the backend's trace
-        budget (v1.23).
+        budget (v1.23). On a worker whose recorder keeps its history in
+        Postgres, history=1 searches the rows of the own cluster there
+        instead; the answer is complete and a failed or timed-out search
+        answers 503 (v1.26).
       parameters:
         - name: partition
           in: query
@@ -692,6 +695,17 @@ paths:
               schema:
                 type: array
                 items: {$ref: '#/components/schemas/RecorderEventRow'}
+        '503':
+          description: >-
+            history=1 on a worker with Postgres history: the search failed or
+            timed out (v1.26).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail]
+                properties:
+                  detail: {type: string, enum: ["history search failed"]}
         '422': {$ref: '#/components/responses/ValidationError'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
