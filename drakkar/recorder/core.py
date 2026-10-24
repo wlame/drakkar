@@ -467,12 +467,17 @@ class EventRecorder(EventWriter):
 
     @property
     def storage_dir(self) -> str:
-        """The worker's own folder (``storage.dir``); ``''`` in memory-only mode."""
+        """The worker's own folder (``storage.dir``); ``''`` when none is set, which persistence ``none`` allows."""
         return self._storage_dir
 
     @property
     def worker_name(self) -> str:
         return self._worker_name
+
+    @property
+    def cluster_name(self) -> str:
+        """The cluster this recorder's worker belongs to; ``''`` when none is set."""
+        return self._cluster_name
 
     @property
     def shared_dir(self) -> str:

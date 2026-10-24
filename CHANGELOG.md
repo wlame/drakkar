@@ -107,6 +107,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/api/v1/partitions` answers an empty list when the main loop does not
   answer in time. `EventRecorder.reader_db` is removed; use
   `file_reader_db` or `memory_store`.
+  `/api/v1/debug/databases` shows the memory store as the first row
+  (`kind: "memory"`, named `<worker>-memory`): its row count, the first and
+  last event time, the count per event type (empty when the 2-second limit
+  stops the count) and the data bytes in use. `/api/v1/debug/download-live`
+  takes `source=memory` or `source=file` (default: `file` when the worker
+  writes a file, else `memory`). The memory snapshot is named
+  `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db`. With `storage.dir` set, it is
+  copied in steps of 1024 pages into a temporary file there, and a copy that
+  does not finish in 30 seconds answers 500. Without `storage.dir`, it is
+  copied in RAM, so the download holds one more copy of the store in memory.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part

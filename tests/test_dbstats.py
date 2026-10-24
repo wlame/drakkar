@@ -9,9 +9,12 @@ here; their meta file carries their statistics.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import time
+
+import pytest
 
 import drakkar.dbstats as dbstats_mod
 from drakkar.dbstats import OwnFileStats
@@ -95,3 +98,50 @@ def test_a_vanished_file_is_skipped_and_forgotten(tmp_path):
 
     assert own.measure([path]) == []
     assert own.cached_paths() == []
+
+
+@pytest.fixture
+def conn():
+    with contextlib.closing(sqlite3.connect(':memory:')) as memory:
+        yield memory
+
+
+def test_measure_memory_store_without_worker_config_uses_the_fallback_cluster(conn):
+    conn.executescript(SCHEMA_EVENTS)
+    add_events(conn, [('consumed', 5.0), ('consumed', 7.0), ('arranged', 6.0)])
+    conn.commit()
+
+    row = dbstats_mod.measure_memory_store(conn, worker_name='w1', fallback_cluster='c9', event_count=3)
+
+    page_count, freelist, page_size = (
+        conn.execute(f'PRAGMA {p}').fetchone()[0] for p in ('page_count', 'freelist_count', 'page_size')
+    )
+    assert row == {
+        'filename': 'w1-memory',
+        'worker_name': 'w1',
+        'cluster_name': 'c9',
+        'kind': 'memory',
+        'event_count': 3,
+        'event_counts': {'consumed': 2, 'arranged': 1},
+        'first_event_ts': 5.0,
+        'last_event_ts': 7.0,
+        'size_bytes': (page_count - freelist) * page_size,
+    }
+
+
+def test_measure_memory_store_of_an_empty_store_without_a_cluster_answers_nulls(conn):
+    conn.executescript(SCHEMA_EVENTS)
+
+    row = dbstats_mod.measure_memory_store(conn, worker_name='w1', fallback_cluster='', event_count=0)
+
+    assert (row['cluster_name'], row['event_counts'], row['first_event_ts'], row['last_event_ts']) == (
+        None,
+        {},
+        None,
+        None,
+    )
+
+
+def test_measure_memory_store_raises_a_failure_that_is_not_the_read_limit(conn):
+    with pytest.raises(sqlite3.OperationalError, match='no such table'):
+        dbstats_mod.measure_memory_store(conn, worker_name='w1', fallback_cluster='', event_count=0)

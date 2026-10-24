@@ -7,7 +7,7 @@ Routes:
   * ``/api/v1/debug/databases``         — own files, then the shared history folders.
   * ``/api/v1/debug/merge``             — merge history files into ``merged/``.
   * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
-  * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file.
+  * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file or the memory store.
   * ``/api/v1/debug/archives``          — compressed archives of every cluster folder.
   * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or sealed history.
   * ``/api/v1/debug/label-keys``        — distinct label keys across events.
@@ -27,13 +27,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import io
 import json
 import os
 import re
 import secrets
 import sqlite3
 import stat
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -44,9 +46,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.dbstats import OwnFileStats
+from drakkar.dbstats import OwnFileStats, measure_memory_store
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
+from drakkar.recorder import memstore
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
+from drakkar.recorder.helpers import make_db_path
 from drakkar.recorder.history import HISTORY_FOLDER, MERGED_FOLDER, meta_path, read_meta
 from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, trace_history
 from drakkar.recorder.schema import EventType
@@ -56,6 +60,7 @@ from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
+    from drakkar.recorder.memstore import MemoryCoverage
     from drakkar.uiserver.server import UIDeps
 
 logger = structlog.get_logger()
@@ -100,6 +105,10 @@ DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
 _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
+NO_MEMORY_STORE_ERROR = 'No memory store on this worker'
+BAD_SOURCE_ERROR = 'source must be memory or file'
+DOWNLOAD_SOURCE_MEMORY = 'memory'
+DOWNLOAD_SOURCE_FILE = 'file'
 
 # Rows of ``/api/v1/debug/periodic``: the newest periodic runs, by ``ts``.
 PERIODIC_HISTORY_ROWS = 500
@@ -120,38 +129,138 @@ def _backup_into(source: sqlite3.Connection, target: sqlite3.Connection) -> None
     source.backup(target)
 
 
-def _snapshot_live_file(live_path: str) -> BinaryIO:
-    """A consistent copy of the live recorder file, as an open handle to an unlinked temp file.
+def _snapshot_into_temp_file(folder: str, name: str, fill: Callable[[sqlite3.Connection], None]) -> BinaryIO:
+    """Copy a database into a private temp file in ``folder``; return an open handle to the unlinked file.
 
-    Made with the SQLite backup API on its own read-only connection: never
-    the recorder's reader, which the UI pages read through and which would
-    be held for the whole copy. In WAL mode the copy's read transaction
-    does not block the recorder's writer. The copy goes to a dot-named,
-    owner-only temp file beside the live file and is switched to a rollback
-    journal, so it opens on its own. The temp file is unlinked before the
+    The temp file is dot-named after ``name``, created exclusive and
+    owner-only, filled by ``fill`` through a connection to it, and switched
+    to a rollback journal, so it opens on its own. It is unlinked before the
     handle is returned, so nothing is left behind even when the download
     breaks. Blocking: run it in a thread.
     """
-    folder, name = os.path.split(live_path)
     temp = os.path.join(folder, f'.{name}.{secrets.token_hex(8)}.download')
     os.close(os.open(temp, _SNAPSHOT_FLAGS, 0o600))
     try:
-        source = sqlite3.connect(f'file:{live_path}?mode=ro', uri=True)
+        target = sqlite3.connect(temp)
         try:
-            target = sqlite3.connect(temp)
-            try:
-                _backup_into(source, target)
-                target.execute('PRAGMA journal_mode=DELETE')
-            finally:
-                target.close()
+            fill(target)
+            target.execute('PRAGMA journal_mode=DELETE')
         finally:
-            source.close()
+            target.close()
         # The response closes the handle after the last chunk.
         return open(temp, 'rb')
     finally:
         for suffix in _SNAPSHOT_SIDECARS:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp + suffix)
+
+
+def _snapshot_live_file(live_path: str) -> BinaryIO:
+    """A consistent copy of the live recorder file, as an open handle to an unlinked temp file.
+
+    Made with the SQLite backup API on its own read-only connection: never
+    the recorder's reader, which the UI pages read through and which would
+    be held for the whole copy. In WAL mode the copy's read transaction
+    does not block the recorder's writer. The copy goes beside the live
+    file (:func:`_snapshot_into_temp_file`). Blocking: run it in a thread.
+    """
+    folder, name = os.path.split(live_path)
+    source = sqlite3.connect(f'file:{live_path}?mode=ro', uri=True)
+    try:
+        return _snapshot_into_temp_file(folder, name, lambda target: _backup_into(source, target))
+    finally:
+        source.close()
+
+
+def _memory_snapshot_name(worker_name: str) -> str:
+    """``<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db``, the UTC time now in the recorder file name format."""
+    return os.path.basename(make_db_path('', f'{worker_name}-memory'))
+
+
+def _snapshot_step_check(deadline: float) -> Callable[[int, int, int], None]:
+    """A backup progress callback that fails the copy once ``deadline`` (monotonic) has passed."""
+
+    def check(_status: int, _remaining: int, _total: int) -> None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f'the memory store copy did not finish in {memstore.SNAPSHOT_LIMIT_SECONDS:g} s')
+
+    return check
+
+
+def _backup_in_steps(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+    """Copy ``source`` into ``target`` in steps of :data:`SNAPSHOT_STEP_PAGES` pages, within the snapshot limit.
+
+    The read lock on the memory store is held for one step only, so memory
+    writes go on between steps. A write between steps restarts the copy, so
+    the result is always one consistent database; a copy that has not
+    finished after :data:`SNAPSHOT_LIMIT_SECONDS` raises :class:`TimeoutError`.
+    """
+    deadline = time.monotonic() + memstore.SNAPSHOT_LIMIT_SECONDS
+    source.backup(target, pages=memstore.SNAPSHOT_STEP_PAGES, progress=_snapshot_step_check(deadline))
+
+
+def _snapshot_memory_stepped(conn: sqlite3.Connection, storage_dir: str, worker_name: str) -> tuple[BinaryIO, str]:
+    """A stepped copy of the memory store into a temp file in ``storage_dir``; the handle and the attachment name.
+
+    ``conn`` is a by-name connection to the store (the open guard holds it
+    open). Blocking: run it in a thread.
+    """
+    name = _memory_snapshot_name(worker_name)
+    handle = _snapshot_into_temp_file(storage_dir, name, lambda target: _backup_in_steps(conn, target))
+    return handle, name
+
+
+def _snapshot_memory_serialized(conn: sqlite3.Connection) -> bytes:
+    """The memory store as bytes, copied in RAM inside one read transaction. Blocking.
+
+    For a worker with no folder of its own: the read lock is held only for
+    the memory copy, and the copy costs one more image of the store in RAM
+    while the download runs.
+    """
+    conn.execute('BEGIN')
+    try:
+        # A deferred BEGIN takes no lock; the first read does.
+        conn.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchall()
+        return conn.serialize()
+    finally:
+        conn.rollback()
+
+
+def _snapshot_memory(recorder: EventRecorder) -> tuple[BinaryIO, str] | None:
+    """A snapshot of the memory store and its attachment name; ``None`` when there is no open store. Blocking.
+
+    With ``storage.dir`` set, a stepped copy into a temp file there;
+    without it, a copy in RAM. The by-name connection goes through the
+    open guard, so a snapshot that races the stop never creates a new,
+    empty store.
+    """
+    with recorder.open_memory_reader() as conn:
+        if conn is None:
+            return None
+        if recorder.storage_dir:
+            return _snapshot_memory_stepped(conn, recorder.storage_dir, recorder.worker_name)
+        return io.BytesIO(_snapshot_memory_serialized(conn)), _memory_snapshot_name(recorder.worker_name)
+
+
+def _stream_size(handle: BinaryIO) -> int:
+    """Bytes in ``handle``, a temp file or a memory buffer; the position is left at the start."""
+    size = handle.seek(0, os.SEEK_END)
+    handle.seek(0)
+    return size
+
+
+def _snapshot_response(handle: BinaryIO, filename: str) -> StreamingResponse:
+    """Stream a snapshot as an attachment named ``filename``; the stream closes ``handle``."""
+    return StreamingResponse(
+        _read_chunks(handle),
+        media_type='application/x-sqlite3',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Content-Length': str(_stream_size(handle)),
+            # Same reason as /debug/download: the URL may carry ?token=.
+            'Cache-Control': 'no-store, private',
+        },
+    )
 
 
 def _read_chunks(handle: BinaryIO) -> Iterator[bytes]:
@@ -350,19 +459,35 @@ def _history_answer(shared: Path) -> list[dict[str, Any]]:
     return folders
 
 
-def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats) -> dict[str, Any]:
-    """The ``/debug/databases`` answer: own files measured now, then the shared history. Blocking.
+def _databases_answer(
+    recorder: EventRecorder, own_stats: OwnFileStats, coverage: MemoryCoverage | None
+) -> dict[str, Any]:
+    """The ``/debug/databases`` answer: the memory row, own files measured now, then the shared history. Blocking.
 
-    The two parts are independent: a recorder without a file has no own rows
-    but still lists the shared history when a shared folder is set.
+    The parts are independent. ``coverage`` is the memory coverage, read on
+    the main loop; with it, the memory row comes first, read on a by-name
+    connection through the open guard (no row once the store is closed).
+    The file rows follow when the recorder writes a file, and the shared
+    history is listed whenever a shared folder is set.
     """
     own: list[dict[str, Any]] = []
+    if coverage is not None:
+        with recorder.open_memory_reader() as conn:
+            if conn is not None:
+                own.append(
+                    measure_memory_store(
+                        conn,
+                        worker_name=recorder.worker_name,
+                        fallback_cluster=recorder.cluster_name,
+                        event_count=coverage.rows,
+                    )
+                )
     if recorder.has_file:
         live = os.path.normpath(recorder.db_path) if recorder.db_path else ''
-        own = [
+        own.extend(
             _own_db_row(stats, 'live' if stats.path == live else 'backlog')
             for stats in own_stats.measure(own_db_files(recorder.storage_dir, recorder.worker_name))
-        ]
+        )
     folders = _history_answer(Path(recorder.shared_dir)) if recorder.shared_dir else []
     return {'own': own, 'history': {'folders': folders}}
 
@@ -478,7 +603,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         ``shared.dir`` and reads the own files with sqlite3 — /healthz and
         /readyz live on this same loop.
         """
-        return JSONResponse(await asyncio.to_thread(_databases_answer, recorder, own_stats))
+        coverage = recorder.memory_coverage()
+        return JSONResponse(await asyncio.to_thread(_databases_answer, recorder, own_stats, coverage))
 
     @router.post('/api/v1/debug/merge', dependencies=[Depends(deps.require_auth)])
     async def api_debug_merge(request: Request):
@@ -710,12 +836,24 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         )
 
     @router.get('/api/v1/debug/download-live', dependencies=[Depends(deps.require_auth)])
-    async def debug_download_live():
-        """Download a consistent snapshot of this worker's live recorder file.
+    async def debug_download_live(source: str | None = None):
+        """Download a consistent snapshot of the live recorder file or of the memory store.
 
-        404 without a recorder file or before the first file exists; 500 when
-        the snapshot fails. See :func:`_snapshot_live_file`.
+        ``source`` is ``file`` or ``memory``; it defaults to ``file`` when
+        the recorder writes a file, else ``memory``. 400 for another value;
+        404 without a live file (``file``) or without an open memory store
+        (``memory``); 500 when the snapshot fails. See
+        :func:`_snapshot_live_file` and :func:`_snapshot_memory`.
         """
+        if source is None:
+            source = DOWNLOAD_SOURCE_FILE if recorder.has_file else DOWNLOAD_SOURCE_MEMORY
+        if source == DOWNLOAD_SOURCE_FILE:
+            return await _download_live_file()
+        if source == DOWNLOAD_SOURCE_MEMORY:
+            return await _download_memory_store()
+        return JSONResponse({'error': BAD_SOURCE_ERROR}, status_code=400)
+
+    async def _download_live_file():
         live_path = recorder.db_path if recorder.has_file else ''
         if not live_path or not await asyncio.to_thread(os.path.isfile, live_path):
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
@@ -724,17 +862,19 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         except (OSError, sqlite3.Error) as exc:
             await logger.awarning('debug_download_live_failed', category='debug', db_path=live_path, error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
-        size = os.fstat(handle.fileno()).st_size
-        return StreamingResponse(
-            _read_chunks(handle),
-            media_type='application/x-sqlite3',
-            headers={
-                'Content-Disposition': f'attachment; filename="{os.path.basename(live_path)}"',
-                'Content-Length': str(size),
-                # Same reason as /debug/download: the URL may carry ?token=.
-                'Cache-Control': 'no-store, private',
-            },
-        )
+        return _snapshot_response(handle, os.path.basename(live_path))
+
+    async def _download_memory_store():
+        try:
+            snapshot = await asyncio.to_thread(_snapshot_memory, recorder)
+        except (OSError, sqlite3.Error) as exc:
+            # OSError covers the TimeoutError of a copy that kept restarting.
+            await logger.awarning('debug_download_live_failed', category='debug', source='memory', error=str(exc))
+            return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
+        if snapshot is None:
+            return JSONResponse({'error': NO_MEMORY_STORE_ERROR}, status_code=404)
+        handle, name = snapshot
+        return _snapshot_response(handle, name)
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():

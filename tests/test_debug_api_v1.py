@@ -9,6 +9,8 @@ Covers:
     and merge/download/trace/trace-by-label input hardening.
 """
 
+import contextlib
+import sqlite3
 import time
 import typing
 from datetime import UTC, datetime
@@ -29,7 +31,7 @@ from drakkar.config import (
 )
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
-from drakkar.recorder import EventRecorder
+from drakkar.recorder import EventRecorder, memstore
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
@@ -1414,3 +1416,133 @@ async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_re
         'rebuild_index': 'cluster',
         'sweep': 'worker',
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/debug/databases: the memory row (v1.25)
+# ---------------------------------------------------------------------------
+
+MEMORY_WORKER = 'w-1'
+
+
+@pytest.fixture
+async def started_recorder(tmp_path):
+    """Start recorders built in the test, record a few events, and stop them at the end."""
+    recorders: list[EventRecorder] = []
+
+    async def start(
+        persistence: str, *, store_events: bool = True, events: int = 3, base_ts: float | None = None
+    ) -> EventRecorder:
+        storage = tmp_path / 'storage'
+        storage.mkdir(exist_ok=True)
+        config = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60, store_events=store_events)
+        rec = EventRecorder(
+            config,
+            worker_name=MEMORY_WORKER,
+            cluster_name='fallback',
+            persistence=persistence,
+            storage_dir=str(storage) if persistence == 'sqlite' else '',
+        )
+        await rec.start()
+        recorders.append(rec)
+        drakkar_config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        drakkar_config.ui.release.enabled = False
+        await rec.write_config(drakkar_config)
+        # Recent timestamps: older rows would leave the memory window.
+        base = time.time() - 30 if base_ts is None else base_ts
+        for offset in range(events):
+            rec._record({'ts': base + offset, 'event': 'consumed', 'partition': 0, 'offset': offset})
+        rec._record({'ts': base + 10, 'event': 'arranged', 'partition': 0, 'offset': 0})
+        await rec.flush()
+        return rec
+
+    yield start
+    for rec in recorders:
+        await rec.stop()
+
+
+async def _databases(rec: EventRecorder) -> dict:
+    app = MagicMock()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config.ui.release.enabled = False
+    async with make_client(rec.config, rec, app) as c:
+        resp = await c.get('/api/v1/debug/databases')
+    assert resp.status_code == 200
+    return resp.json()
+
+
+@pytest.mark.parametrize('persistence', ['none', 'sqlite'])
+async def test_databases_memory_row_comes_first_in_both_modes(started_recorder, persistence):
+    rec = await started_recorder(persistence)
+
+    own = (await _databases(rec))['own']
+
+    assert [row['kind'] for row in own] == (['memory'] if persistence == 'none' else ['memory', 'live'])
+    assert own[0]['filename'] == 'w-1-memory'
+    assert own[0]['worker_name'] == MEMORY_WORKER
+
+
+async def test_databases_memory_row_numbers(started_recorder):
+    base_ts = float(int(time.time()) - 30)
+    rec = await started_recorder('none', events=3, base_ts=base_ts)
+    # The worker_config row of the memory store names another cluster than the recorder's.
+    with contextlib.closing(sqlite3.connect(rec.memory_store.uri, uri=True)) as writer:
+        writer.execute("UPDATE worker_config SET cluster_name = 'search' WHERE id = 1")
+        writer.commit()
+
+    (row,) = (await _databases(rec))['own']
+
+    assert row['event_count'] == rec.memory_coverage().rows == 4
+    assert row['event_counts'] == {'consumed': 3, 'arranged': 1}
+    assert (row['first_event_ts'], row['last_event_ts']) == (base_ts, base_ts + 10)
+    assert row['size_bytes'] == await rec.memory_store.used_bytes()
+    assert row['cluster_name'] == 'search'
+
+
+async def test_databases_with_store_events_false_has_file_rows_only(started_recorder):
+    rec = await started_recorder('sqlite', store_events=False)
+
+    own = (await _databases(rec))['own']
+
+    assert [row['kind'] for row in own] == ['live']
+
+
+async def test_databases_memory_count_stopped_by_the_limit_answers_empty_event_counts(started_recorder, monkeypatch):
+    rec = await started_recorder('none', events=3)
+    # Every statement of the row is stopped at its first check.
+    monkeypatch.setattr(memstore, 'PROGRESS_HANDLER_STEPS', 1)
+    monkeypatch.setattr(memstore, 'MEMORY_READ_LIMIT_SECONDS', -1.0)
+
+    (row,) = (await _databases(rec))['own']
+
+    assert row['kind'] == 'memory'
+    assert row['event_counts'] == {}
+    assert row['event_count'] == 4
+    assert row['cluster_name'] == 'fallback'
+
+
+async def test_databases_and_download_after_stop_answer_empty_shapes(started_recorder):
+    rec = await started_recorder('none')
+    app = MagicMock()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config.ui.release.enabled = False
+
+    # A store closed while the recorder still points at it (a read racing
+    # the stop): the guard answers nothing and no empty store is created.
+    store = rec.memory_store
+    await store.close()
+    async with make_client(rec.config, rec, app) as c:
+        racing = (await c.get('/api/v1/debug/databases')).json()
+        racing_download = await c.get('/api/v1/debug/download-live')
+    with contextlib.closing(sqlite3.connect(store.uri, uri=True)) as raw:
+        assert raw.execute("SELECT name FROM sqlite_master WHERE name = 'events'").fetchall() == []
+
+    await rec.stop()
+    async with make_client(rec.config, rec, app) as c:
+        stopped = (await c.get('/api/v1/debug/databases')).json()
+        stopped_download = await c.get('/api/v1/debug/download-live')
+
+    assert racing == stopped == {'own': [], 'history': {'folders': []}}
+    for resp in (racing_download, stopped_download):
+        assert resp.status_code == 404
+        assert resp.json() == {'error': 'No memory store on this worker'}

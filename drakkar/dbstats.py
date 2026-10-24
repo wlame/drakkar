@@ -13,6 +13,9 @@ events table is append-only with a monotonic integer id, so a refresh
 aggregates only the rows past the cached ``max_event_id`` and merges them
 into the cached counts. A cursor that goes backwards (the file was
 replaced) falls back to a full scan.
+
+The memory store of the recorder is not a file. Its row is measured on
+request too, with cheap numbers only: :func:`measure_memory_store`.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import threading
 import structlog
 
 from drakkar.merge import DbStats, _dict_factory, _table_exists, scan_db
+from drakkar.recorder.memstore import arm_read_limit, is_read_interrupted
 
 logger = structlog.get_logger()
 
@@ -143,3 +147,59 @@ def _delta_scan(path: str, prev: DbStats) -> DbStats | None:
     finally:
         if db is not None:
             db.close()
+
+
+def measure_memory_store(
+    conn: sqlite3.Connection, *, worker_name: str, fallback_cluster: str, event_count: int
+) -> dict:
+    """The memory row of the databases page, read on a by-name connection to the memory store. Blocking.
+
+    ``event_count`` comes from the caller (the id range the store holds), so
+    no ``COUNT(*)`` runs here. The first and last ``ts`` come from the
+    ``ts`` index, the per-event counts from one ``GROUP BY event`` over the
+    event index, and ``size_bytes`` is the data in use (pages in use times
+    the page size), not the memory the store holds. ``cluster_name`` comes
+    from the store's ``worker_config`` row, else ``fallback_cluster``. Every
+    statement runs under the memory read limit; a statement it stops
+    answers its empty part (no timestamps, ``{}``, the fallback cluster).
+    """
+    span = _bounded_rows(conn, 'SELECT MIN(ts), MAX(ts) FROM events')
+    first_ts, last_ts = span[0] if span else (None, None)
+    counts = _bounded_rows(conn, 'SELECT event, COUNT(*) FROM events GROUP BY event')
+    cluster_name = fallback_cluster
+    if _table_exists(conn, 'worker_config'):
+        config_rows = _bounded_rows(conn, 'SELECT cluster_name FROM worker_config WHERE id = 1')
+        if config_rows and config_rows[0][0]:
+            cluster_name = config_rows[0][0]
+    return {
+        'filename': f'{worker_name}-memory',
+        'worker_name': worker_name,
+        'cluster_name': cluster_name or None,
+        'kind': 'memory',
+        'event_count': event_count,
+        'event_counts': dict(counts or []),
+        'first_event_ts': first_ts,
+        'last_event_ts': last_ts,
+        'size_bytes': _used_bytes(conn),
+    }
+
+
+def _bounded_rows(conn: sqlite3.Connection, query: str) -> list[tuple] | None:
+    """The rows of ``query`` under the memory read limit; ``None`` when the limit stopped it."""
+    arm_read_limit(conn)
+    try:
+        return conn.execute(query).fetchall()
+    except sqlite3.OperationalError as exc:
+        if is_read_interrupted(exc):
+            return None
+        raise
+    finally:
+        # Disarmed again: the limit bounds this statement only.
+        conn.set_progress_handler(None, 0)
+
+
+def _used_bytes(conn: sqlite3.Connection) -> int:
+    page_count, freelist_count, page_size = (
+        conn.execute(f'PRAGMA {pragma}').fetchone()[0] for pragma in ('page_count', 'freelist_count', 'page_size')
+    )
+    return (page_count - freelist_count) * page_size

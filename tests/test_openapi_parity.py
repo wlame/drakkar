@@ -553,3 +553,33 @@ async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch
     payload = response.json()
     assert payload == {'tasks': [], 'lane_count': 4, 'truncated': False, 'unavailable': True}
     jsonschema.validate(payload, _resolve_schema(schemas, 'RecentTasks'), cls=jsonschema.Draft202012Validator)
+
+
+async def test_databases_payload_matches_schema(tmp_path):
+    """The memory row and the live row of ``/debug/databases`` match the vendored OwnDatabase schema."""
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+    storage = tmp_path / 'storage'
+    storage.mkdir()
+    cfg = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60)
+    recorder = EventRecorder(
+        cfg, worker_name='schema-worker', cluster_name='search', persistence='sqlite', storage_dir=str(storage)
+    )
+    await recorder.start()
+    try:
+        recorder._record({'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': 1})
+        await recorder.flush()
+        app = MagicMock()
+        app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        app._config.ui.release.enabled = False
+        transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            payload = (await client.get('/api/v1/debug/databases')).json()
+    finally:
+        await recorder.stop()
+
+    jsonschema.validate(payload, _resolve_schema(schemas, 'DatabasesResponse'), cls=jsonschema.Draft202012Validator)
+    own_schema = _resolve_schema(schemas, 'OwnDatabase')
+    for row in payload['own']:
+        jsonschema.validate(row, own_schema, cls=jsonschema.Draft202012Validator)
+    assert [row['kind'] for row in payload['own']] == ['memory', 'live']
+    assert payload['own'][0]['event_counts'] == {'consumed': 1}

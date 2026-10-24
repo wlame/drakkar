@@ -1,22 +1,27 @@
-"""``GET /api/v1/debug/download-live``: a consistent snapshot of the live recorder file.
+"""``GET /api/v1/debug/download-live``: a consistent snapshot of the live recorder file or the memory store.
 
-The snapshot is made with the SQLite backup API on its own read-only
+The file snapshot is made with the SQLite backup API on its own read-only
 connection (never the recorder's reader, which the UI reads through), into
 a private temp file in ``storage.dir`` that is gone once the answer starts.
+The memory snapshot goes through the open guard of the memory store: a
+stepped backup into a temp file in ``storage.dir`` when it is set, a copy
+in RAM otherwise.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import re
 import sqlite3
+import time
 from unittest.mock import MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.config import DrakkarConfig
-from drakkar.recorder import EventRecorder
+from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.server import create_ui_app
@@ -137,15 +142,6 @@ async def test_the_route_never_uses_the_recorders_reader(tmp_path, storage):
     assert recorder._reader_db.method_calls == []
 
 
-async def test_memory_only_answers_404(tmp_path):
-    client, _recorder = _client(tmp_path, memory_only=True)
-    async with client:
-        resp = await client.get('/api/v1/debug/download-live')
-
-    assert resp.status_code == 404
-    assert resp.json() == {'error': 'No live recorder file on this worker'}
-
-
 async def test_no_live_file_yet_answers_404(tmp_path, storage):
     client, _recorder = _client(tmp_path)
     async with client:
@@ -153,3 +149,231 @@ async def test_no_live_file_yet_answers_404(tmp_path, storage):
 
     assert resp.status_code == 404
     assert not os.listdir(storage)
+
+
+MEMORY_NAME_RE = re.compile(r'^w-1-memory-\d{4}-\d{2}-\d{2}__\d{2}_\d{2}_\d{2}\.db$')
+
+
+def _consumed(offset: int) -> dict:
+    return {'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': offset}
+
+
+@pytest.fixture
+async def started(tmp_path):
+    """Start recorders built in the test (``none`` or ``sqlite``) and stop them at the end."""
+    recorders: list[EventRecorder] = []
+
+    async def start(persistence: str, *, storage_dir: str = '', events: int = 3) -> EventRecorder:
+        config = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60)
+        rec = EventRecorder(
+            config,
+            worker_name='w-1',
+            cluster_name='search',
+            persistence=persistence,
+            storage_dir=storage_dir,
+        )
+        await rec.start()
+        recorders.append(rec)
+        await rec.write_config(_drakkar_config())
+        for offset in range(events):
+            rec._record(_consumed(offset))
+        await rec.flush()
+        return rec
+
+    yield start
+    for rec in recorders:
+        await rec.stop()
+
+
+def _drakkar_config() -> DrakkarConfig:
+    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    config.ui.release.enabled = False
+    return config
+
+
+def _client_of(rec: EventRecorder) -> AsyncClient:
+    drakkar_app = MagicMock()
+    drakkar_app._config = _drakkar_config()
+    app = create_ui_app(rec.config, rec, drakkar_app)
+    return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
+
+
+def _open_snapshot(data: bytes, tmp_path) -> sqlite3.Connection:
+    path = tmp_path / 'downloaded.db'
+    path.write_bytes(data)
+    return sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+
+
+def _assert_recorder_copy(conn: sqlite3.Connection, events: int) -> None:
+    assert conn.execute('SELECT COUNT(*) FROM events').fetchone() == (events,)
+    assert conn.execute('SELECT worker_name, cluster_name FROM worker_config').fetchone() == ('w-1', 'search')
+    assert conn.execute('PRAGMA journal_mode').fetchone() == ('delete',)
+
+
+@pytest.mark.parametrize('persistence', ['sqlite', 'none'])
+async def test_download_live_default_source(tmp_path, storage, started, persistence):
+    rec = await started(persistence, storage_dir=str(storage) if persistence == 'sqlite' else '', events=2)
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live')
+
+    assert resp.status_code == 200
+    disposition = resp.headers['content-disposition']
+    if persistence == 'sqlite':
+        assert disposition == f'attachment; filename="{os.path.basename(rec.db_path)}"'
+    else:
+        name = disposition.removeprefix('attachment; filename="').removesuffix('"')
+        assert MEMORY_NAME_RE.fullmatch(name)
+    assert resp.headers['content-type'] == 'application/x-sqlite3'
+    assert resp.headers['cache-control'] == 'no-store, private'
+    assert resp.headers['content-length'] == str(len(resp.content))
+    with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=2)
+
+
+async def test_download_live_source_memory_on_a_file_worker_serves_the_memory_store(tmp_path, storage, started):
+    rec = await started('sqlite', storage_dir=str(storage), events=2)
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'memory'})
+
+    assert resp.status_code == 200
+    assert 'w-1-memory-' in resp.headers['content-disposition']
+    with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=2)
+    assert sorted(p.name for p in storage.iterdir() if p.name.startswith('.')) == []
+
+
+async def test_download_live_source_file_without_a_file_answers_404(started):
+    rec = await started('none')
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'file'})
+
+    assert resp.status_code == 404
+    assert resp.json() == {'error': 'No live recorder file on this worker'}
+
+
+async def test_download_live_source_memory_without_a_store_answers_404(tmp_path):
+    # Never started: the recorder has no memory store.
+    client, _recorder = _client(tmp_path, memory_only=True)
+    async with client:
+        default = await client.get('/api/v1/debug/download-live')
+        memory = await client.get('/api/v1/debug/download-live', params={'source': 'memory'})
+
+    assert (default.status_code, memory.status_code) == (404, 404)
+    assert default.json() == memory.json() == {'error': 'No memory store on this worker'}
+
+
+async def test_download_live_unknown_source_answers_400(tmp_path):
+    client, _recorder = _client(tmp_path, memory_only=True)
+    async with client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'disk'})
+
+    assert resp.status_code == 400
+    assert resp.json() == {'error': 'source must be memory or file'}
+
+
+async def test_stepped_memory_snapshot_with_storage_dir(tmp_path, storage, started):
+    rec = await started('none', events=4)
+
+    with rec.open_memory_reader() as conn:
+        handle, name = routes_debug._snapshot_memory_stepped(conn, str(storage), 'w-1')
+    with handle:
+        data = handle.read()
+
+    assert MEMORY_NAME_RE.fullmatch(name)
+    with contextlib.closing(_open_snapshot(data, tmp_path)) as copy:
+        _assert_recorder_copy(copy, events=4)
+    assert os.listdir(storage) == []
+
+
+async def test_serialized_memory_snapshot_without_storage_dir(tmp_path, started):
+    rec = await started('none', events=4)
+
+    with rec.open_memory_reader() as conn:
+        data = routes_debug._snapshot_memory_serialized(conn)
+        # The read transaction is over: the connection is free again.
+        assert not conn.in_transaction
+
+    with contextlib.closing(_open_snapshot(data, tmp_path)) as copy:
+        _assert_recorder_copy(copy, events=4)
+
+
+def _writer_by_name(rec: EventRecorder) -> sqlite3.Connection:
+    """A read-write connection to the memory store, as a second writer between backup steps."""
+    conn = sqlite3.connect(rec.memory_store.uri, uri=True, check_same_thread=False)
+    conn.execute(f'PRAGMA busy_timeout = {memstore.BUSY_TIMEOUT_MS}')
+    return conn
+
+
+def _write_and_evict(conn: sqlite3.Connection) -> None:
+    """Append the next id and delete the oldest one, as a memory stage and an eviction would."""
+    low, high = conn.execute('SELECT MIN(id), MAX(id) FROM events').fetchone()
+    conn.execute('INSERT INTO events (id, ts, dt, event) VALUES (?, ?, ?, ?)', (high + 1, time.time(), '', 'consumed'))
+    conn.execute('DELETE FROM events WHERE id = ?', (low,))
+    conn.commit()
+
+
+async def test_stepped_snapshot_restarts_under_eviction_and_stays_consistent(tmp_path, storage, started, monkeypatch):
+    rec = await started('none', events=50)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_STEP_PAGES', 1)
+    writer = _writer_by_name(rec)
+    real_check = routes_debug._snapshot_step_check
+    steps: list[int] = []
+
+    def check_with_writes(deadline):
+        check = real_check(deadline)
+
+        def step(status, remaining, total):
+            steps.append(remaining)
+            # A write plus an eviction between the second and third steps,
+            # and between the third and fourth: each restarts the copy.
+            if len(steps) in (2, 3):
+                _write_and_evict(writer)
+            check(status, remaining, total)
+
+        return step
+
+    monkeypatch.setattr(routes_debug, '_snapshot_step_check', check_with_writes)
+    try:
+        with rec.open_memory_reader() as conn:
+            handle, _name = routes_debug._snapshot_memory_stepped(conn, str(storage), 'w-1')
+    finally:
+        writer.close()
+    with handle:
+        data = handle.read()
+
+    assert len(steps) > steps[0] + 1  # the copy started again at least once
+    with contextlib.closing(_open_snapshot(data, tmp_path)) as copy:
+        low, high, count = copy.execute('SELECT MIN(id), MAX(id), COUNT(*) FROM events').fetchone()
+        assert (low, high, count) == (3, 52, 50)
+        assert copy.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+
+
+async def test_stepped_snapshot_over_limit_answers_500(tmp_path, storage, started, monkeypatch):
+    rec = await started('none', storage_dir=str(storage), events=50)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_STEP_PAGES', 1)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
+    writer = _writer_by_name(rec)
+    real_check = routes_debug._snapshot_step_check
+
+    def check_with_a_write_every_step(deadline):
+        check = real_check(deadline)
+
+        def step(status, remaining, total):
+            _write_and_evict(writer)
+            check(status, remaining, total)
+
+        return step
+
+    monkeypatch.setattr(routes_debug, '_snapshot_step_check', check_with_a_write_every_step)
+    try:
+        async with _client_of(rec) as client:
+            resp = await client.get('/api/v1/debug/download-live', params={'source': 'memory'})
+    finally:
+        writer.close()
+
+    assert resp.status_code == 500
+    assert resp.json() == {'error': 'Snapshot failed: the memory store copy did not finish in 0.1 s'}
+    assert os.listdir(storage) == []
