@@ -552,6 +552,100 @@ async def test_failed_rollback_is_logged_and_retried_by_the_next_stage(none_reco
     assert await _memory_ids(rec) == [1, 2]
 
 
+async def test_final_error_with_a_failed_gap_delete_stops_the_stage_and_keeps_one_range(none_recorder, monkeypatch):
+    rec = none_recorder
+    monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', SMALL_CHUNK_ROWS)
+    _fail_memory_writes(monkeypatch, rec, {2: SQLITE_FULL})
+    real_delete = core_mod.delete_id_prefix
+    attempts: list[int] = []
+
+    async def failing_once(conn, below_id):
+        attempts.append(below_id)
+        if len(attempts) == 1:
+            return PrefixDeletion(0, None, _sqlite_error(SQLITE_FULL))
+        return await real_delete(conn, below_id)
+
+    monkeypatch.setattr(core_mod, 'delete_id_prefix', failing_once)
+    _record_many(rec, 10)
+
+    await rec.flush_memory()
+
+    assert await _memory_ids(rec) == [1, 2, 3, 4]
+    assert [event['offset'] for event in rec._intake] == [8, 9]
+    assert rec._next_id == 9
+
+    await rec.flush_memory()
+
+    assert attempts == [9, 9]
+    assert await _memory_ids(rec) == [9, 10]
+    coverage = rec.memory_coverage()
+    assert (coverage.floor_id, coverage.last_id) == (9, 10)
+
+
+async def test_gap_delete_with_a_failed_rollback_logs_it_and_the_next_stage_rolls_back_first(
+    none_recorder, monkeypatch
+):
+    rec = none_recorder
+    _fail_memory_writes(monkeypatch, rec, {1: SQLITE_FULL})
+    real_delete = core_mod.delete_id_prefix
+    calls: list[str] = []
+    deletes: list[int] = []
+
+    async def failing_once(conn, below_id):
+        calls.append('delete')
+        deletes.append(below_id)
+        if len(deletes) == 1:
+            return PrefixDeletion(0, None, _sqlite_error(SQLITE_FULL), sqlite3.OperationalError('rollback failed'))
+        return await real_delete(conn, below_id)
+
+    writer = rec.memory_store.writer
+    real_rollback = writer.rollback
+
+    async def rollback():
+        calls.append('rollback')
+        return await real_rollback()
+
+    monkeypatch.setattr(core_mod, 'delete_id_prefix', failing_once)
+    monkeypatch.setattr(writer, 'rollback', rollback)
+    _record_many(rec, 2)
+
+    with capture_logs() as captured:
+        await rec.flush_memory()
+
+    lines = _logs(captured, 'recorder_memory_eviction_failed')
+    assert [(line['reason'], line['rollback_error']) for line in lines] == [('gap', 'rollback failed')]
+    assert rec._memory_dirty
+    calls.clear()
+
+    _record_many(rec, 1, first_offset=2)
+    await rec.flush_memory()
+
+    assert calls == ['rollback', 'delete']
+    assert await _memory_ids(rec) == [3]
+
+
+async def test_repeated_rollback_failures_log_once_per_minute_with_the_suppressed_count(none_recorder, monkeypatch):
+    rec = none_recorder
+    clock = _fake_clock_log(rec)
+    writer = rec.memory_store.writer
+    _fail_memory_writes(monkeypatch, rec, {1: SQLITE_BUSY})
+    real_rollback = writer.rollback
+    monkeypatch.setattr(writer, 'rollback', AsyncMock(side_effect=sqlite3.OperationalError('cannot roll back')))
+    _record_many(rec, 2)
+
+    with capture_logs() as captured:
+        for _ in range(3):
+            await rec.flush_memory()
+        clock[0] += 61
+        await rec.flush_memory()
+
+    lines = _logs(captured, 'recorder_memory_rollback_failed')
+    assert [(line['log_level'], line['suppressed']) for line in lines] == [('warning', 0), ('warning', 2)]
+    monkeypatch.setattr(writer, 'rollback', real_rollback)
+    await rec.flush_memory()
+    assert await _memory_ids(rec) == [1, 2]
+
+
 async def test_stage_m_chunk_cancelled_by_stop_with_none_is_written_by_the_final_stage(monkeypatch):
     rec = _recorder('none', flush_interval_seconds=1, max_buffer=1000)
     await rec.start()
@@ -659,6 +753,105 @@ async def test_write_config_writes_memory_and_file_and_rotation_rewrites_the_new
     await rec._rotate()
 
     assert memory_rows == [(WORKER,)]
+    conn = sqlite3.connect(rec.db_path)
+    try:
+        assert conn.execute('SELECT worker_name FROM worker_config').fetchall() == [(WORKER,)]
+    finally:
+        conn.close()
+
+
+def _drakkar_config():
+    from drakkar.config import DrakkarConfig, ExecutorConfig
+
+    return DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}})
+
+
+async def test_write_config_rolls_back_an_open_chunk_before_its_memory_commit(none_recorder):
+    rec = none_recorder
+    writer = rec.memory_store.writer
+    await writer.execute("INSERT INTO events (id, ts, dt, event) VALUES (1, 1.0, 'x', 'consumed')")
+    rec._memory_dirty = True
+
+    await rec.write_config(_drakkar_config())
+
+    _, events = await rec.memory_store.read('SELECT count(*) FROM events')
+    _, config_rows = await rec.memory_store.read('SELECT worker_name FROM worker_config')
+    assert events == [(0,)]
+    assert config_rows == [(WORKER,)]
+    assert not rec._memory_dirty
+
+
+async def test_write_config_writes_the_file_when_the_memory_write_fails(sqlite_recorder, monkeypatch):
+    rec = sqlite_recorder
+    memory_writer = rec.memory_store.writer
+    real_insert = rec._insert_config_row
+
+    async def insert(db, row):
+        if db is memory_writer:
+            raise _sqlite_error(SQLITE_FULL)
+        await real_insert(db, row)
+
+    monkeypatch.setattr(rec, '_insert_config_row', insert)
+
+    with capture_logs() as captured:
+        await rec.write_config(_drakkar_config())
+
+    lines = _logs(captured, 'recorder_memory_config_write_failed')
+    assert [(line['log_level'], line['suppressed']) for line in lines] == [('warning', 0)]
+    conn = sqlite3.connect(rec.db_path)
+    try:
+        assert conn.execute('SELECT worker_name FROM worker_config').fetchall() == [(WORKER,)]
+    finally:
+        conn.close()
+
+
+async def test_cancelled_caller_does_not_cancel_the_file_stage_of_a_flush(sqlite_recorder, monkeypatch):
+    rec = sqlite_recorder
+    gate = asyncio.Event()
+    waiting = _block_writes(monkeypatch, rec._db, gate)
+    _record_many(rec, 3)
+
+    read = asyncio.create_task(rec.flush())
+    await asyncio.wait_for(waiting.wait(), WAIT_SECONDS)
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+    gate.set()
+    async with rec._flush_lock:
+        pass
+
+    assert _file_ids(rec.db_path) == [1, 2, 3]
+    assert len(rec._file_queue) == 0
+
+
+async def test_sqlite_sequence_of_the_file_is_the_largest_explicit_id(sqlite_recorder):
+    rec = sqlite_recorder
+    _record_many(rec, 7)
+    await rec.flush()
+    _record_many(rec, 5, first_offset=7)
+    await rec.flush()
+
+    conn = sqlite3.connect(rec.db_path)
+    try:
+        sequence = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
+        largest = conn.execute('SELECT MAX(id) FROM events').fetchone()
+    finally:
+        conn.close()
+    assert sequence == largest == (12,)
+
+
+async def test_write_config_skips_memory_when_an_open_chunk_cannot_be_rolled_back(sqlite_recorder, monkeypatch):
+    rec = sqlite_recorder
+    writer = rec.memory_store.writer
+    rec._memory_dirty = True
+    monkeypatch.setattr(writer, 'rollback', AsyncMock(side_effect=sqlite3.OperationalError('cannot roll back')))
+
+    with capture_logs() as captured:
+        await rec.write_config(_drakkar_config())
+
+    assert len(_logs(captured, 'recorder_memory_config_write_failed')) == 1
+    _, config_rows = await rec.memory_store.read('SELECT count(*) FROM worker_config')
+    assert config_rows == [(0,)]
     conn = sqlite3.connect(rec.db_path)
     try:
         assert conn.execute('SELECT worker_name FROM worker_config').fetchall() == [(WORKER,)]

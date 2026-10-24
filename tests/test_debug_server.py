@@ -777,7 +777,7 @@ async def _start_live_recorder(tmp_path):
     """Spin up a real EventRecorder with on-disk SQLite for endpoint tests.
 
     Short flush interval so buffered events land in the DB before the
-    endpoint reads — the endpoint itself also ``await recorder._flush()``s
+    endpoint reads — the endpoint itself also ``await recorder.flush()``s
     defensively, but the fixture helper avoids relying on that alone.
     """
     from drakkar.recorder import EventRecorder
@@ -1755,7 +1755,6 @@ class TestApiEvents:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -1884,7 +1883,6 @@ class TestApiRecentTasks:
         # the endpoint reads recorder.config.ws_min_duration_ms).
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
-        mock_recorder._buffer = []
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2089,7 +2087,6 @@ class TestApiTimelineEvents:
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
-        mock_recorder._buffer = []
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2185,7 +2182,6 @@ class TestApiRecentTasksDepthAndWindow:
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
-        mock_recorder._buffer = []
         if not pool_present:
             mock_app._executor_pool = None
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2592,7 +2588,6 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2628,7 +2623,6 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -3485,7 +3479,6 @@ class TestApiPeriodicTasks:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
 
         mock_recorder.storage_dir = str(tmp_path)
@@ -3529,7 +3522,6 @@ class TestApiPeriodicTasks:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
 
         mock_recorder.storage_dir = str(tmp_path)
@@ -3602,7 +3594,6 @@ class TestApiLabelTrace:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
         mock_recorder._worker_name = 'test-worker'
         mock_recorder._cluster_name = ''
@@ -3653,7 +3644,6 @@ class TestApiLabelTrace:
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = cfg
 
         mock_recorder.storage_dir = '/tmp'
@@ -4338,7 +4328,6 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
         mock_recorder._reader_db = observer
         mock_recorder.reader_db = observer
         mock_recorder.flush = AsyncMock()
-        mock_recorder._buffer = []
         mock_recorder.config = debug_config
         mock_app.main_loop = main_loop
 
@@ -4389,7 +4378,6 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     mock_recorder._reader_db = db
     mock_recorder.reader_db = db
     mock_recorder.flush = AsyncMock()
-    mock_recorder._buffer = []
     mock_recorder.config = debug_config
     # ``mock_app.main_loop`` is a ``MagicMock`` by default; the helper
     # should see it's not an ``asyncio.AbstractEventLoop`` and execute
@@ -4534,7 +4522,6 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
     # spec routes calls through the real attribute name.
     mock_recorder.flush = _flush
     mock_recorder.config = debug_config
-    mock_recorder._buffer = []
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4575,7 +4562,6 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
     # above for rationale.
     mock_recorder.flush = _flush
     mock_recorder.config = debug_config
-    mock_recorder._buffer = []
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4608,7 +4594,6 @@ async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
     mock_recorder.reader_db = None
     mock_recorder.flush = AsyncMock()
     mock_recorder.config = debug_config
-    mock_recorder._buffer = []
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4640,7 +4625,6 @@ async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
     monkeypatch.setattr(UIDeps, 'dispatch_bounded', never_answers)
 
     mock_recorder.config = debug_config
-    mock_recorder._buffer = []
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4690,7 +4674,6 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     mock_recorder._reader_db = reader
     mock_recorder.reader_db = reader
     mock_recorder.flush = AsyncMock()
-    mock_recorder._buffer = []
     mock_recorder.config = debug_config
 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)

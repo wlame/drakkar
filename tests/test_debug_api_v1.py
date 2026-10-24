@@ -1398,7 +1398,6 @@ async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_re
     mock_recorder._reader_db = db
     mock_recorder.reader_db = db
     mock_recorder.flush = AsyncMock()
-    mock_recorder._intake = []
     mock_recorder.config = debug_config
     mock_recorder.storage_dir = str(tmp_path)
 

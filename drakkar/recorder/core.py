@@ -872,14 +872,42 @@ class EventRecorder(EventWriter):
         if not self._store.store_config:
             return
         row = self._config_row(drakkar_config)
-        store = self._memory_store
-        if store is not None:
-            # Under the memory lock: a stage M between its insert and its
-            # commit must not commit, or roll back, this row with its chunk.
-            async with self._memory_lock:
-                await self._insert_config_row(store.writer, row)
+        await self._write_config_to_memory(row)
         if self._db:
             await self._insert_config_row(self._db, row)
+
+    async def _write_config_to_memory(self, row: list[Any]) -> None:
+        """Write the worker_config row into the memory store; a failure is logged and never stops the file write."""
+        store = self._memory_store
+        if store is None:
+            return
+        # Under the memory lock: a stage M between its insert and its commit
+        # must not commit, or roll back, this row with its chunk.
+        async with self._memory_lock:
+            if not store.is_open:
+                return
+            writer = store.writer
+            # An earlier chunk's open transaction would be committed with
+            # this row; the gap delete may run here too, it is harmless.
+            await self._settle_previous_chunk(writer)
+            if self._memory_dirty:
+                await self._log_config_memory_failure('the memory writer holds a transaction it cannot roll back')
+                return
+            try:
+                await self._insert_config_row(writer, row)
+            except sqlite3.Error as exc:
+                self._memory_dirty = True
+                await self._rollback_memory(writer)
+                await self._log_config_memory_failure(str(exc))
+
+    async def _log_config_memory_failure(self, error: str) -> None:
+        await self._memory_log.emit(
+            'recorder_memory_config_write_failed',
+            logger.awarning,
+            'recorder_memory_config_write_failed',
+            category='recorder',
+            error=error,
+        )
 
     async def _write_config_to_file(self) -> None:
         """Write the worker_config row into the current file only (a new file after a rotation)."""
@@ -1359,7 +1387,12 @@ class EventRecorder(EventWriter):
             if store is None or not store.is_open:
                 return
             writer = store.writer
-            await self._settle_previous_chunk(writer)
+            if not await self._settle_previous_chunk(writer):
+                # A gap or an open transaction is still there: writing now
+                # would break the one contiguous id range. The next tick
+                # tries again; the intake keeps its rows.
+                self._update_buffer_gauge()
+                return
             # Snapshot the depth: events appended while this stage awaits
             # ride along on the next tick rather than extending this one
             # indefinitely under a fast producer.
@@ -1385,12 +1418,19 @@ class EventRecorder(EventWriter):
     async def _evict(self, evict_min_interval: float) -> None:
         """The eviction pass at the end of a stage M, under ``_memory_lock``; it removes nothing yet."""
 
-    async def _settle_previous_chunk(self, writer: aiosqlite.Connection) -> None:
-        """Before a stage M writes: roll back a cancelled chunk's transaction and delete a pending gap."""
+    async def _settle_previous_chunk(self, writer: aiosqlite.Connection) -> bool:
+        """Before a memory write: roll back an earlier chunk's open transaction and delete a pending gap.
+
+        Returns whether the writer is clean: no open transaction left and no
+        gap waiting. A stage M writes no chunk otherwise.
+        """
         if self._memory_dirty:
             await self._rollback_memory(writer)
+            if self._memory_dirty:
+                return False
         if self._pending_gap_id is not None:
-            await self._delete_pending_gap(writer)
+            return await self._delete_pending_gap(writer)
+        return True
 
     async def _write_memory_chunk(self, writer: aiosqlite.Connection, batch: list[dict], rows: list[tuple]) -> bool:
         """Write one chunk to the memory store; return whether the stage goes on.
@@ -1400,7 +1440,10 @@ class EventRecorder(EventWriter):
         the intake and gives its ids back: the stage stops and the next tick
         retries it, so nothing is dropped. A final error keeps the store one
         contiguous range: the chunk goes to the file queue (with a file) or
-        is lost, and every memory row up to its last id is deleted.
+        is lost, and every memory row up to its last id is deleted. When
+        that rollback or delete fails, the stage stops too, so no later
+        chunk lands above the rows still to delete; the next stage M
+        deletes them first.
 
         A cancelled write (``stop()``) does only synchronous bookkeeping:
         without a file the chunk goes back to the intake with its ids, and
@@ -1433,8 +1476,6 @@ class EventRecorder(EventWriter):
                 return False
             self._keep_rows_without_memory(rows)
             recorder_memory_write_failures.inc()
-            await self._rollback_memory(writer)
-            await self._delete_pending_gap(writer)
             await self._memory_log.emit(
                 'recorder_memory_write_failed',
                 logger.aerror,
@@ -1443,7 +1484,7 @@ class EventRecorder(EventWriter):
                 error=str(exc),
                 batch_size=len(batch),
             )
-            return True
+            return await self._settle_previous_chunk(writer)
         finally:
             if not settled:
                 # Cancelled mid-write. Everything here is synchronous: an
@@ -1479,11 +1520,16 @@ class EventRecorder(EventWriter):
         # ``ts`` is the second column of a row tuple.
         self._evicted_max_ts = max(self._evicted_max_ts, max(row[1] for row in rows))
 
-    async def _delete_pending_gap(self, writer: aiosqlite.Connection) -> None:
-        """Delete the memory rows up to the pending gap id, in eviction batches; keep it pending on failure."""
+    async def _delete_pending_gap(self, writer: aiosqlite.Connection) -> bool:
+        """Delete the memory rows up to the pending gap id, in eviction batches; return whether it is done.
+
+        On failure the gap stays pending. When the rollback after the failed
+        batch fails too, the writer is marked dirty, so the next memory
+        write rolls it back first.
+        """
         gap_id = self._pending_gap_id
         if gap_id is None:
-            return
+            return True
         result = await delete_id_prefix(writer, gap_id + 1)
         if result.deleted:
             recorder_memory_evicted_rows.labels(reason='gap').inc(result.deleted)
@@ -1491,22 +1537,32 @@ class EventRecorder(EventWriter):
             self._evicted_max_ts = max(self._evicted_max_ts, result.max_ts)
         if result.error is None:
             self._pending_gap_id = None
-            return
+            return True
+        fields: dict[str, Any] = {'error': str(result.error), 'reason': 'gap'}
+        if result.rollback_error is not None:
+            self._memory_dirty = True
+            fields['rollback_error'] = str(result.rollback_error)
         await self._memory_log.emit(
             'recorder_memory_eviction_failed',
             logger.awarning,
             'recorder_memory_eviction_failed',
             category='recorder',
-            error=str(result.error),
-            reason='gap',
+            **fields,
         )
+        return False
 
     async def _rollback_memory(self, writer: aiosqlite.Connection) -> None:
         """Roll back the memory writer's open transaction, if any."""
         try:
             await writer.rollback()
         except sqlite3.Error as exc:
-            await logger.awarning('recorder_memory_rollback_failed', category='recorder', error=str(exc))
+            await self._memory_log.emit(
+                'recorder_memory_rollback_failed',
+                logger.awarning,
+                'recorder_memory_rollback_failed',
+                category='recorder',
+                error=str(exc),
+            )
             return
         self._memory_dirty = False
 

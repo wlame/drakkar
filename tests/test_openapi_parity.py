@@ -294,7 +294,6 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     recorder._reader_db = db
     recorder.reader_db = db
     recorder.flush = AsyncMock()
-    recorder._intake = []
     recorder.config = cfg
     app = MagicMock()
     app._worker_id = 'schema-worker'
@@ -369,7 +368,6 @@ async def test_timeline_events_payload_matches_schema():
     recorder._reader_db = db
     recorder.reader_db = db
     recorder.flush = AsyncMock()
-    recorder._intake = []
     recorder.config = cfg
     app = MagicMock()
     app._worker_id = 'schema-worker'

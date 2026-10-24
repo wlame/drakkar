@@ -589,3 +589,26 @@ async def test_delete_id_prefix_keeps_committed_batches_when_a_later_one_fails(s
     assert isinstance(result.error, sqlite3.OperationalError)
     _, rows = await store.read('SELECT MIN(id) FROM events')
     assert rows == [(EVICT_BATCH_ROWS + 1,)]
+
+
+async def test_delete_id_prefix_reports_a_failed_rollback_and_counts_no_failed_batch(store, monkeypatch):
+    await _fill_events(store, 10)
+    writer = store.writer
+    real_execute = writer.execute
+
+    def execute(sql, params=()):
+        if sql.startswith('DELETE'):
+            raise sqlite3.OperationalError('database or disk is full')
+        return real_execute(sql, params)
+
+    async def failing_rollback():
+        raise sqlite3.OperationalError('cannot roll back')
+
+    monkeypatch.setattr(writer, 'execute', execute)
+    monkeypatch.setattr(writer, 'rollback', failing_rollback)
+
+    result = await delete_id_prefix(writer, 11)
+
+    assert result.deleted == 0
+    assert str(result.error) == 'database or disk is full'
+    assert str(result.rollback_error) == 'cannot roll back'

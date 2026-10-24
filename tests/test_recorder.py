@@ -1001,7 +1001,7 @@ async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path, unique_
     """A flush running concurrently with _rotate must never hit 'no such table'.
 
     This exercises the real race that motivated the fix: _rotate previously
-    swapped self._db first and then created the schema, so a _flush_loop
+    swapped self._db first and then created the schema, so a file loop
     iteration interleaved between the swap and the schema-creation would
     execute INSERT against a schemaless file.
 

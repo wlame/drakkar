@@ -109,11 +109,17 @@ class MemoryCoverage:
 
 @dataclass(frozen=True)
 class PrefixDeletion:
-    """What :func:`delete_id_prefix` removed: the row count, the largest ``ts`` among them, and the error that ended it."""
+    """What :func:`delete_id_prefix` removed: the row count, the largest ``ts`` among them, and the error that ended it.
+
+    ``rollback_error`` is set when the rollback after ``error`` failed too:
+    the connection may then still hold the open transaction of the failed
+    batch, and the caller must roll it back before its next write.
+    """
 
     deleted: int
     max_ts: float | None
     error: sqlite3.Error | None = None
+    rollback_error: sqlite3.Error | None = None
 
 
 async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixDeletion:
@@ -122,7 +128,9 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
     Before each batch, ``MAX(ts)`` of the rows about to go is read, so the
     caller can keep the largest removed ``ts``. A failed statement rolls
     back the open batch and ends the deletion; the batches committed before
-    it stay deleted and are counted in the result, with the error.
+    it stay deleted and are counted in the result, with the error. The
+    failed batch is never counted: it is rolled back, or, when the rollback
+    fails as well, still open, which ``rollback_error`` reports.
     """
     deleted = 0
     max_ts: float | None = None
@@ -144,8 +152,10 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
             if batch_max_ts is not None:
                 max_ts = batch_max_ts if max_ts is None else max(max_ts, batch_max_ts)
     except sqlite3.Error as exc:
-        with contextlib.suppress(sqlite3.Error):
+        try:
             await conn.rollback()
+        except sqlite3.Error as rollback_exc:
+            return PrefixDeletion(deleted, max_ts, exc, rollback_exc)
         return PrefixDeletion(deleted, max_ts, exc)
     return PrefixDeletion(deleted, max_ts)
 
