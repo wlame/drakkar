@@ -10,11 +10,17 @@ The texts are pinned by ``tests/fixtures/fleet_providers.json`` so the emitted
 bytes are identical for any implementation. ``{schema}`` in a text stands for
 the schema of the connection; it is validated as a lower-case identifier when
 the config loads, so a plain replace is safe.
+
+The recorder events table of the ``postgres`` recorder mode has its own part of
+the corpus below the providers' part: the start DDL, the hourly partitions,
+the upkeep and search statements, the COPY columns and the names.
 """
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -97,6 +103,161 @@ MISSING_TABLE_MESSAGE = (
 )
 
 
+RECORDER_TABLE = 'recorder_events'
+RECORDER_FEATURE = 'recorder'
+RECORDER_PLACEHOLDERS: tuple[str, ...] = ('{schema}', '{table}', '{partition}', '{from}', '{to}', '{retention_hours}')
+
+# Run in this order when the table is missing and the schema is managed. The
+# GIN index has no pending list (fastupdate = off): with one, the pending-list
+# flush lands inside some COPYs and makes the slow tail of the writes longer.
+RECORDER_DDL_TEMPLATES: tuple[str, ...] = (
+    'CREATE SCHEMA IF NOT EXISTS {schema}',
+    'CREATE TABLE IF NOT EXISTS {schema}.{table} (\n'
+    '    cluster        text             NOT NULL,\n'
+    '    worker         text             NOT NULL,\n'
+    '    instance       text             NOT NULL,\n'
+    '    id             bigint           NOT NULL,\n'
+    '    ts             double precision NOT NULL,\n'
+    '    dt             text             NOT NULL,\n'
+    '    event          text             NOT NULL,\n'
+    '    "partition"    integer,\n'
+    '    "offset"       bigint,\n'
+    '    task_id        text,\n'
+    '    args           text,\n'
+    '    stdout_size    bigint,\n'
+    '    stdout         text,\n'
+    '    stderr         text,\n'
+    '    exit_code      integer,\n'
+    '    duration       double precision,\n'
+    '    output_topic   text,\n'
+    '    metadata       text,\n'
+    '    pid            integer,\n'
+    '    labels         text,\n'
+    '    origin         text             NOT NULL,\n'
+    '    client_name    text,\n'
+    '    request_id     text,\n'
+    '    trace_offsets  bigint[],\n'
+    '    PRIMARY KEY (instance, id, ts)\n'
+    ') PARTITION BY RANGE (ts)',
+    "COMMENT ON TABLE {schema}.{table} IS 'retention_hours={retention_hours}'",
+    'CREATE INDEX IF NOT EXISTS {table}_partition_offset_idx ON {schema}.{table} ("partition", "offset")',
+    'CREATE INDEX IF NOT EXISTS {table}_task_id_idx ON {schema}.{table} (task_id)',
+    'CREATE INDEX IF NOT EXISTS {table}_trace_offsets_idx ON {schema}.{table} USING gin (trace_offsets) '
+    'WITH (fastupdate = off) WHERE trace_offsets IS NOT NULL',
+)
+
+# One partition per UTC hour; {from} and {to} are whole epoch seconds.
+PARTITION_DDL_TEMPLATES: dict[str, str] = {
+    'create': 'CREATE TABLE IF NOT EXISTS {schema}.{partition} PARTITION OF {schema}.{table} FOR VALUES FROM ({from}) TO ({to})',
+    'drop': 'DROP TABLE IF EXISTS {schema}.{partition}',
+}
+
+# The recorder's own statements. ``check_table`` and ``ddl_lock`` are shared
+# with the providers and live in STATEMENT_TEMPLATES.
+_TRACE_COLUMNS = (
+    'e.instance, e.worker, e.id, e.ts, e.dt, e.event, e."partition", e."offset", e.task_id, e.args, '
+    'e.stdout_size, e.stdout, e.stderr, e.exit_code, e.duration, e.output_topic, e.metadata, e.pid, e.labels, '
+    'e.origin, e.client_name, e.request_id'
+)
+RECORDER_STATEMENT_TEMPLATES: dict[str, str] = {
+    # SET takes no bind parameter; set_config with true is local to the transaction.
+    'set_local': 'SELECT set_config($1, $2, true)',
+    'try_lock': 'SELECT pg_try_advisory_xact_lock(hashtext($1))',
+    'server_now': 'SELECT extract(epoch FROM now())::float8',
+    'retention_read': "SELECT obj_description(to_regclass($1), 'pg_class')",
+    'partitions_list': (
+        'SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid '
+        'WHERE i.inhparent = to_regclass($1) ORDER BY c.relname'
+    ),
+    # Three branches, each served by its own index, joined by UNION ALL; the
+    # key-only DISTINCT ON removes a row two branches found without hashing the
+    # output texts. No join back to the table: with many partitions that join
+    # turns into a hash join that reads every partition.
+    'trace': (
+        f'WITH hits AS ( SELECT {_TRACE_COLUMNS} FROM {{schema}}.{{table}} e '
+        'WHERE e.cluster = $1 AND e."partition" = $2 AND e."offset" = $3::bigint '
+        f'UNION ALL SELECT {_TRACE_COLUMNS} FROM {{schema}}.{{table}} e '
+        'WHERE e.cluster = $1 AND e."partition" = $2 AND e.task_id IN ( SELECT s.task_id FROM {schema}.{table} s '
+        'WHERE s.cluster = $1 AND s."partition" = $2 AND s.event = \'task_started\' '
+        'AND s.trace_offsets @> ARRAY[$3::bigint]) '
+        f'UNION ALL SELECT {_TRACE_COLUMNS} FROM {{schema}}.{{table}} e '
+        "WHERE e.cluster = $1 AND e.\"partition\" = $2 AND e.event IN ('annotation', 'offload') "
+        'AND e.trace_offsets @> ARRAY[$3::bigint]) '
+        'SELECT d.id, d.ts, d.dt, d.event, d."partition", d."offset", d.task_id, d.args, d.stdout_size, d.stdout, '
+        'd.stderr, d.exit_code, d.duration, d.output_topic, d.metadata, d.pid, d.labels, d.origin, d.client_name, '
+        'd.request_id, d.worker AS worker_name '
+        'FROM (SELECT DISTINCT ON (h.instance, h.id, h.ts) h.* FROM hits h ORDER BY h.instance, h.id, h.ts) d '
+        'ORDER BY d.ts, d.worker, d.instance, d.id'
+    ),
+}
+
+# The writer identity, the 20 recorder event columns in their pinned order,
+# then the trace index column. Written out rather than derived, so this module
+# stays free of the recorder package.
+COPY_COLUMNS: tuple[str, ...] = (
+    'cluster',
+    'worker',
+    'instance',
+    'id',
+    'ts',
+    'dt',
+    'event',
+    'partition',
+    'offset',
+    'task_id',
+    'args',
+    'stdout_size',
+    'stdout',
+    'stderr',
+    'exit_code',
+    'duration',
+    'output_topic',
+    'metadata',
+    'pid',
+    'labels',
+    'origin',
+    'client_name',
+    'request_id',
+    'trace_offsets',
+)
+
+PARTITIONS_AHEAD_HOURS = 3
+PARTITION_MAINTENANCE_SECONDS = 300
+LOCK_TIMEOUT_MS = 3000
+POSTGRES_CHUNK_MAX_BYTES = 4 * 1024 * 1024
+POSTGRES_CHUNK_FINAL_FAILURES = 2
+SQLSTATE_UNIQUE_VIOLATION = '23505'
+SQLSTATE_CHECK_VIOLATION = '23514'
+SQLSTATE_LOCK_NOT_AVAILABLE = '55P03'
+SECONDS_PER_HOUR = 3600
+RETENTION_HOURS_MIN = 1
+RETENTION_HOURS_MAX = 168
+
+# Values the recorder passes to set_local; statement_timeout gets the search's
+# time limit in whole milliseconds.
+SETTING_JIT = 'jit'
+SETTING_LOCK_TIMEOUT = 'lock_timeout'
+SETTING_SYNCHRONOUS_COMMIT = 'synchronous_commit'
+STATEMENT_TIMEOUT_SETTING = 'statement_timeout'
+SET_LOCAL_VALUES: dict[str, str] = {
+    SETTING_JIT: 'off',
+    SETTING_LOCK_TIMEOUT: str(LOCK_TIMEOUT_MS),
+    SETTING_SYNCHRONOUS_COMMIT: 'off',
+}
+
+RECORDER_MISSING_TABLE_MESSAGE = (
+    'table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; '
+    'create it with: {command}'
+)
+RECORDER_MISSING_TABLE_COMMAND = (
+    'drakkar-schema postgres --schema={schema} --recorder --retention-hours={retention_hours}'
+)
+RECORDER_MISSING_TABLE_PREFIX_FLAG = ' --table-prefix={prefix}'
+
+_PARTITION_DIGITS = 10
+_RETENTION_COMMENT_RE = re.compile(r'retention_hours=([0-9]+)')
+
+
 def render(template: str, schema: str) -> str:
     """Return ``template`` with every ``{schema}`` replaced by ``schema``."""
     return template.replace(SCHEMA_PLACEHOLDER, schema)
@@ -120,6 +281,107 @@ def render_schema_sql(schema: str) -> str:
 def missing_table_message(schema: str, table: str, connection: str) -> str:
     """Return the error text for a table that is absent while the schema is not managed."""
     return MISSING_TABLE_MESSAGE.format(schema=schema, table=table, connection=connection)
+
+
+def recorder_table_name(prefix: str) -> str:
+    """Return the events table name: ``recorder_events``, or ``<prefix>_recorder_events``."""
+    return f'{prefix}_{RECORDER_TABLE}' if prefix else RECORDER_TABLE
+
+
+def partition_name(table: str, hour: int) -> str:
+    """Return the name of the partition of epoch hour ``hour``: ``{table}_pYYYYMMDDHH`` in UTC."""
+    moment = datetime.fromtimestamp(hour * SECONDS_PER_HOUR, UTC)
+    # Formatted by hand: strftime does not pad a year below 1000 on every platform.
+    return f'{table}_p{moment.year:04d}{moment.month:02d}{moment.day:02d}{moment.hour:02d}'
+
+
+def partition_bounds(hour: int) -> tuple[int, int]:
+    """Return the ``ts`` range of the partition of epoch hour ``hour``, in whole epoch seconds."""
+    return hour * SECONDS_PER_HOUR, (hour + 1) * SECONDS_PER_HOUR
+
+
+def parse_partition_hour(table: str, name: str) -> int | None:
+    """Return the epoch hour of a partition name of ``table``, or ``None`` when the name is not one.
+
+    The name must be ``{table}_p`` and ten digits that form a real UTC hour,
+    and it must be exactly the name :func:`partition_name` gives for that hour.
+    """
+    match = re.fullmatch(re.escape(table) + rf'_p([0-9]{{{_PARTITION_DIGITS}}})', name)
+    if match is None:
+        return None
+    digits = match.group(1)
+    try:
+        moment = datetime(int(digits[:4]), int(digits[4:6]), int(digits[6:8]), int(digits[8:]), tzinfo=UTC)
+    except ValueError:
+        return None
+    hour = int(moment.timestamp()) // SECONDS_PER_HOUR
+    return hour if partition_name(table, hour) == name else None
+
+
+def parse_retention_comment(text: str | None) -> int | None:
+    """Return the retention stored in a table comment, or ``None`` when the comment holds no valid one.
+
+    Valid is exactly ``retention_hours=<digits>`` with a value from 1 to 168.
+    """
+    if text is None:
+        return None
+    match = _RETENTION_COMMENT_RE.fullmatch(text)
+    if match is None:
+        return None
+    hours = int(match.group(1))
+    return hours if RETENTION_HOURS_MIN <= hours <= RETENTION_HOURS_MAX else None
+
+
+def render_recorder(
+    template: str,
+    *,
+    schema: str,
+    table: str,
+    retention_hours: int = 0,
+    partition: str = '',
+    from_: int = 0,
+    to: int = 0,
+) -> str:
+    """Return a recorder template with its six placeholders replaced.
+
+    Every value is a checked lower-case identifier or a whole number, so a
+    plain replace is safe.
+    """
+    values = {
+        '{schema}': schema,
+        '{table}': table,
+        '{partition}': partition,
+        '{from}': str(from_),
+        '{to}': str(to),
+        '{retention_hours}': str(retention_hours),
+    }
+    for placeholder, value in values.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
+def recorder_ddl_for(schema: str, table: str, retention_hours: int) -> list[str]:
+    """Return the recorder start DDL rendered for one table, in the order it must run."""
+    return [
+        render_recorder(template, schema=schema, table=table, retention_hours=retention_hours)
+        for template in RECORDER_DDL_TEMPLATES
+    ]
+
+
+def render_recorder_schema_sql(schema: str, table: str, retention_hours: int) -> str:
+    """Return the recorder DDL as a script, in the format of :func:`render_schema_sql`."""
+    return '\n'.join(f'{statement};\n' for statement in recorder_ddl_for(schema, table, retention_hours))
+
+
+def recorder_missing_table_message(schema: str, table: str, connection: str, retention_hours: int, prefix: str) -> str:
+    """Return the error text for a missing recorder table while the schema is not managed.
+
+    The command in the text gains ``--table-prefix`` only for a non-empty prefix.
+    """
+    command = RECORDER_MISSING_TABLE_COMMAND.format(schema=schema, retention_hours=retention_hours)
+    if prefix:
+        command += RECORDER_MISSING_TABLE_PREFIX_FLAG.format(prefix=prefix)
+    return RECORDER_MISSING_TABLE_MESSAGE.format(schema=schema, table=table, connection=connection, command=command)
 
 
 def is_transient_sqlstate(sqlstate: str | None) -> bool:
@@ -242,4 +504,41 @@ async def ensure_tables(
     async with borrow_transaction(pool) as conn:
         await conn.execute(STATEMENT_TEMPLATES['ddl_lock'], schema)
         for statement in ddl_for(schema):
+            await conn.execute(statement)
+
+
+async def ensure_recorder_table(
+    pool: Any,
+    *,
+    schema: str,
+    table: str,
+    retention_hours: int,
+    manage_schema: bool,
+    connection: str,
+    prefix: str,
+) -> None:
+    """Make the recorder events table available; never touches the providers' tables.
+
+    A table that exists costs one read-only check and no lock. A missing table
+    raises ``RuntimeError`` naming the schema command when the schema is not
+    managed. Otherwise one transaction takes the schema's advisory lock, bounds
+    its lock waits, checks again (another worker may have created the table
+    while this one waited) and runs the recorder DDL only if it is still
+    missing. Partitions are not created here.
+    """
+    check_sql = STATEMENT_TEMPLATES['check_table']
+    qualified = f'{schema}.{table}'
+    async with borrow(pool) as conn:
+        if await conn.fetchval(check_sql, qualified):
+            return
+    if not manage_schema:
+        raise RuntimeError(recorder_missing_table_message(schema, table, connection, retention_hours, prefix))
+    async with borrow_transaction(pool) as conn:
+        await conn.execute(STATEMENT_TEMPLATES['ddl_lock'], schema)
+        await conn.execute(
+            RECORDER_STATEMENT_TEMPLATES['set_local'], SETTING_LOCK_TIMEOUT, SET_LOCAL_VALUES[SETTING_LOCK_TIMEOUT]
+        )
+        if await conn.fetchval(check_sql, qualified):
+            return
+        for statement in recorder_ddl_for(schema, table, retention_hours):
             await conn.execute(statement)

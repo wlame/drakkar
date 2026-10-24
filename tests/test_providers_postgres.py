@@ -140,7 +140,11 @@ def test_missing_table_message_matches_the_fixture():
     )
 
 
-@pytest.mark.parametrize('case', FIXTURE['schema_command'], ids=lambda c: c['args'][1])
+# The --recorder cases also print the recorder table; their own tests cover them.
+PROVIDER_COMMAND_CASES = [case for case in FIXTURE['schema_command'] if '--recorder' not in case['args']]
+
+
+@pytest.mark.parametrize('case', PROVIDER_COMMAND_CASES, ids=lambda c: c['args'][1])
 def test_render_schema_sql_matches_the_fixture(case):
     assert render_schema_sql(case['args'][1].removeprefix('--schema=')) == case['stdout']
 

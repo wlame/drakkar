@@ -27,15 +27,185 @@
   },
   "schema_command": [
     {"args": ["postgres", "--schema=drakkar"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"},
-    {"args": ["postgres", "--schema=ops_fleet"], "stdout": "CREATE SCHEMA IF NOT EXISTS ops_fleet;\n\nCREATE TABLE IF NOT EXISTS ops_fleet.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON ops_fleet.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON ops_fleet.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS ops_fleet.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"}
+    {"args": ["postgres", "--schema=ops_fleet"], "stdout": "CREATE SCHEMA IF NOT EXISTS ops_fleet;\n\nCREATE TABLE IF NOT EXISTS ops_fleet.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON ops_fleet.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON ops_fleet.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS ops_fleet.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n"},
+    {"args": ["postgres", "--schema=drakkar", "--recorder"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.recorder_events (\n    cluster        text             NOT NULL,\n    worker         text             NOT NULL,\n    instance       text             NOT NULL,\n    id             bigint           NOT NULL,\n    ts             double precision NOT NULL,\n    dt             text             NOT NULL,\n    event          text             NOT NULL,\n    \"partition\"    integer,\n    \"offset\"       bigint,\n    task_id        text,\n    args           text,\n    stdout_size    bigint,\n    stdout         text,\n    stderr         text,\n    exit_code      integer,\n    duration       double precision,\n    output_topic   text,\n    metadata       text,\n    pid            integer,\n    labels         text,\n    origin         text             NOT NULL,\n    client_name    text,\n    request_id     text,\n    trace_offsets  bigint[],\n    PRIMARY KEY (instance, id, ts)\n) PARTITION BY RANGE (ts);\n\nCOMMENT ON TABLE drakkar.recorder_events IS 'retention_hours=6';\n\nCREATE INDEX IF NOT EXISTS recorder_events_partition_offset_idx ON drakkar.recorder_events (\"partition\", \"offset\");\n\nCREATE INDEX IF NOT EXISTS recorder_events_task_id_idx ON drakkar.recorder_events (task_id);\n\nCREATE INDEX IF NOT EXISTS recorder_events_trace_offsets_idx ON drakkar.recorder_events USING gin (trace_offsets) WITH (fastupdate = off) WHERE trace_offsets IS NOT NULL;\n"},
+    {"args": ["postgres", "--schema=drakkar", "--recorder", "--table-prefix=heavy", "--retention-hours=24"], "stdout": "CREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.fleet_workers (\n    worker        text        PRIMARY KEY,\n    instance      text        NOT NULL,\n    cluster       text        NOT NULL,\n    card          text        NOT NULL,\n    heartbeat_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_cluster_idx ON drakkar.fleet_workers (cluster);\n\nCREATE INDEX IF NOT EXISTS fleet_workers_heartbeat_idx ON drakkar.fleet_workers (heartbeat_at);\n\nCREATE TABLE IF NOT EXISTS drakkar.task_locks (\n    scope         text        PRIMARY KEY,\n    token         text        NOT NULL,\n    worker        text        NOT NULL,\n    instance      text        NOT NULL,\n    acquired_at   timestamptz NOT NULL DEFAULT now(),\n    refreshed_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE SCHEMA IF NOT EXISTS drakkar;\n\nCREATE TABLE IF NOT EXISTS drakkar.heavy_recorder_events (\n    cluster        text             NOT NULL,\n    worker         text             NOT NULL,\n    instance       text             NOT NULL,\n    id             bigint           NOT NULL,\n    ts             double precision NOT NULL,\n    dt             text             NOT NULL,\n    event          text             NOT NULL,\n    \"partition\"    integer,\n    \"offset\"       bigint,\n    task_id        text,\n    args           text,\n    stdout_size    bigint,\n    stdout         text,\n    stderr         text,\n    exit_code      integer,\n    duration       double precision,\n    output_topic   text,\n    metadata       text,\n    pid            integer,\n    labels         text,\n    origin         text             NOT NULL,\n    client_name    text,\n    request_id     text,\n    trace_offsets  bigint[],\n    PRIMARY KEY (instance, id, ts)\n) PARTITION BY RANGE (ts);\n\nCOMMENT ON TABLE drakkar.heavy_recorder_events IS 'retention_hours=24';\n\nCREATE INDEX IF NOT EXISTS heavy_recorder_events_partition_offset_idx ON drakkar.heavy_recorder_events (\"partition\", \"offset\");\n\nCREATE INDEX IF NOT EXISTS heavy_recorder_events_task_id_idx ON drakkar.heavy_recorder_events (task_id);\n\nCREATE INDEX IF NOT EXISTS heavy_recorder_events_trace_offsets_idx ON drakkar.heavy_recorder_events USING gin (trace_offsets) WITH (fastupdate = off) WHERE trace_offsets IS NOT NULL;\n"}
   ],
   "schema_command_usage_errors": [
     {"args": [], "exit": 2},
     {"args": ["postgres"], "exit": 2},
     {"args": ["postgres", "--schema=Bad-Name"], "exit": 2},
     {"args": ["postgres", "--schema="], "exit": 2},
-    {"args": ["mysql", "--schema=drakkar"], "exit": 2}
+    {"args": ["mysql", "--schema=drakkar"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--table-prefix=heavy"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--retention-hours=6"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--recorder", "--table-prefix=Heavy"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--recorder", "--retention-hours=0"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--recorder", "--retention-hours=169"], "exit": 2},
+    {"args": ["postgres", "--schema=drakkar", "--recorder=x"], "exit": 2}
   ],
+  "recorder": {
+    "_comment": "The recorder events table of the postgres persistence mode. {schema} is the schema of the connection, {table} the table name (recorder_events, or <prefix>_recorder_events), {partition} a partition name, {from} and {to} its bounds in whole epoch seconds, {retention_hours} the value of the table comment. ddl holds the start DDL in the order it runs (ddl_example renders it once), partition_ddl the two partition templates, statements the texts of the recorder alone (check_table and ddl_lock are the ones above). partition_names map an epoch hour to its partition name and bounds; partition_parse_cases map a listed name to its epoch hour, or null for a name that is not the upkeep's. constants pins the numbers and the values given to set_local (statement_timeout gets the time limit of the search in whole milliseconds). missing_table_command gains missing_table_prefix_flag only for a non-empty prefix. retention_comment_cases map a table comment (null: no comment) to the stored retention, or null. trace_offsets_cases map an event and its metadata text to trace_offsets, or null. text_cases map a text value to the text written. upkeep_cases map the server clock, the stored retention and the listed partitions to the partitions created ([name, from, to], ascending) and dropped (ascending).",
+    "placeholders": ["{schema}", "{table}", "{partition}", "{from}", "{to}", "{retention_hours}"],
+    "table_names": [
+      {"prefix": "", "table": "recorder_events"},
+      {"prefix": "heavy", "table": "heavy_recorder_events"},
+      {"prefix": "aaaaaaaaaaaaaaaaaaaaaaaa", "table": "aaaaaaaaaaaaaaaaaaaaaaaa_recorder_events"}
+    ],
+    "prefix_cases": [
+      {"prefix": "", "valid": true},
+      {"prefix": "a", "valid": true},
+      {"prefix": "a_1", "valid": true},
+      {"prefix": "heavy", "valid": true},
+      {"prefix": "aaaaaaaaaaaaaaaaaaaaaaaa", "valid": true},
+      {"prefix": "aaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false},
+      {"prefix": "_a", "valid": false},
+      {"prefix": "1a", "valid": false},
+      {"prefix": "A", "valid": false},
+      {"prefix": "a-b", "valid": false},
+      {"prefix": "a b", "valid": false},
+      {"prefix": "a\n", "valid": false}
+    ],
+    "ddl": [
+      "CREATE SCHEMA IF NOT EXISTS {schema}",
+      "CREATE TABLE IF NOT EXISTS {schema}.{table} (\n    cluster        text             NOT NULL,\n    worker         text             NOT NULL,\n    instance       text             NOT NULL,\n    id             bigint           NOT NULL,\n    ts             double precision NOT NULL,\n    dt             text             NOT NULL,\n    event          text             NOT NULL,\n    \"partition\"    integer,\n    \"offset\"       bigint,\n    task_id        text,\n    args           text,\n    stdout_size    bigint,\n    stdout         text,\n    stderr         text,\n    exit_code      integer,\n    duration       double precision,\n    output_topic   text,\n    metadata       text,\n    pid            integer,\n    labels         text,\n    origin         text             NOT NULL,\n    client_name    text,\n    request_id     text,\n    trace_offsets  bigint[],\n    PRIMARY KEY (instance, id, ts)\n) PARTITION BY RANGE (ts)",
+      "COMMENT ON TABLE {schema}.{table} IS 'retention_hours={retention_hours}'",
+      "CREATE INDEX IF NOT EXISTS {table}_partition_offset_idx ON {schema}.{table} (\"partition\", \"offset\")",
+      "CREATE INDEX IF NOT EXISTS {table}_task_id_idx ON {schema}.{table} (task_id)",
+      "CREATE INDEX IF NOT EXISTS {table}_trace_offsets_idx ON {schema}.{table} USING gin (trace_offsets) WITH (fastupdate = off) WHERE trace_offsets IS NOT NULL"
+    ],
+    "ddl_example": {
+      "schema": "drakkar",
+      "table": "recorder_events",
+      "retention_hours": 6,
+      "ddl": [
+        "CREATE SCHEMA IF NOT EXISTS drakkar",
+        "CREATE TABLE IF NOT EXISTS drakkar.recorder_events (\n    cluster        text             NOT NULL,\n    worker         text             NOT NULL,\n    instance       text             NOT NULL,\n    id             bigint           NOT NULL,\n    ts             double precision NOT NULL,\n    dt             text             NOT NULL,\n    event          text             NOT NULL,\n    \"partition\"    integer,\n    \"offset\"       bigint,\n    task_id        text,\n    args           text,\n    stdout_size    bigint,\n    stdout         text,\n    stderr         text,\n    exit_code      integer,\n    duration       double precision,\n    output_topic   text,\n    metadata       text,\n    pid            integer,\n    labels         text,\n    origin         text             NOT NULL,\n    client_name    text,\n    request_id     text,\n    trace_offsets  bigint[],\n    PRIMARY KEY (instance, id, ts)\n) PARTITION BY RANGE (ts)",
+        "COMMENT ON TABLE drakkar.recorder_events IS 'retention_hours=6'",
+        "CREATE INDEX IF NOT EXISTS recorder_events_partition_offset_idx ON drakkar.recorder_events (\"partition\", \"offset\")",
+        "CREATE INDEX IF NOT EXISTS recorder_events_task_id_idx ON drakkar.recorder_events (task_id)",
+        "CREATE INDEX IF NOT EXISTS recorder_events_trace_offsets_idx ON drakkar.recorder_events USING gin (trace_offsets) WITH (fastupdate = off) WHERE trace_offsets IS NOT NULL"
+      ]
+    },
+    "partition_ddl": {
+      "create": "CREATE TABLE IF NOT EXISTS {schema}.{partition} PARTITION OF {schema}.{table} FOR VALUES FROM ({from}) TO ({to})",
+      "drop": "DROP TABLE IF EXISTS {schema}.{partition}"
+    },
+    "statements": {
+      "set_local": {"sql": "SELECT set_config($1, $2, true)"},
+      "try_lock": {"sql": "SELECT pg_try_advisory_xact_lock(hashtext($1))"},
+      "server_now": {"sql": "SELECT extract(epoch FROM now())::float8"},
+      "retention_read": {"sql": "SELECT obj_description(to_regclass($1), 'pg_class')"},
+      "partitions_list": {"sql": "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = to_regclass($1) ORDER BY c.relname"},
+      "trace": {"sql": "WITH hits AS ( SELECT e.instance, e.worker, e.id, e.ts, e.dt, e.event, e.\"partition\", e.\"offset\", e.task_id, e.args, e.stdout_size, e.stdout, e.stderr, e.exit_code, e.duration, e.output_topic, e.metadata, e.pid, e.labels, e.origin, e.client_name, e.request_id FROM {schema}.{table} e WHERE e.cluster = $1 AND e.\"partition\" = $2 AND e.\"offset\" = $3::bigint UNION ALL SELECT e.instance, e.worker, e.id, e.ts, e.dt, e.event, e.\"partition\", e.\"offset\", e.task_id, e.args, e.stdout_size, e.stdout, e.stderr, e.exit_code, e.duration, e.output_topic, e.metadata, e.pid, e.labels, e.origin, e.client_name, e.request_id FROM {schema}.{table} e WHERE e.cluster = $1 AND e.\"partition\" = $2 AND e.task_id IN ( SELECT s.task_id FROM {schema}.{table} s WHERE s.cluster = $1 AND s.\"partition\" = $2 AND s.event = 'task_started' AND s.trace_offsets @> ARRAY[$3::bigint]) UNION ALL SELECT e.instance, e.worker, e.id, e.ts, e.dt, e.event, e.\"partition\", e.\"offset\", e.task_id, e.args, e.stdout_size, e.stdout, e.stderr, e.exit_code, e.duration, e.output_topic, e.metadata, e.pid, e.labels, e.origin, e.client_name, e.request_id FROM {schema}.{table} e WHERE e.cluster = $1 AND e.\"partition\" = $2 AND e.event IN ('annotation', 'offload') AND e.trace_offsets @> ARRAY[$3::bigint]) SELECT d.id, d.ts, d.dt, d.event, d.\"partition\", d.\"offset\", d.task_id, d.args, d.stdout_size, d.stdout, d.stderr, d.exit_code, d.duration, d.output_topic, d.metadata, d.pid, d.labels, d.origin, d.client_name, d.request_id, d.worker AS worker_name FROM (SELECT DISTINCT ON (h.instance, h.id, h.ts) h.* FROM hits h ORDER BY h.instance, h.id, h.ts) d ORDER BY d.ts, d.worker, d.instance, d.id"}
+    },
+    "partition_names": [
+      {"table": "recorder_events", "hour": 498254, "name": "recorder_events_p2026110314", "from": 1793714400, "to": 1793718000},
+      {"table": "recorder_events", "hour": 498263, "name": "recorder_events_p2026110323", "from": 1793746800, "to": 1793750400},
+      {"table": "recorder_events", "hour": 498264, "name": "recorder_events_p2026110400", "from": 1793750400, "to": 1793754000},
+      {"table": "recorder_events", "hour": 490895, "name": "recorder_events_p2025123123", "from": 1767222000, "to": 1767225600},
+      {"table": "recorder_events", "hour": 490896, "name": "recorder_events_p2026010100", "from": 1767225600, "to": 1767229200},
+      {"table": "recorder_events", "hour": 0, "name": "recorder_events_p1970010100", "from": 0, "to": 3600}
+    ],
+    "partition_parse_cases": [
+      {"table": "recorder_events", "name": "recorder_events_p2026110314", "hour": 498254},
+      {"table": "heavy_recorder_events", "name": "heavy_recorder_events_p2026010100", "hour": 490896},
+      {"table": "recorder_events", "name": "recorder_events_p2026110324", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p20261103", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p202611031", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p2026023010", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p2026130110", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p0000010100", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p2026110314x", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p2026110314\n", "hour": null},
+      {"table": "recorder_events", "name": "heavy_recorder_events_p2026110314", "hour": null},
+      {"table": "heavy_recorder_events", "name": "recorder_events_p2026110314", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_old", "hour": null},
+      {"table": "recorder_events", "name": "recorder_events_p", "hour": null}
+    ],
+    "copy_columns": ["cluster", "worker", "instance", "id", "ts", "dt", "event", "partition", "offset", "task_id", "args", "stdout_size", "stdout", "stderr", "exit_code", "duration", "output_topic", "metadata", "pid", "labels", "origin", "client_name", "request_id", "trace_offsets"],
+    "constants": {
+      "partitions_ahead_hours": 3,
+      "partition_maintenance_seconds": 300,
+      "lock_timeout_ms": 3000,
+      "chunk_max_bytes": 4194304,
+      "chunk_final_failures": 2,
+      "set_local_values": {"jit": "off", "lock_timeout": "3000", "synchronous_commit": "off"},
+      "statement_timeout_setting": "statement_timeout"
+    },
+    "messages": {
+      "missing_table": "table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; create it with: {command}",
+      "missing_table_command": "drakkar-schema postgres --schema={schema} --recorder --retention-hours={retention_hours}",
+      "missing_table_prefix_flag": " --table-prefix={prefix}"
+    },
+    "missing_table_cases": [
+      {"schema": "drakkar", "table": "recorder_events", "connection": "main", "retention_hours": 6, "prefix": "", "message": "table drakkar.recorder_events does not exist and connections.postgres.main.manage_schema is false; create it with: drakkar-schema postgres --schema=drakkar --recorder --retention-hours=6"},
+      {"schema": "ops_fleet", "table": "heavy_recorder_events", "connection": "history", "retention_hours": 24, "prefix": "heavy", "message": "table ops_fleet.heavy_recorder_events does not exist and connections.postgres.history.manage_schema is false; create it with: drakkar-schema postgres --schema=ops_fleet --recorder --retention-hours=24 --table-prefix=heavy"}
+    ],
+    "retention_comment_cases": [
+      {"text": "retention_hours=6", "expected": 6},
+      {"text": "retention_hours=1", "expected": 1},
+      {"text": "retention_hours=168", "expected": 168},
+      {"text": "retention_hours=06", "expected": 6},
+      {"text": "retention_hours=0", "expected": null},
+      {"text": "retention_hours=169", "expected": null},
+      {"text": "retention_hours=99999999999999999999", "expected": null},
+      {"text": "retention_hours=6 ", "expected": null},
+      {"text": "retention_hours=6\n", "expected": null},
+      {"text": " retention_hours=6", "expected": null},
+      {"text": "retention_hours=-6", "expected": null},
+      {"text": "retention_hours=+6", "expected": null},
+      {"text": "retention_hours=", "expected": null},
+      {"text": "Retention_hours=6", "expected": null},
+      {"text": "keep six hours of history", "expected": null},
+      {"text": "", "expected": null},
+      {"text": null, "expected": null}
+    ],
+    "trace_offsets_cases": [
+      {"name": "task_started_source_offsets", "event": "task_started", "metadata": "{\"source_offsets\": [42, 7]}", "expected": [42, 7]},
+      {"name": "annotation_offsets", "event": "annotation", "metadata": "{\"offsets\": [5], \"type\": \"note\"}", "expected": [5]},
+      {"name": "offload_offsets", "event": "offload", "metadata": "{\"offsets\": [1, 2, 3]}", "expected": [1, 2, 3]},
+      {"name": "other_event", "event": "task_completed", "metadata": "{\"source_offsets\": [42], \"offsets\": [42]}", "expected": null},
+      {"name": "task_started_reads_only_source_offsets", "event": "task_started", "metadata": "{\"offsets\": [42]}", "expected": null},
+      {"name": "annotation_reads_only_offsets", "event": "annotation", "metadata": "{\"source_offsets\": [42]}", "expected": null},
+      {"name": "empty_array", "event": "task_started", "metadata": "{\"source_offsets\": []}", "expected": null},
+      {"name": "boolean_element", "event": "task_started", "metadata": "{\"source_offsets\": [1, true]}", "expected": null},
+      {"name": "fraction_element", "event": "task_started", "metadata": "{\"source_offsets\": [5.0]}", "expected": null},
+      {"name": "exponent_element", "event": "task_started", "metadata": "{\"source_offsets\": [1e3]}", "expected": null},
+      {"name": "string_element", "event": "task_started", "metadata": "{\"source_offsets\": [\"5\"]}", "expected": null},
+      {"name": "null_element", "event": "task_started", "metadata": "{\"source_offsets\": [null]}", "expected": null},
+      {"name": "nested_array_element", "event": "task_started", "metadata": "{\"source_offsets\": [[5]]}", "expected": null},
+      {"name": "largest_signed_64_bit", "event": "task_started", "metadata": "{\"source_offsets\": [9223372036854775807, -9223372036854775808]}", "expected": [9223372036854775807, -9223372036854775808]},
+      {"name": "above_signed_64_bit", "event": "task_started", "metadata": "{\"source_offsets\": [9223372036854775808]}", "expected": null},
+      {"name": "below_signed_64_bit", "event": "task_started", "metadata": "{\"source_offsets\": [-9223372036854775809]}", "expected": null},
+      {"name": "value_not_an_array", "event": "task_started", "metadata": "{\"source_offsets\": 5}", "expected": null},
+      {"name": "not_an_object", "event": "task_started", "metadata": "[{\"source_offsets\": [5]}]", "expected": null},
+      {"name": "broken_json", "event": "task_started", "metadata": "{\"source_offsets\": [5]", "expected": null},
+      {"name": "missing_key", "event": "task_started", "metadata": "{\"stdin\": \"x\"}", "expected": null},
+      {"name": "null_metadata", "event": "task_started", "metadata": null, "expected": null},
+      {"name": "nan_elsewhere_in_the_object", "event": "task_started", "metadata": "{\"source_offsets\": [5], \"score\": NaN}", "expected": null},
+      {"name": "nan_element", "event": "offload", "metadata": "{\"offsets\": [NaN]}", "expected": null},
+      {"name": "nul_escape_inside_stdin", "event": "task_started", "metadata": "{\"stdin\": \"a\\u0000b\", \"source_offsets\": [9]}", "expected": [9]}
+    ],
+    "text_cases": [
+      {"text": "a\u0000b", "expected": "a�b"},
+      {"text": "\u0000ab", "expected": "�ab"},
+      {"text": "ab\u0000", "expected": "ab�"},
+      {"text": "\u0000\u0000", "expected": "��"},
+      {"text": "no nul", "expected": "no nul"},
+      {"text": "", "expected": ""}
+    ],
+    "upkeep_cases": [
+      {"name": "empty_table", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": 6, "listed": [], "created": [["recorder_events_p2026110313", 1793710800, 1793714400], ["recorder_events_p2026110314", 1793714400, 1793718000], ["recorder_events_p2026110315", 1793718000, 1793721600], ["recorder_events_p2026110316", 1793721600, 1793725200], ["recorder_events_p2026110317", 1793725200, 1793728800]], "dropped": []},
+      {"name": "steady_state", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": 6, "listed": ["recorder_events_p2026110306", "recorder_events_p2026110307", "recorder_events_p2026110308", "recorder_events_p2026110309", "recorder_events_p2026110310", "recorder_events_p2026110311", "recorder_events_p2026110312", "recorder_events_p2026110313", "recorder_events_p2026110314", "recorder_events_p2026110315", "recorder_events_p2026110316"], "created": [["recorder_events_p2026110317", 1793725200, 1793728800]], "dropped": ["recorder_events_p2026110306", "recorder_events_p2026110307"]},
+      {"name": "nothing_to_do", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": 6, "listed": ["recorder_events_p2026110309", "recorder_events_p2026110310", "recorder_events_p2026110311", "recorder_events_p2026110312", "recorder_events_p2026110313", "recorder_events_p2026110314", "recorder_events_p2026110315", "recorder_events_p2026110316", "recorder_events_p2026110317"], "created": [], "dropped": []},
+      {"name": "no_stored_retention_drops_nothing", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": null, "listed": ["recorder_events_p2026110300", "recorder_events_p2026110301", "recorder_events_p2026110302", "recorder_events_p2026110303", "recorder_events_p2026110304", "recorder_events_p2026110305", "recorder_events_p2026110306", "recorder_events_p2026110307", "recorder_events_p2026110308", "recorder_events_p2026110309", "recorder_events_p2026110310", "recorder_events_p2026110311", "recorder_events_p2026110312", "recorder_events_p2026110313", "recorder_events_p2026110314"], "created": [["recorder_events_p2026110315", 1793718000, 1793721600], ["recorder_events_p2026110316", 1793721600, 1793725200], ["recorder_events_p2026110317", 1793725200, 1793728800]], "dropped": []},
+      {"name": "names_of_others_are_left_alone", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": 1, "listed": ["recorder_events_old", "recorder_events_p20261103", "recorder_events_p2026110300x", "recorder_events_p2026110310", "recorder_events_p2026110311", "recorder_events_p2026110312", "recorder_events_p2026110313", "recorder_events_p2026110324"], "created": [["recorder_events_p2026110314", 1793714400, 1793718000], ["recorder_events_p2026110315", 1793718000, 1793721600], ["recorder_events_p2026110316", 1793721600, 1793725200], ["recorder_events_p2026110317", 1793725200, 1793728800]], "dropped": ["recorder_events_p2026110310", "recorder_events_p2026110311", "recorder_events_p2026110312"]},
+      {"name": "exact_hour_boundary", "table": "recorder_events", "now": 1793714400.0, "stored_retention_hours": 1, "listed": ["recorder_events_p2026110311", "recorder_events_p2026110312", "recorder_events_p2026110313"], "created": [["recorder_events_p2026110314", 1793714400, 1793718000], ["recorder_events_p2026110315", 1793718000, 1793721600], ["recorder_events_p2026110316", 1793721600, 1793725200], ["recorder_events_p2026110317", 1793725200, 1793728800]], "dropped": ["recorder_events_p2026110311", "recorder_events_p2026110312"]},
+      {"name": "year_boundary", "table": "recorder_events", "now": 1798763400.0, "stored_retention_hours": 168, "listed": ["recorder_events_p2026123122", "recorder_events_p2026123123"], "created": [["recorder_events_p2027010100", 1798761600, 1798765200], ["recorder_events_p2027010101", 1798765200, 1798768800], ["recorder_events_p2027010102", 1798768800, 1798772400], ["recorder_events_p2027010103", 1798772400, 1798776000]], "dropped": []},
+      {"name": "long_retention_keeps_a_week", "table": "recorder_events", "now": 1793716200.25, "stored_retention_hours": 168, "listed": ["recorder_events_p2026102713", "recorder_events_p2026102714", "recorder_events_p2026110313", "recorder_events_p2026110314", "recorder_events_p2026110315", "recorder_events_p2026110316", "recorder_events_p2026110317"], "created": [], "dropped": ["recorder_events_p2026102713"]}
+    ]
+  },
   "redis": {
     "placeholders": {"prefix": "{prefix}", "worker": "{worker}", "scope": "{scope}"},
     "keys": {

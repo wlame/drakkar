@@ -9,14 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from drakkar.providers.postgres import render_recorder_schema_sql, render_schema_sql
 from drakkar.schema import USAGE_TEXT, main
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 FIXTURE = json.loads((FIXTURES / 'fleet_providers.json').read_text())
 PYPROJECT = Path(__file__).parent.parent / 'pyproject.toml'
+RECORDER_COMMAND_CASES = [case for case in FIXTURE['schema_command'] if '--recorder' in case['args']]
+RECORDER_USAGE_LINE = (
+    '  drakkar-schema postgres --schema=<name> --recorder [--table-prefix=<p>] [--retention-hours=<n>]'
+    '   also print the recorder events table\n'
+)
 
 
-@pytest.mark.parametrize('case', FIXTURE['schema_command'], ids=lambda case: case['args'][1])
+@pytest.mark.parametrize('case', FIXTURE['schema_command'], ids=lambda case: ' '.join(case['args'][1:]))
 def test_main_prints_the_pinned_ddl(case):
     stdout, stderr = io.StringIO(), io.StringIO()
 
@@ -64,6 +70,52 @@ ACCEPTED_SHAPES = {
     'separator-after-space-form': ['--schema', 'drakkar', '--', 'postgres'],
 }
 
+# The same shapes for the recorder flags; each prints the recorder DDL of the
+# second recorder case of the fixture (prefix heavy, retention 24).
+RECORDER_ACCEPTED_SHAPES = {
+    'recorder-space-forms': [
+        'postgres',
+        '--schema',
+        'drakkar',
+        '--recorder',
+        '--table-prefix',
+        'heavy',
+        '--retention-hours',
+        '24',
+    ],
+    'recorder-flags-before-feature': [
+        '--retention-hours=24',
+        '--table-prefix=heavy',
+        '--recorder',
+        '--schema=drakkar',
+        'postgres',
+    ],
+    'recorder-repeated-last-wins': [
+        'postgres',
+        '--schema=drakkar',
+        '--recorder',
+        '--table-prefix=light',
+        '--table-prefix=heavy',
+        '--retention-hours=6',
+        '--retention-hours=24',
+    ],
+    'recorder-leading-zero-retention': [
+        'postgres',
+        '--schema=drakkar',
+        '--recorder',
+        '--table-prefix=heavy',
+        '--retention-hours=024',
+    ],
+    'recorder-separator-after-flags': [
+        '--schema=drakkar',
+        '--recorder',
+        '--table-prefix=heavy',
+        '--retention-hours=24',
+        '--',
+        'postgres',
+    ],
+}
+
 REJECTED_SHAPES = {
     'extra-argument': ['postgres', '--schema=drakkar', 'extra'],
     'space-form-without-value': ['postgres', '--schema'],
@@ -78,6 +130,24 @@ REJECTED_SHAPES = {
     'value-after-the-separator': ['postgres', '--', '--schema=drakkar'],
     'abbreviated-flag': ['postgres', '--sch=drakkar'],
     'abbreviated-flag-space-form': ['postgres', '--sch', 'drakkar'],
+    'recorder-abbreviated': ['postgres', '--schema=drakkar', '--rec'],
+    'recorder-flag-with-a-value': ['postgres', '--schema=drakkar', '--recorder=yes'],
+    'retention-with-a-plus-sign': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours=+6'],
+    'retention-with-a-space': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours= 6'],
+    'retention-with-a-fraction': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours=6.0'],
+    'retention-empty': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours='],
+    'retention-not-a-number': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours=six'],
+    'retention-huge': ['postgres', '--schema=drakkar', '--recorder', '--retention-hours=99999999999999999999'],
+    'retention-longer-than-int-converts': [
+        'postgres',
+        '--schema=drakkar',
+        '--recorder',
+        '--retention-hours=' + '9' * 5000,
+    ],
+    'prefix-25-characters': ['postgres', '--schema=drakkar', '--recorder', '--table-prefix=' + 'a' * 25],
+    'prefix-starting-with-underscore': ['postgres', '--schema=drakkar', '--recorder', '--table-prefix=_a'],
+    'prefix-trailing-newline': ['postgres', '--schema=drakkar', '--recorder', '--table-prefix=heavy\n'],
+    'empty-prefix-without-recorder': ['postgres', '--schema=drakkar', '--table-prefix='],
 }
 
 HELP_SHAPES = {
@@ -98,6 +168,17 @@ def test_main_accepted_argument_shape_prints_the_pinned_ddl(args):
 
     assert code == 0
     assert stdout.getvalue() == FIXTURE['schema_command'][0]['stdout']
+    assert stderr.getvalue() == ''
+
+
+@pytest.mark.parametrize('args', RECORDER_ACCEPTED_SHAPES.values(), ids=RECORDER_ACCEPTED_SHAPES.keys())
+def test_main_accepted_recorder_argument_shape_prints_the_pinned_ddl(args):
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    code = main(args, stdout, stderr)
+
+    assert code == 0
+    assert stdout.getvalue() == RECORDER_COMMAND_CASES[1]['stdout']
     assert stderr.getvalue() == ''
 
 
@@ -160,3 +241,20 @@ def test_console_script_is_declared():
     scripts = tomllib.loads(PYPROJECT.read_text())['project']['scripts']
 
     assert scripts['drakkar-schema'] == 'drakkar.schema:main'
+
+
+def test_recorder_flag_prints_one_empty_line_then_the_recorder_ddl():
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    code = main(['postgres', '--schema=drakkar', '--recorder', '--table-prefix='], stdout, stderr)
+
+    assert code == 0
+    providers_script = render_schema_sql('drakkar')
+    assert stdout.getvalue() == providers_script + '\n' + render_recorder_schema_sql('drakkar', 'recorder_events', 6)
+    assert stdout.getvalue() == RECORDER_COMMAND_CASES[0]['stdout']
+    assert providers_script.endswith(';\n')
+    assert stdout.getvalue()[len(providers_script) :].startswith('\nCREATE SCHEMA IF NOT EXISTS drakkar;\n')
+
+
+def test_usage_text_has_the_recorder_line():
+    assert RECORDER_USAGE_LINE in USAGE_TEXT.splitlines(keepends=True)

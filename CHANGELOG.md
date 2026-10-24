@@ -60,13 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder mode `postgres` (config only so far).** `ui.recorder.persistence`
-  accepts `postgres`. It is never derived from `storage.dir`. The new section
-  `ui.recorder.postgres` has the keys `connection` (`main`), `table_prefix`,
-  `retention_hours` (6), `store_output` (false), `batch_rows` (5000),
-  `queue_max_mib` (128) and `resilience`. The load fails when the named
-  connection is not declared under `connections.postgres`. The config summary
-  shows ` recorder=postgres`.
+- **Recorder mode `postgres` (config and table DDL so far).**
+  `ui.recorder.persistence` accepts `postgres`. It is never derived from
+  `storage.dir`. The new section `ui.recorder.postgres` has the keys
+  `connection` (`main`), `table_prefix`, `retention_hours` (6),
+  `store_output` (false), `batch_rows` (5000), `queue_max_mib` (128) and
+  `resilience`. The load fails when the named connection is not declared
+  under `connections.postgres`. The config summary shows
+  ` recorder=postgres`. `drakkar-schema postgres` has the new flags
+  `--recorder`, `--table-prefix` and `--retention-hours` (1 to 168, default
+  6). With `--recorder` it also prints the DDL of the recorder events table,
+  one table partitioned by UTC hour.
 - **Recorder memory store and the persistence choice.** When
   `ui.recorder.store_events` is on, the recorder keeps its recent events in
   an in-memory SQLite database, the memory store. New keys:
