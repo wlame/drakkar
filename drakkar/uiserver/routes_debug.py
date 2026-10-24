@@ -910,8 +910,9 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         file serves the memory store). 400 for another value;
         404 without a live file (``file``) or without an open memory store
         (``memory``); 500 when the snapshot fails, or when another memory
-        snapshot still runs after the snapshot limit. See
-        :func:`_snapshot_live_file` and :func:`_snapshot_memory_alone`.
+        snapshot still runs after the snapshot limit (one memory snapshot
+        runs at a time). See :func:`_snapshot_live_file` and
+        :func:`_snapshot_memory`.
         """
         if source is None:
             source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
