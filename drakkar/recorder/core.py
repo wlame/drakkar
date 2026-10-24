@@ -830,8 +830,14 @@ class EventRecorder(EventWriter):
         return fields
 
     async def _close_memory_store(self, wait_seconds: float | None = None) -> None:
-        """Close the memory store, if there is one, waiting at most ``wait_seconds`` for by-name readers."""
-        store, self._memory_store = self._memory_store, None
+        """Close the memory store, if there is one, waiting at most ``wait_seconds`` for by-name readers.
+
+        The store is taken under ``_memory_lock``, so a stage M in flight
+        (a UI read's) ends before the writer goes; the close runs after the
+        lock is released.
+        """
+        async with self._memory_lock:
+            store, self._memory_store = self._memory_store, None
         if store is not None:
             await store.close(wait_seconds)
 

@@ -549,6 +549,29 @@ async def test_memory_store_property_follows_the_recorder_lifetime():
     assert rec.memory_store is None
 
 
+async def test_closing_the_memory_store_waits_for_a_memory_stage_in_flight():
+    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    await rec.start()
+    store = rec.memory_store
+    # A memory stage in flight holds the memory lock.
+    await rec._memory_lock.acquire()
+    holds_lock = True
+    try:
+        closing = asyncio.create_task(rec._close_memory_store())
+        await asyncio.sleep(0.05)
+        assert rec.memory_store is store
+        assert store.is_open
+        rec._memory_lock.release()
+        holds_lock = False
+        await asyncio.wait_for(closing, timeout=5)
+        assert rec.memory_store is None
+        assert not store.is_open
+    finally:
+        if holds_lock:
+            rec._memory_lock.release()
+        await rec.stop()
+
+
 async def _fill_events(store: MemoryStore, count: int) -> None:
     await store.writer.executemany(
         'INSERT INTO events (id, ts, dt, event) VALUES (?, ?, ?, ?)',
