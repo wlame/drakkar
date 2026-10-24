@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from drakkar.cluster_tasks import card_cluster_hash
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
+from drakkar.recorder.queries import ReadBound, ReadClass
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.uiserver.server_helpers import BACKEND_NAME, backend_version, origin_allowed
 
@@ -228,8 +229,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
           unknown tokens) is still doing useful work — surfacing those
           counts as zero in ``ok`` AND zero in ``err`` made the tile look
           dead during normal high-rate-limit traffic. The DB query goes
-          through the shared ``flush_and_select`` helper so the reader
-          connection stays on the main loop.
+          through the shared ``recorder_select`` helper as a window read,
+          so the connection stays on the main loop.
         """
         webapp_cfg = drakkar_app._config.sources.http
         if not webapp_cfg.enabled:
@@ -249,11 +250,15 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         try:
             for key, event_names in queries.WEBAPP_RATE_TILES:
                 query, params = queries.event_count_query(event_names=event_names, since=since)
-                result = await deps.flush_and_select(query, params)
-                if result is not None:
-                    _cols, rows = result
-                    if rows:
-                        tiles[key] = int(rows[0][0] or 0)
+                result = await deps.recorder_select(
+                    query,
+                    params,
+                    read_class=ReadClass.WINDOW,
+                    bound=ReadBound(since=since),
+                    endpoint='/api/v1/dashboard',
+                )
+                if result is not None and result.rows:
+                    tiles[key] = int(result.rows[0][0] or 0)
         except Exception:
             # Recorder may not be ready in startup-edge windows; surface
             # the tile with zeros rather than 500ing the dashboard.
@@ -327,9 +332,9 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         ``pending_offsets`` / ``committed_offset`` / ``high_watermark`` /
         ``lag``, sorted by partition.
         """
-        # ``get_partition_summary`` internally does ``self._db.execute(...)``;
-        # dispatch to the main loop so the aiosqlite cursor stays there.
-        summary = await dispatch_to_loop(recorder.get_partition_summary(), deps.drakkar_app.main_loop)
+        # The recorder connections live on the main loop. Bounded: a wedged
+        # main loop answers the empty table instead of hanging the page.
+        summary = await deps.dispatch_bounded(recorder.get_partition_summary(), default=[])
         processors = drakkar_app.processors
         lag_data = await deps.get_lag()
         for s in summary:

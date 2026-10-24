@@ -291,8 +291,10 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
 
     recorder = AsyncMock(spec=EventRecorder)
     recorder._db = db
-    recorder._reader_db = db
-    recorder.reader_db = db
+    recorder.file_reader_db = db
+    recorder.persistence = 'sqlite'
+    recorder.memory_store = None
+    recorder.memory_coverage = MagicMock(return_value=None)
     recorder.flush = AsyncMock()
     recorder.config = cfg
     app = MagicMock()
@@ -365,8 +367,10 @@ async def test_timeline_events_payload_matches_schema():
     cfg = make_ui_config()
     recorder = AsyncMock(spec=EventRecorder)
     recorder._db = db
-    recorder._reader_db = db
-    recorder.reader_db = db
+    recorder.file_reader_db = db
+    recorder.persistence = 'sqlite'
+    recorder.memory_store = None
+    recorder.memory_coverage = MagicMock(return_value=None)
     recorder.flush = AsyncMock()
     recorder.config = cfg
     app = MagicMock()
@@ -524,10 +528,10 @@ async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch
 
     schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
 
-    async def unavailable_read(self, query, params=()):
+    async def unavailable_read(self, query, params, **read):
         return None
 
-    monkeypatch.setattr(UIDeps, 'flush_and_select', unavailable_read)
+    monkeypatch.setattr(UIDeps, 'recorder_select', unavailable_read)
 
     cfg = make_ui_config()
     recorder = AsyncMock(spec=EventRecorder)

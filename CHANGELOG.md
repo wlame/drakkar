@@ -94,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second. The memory gauges are set after each
   pass. A failed pass logs `recorder_memory_eviction_failed` with the reason
   `window`, `rows`, `bytes` or `floor`, and the next pass starts again.
+  The UI reads recent events from the memory store. With persistence
+  `none`, every UI read uses the memory store, so the pages show the memory
+  window only. With persistence `sqlite`, a time-window read, a newest-N
+  read and an `after_id` poll use the memory store when it still holds
+  every row they ask for, and the live file otherwise; reads by task, by
+  message, by label and the whole-table reads (partitions, event pages)
+  always use the file, and the label keys always use the memory store. A
+  page with two queries reads both from the same source. A memory read
+  stopped by its 2-second limit answers an empty page and logs
+  `ui_read_memory_timed_out` (at most once per 60 seconds).
+  `/api/v1/partitions` answers an empty list when the main loop does not
+  answer in time. `EventRecorder.reader_db` is removed; use
+  `file_reader_db` or `memory_store`.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part

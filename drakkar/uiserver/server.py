@@ -38,6 +38,7 @@ import secrets
 import threading
 import time
 from collections.abc import Coroutine, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -51,8 +52,19 @@ from starlette.responses import Response
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
+from drakkar.config.ui import PERSISTENCE_NONE
 from drakkar.loopserver import LoopLoggingServer
 from drakkar.recorder import EventRecorder
+from drakkar.recorder.queries import (
+    SOURCE_FILE,
+    SOURCE_MEMORY,
+    ReadBound,
+    ReadClass,
+    Source,
+    pick_source,
+    read_memory,
+    still_covered,
+)
 from drakkar.uihost import ResolvedBundle
 
 # Re-export the helpers here so test imports and patches like
@@ -125,6 +137,15 @@ _degraded_read_last_logged: dict[str, float] = {}
 # Distinguishes "the dispatch never produced a value" from a legitimate
 # ``None`` returned by the read itself, which the reader-absent branch uses.
 _DISPATCH_FAILED = object()
+
+
+@dataclass(frozen=True)
+class RecorderRows:
+    """The answer of one recorder read: column names, rows, and the source that gave them."""
+
+    columns: list[str]
+    rows: list
+    source: Source
 
 
 def _warn_degraded_read(event: str, hint: str) -> None:
@@ -260,56 +281,101 @@ class UIDeps:
             return
         raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
-    async def flush_and_select(
+    async def recorder_select(
         self,
         query: str,
-        params: Sequence[Any] = (),
-    ) -> tuple[list[str], list] | None:
-        """Flush the recorder then run a SELECT against the reader connection.
+        params: Sequence[Any],
+        *,
+        read_class: ReadClass,
+        bound: ReadBound,
+        endpoint: str,
+    ) -> RecorderRows | None:
+        """Run one recorder SELECT on the source the read class picks; ``None`` when there is no answer.
 
-        Consolidates the "flush → check DB → SELECT → (columns, rows)"
-        pattern shared by 11 UI-server endpoints. Reads go through
-        ``recorder.reader_db`` (the dedicated reader aiosqlite connection
-        opened alongside the writer) so UI queries don't queue behind
-        writer flushes. Dispatches via ``dispatch_to_loop`` so the
-        connection stays on its owning loop when the UI server runs
-        in a separate thread.
+        Runs on the main loop: the source rule (:func:`pick_source`) reads
+        the coverage there, a memory read runs the memory stage first and a
+        file read both stages. A memory answer is checked again against
+        the coverage read after its SELECT (:func:`still_covered`): when an
+        eviction in between removed rows the read asked for, the read runs
+        again on the file with ``sqlite``, and keeps the shorter answer
+        with ``none``.
 
-        Returns ``(columns, rows)`` on success or ``None`` when the reader
-        connection is absent (recorder not started, or started without
-        event storage). No automatic fallback to the writer — that would
-        defeat the dedicated-reader-pool design. Callers map ``None`` onto
-        whatever empty response shape their endpoint uses
-        (``JSONResponse([])``, ``{}``, etc.).
-
-        Both ``None`` causes — reader absent and dispatch timeout — are
-        logged (rate-limited), because they look identical from the browser
-        and an operator staring at a degraded page needs to know which one
-        they have.
+        ``None`` (no reader, the read limit, a recorder that is stopping,
+        or a main loop that did not answer in time) is logged, rate-limited,
+        and the caller answers its endpoint's empty shape.
         """
         recorder = self.recorder
 
-        async def _inner() -> tuple[list[str], list] | None:
-            await recorder.flush()
-            db = recorder.reader_db
-            if not db:
-                _warn_degraded_read(
-                    'ui_read_reader_db_absent',
-                    hint='recorder has no reader connection — not started yet, '
-                    'or started without event storage (storage.dir / ui.recorder.store_events)',
-                )
-                return None
-            async with db.execute(query, params) as cur:
-                columns: list[str] = [desc[0] for desc in cur.description or []]
-                rows: list = list(await cur.fetchall())
-            return columns, rows
+        async def _inner() -> RecorderRows | None:
+            source = pick_source(recorder.persistence, read_class, bound, recorder.memory_coverage())
+            if source == SOURCE_MEMORY:
+                await recorder.flush_memory()
+                result = await read_memory(recorder.memory_store, query, params, endpoint=endpoint)
+                if result is None:
+                    return None
+                columns, rows = result
+                if recorder.persistence == PERSISTENCE_NONE:
+                    return RecorderRows(columns=columns, rows=rows, source=SOURCE_MEMORY)
+                # The coverage now, read on the main loop after the SELECT.
+                coverage = recorder.memory_coverage()
+                if coverage is not None and still_covered(read_class, bound, coverage, len(rows)):
+                    return RecorderRows(columns=columns, rows=rows, source=SOURCE_MEMORY)
+            return await self._select_file(query, params)
 
+        return await self._dispatch_read(_inner())
+
+    async def recorder_select_on(
+        self,
+        source: Source,
+        query: str,
+        params: Sequence[Any],
+        *,
+        endpoint: str,
+    ) -> RecorderRows | None:
+        """Run one recorder SELECT on ``source``, with no source rule; ``None`` when there is no answer.
+
+        For the aux lookups of a composite endpoint, which read the source
+        of its primary query, and for reads that always use memory.
+        """
+        recorder = self.recorder
+
+        async def _inner() -> RecorderRows | None:
+            if source == SOURCE_FILE:
+                return await self._select_file(query, params)
+            await recorder.flush_memory()
+            result = await read_memory(recorder.memory_store, query, params, endpoint=endpoint)
+            if result is None:
+                return None
+            columns, rows = result
+            return RecorderRows(columns=columns, rows=rows, source=SOURCE_MEMORY)
+
+        return await self._dispatch_read(_inner())
+
+    async def _select_file(self, query: str, params: Sequence[Any]) -> RecorderRows | None:
+        """Both stages, then the SELECT on the live file; on the main loop."""
+        recorder = self.recorder
+        await recorder.flush()
+        db = recorder.file_reader_db
+        if db is None:
+            _warn_degraded_read(
+                'ui_read_reader_db_absent',
+                hint='recorder has no reader connection — not started yet, '
+                'or started without event storage (ui.recorder.store_events)',
+            )
+            return None
+        async with db.execute(query, params) as cur:
+            columns: list[str] = [desc[0] for desc in cur.description or []]
+            rows: list = list(await cur.fetchall())
+        return RecorderRows(columns=columns, rows=rows, source=SOURCE_FILE)
+
+    async def _dispatch_read(self, read: Coroutine[Any, Any, RecorderRows | None]) -> RecorderRows | None:
+        """Run a recorder read on the main loop, bounded; a loop that does not answer gives ``None``."""
         # Bounded: a bare dispatch waits forever, so a wedged main loop would
-        # hang every one of the endpoints sharing this helper — including the
-        # pages an operator opens precisely because the worker is misbehaving.
-        # On timeout the caller sees the same ``None`` it already handles for
+        # hang every endpoint that reads the recorder — including the pages
+        # an operator opens precisely because the worker is misbehaving. On
+        # timeout the caller sees the same ``None`` it already handles for
         # "no reader connection", so no endpoint needs a new branch.
-        result = await self.dispatch_bounded(_inner(), default=_DISPATCH_FAILED)
+        result = await self.dispatch_bounded(read, default=_DISPATCH_FAILED)
         if result is _DISPATCH_FAILED:
             # ``dispatch_bounded`` already logged the timeout itself; this
             # line names the consequence, so the degraded UI response and its

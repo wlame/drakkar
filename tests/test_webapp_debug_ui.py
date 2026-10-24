@@ -37,15 +37,17 @@ def _make_mock_recorder(events: list[dict] | None = None) -> AsyncMock:
     """Build a mock recorder with sensible defaults for the dashboard route.
 
     The dashboard endpoint calls ``get_stats`` and (now) the new
-    ``flush_and_select`` path. We default the SQL helper to return
-    ``None`` (= recorder reader missing), which the route translates
+    ``recorder_select`` path. With no memory store and no file reader the
+    helper returns ``None`` (= recorder reader missing), which the route translates
     into ``success_60s=0`` / ``error_60s=0`` — fine for the no-events
     happy path.
     """
     rec = AsyncMock(spec=EventRecorder)
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     rec.get_stats.return_value = {
         'total_events': 0,
         'consumed': 0,

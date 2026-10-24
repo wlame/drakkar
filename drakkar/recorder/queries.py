@@ -8,11 +8,12 @@ rather than hunting them through a 3,000-line class.
 Two families live here:
 
 - **local** — ``get_events``, ``get_trace``, ``get_task_events``,
-  ``get_partition_summary``: straight reads of this worker's database
-  through the recorder's dedicated reader connection.
-- **trace** — ``cross_trace`` (this worker's live file plus its own closed
+  ``get_partition_summary``: straight reads of this worker's events, from
+  the memory store or the live file as the source rule picks (see
+  :func:`pick_source`).
+- **trace** — ``cross_trace`` (the live part plus this worker's own closed
   files not sealed into the history folder yet), ``cross_trace_by_label``
-  (the live file), and :func:`trace_history`, a bounded search over the
+  (the live part), and :func:`trace_history`, a bounded search over the
   sealed files of a cluster history folder. Other workers' files are never
   opened: a worker's live file belongs to its owner alone.
 """
@@ -26,14 +27,19 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from enum import StrEnum
+from typing import Any, Literal
 
 import aiosqlite
 import structlog
 
 from drakkar.config import UIConfig, UIRecorderConfig
+from drakkar.config.ui import PERSISTENCE_NONE, Persistence
+from drakkar.providers.resilience import RateLimitedLog
+from drakkar.recorder import memstore
 from drakkar.recorder.archive import parse_db_start_ts
 from drakkar.recorder.history import list_sealed
+from drakkar.recorder.memstore import MemoryCoverage, MemoryStore, is_read_interrupted
 from drakkar.recorder.schema import _LABEL_TRACE_QUERY, _TRACE_QUERY, EventType
 from drakkar.recorder.sealing import own_db_files
 
@@ -154,30 +160,158 @@ def trace_history(folder: str, partition: int, msg_offset: int, *, max_files: in
     return _by_time(rows)
 
 
+# ---------------------------------------------------------------------------
+# Read classes and the source rule
+#
+# With ``sqlite`` a read picks one source, the memory store or the live
+# file, and never merges two answers: the file holds every row of the
+# memory store with the same id once stage F ran. The memory store answers
+# a read only when it is sure to hold every row the read asks for; its
+# coverage says what it holds. With ``none`` every read uses the memory
+# store, and an older range simply gives a shorter answer.
+# ---------------------------------------------------------------------------
+
+Source = Literal['memory', 'file']
+SOURCE_MEMORY: Source = 'memory'
+SOURCE_FILE: Source = 'file'
+
+
+class ReadClass(StrEnum):
+    """The shape of a read, which decides whether the memory store can answer it."""
+
+    WINDOW = 'window'  # ``ts >= since``
+    NEWEST = 'newest'  # the newest ``limit`` rows, no lower bound
+    POLL = 'poll'  # ``id > after_id``
+    KEYED = 'keyed'  # by task id, (partition, offset), trace or label
+    WHOLE = 'whole'  # the whole table: partition summary, event listing
+
+
+@dataclass(frozen=True)
+class ReadBound:
+    """The bound of a read that the source rule compares with the coverage."""
+
+    since: float | None = None
+    after_id: int | None = None
+    limit: int | None = None
+
+
+def _memory_holds(read_class: ReadClass, bound: ReadBound, coverage: MemoryCoverage) -> bool:
+    """Whether the memory store holds every row a window or poll read asks for."""
+    if not coverage.evicted:
+        return True
+    if read_class is ReadClass.WINDOW:
+        return bound.since is not None and bound.since > coverage.evicted_max_ts
+    if read_class is ReadClass.POLL:
+        return bound.after_id is not None and bound.after_id >= coverage.floor_id - 1
+    return False
+
+
+def pick_source(
+    persistence: Persistence, read_class: ReadClass, bound: ReadBound, coverage: MemoryCoverage | None
+) -> Source:
+    """The source a read starts on.
+
+    No memory store (``coverage`` is ``None``) means the file. With
+    ``none`` every other read uses memory. With ``sqlite``, keyed and
+    whole-table reads use the file; a window or poll read uses memory
+    when the memory store holds its whole range; a newest-N read starts on
+    memory and :func:`still_covered` sends it to the file when memory was
+    evicted and came back short.
+    """
+    if coverage is None:
+        return SOURCE_FILE
+    if persistence == PERSISTENCE_NONE:
+        return SOURCE_MEMORY
+    if read_class is ReadClass.NEWEST:
+        return SOURCE_MEMORY
+    if read_class in (ReadClass.WINDOW, ReadClass.POLL) and _memory_holds(read_class, bound, coverage):
+        return SOURCE_MEMORY
+    return SOURCE_FILE
+
+
+def still_covered(read_class: ReadClass, bound: ReadBound, coverage: MemoryCoverage, rows_returned: int) -> bool:
+    """Whether a memory answer stands, judged by the coverage read after its SELECT.
+
+    An eviction between the decision and the SELECT can remove rows the
+    read asked for; with ``sqlite`` the read then runs again on the file.
+    For a newest-N read this is also the rule "memory returned ``limit``
+    rows". Keyed and whole-table reads are never answered from memory with
+    ``sqlite``.
+    """
+    if read_class is ReadClass.NEWEST:
+        return not coverage.evicted or (bound.limit is not None and rows_returned >= bound.limit)
+    return _memory_holds(read_class, bound, coverage)
+
+
+# A memory read stopped by the read limit repeats on every poll of every
+# open page, so its line goes out at most once per minute.
+_memory_read_log = RateLimitedLog(time.monotonic)
+
+
+async def read_memory(
+    store: MemoryStore | None, query: str, params: Sequence[Any], *, endpoint: str
+) -> tuple[list[str], list[Any]] | None:
+    """Run one read on the memory store; ``None`` when it gives no answer.
+
+    No answer means: no open store (not started, stopped, or stopping
+    under the read), or the read limit stopped the statement, which logs
+    ``ui_read_memory_timed_out``. The caller answers its empty shape.
+    """
+    if store is None or not store.is_open:
+        return None
+    try:
+        return await store.read(query, params)
+    except sqlite3.OperationalError as exc:
+        if not is_read_interrupted(exc):
+            raise
+        await _memory_read_log.emit(
+            'ui_read_memory_timed_out',
+            logger.awarning,
+            'ui_read_memory_timed_out',
+            category='debug',
+            endpoint=endpoint,
+            # Read at call time: the limit the read just ran under.
+            limit_seconds=memstore.MEMORY_READ_LIMIT_SECONDS,
+        )
+        return None
+    except (RuntimeError, ValueError):
+        # The store closed under the read (the recorder is stopping): the
+        # reader is gone, which raises one of these two.
+        if store.is_open:
+            raise
+        return None
+
+
 @dataclass(frozen=True)
 class QueryContext:
     """What the query layer needs from the recorder that owns it.
 
-    Deliberately a handful of values and three callables rather than the
+    Deliberately a handful of values and callables rather than the
     recorder itself: a test can build one over a bare aiosqlite connection,
     and nothing here can reach back into the write path.
 
-    ``reader`` and ``db_path`` are callables, not values, because both
-    change under the query layer's feet — the recorder swaps its
-    connections and its file on every rotation.
+    The readers, the coverage and ``db_path`` are callables, not values,
+    because they change under the query layer's feet — the recorder swaps
+    its file on every rotation, and eviction moves the coverage.
 
-    ``flush`` makes events recorded a moment ago visible to a SELECT; the
-    trace queries call it so an operator never sees a half-written
-    lifecycle.
+    ``memory_store`` is the store itself rather than its connection, so
+    every memory read goes through :meth:`MemoryStore.read` and its read
+    limit. ``flush`` (both stages) makes events recorded a moment ago
+    visible to a file read; ``flush_memory`` (the memory stage) does the
+    same for a memory read.
     """
 
     config: UIConfig
     worker_name: str
     cluster_name: str
-    reader: Callable[[], aiosqlite.Connection | None]
+    persistence: Persistence
+    memory_store: Callable[[], MemoryStore | None]
+    file_reader: Callable[[], aiosqlite.Connection | None]
+    coverage: Callable[[], MemoryCoverage | None]
     db_path: Callable[[], str]
     flush: Callable[[], Awaitable[None]]
-    # The worker's own folder (``storage.dir``); ``''`` in memory-only mode.
+    flush_memory: Callable[[], Awaitable[None]]
+    # The worker's own folder (``storage.dir``); ``''`` without a recorder file.
     storage_dir: str = ''
 
     @property
@@ -199,21 +333,34 @@ class EventQueries:
     def __init__(self, ctx: QueryContext) -> None:
         self._ctx = ctx
 
-    @property
-    def _reader(self) -> aiosqlite.Connection | None:
-        """The connection reads go through, or None when there is none.
+    async def _select(
+        self, read_class: ReadClass, query: str, params: Sequence[Any], *, endpoint: str, flush_file: bool
+    ) -> list[dict]:
+        """Run a keyed or whole-table read on the source its class picks; one dict per row.
 
-        Reads use the dedicated reader connection so they don't serialize
-        behind buffered-event flushes on the writer; the recorder falls
-        back to the writer when no reader is available (e.g. tests that
-        construct the recorder with only ``_db`` set).
+        A memory read runs the memory stage first. A file read runs both
+        stages first when ``flush_file``; the whole-table reads leave it
+        off, because the polled pages would otherwise force a file write on
+        every poll. Answers ``[]`` when events are not stored or the source
+        gives no answer.
         """
-        return self._ctx.reader()
-
-    def _readable(self) -> aiosqlite.Connection | None:
-        """The reader connection, or None when events are not queryable."""
-        reader = self._reader
-        return reader if reader and self._ctx.store.store_events else None
+        if not self._ctx.store.store_events:
+            return []
+        source = pick_source(self._ctx.persistence, read_class, ReadBound(), self._ctx.coverage())
+        if source == SOURCE_MEMORY:
+            await self._ctx.flush_memory()
+            result = await read_memory(self._ctx.memory_store(), query, params, endpoint=endpoint)
+            if result is None:
+                return []
+            columns, rows = result
+            return [dict(zip(columns, row, strict=False)) for row in rows]
+        if flush_file:
+            await self._ctx.flush()
+        reader = self._ctx.file_reader()
+        if reader is None:
+            return []
+        async with reader.execute(query, params) as cursor:
+            return await _rows_as_dicts(cursor)
 
     async def get_events(
         self,
@@ -224,13 +371,7 @@ class EventQueries:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
-        # Reads go through the dedicated reader connection so they don't
-        # serialize behind buffered-event flushes on the writer; fall back
-        # to the writer when the reader isn't available (e.g. tests that
-        # construct the recorder with only ``_db`` set).
-        reader = self._readable()
-        if reader is None:
-            return []
+        """A page of events, newest first, optionally filtered; a whole-table read."""
         conditions = []
         params: list = []
         if partition is not None:
@@ -251,42 +392,47 @@ class EventQueries:
         where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
         query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?'
         params.extend([limit, offset])
-        async with reader.execute(query, params) as cursor:
-            return await _rows_as_dicts(cursor)
+        return await self._select(ReadClass.WHOLE, query, params, endpoint='get_events', flush_file=False)
 
     async def trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
         """Find all events for tasks matching a label key-value pair."""
-        await self._ctx.flush()
-        reader = self._readable()
-        if reader is None:
-            return []
         json_path = f'$.{label_key}'
-        async with reader.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
-            return await _rows_as_dicts(cursor)
+        return await self._select(
+            ReadClass.KEYED,
+            _LABEL_TRACE_QUERY,
+            [json_path, label_value],
+            endpoint='/api/v1/debug/trace-by-label',
+            flush_file=True,
+        )
 
     async def cross_trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
-        """Trace by label through this worker's live file; rows carry ``worker_name``."""
+        """Trace by label through this worker's live events; rows carry ``worker_name``."""
         events = await self.trace_by_label(label_key, label_value)
         for ev in events:
             ev['worker_name'] = self._ctx.worker_name
         return _by_time(events)
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
-        """Get the full lifecycle of a message by partition and offset."""
-        await self._ctx.flush()
-        reader = self._readable()
-        if reader is None:
-            return []
-        async with reader.execute(
-            _TRACE_QUERY, [partition, msg_offset, partition, msg_offset, partition, msg_offset]
-        ) as cursor:
-            return await _rows_as_dicts(cursor)
+        """Get the full lifecycle of a message by partition and offset.
+
+        With ``sqlite`` this reads the live file, never memory: the closed
+        own files that :meth:`cross_trace` adds then join without a row
+        appearing twice.
+        """
+        return await self._select(
+            ReadClass.KEYED,
+            _TRACE_QUERY,
+            [partition, msg_offset, partition, msg_offset, partition, msg_offset],
+            endpoint='/api/v1/debug/trace',
+            flush_file=True,
+        )
 
     async def cross_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Trace a message through this worker's own files.
 
-        The live file (through the reader connection) and this worker's
-        closed files that are not sealed into the history folder yet. The
+        The live part (:meth:`get_trace`) and, with a recorder file, this
+        worker's closed files that are not sealed into the history folder
+        yet. The
         sealed history is a separate search (:func:`trace_history`). Every
         returned event carries a ``worker_name`` field; events come in time
         order.
@@ -312,19 +458,11 @@ class EventQueries:
 
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""
-        await self._ctx.flush()  # ensure recent events are queryable
-        reader = self._readable()
-        if reader is None:
-            return []
         query = 'SELECT * FROM events WHERE task_id = ? ORDER BY id ASC'
-        async with reader.execute(query, [task_id]) as cursor:
-            return await _rows_as_dicts(cursor)
+        return await self._select(ReadClass.KEYED, query, [task_id], endpoint='/api/v1/task/{task_id}', flush_file=True)
 
     async def get_partition_summary(self) -> list[dict]:
-        """Get summary stats per partition from recorded events."""
-        reader = self._readable()
-        if reader is None:
-            return []
+        """Get summary stats per partition from recorded events; a whole-table read."""
         query = f"""
             SELECT
                 partition,
@@ -339,8 +477,7 @@ class EventQueries:
             GROUP BY partition
             ORDER BY partition
         """
-        async with reader.execute(query) as cursor:
-            return await _rows_as_dicts(cursor)
+        return await self._select(ReadClass.WHOLE, query, (), endpoint='/api/v1/partitions', flush_file=False)
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +499,10 @@ class EventQueries:
 # dispatching the read to the main loop, and shaping the JSON response.
 #
 # The SQL builders return ``(sql, params)`` rather than executing, because
-# the UI reads run through ``deps.flush_and_select``: a flush, then a
-# SELECT on the recorder's reader connection, dispatched to the main loop
-# with a timeout. That execution path belongs to the UI server; the query
-# text does not.
+# the UI reads run through ``deps.recorder_select``: the source rule, a
+# flush of the stages that source needs, then a SELECT on the memory store
+# or the live file, dispatched to the main loop with a timeout. That
+# execution path belongs to the UI server; the query text does not.
 # ---------------------------------------------------------------------------
 
 # Events that describe one execution attempt. Every timeline and task-state

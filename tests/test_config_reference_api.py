@@ -68,8 +68,10 @@ async def get_config_reference(config: DrakkarConfig, handler: object = None) ->
     ui_config = config.ui
     recorder = AsyncMock(spec=EventRecorder)
     recorder._db = None
-    recorder._reader_db = None
-    recorder.reader_db = None
+    recorder.file_reader_db = None
+    recorder.persistence = 'sqlite'
+    recorder.memory_store = None
+    recorder.memory_coverage = MagicMock(return_value=None)
     recorder.config = ui_config
     app = make_app(config, handler=handler)
     fastapi_app = create_ui_app(ui_config, recorder, app)
@@ -147,8 +149,7 @@ class TestShape:
         ui_config = make_ui_config(enabled=True, port=8080, auth_token='top-secret')
         recorder = AsyncMock(spec=EventRecorder)
         recorder._db = None
-        recorder._reader_db = None
-        recorder.reader_db = None
+        recorder.file_reader_db = None
         recorder.config = ui_config
         app = make_app(DrakkarConfig(sources={'kafka': {'enabled': True}}))
         fastapi_app = create_ui_app(ui_config, recorder, app)

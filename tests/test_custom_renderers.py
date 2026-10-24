@@ -87,8 +87,10 @@ def _mock_app(config: DrakkarConfig) -> MagicMock:
 def _make_client(ui_config: UIConfig) -> AsyncClient:
     recorder = AsyncMock(spec=EventRecorder)
     recorder._db = None
-    recorder._reader_db = None
-    recorder.reader_db = None
+    recorder.file_reader_db = None
+    recorder.persistence = 'sqlite'
+    recorder.memory_store = None
+    recorder.memory_coverage = MagicMock(return_value=None)
     recorder.config = ui_config
     app = _mock_app(DrakkarConfig(sources={'kafka': {'enabled': True}}, ui=ui_config))
     fastapi_app = create_ui_app(ui_config, recorder, app)

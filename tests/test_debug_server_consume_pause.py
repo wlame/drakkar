@@ -26,8 +26,10 @@ from tests.conftest import make_ui_config
 def _mock_recorder() -> AsyncMock:
     rec = AsyncMock(spec=EventRecorder)
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     return rec
 
 

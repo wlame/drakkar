@@ -206,6 +206,12 @@ def _is_running(future: Future[None] | None) -> bool:
     return future is not None and not future.done()
 
 
+def _retrieve_outcome(task: asyncio.Task[None]) -> None:
+    """Mark a task's exception as retrieved; whoever awaited the task got it raised."""
+    if not task.cancelled():
+        task.exception()
+
+
 def _log_job_failure(job: str, future: Future[None]) -> None:
     """Log a job of the archive thread that raised, when nothing awaits its result."""
     if future.cancelled() or (exc := future.exception()) is None:
@@ -421,6 +427,10 @@ class EventRecorder(EventWriter):
         # can all run it on the main loop, and two at once would each take
         # part of the file queue and race on the duration histogram.
         self._flush_lock = asyncio.Lock()
+        # The stage F run that flushes for reads share while it waits for
+        # ``_flush_lock`` (see ``_queued_stage_file``): while the disk hangs,
+        # each timed-out read would otherwise leave one more waiting run.
+        self._waiting_stage_file: asyncio.Task[None] | None = None
         # Consecutive failures of the file chunk at the front of the file
         # queue. Reset on a successful stage F or when a chunk is dropped
         # after ``max_flush_retries``; one counter is enough because a
@@ -435,9 +445,13 @@ class EventRecorder(EventWriter):
                 storage_dir=storage_dir if self._has_file else '',
                 worker_name=worker_name,
                 cluster_name=cluster_name,
-                reader=lambda: self._reader_db or self._db,
+                persistence=persistence,
+                memory_store=lambda: self._memory_store,
+                file_reader=lambda: self._reader_db,
+                coverage=self.memory_coverage,
                 db_path=lambda: self._db_path,
                 flush=self.flush,
+                flush_memory=self.flush_memory,
             )
         )
 
@@ -510,11 +524,6 @@ class EventRecorder(EventWriter):
         return self._memory_store.open_by_name()
 
     @property
-    def reader_db(self) -> aiosqlite.Connection | None:
-        """The read-only connection of the recorder file; the same as :attr:`file_reader_db`."""
-        return self._reader_db
-
-    @property
     def file_reader_db(self) -> aiosqlite.Connection | None:
         """The read-only connection of the live recorder file; ``None`` before start or without a file.
 
@@ -543,7 +552,35 @@ class EventRecorder(EventWriter):
         finishes on its own.
         """
         await asyncio.shield(self._stage_memory(EVICT_MIN_INTERVAL_SECONDS))
-        await asyncio.shield(self._stage_file())
+        await asyncio.shield(self._queued_stage_file())
+
+    def _queued_stage_file(self) -> asyncio.Task[None]:
+        """The stage F run that has not taken its rows yet, shared by every flush that asks for one.
+
+        A run takes the file queue only once it holds ``_flush_lock``, so a
+        flush that joins a waiting run still gets the rows its own stage M
+        just queued. A run that holds the lock already took its rows; the
+        next flush starts a new run, which then waits.
+        """
+        task = self._waiting_stage_file
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._run_queued_stage_file())
+            # Every flush that awaited the run may have given up (a read
+            # that timed out): retrieve the outcome so it is never left
+            # unretrieved on the loop. A flush still waiting gets it raised.
+            task.add_done_callback(_retrieve_outcome)
+            self._waiting_stage_file = task
+        return task
+
+    async def _run_queued_stage_file(self) -> None:
+        """One shared stage F run: wait for ``_flush_lock``, leave the waiting slot, run stage F."""
+        if not self._has_file:
+            return
+        async with self._flush_lock:
+            # This run takes its rows now: a flush that asks from here on needs a new run.
+            if self._waiting_stage_file is asyncio.current_task():
+                self._waiting_stage_file = None
+            await self._stage_file_locked()
 
     async def flush_memory(self) -> None:
         """Write the recorded events to the memory store only, shielded like :meth:`flush`."""
@@ -1670,28 +1707,31 @@ class EventRecorder(EventWriter):
         if not self._has_file:
             return
         async with self._flush_lock:
-            # Snapshot ``self._db`` once and use it for every write and
-            # commit of this stage: a concurrent ``_rotate`` swaps
-            # ``self._db`` under this lock only, so the writes of one stage
-            # always land in one file.
-            db = self._db
-            if not db or not self._file_queue:
+            await self._stage_file_locked()
+
+    async def _stage_file_locked(self) -> None:
+        """Stage F with ``_flush_lock`` held by the caller."""
+        # Snapshot ``self._db`` once and use it for every write and commit
+        # of this stage: a concurrent ``_rotate`` swaps ``self._db`` under
+        # this lock only, so the writes of one stage always land in one file.
+        db = self._db
+        if not db or not self._file_queue:
+            return
+        # Observe the whole stage across every chunk — the histogram
+        # surfaces the disk-I/O latency tail.
+        flush_start = time.monotonic()
+        # Snapshot the depth, as stage M does.
+        pending = len(self._file_queue)
+        while pending > 0:
+            take = min(pending, FLUSH_CHUNK_ROWS)
+            pending -= take
+            batch = [self._file_queue.popleft() for _ in range(take)]
+            if not await self._write_file_chunk(db, batch):
+                self._update_buffer_gauge()
                 return
-            # Observe the whole stage across every chunk — the histogram
-            # surfaces the disk-I/O latency tail.
-            flush_start = time.monotonic()
-            # Snapshot the depth, as stage M does.
-            pending = len(self._file_queue)
-            while pending > 0:
-                take = min(pending, FLUSH_CHUNK_ROWS)
-                pending -= take
-                batch = [self._file_queue.popleft() for _ in range(take)]
-                if not await self._write_file_chunk(db, batch):
-                    self._update_buffer_gauge()
-                    return
-            self._flush_failures = 0
-            recorder_flush_duration.observe(time.monotonic() - flush_start)
-            self._update_buffer_gauge()
+        self._flush_failures = 0
+        recorder_flush_duration.observe(time.monotonic() - flush_start)
+        self._update_buffer_gauge()
 
     async def _write_file_chunk(self, db: aiosqlite.Connection, batch: list[tuple[int, tuple]]) -> bool:
         """Write one chunk of ``(id, row)`` pairs to the file; return whether the stage should keep going.

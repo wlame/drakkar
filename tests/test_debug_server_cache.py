@@ -64,15 +64,16 @@ def mock_recorder():
     }
     rec.get_partition_summary.return_value = []
     rec.get_events.return_value = []
-    # default: no events DB (periodic endpoint short-circuits). The real
-    # recorder exposes BOTH a writer (``_db``) and a reader (``_reader_db``
-    # / ``reader_db``) connection; explicitly null them all so the
-    # endpoints' ``reader_db or _db`` fallback sees a clean absence
-    # instead of the auto-generated MagicMock the AsyncMock spec would
-    # otherwise provide.
+    # default: no events DB (periodic endpoint short-circuits). Null the
+    # connections and the memory store explicitly so the read helpers see
+    # a clean absence instead of the auto-generated MagicMock the
+    # AsyncMock spec would otherwise provide; with no memory store every
+    # read goes to the file reader.
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     rec.flush = AsyncMock()
     return rec
 
@@ -146,14 +147,13 @@ class TestApiPeriodicSystemField:
                 ev,
             )
         await db.commit()
-        # Wire the same connection as both writer and reader — the debug
-        # server's SELECT path picks ``reader_db`` first, so the test
-        # fixture must set it explicitly (setting ``_db`` alone leaves
-        # ``reader_db`` as the fixture default of None and the SELECT
-        # short-circuits).
+        # Wire the same connection as both writer and file reader — with no
+        # memory store the debug server's SELECT path reads
+        # ``file_reader_db``, so the test must set it explicitly (setting
+        # ``_db`` alone leaves it as the fixture default of None and the
+        # SELECT short-circuits).
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         return db
 
     async def test_system_true_when_metadata_has_system(self, tmp_path, mock_recorder, debug_config):

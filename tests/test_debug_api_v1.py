@@ -45,8 +45,10 @@ _INT32_MAX = 2**31 - 1
 def mock_recorder():
     rec = AsyncMock(spec=EventRecorder)
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     rec.get_stats.return_value = {'total_events': 3, 'consumed': 2, 'completed': 1}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []
@@ -1395,8 +1397,7 @@ async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_re
         )
     await db.commit()
     mock_recorder._db = db
-    mock_recorder._reader_db = db
-    mock_recorder.reader_db = db
+    mock_recorder.file_reader_db = db
     mock_recorder.flush = AsyncMock()
     mock_recorder.config = debug_config
     mock_recorder.storage_dir = str(tmp_path)

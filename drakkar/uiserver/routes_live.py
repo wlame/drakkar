@@ -28,8 +28,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
+from drakkar.recorder.queries import ReadBound, ReadClass, Source
 from drakkar.uiserver.server_helpers import hook_flags
 
 if TYPE_CHECKING:
@@ -220,11 +220,18 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             after_id=after_id,
             limit=limit,
         )
-        result = await deps.flush_and_select(query, params)
+        # An incremental poll reads ``id > after_id``; a first load reads
+        # the newest ``limit`` rows.
+        if after_id > 0:
+            read_class, bound = ReadClass.POLL, ReadBound(after_id=after_id, limit=limit)
+        else:
+            read_class, bound = ReadClass.NEWEST, ReadBound(limit=limit)
+        result = await deps.recorder_select(
+            query, params, read_class=read_class, bound=bound, endpoint='/api/v1/events'
+        )
         if result is None:
             return JSONResponse([])
-        columns, rows = result
-        return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
+        return JSONResponse([dict(zip(result.columns, row, strict=False)) for row in result.rows])
 
     @router.get('/api/v1/recent-tasks')
     async def api_recent_tasks(
@@ -277,7 +284,13 @@ def create_live_router(deps: UIDeps) -> APIRouter:
 
         since = time.time() - (minutes * 60)
         query, params = queries.recent_tasks_query(since=since, event_limit=event_limit)
-        result = await deps.flush_and_select(query, params)
+        result = await deps.recorder_select(
+            query,
+            params,
+            read_class=ReadClass.WINDOW,
+            bound=ReadBound(since=since),
+            endpoint='/api/v1/recent-tasks',
+        )
         if result is None:
             # Degraded read (no reader connection, or the bounded main-loop
             # dispatch timed out). Keep the documented object shape — a bare
@@ -285,8 +298,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             # throw — and flag it so the UI can hold the last good timeline
             # instead of drawing an empty one.
             return JSONResponse({'tasks': [], 'lane_count': max_lanes, 'truncated': False, 'unavailable': True})
-        columns, rows = result
-        events = [dict(zip(columns, row, strict=False)) for row in rows]
+        events = [dict(zip(result.columns, row, strict=False)) for row in result.rows]
         # Hitting the cap means older tasks in the window were dropped. Say
         # so rather than letting the UI present a partial window as complete.
         truncated = len(events) >= event_limit
@@ -320,13 +332,18 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         minutes_clamped = min(minutes, cap) if minutes > 0 else cap
         since = time.time() - minutes_clamped * 60
         query, params = queries.timeline_events_query(since=since, limit=config.max_rows)
-        result = await deps.flush_and_select(query, params)
+        result = await deps.recorder_select(
+            query,
+            params,
+            read_class=ReadClass.WINDOW,
+            bound=ReadBound(since=since),
+            endpoint='/api/v1/timeline/events',
+        )
         if result is None:
             return JSONResponse({'events': [], 'unavailable': True})
-        columns, rows = result
         events = []
-        for row in rows:
-            entry = dict(zip(columns, row, strict=False))
+        for row in result.rows:
+            entry = dict(zip(result.columns, row, strict=False))
             envelope = queries.parse_json_object(entry.get('metadata'))
             if not envelope:
                 continue
@@ -357,18 +374,23 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             return JSONResponse({})
 
         # Short-circuit when recorder event storage is disabled — no point
-        # flushing + SELECTing against an empty table. ``flush_and_select``
+        # flushing + SELECTing against an empty table. ``recorder_select``
         # would still dispatch to the main loop and return rows, but they'd
         # always be empty.
         if not recorder.config.recorder.store_events:
             return JSONResponse({})
 
         query, params = queries.task_state_query(task_ids)
-        query_result = await deps.flush_and_select(query, params)
+        query_result = await deps.recorder_select(
+            query,
+            params,
+            read_class=ReadClass.KEYED,
+            bound=ReadBound(),
+            endpoint='/api/v1/live/arrange-tasks',
+        )
         if query_result is None:
             return JSONResponse({})
-        columns, rows = query_result
-        events = [dict(zip(columns, row, strict=False)) for row in rows]
+        events = [dict(zip(query_result.columns, row, strict=False)) for row in query_result.rows]
         by_id = queries.group_task_states(events)
         return JSONResponse(by_id)
 
@@ -383,52 +405,51 @@ def create_live_router(deps: UIDeps) -> APIRouter:
     # breakdown is fetched lazily by the sidebar via /api/v1/live/sink-breakdown.
     # ------------------------------------------------------------------
 
-    async def _fetch_events(event_name: str, limit: int) -> list[dict]:
+    async def _fetch_events(event_name: str, limit: int, endpoint: str) -> tuple[list[dict], Source | None]:
         """Common helper for the three completion-hook endpoints.
 
-        Returns raw events (ts DESC, limited) as list of dicts, or empty
-        list when recorder storage is disabled. Callers parse metadata
-        themselves because each event type has different metadata shape.
+        Returns raw events (newest first, limited) as a list of dicts, and
+        the source that answered — the aux lookups of the endpoint read the
+        same source. ``([], None)`` when recorder storage is disabled or
+        the read gave no answer. Callers parse metadata themselves because
+        each event type has a different metadata shape.
         """
         if not recorder.config.recorder.store_events:
-            return []
+            return [], None
         query, params = queries.hook_events_query(event_name=event_name, limit=limit)
-        result = await deps.flush_and_select(query, params)
+        result = await deps.recorder_select(
+            query,
+            params,
+            read_class=ReadClass.NEWEST,
+            bound=ReadBound(limit=limit),
+            endpoint=endpoint,
+        )
         if result is None:
-            return []
-        columns, rows = result
-        return [dict(zip(columns, row, strict=False)) for row in rows]
+            return [], None
+        return [dict(zip(result.columns, row, strict=False)) for row in result.rows], result.source
 
     _parse_meta = queries.parse_json_object
 
     @router.get('/api/v1/live/task-results')
     async def api_live_task_results(limit: int = Query(default=200, ge=0, le=5000)):
         """Latest N ``task_complete`` events with their matching exec state."""
-        events = await _fetch_events('task_complete', limit)
+        endpoint = '/api/v1/live/task-results'
+        events, source = await _fetch_events('task_complete', limit, endpoint)
         task_ids = [e['task_id'] for e in events if e.get('task_id')]
         # Batch lookup across three related event types in one query —
         # task_started carries ``source_offsets`` in metadata (essential
         # for rendering the message source in the UI), while
         # task_completed/task_failed carry the subprocess exit status.
+        # It reads the source of the primary query, so both halves of a
+        # row come from one source.
         aux_by_id: dict[str, dict] = {}
-        if task_ids and recorder.reader_db:
+        if task_ids and source is not None:
             query, params = queries.task_exec_state_query(task_ids)
-
-            # The aiosqlite connection lives on the main loop, so run the
-            # SELECT + fetchall there and return plain Python data. Routes
-            # through the reader connection so UI lookups don't queue
-            # behind writer flushes.
-            async def _read_aux():
-                reader = recorder.reader_db
-                if not reader:
-                    return [], []
-                async with reader.execute(query, params) as cur:
-                    cols = [d[0] for d in cur.description]
-                    aux_rows = await cur.fetchall()
-                return cols, aux_rows
-
-            cols, aux_rows = await dispatch_to_loop(_read_aux(), deps.drakkar_app.main_loop)
-            aux_by_id = queries.group_task_exec_state([dict(zip(cols, row, strict=False)) for row in aux_rows])
+            aux = await deps.recorder_select_on(source, query, params, endpoint=endpoint)
+            if aux is not None:
+                aux_by_id = queries.group_task_exec_state(
+                    [dict(zip(aux.columns, row, strict=False)) for row in aux.rows]
+                )
         result = []
         for e in events:
             meta = _parse_meta(e.get('metadata'))
@@ -462,12 +483,14 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         times (replay after restart), we pick the most recent consumed
         event whose ts is <= message_complete.ts.
         """
-        events = await _fetch_events('message_complete', limit)
+        endpoint = '/api/v1/live/message-results'
+        events, source = await _fetch_events('message_complete', limit, endpoint)
 
         # Batch lookup of consumed events for the exact (partition, offset)
-        # set that appears in this batch of message_complete rows.
+        # set that appears in this batch of message_complete rows, on the
+        # source of the primary query.
         consumed_by_key: dict[tuple, list[float]] = {}
-        if events and recorder.reader_db:
+        if events and source is not None:
             pairs = {
                 (e['partition'], e['offset'])
                 for e in events
@@ -475,17 +498,9 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             }
             if pairs:
                 query, params = queries.consumed_timestamps_query(sorted(pairs))
-
-                async def _read_consumed():
-                    reader = recorder.reader_db
-                    if not reader:
-                        return []
-                    async with reader.execute(query, params) as cur:
-                        return await cur.fetchall()
-
-                consumed_by_key = queries.index_consumed_timestamps(
-                    await dispatch_to_loop(_read_consumed(), deps.drakkar_app.main_loop)
-                )
+                consumed = await deps.recorder_select_on(source, query, params, endpoint=endpoint)
+                if consumed is not None:
+                    consumed_by_key = queries.index_consumed_timestamps(consumed.rows)
 
         result = []
         for e in events:
@@ -515,7 +530,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
     async def api_live_window_results(limit: int = Query(default=200, ge=0, le=5000)):
         """Latest N ``window_complete`` events. Metadata carries
         window_id, task_count, output_message_count."""
-        events = await _fetch_events('window_complete', limit)
+        events, _source = await _fetch_events('window_complete', limit, '/api/v1/live/window-results')
         result = []
         for e in events:
             meta = _parse_meta(e.get('metadata'))
@@ -547,10 +562,15 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         if not recorder.config.recorder.store_events:
             return JSONResponse({})
         query, params = queries.sink_breakdown_query(partition=req.partition, offsets=req.offsets)
-        result = await deps.flush_and_select(query, params)
+        result = await deps.recorder_select(
+            query,
+            params,
+            read_class=ReadClass.KEYED,
+            bound=ReadBound(),
+            endpoint='/api/v1/live/sink-breakdown',
+        )
         if result is None:
             return JSONResponse({})
-        _columns, rows = result
-        return JSONResponse(queries.count_by_topic(rows))
+        return JSONResponse(queries.count_by_topic(result.rows))
 
     return router

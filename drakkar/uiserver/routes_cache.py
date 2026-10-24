@@ -181,7 +181,7 @@ def create_cache_router(deps: UIDeps) -> APIRouter:
         reader = _cache_reader_or_404()
 
         # Reads via the cache engine's reader connection rather than the
-        # recorder's ``flush_and_select`` helper: this endpoint queries
+        # recorder's ``recorder_select`` helper: this endpoint queries
         # the cache_entries table, not the events table, and there's
         # nothing to flush on the recorder side.
         async def _read():

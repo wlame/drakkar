@@ -48,7 +48,7 @@ from drakkar.dbstats import OwnFileStats
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
 from drakkar.recorder.history import HISTORY_FOLDER, MERGED_FOLDER, meta_path, read_meta
-from drakkar.recorder.queries import trace_history
+from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, trace_history
 from drakkar.recorder.schema import EventType
 from drakkar.recorder.sealing import own_db_files
 from drakkar.timefmt import format_epoch_ns
@@ -100,6 +100,9 @@ DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
 _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
+
+# Rows of ``/api/v1/debug/periodic``: the newest periodic runs, by ``ts``.
+PERIODIC_HISTORY_ROWS = 500
 # The live-file snapshot is streamed in chunks of this size.
 _SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 # Exclusive, owner-only, never through a link: the temp file holds a copy
@@ -567,17 +570,18 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             WHERE labels IS NOT NULL
             LIMIT 100
         """
-        # No try/except: ``flush_and_select`` already maps DB-absent to
+        # Always the memory store: the label keys of recent rows are
+        # enough for the dropdown, whatever the persistence mode.
+        # No try/except: ``recorder_select_on`` already maps "no answer" to
         # ``None`` (handled below) and any real exception here is a bug
         # (malformed SQL, recorder internal state corruption) that should
         # surface loudly rather than be silently hidden behind an empty
         # response. Fail-loud beats a silently-empty label dropdown.
-        result = await deps.flush_and_select(query)
+        result = await deps.recorder_select_on(SOURCE_MEMORY, query, (), endpoint='/api/v1/debug/label-keys')
         if result is None:
             return JSONResponse([])
-        _columns, rows = result
         keys: set[str] = set()
-        for (labels_json,) in rows:
+        for (labels_json,) in result.rows:
             try:
                 parsed = json.loads(labels_json)
                 keys.update(parsed.keys())
@@ -614,15 +618,21 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             FROM events
             WHERE event = '{EventType.PERIODIC_RUN}'
             ORDER BY ts DESC
-            LIMIT 500
+            LIMIT {PERIODIC_HISTORY_ROWS}
         """
         # No try/except — see ``api_debug_label_keys`` for rationale.
-        # ``flush_and_select`` returns ``None`` on DB-absent; any raised
-        # exception is a real bug and should surface.
-        result = await deps.flush_and_select(query)
+        # ``recorder_select`` returns ``None`` when there is no answer; any
+        # raised exception is a real bug and should surface.
+        result = await deps.recorder_select(
+            query,
+            (),
+            read_class=ReadClass.NEWEST,
+            bound=ReadBound(limit=PERIODIC_HISTORY_ROWS),
+            endpoint='/api/v1/debug/periodic',
+        )
         if result is None:
             return JSONResponse([])
-        columns, rows = result
+        columns, rows = result.columns, result.rows
 
         # group by task name. We also surface a per-task ``system: bool``
         # derived from the event's ``metadata.system``. Framework-internal

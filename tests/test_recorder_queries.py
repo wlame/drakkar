@@ -56,7 +56,10 @@ def ui_config(tmp_path):
 
 
 class Ctx:
-    """Builds a QueryContext over one open connection, counting flushes."""
+    """Builds a QueryContext over one open file connection and no memory store, counting flushes.
+
+    With no memory store every read goes to the file.
+    """
 
     def __init__(self, config, db, db_path, *, worker_name=WORKER, cluster_name=CLUSTER, storage_dir=''):
         self.flushes = 0
@@ -65,13 +68,20 @@ class Ctx:
             storage_dir=storage_dir,
             worker_name=worker_name,
             cluster_name=cluster_name,
-            reader=lambda: db,
+            persistence='sqlite',
+            memory_store=lambda: None,
+            file_reader=lambda: db,
+            coverage=lambda: None,
             db_path=lambda: db_path,
             flush=self._flush,
+            flush_memory=self._flush_memory,
         )
 
     async def _flush(self) -> None:
         self.flushes += 1
+
+    async def _flush_memory(self) -> None:
+        raise AssertionError('a file read must not run the memory stage alone')
 
 
 @pytest.fixture
@@ -134,9 +144,13 @@ class TestGetEvents:
             config=ui_config,
             worker_name=WORKER,
             cluster_name=CLUSTER,
-            reader=lambda: None,
+            persistence='sqlite',
+            memory_store=lambda: None,
+            file_reader=lambda: None,
+            coverage=lambda: None,
             db_path=lambda: '',
             flush=_noop_flush,
+            flush_memory=_noop_flush,
         )
 
         assert await EventQueries(ctx).get_events() == []

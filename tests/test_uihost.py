@@ -451,8 +451,10 @@ def test_ui_config_env_overrides(monkeypatch):
 def mock_recorder():
     rec = AsyncMock(spec=EventRecorder)
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     rec.get_stats.return_value = {'total_events': 0}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []

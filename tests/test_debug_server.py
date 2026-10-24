@@ -20,6 +20,7 @@ from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.recorder import EventRecorder
+from drakkar.recorder.memstore import MemoryStore
 from drakkar.timeline_events import TimelineEventEmitter
 from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
@@ -71,13 +72,15 @@ def peer_view(worker: str, *, cluster: str = '', age: float | None = 5.0, **card
 @pytest.fixture
 def mock_recorder():
     rec = AsyncMock(spec=EventRecorder)
-    # Default the connection attrs to None so endpoints that check
-    # ``recorder.reader_db or recorder._db`` see a clean absence rather
-    # than an auto-generated MagicMock truthy value. Tests that exercise
-    # real DB queries set both explicitly.
+    # Default the connection attrs to None so the read helpers see a
+    # clean absence rather than an auto-generated MagicMock truthy value.
+    # With no memory store every read goes to the file reader; tests that
+    # exercise real DB queries set it explicitly.
     rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
+    rec.file_reader_db = None
+    rec.persistence = 'sqlite'
+    rec.memory_store = None
+    rec.memory_coverage = MagicMock(return_value=None)
     # Memory-only unless a test points it at a folder: the file endpoints
     # then have no root and must answer 404 rather than read the CWD.
     rec.storage_dir = ''
@@ -1752,8 +1755,7 @@ class TestApiEvents:
         # shim — the dedicated reader connection that the real recorder
         # opens is not needed here because there's no writer contention.
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
@@ -1800,8 +1802,7 @@ class TestApiEvents:
 
     async def test_events_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
         mock_recorder._db = None
-        mock_recorder._reader_db = None
-        mock_recorder.reader_db = None
+        mock_recorder.file_reader_db = None
         mock_recorder.flush = AsyncMock()
 
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
@@ -1874,8 +1875,7 @@ class TestApiRecentTasks:
         cfg = make_ui_config(enabled=True, port=8080)
 
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         # The debug_server calls recorder.flush() (public API) and
         # recorder.config (public property) — both expose formerly-private
         # attributes. Stub the public names directly so the specced mock
@@ -1976,8 +1976,7 @@ class TestApiRecentTasks:
         ``payload.tasks``.
         """
         mock_recorder._db = None
-        mock_recorder._reader_db = None
-        mock_recorder.reader_db = None
+        mock_recorder.file_reader_db = None
         mock_recorder.flush = AsyncMock()
 
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
@@ -2083,8 +2082,7 @@ class TestApiTimelineEvents:
 
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
@@ -2095,8 +2093,7 @@ class TestApiTimelineEvents:
 
     async def test_no_reader_returns_empty_unavailable_payload(self, debug_config, mock_recorder, mock_app):
         mock_recorder._db = None
-        mock_recorder._reader_db = None
-        mock_recorder.reader_db = None
+        mock_recorder.file_reader_db = None
         mock_recorder.flush = AsyncMock()
 
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
@@ -2178,8 +2175,7 @@ class TestApiRecentTasksDepthAndWindow:
         cfg = make_ui_config(**kwargs)
 
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         if not pool_present:
@@ -2260,13 +2256,13 @@ class TestApiRecentTasksDepthAndWindow:
     ):
         """An unbounded history_factor x pool size must not reach the DB query unclamped."""
         captured: dict[str, object] = {}
-        original = UIDeps.flush_and_select
+        original = UIDeps.recorder_select
 
-        async def spy(self, query, params=()):
+        async def spy(self, query, params, **read):
             captured['params'] = params
-            return await original(self, query, params)
+            return await original(self, query, params, **read)
 
-        monkeypatch.setattr(UIDeps, 'flush_and_select', spy)
+        monkeypatch.setattr(UIDeps, 'recorder_select', spy)
 
         timeline = UITimelineConfig(history_factor=1_000_000)
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
@@ -2585,8 +2581,7 @@ class TestApiRecentTasksEdgeCases:
         cfg = make_ui_config(enabled=True, port=8080)
 
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
@@ -2620,8 +2615,7 @@ class TestApiRecentTasksEdgeCases:
         cfg = make_ui_config(enabled=True, port=8080)
 
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder.storage_dir = str(tmp_path)
@@ -3476,8 +3470,7 @@ class TestApiPeriodicTasks:
 
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
 
@@ -3519,8 +3512,7 @@ class TestApiPeriodicTasks:
 
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
 
@@ -3591,8 +3583,7 @@ class TestApiLabelTrace:
 
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder._worker_name = 'test-worker'
@@ -3620,16 +3611,29 @@ class TestApiLabelTrace:
         client = AsyncClient(transport=transport, base_url='http://test')
         return client, db
 
+    @staticmethod
+    async def _memory_store_like(db) -> MemoryStore:
+        """A memory store holding the events of ``db``: label keys always come from memory."""
+        store = MemoryStore('label-keys-test', store_config=False)
+        await store.open()
+        async with db.execute('SELECT ts, dt, event, labels FROM events') as cursor:
+            rows = await cursor.fetchall()
+        await store.writer.executemany('INSERT INTO events (ts, dt, event, labels) VALUES (?, ?, ?, ?)', rows)
+        await store.writer.commit()
+        return store
+
     async def test_label_keys_returns_distinct_keys(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
+        mock_recorder.memory_store = await self._memory_store_like(db)
         async with client as c:
             resp = await c.get('/api/v1/debug/label-keys')
+        await mock_recorder.memory_store.close()
+        await db.close()
         assert resp.status_code == 200
         keys = resp.json()
         assert 'request_id' in keys
         assert 'user' in keys
         assert len(keys) == 2
-        await db.close()
 
     async def test_label_keys_empty_when_no_labels(self, mock_recorder, mock_app):
         import aiosqlite
@@ -3641,19 +3645,20 @@ class TestApiLabelTrace:
 
         cfg = make_ui_config(enabled=True, port=8080)
         mock_recorder._db = db
-        mock_recorder._reader_db = db
-        mock_recorder.reader_db = db
+        mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
 
         mock_recorder.storage_dir = '/tmp'
+        mock_recorder.memory_store = await self._memory_store_like(db)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/v1/debug/label-keys')
+        await mock_recorder.memory_store.close()
+        await db.close()
         assert resp.status_code == 200
         assert resp.json() == []
-        await db.close()
 
     async def test_trace_by_label_finds_matching_events(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
@@ -4320,13 +4325,12 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
 
         # Route both writer and reader through the loop-observing spy so
         # we can assert the debug-server read path stays on the main loop
-        # whether it reads via ``_db`` or ``reader_db`` — the production
-        # endpoint picks the reader first but both must be bound to the
-        # main loop.
+        # whether it reads via ``_db`` or ``file_reader_db`` — the
+        # production endpoint picks the reader but both must be bound to
+        # the main loop.
         observer = _LoopObservingDB(db)
         mock_recorder._db = observer
-        mock_recorder._reader_db = observer
-        mock_recorder.reader_db = observer
+        mock_recorder.file_reader_db = observer
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = debug_config
         mock_app.main_loop = main_loop
@@ -4375,8 +4379,7 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     await db.commit()
 
     mock_recorder._db = db
-    mock_recorder._reader_db = db
-    mock_recorder.reader_db = db
+    mock_recorder.file_reader_db = db
     mock_recorder.flush = AsyncMock()
     mock_recorder.config = debug_config
     # ``mock_app.main_loop`` is a ``MagicMock`` by default; the helper
@@ -4469,15 +4472,14 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
 
 
 # ---------------------------------------------------------------------------
-# _flush_and_select helper: consolidates the "flush + read via
-# reader_db with writer fallback" pattern. The helper is a closure inside
-# ``create_ui_app`` so it isn't imported directly — instead these tests
-# exercise it through ``/api/events`` which routes a minimal SELECT through
-# the helper.
+# ``UIDeps.recorder_select``: the source rule, the stages its source
+# needs, then the SELECT. These tests point a mock recorder with no
+# memory store at a file reader (no memory store reads the file) and
+# exercise the helper through ``/api/v1/events``.
 # ---------------------------------------------------------------------------
 
 
-async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_recorder, debug_config, mock_app):
+async def test_recorder_select_returns_columns_and_rows(tmp_path, mock_recorder, debug_config, mock_app):
     """The helper returns (columns, rows) from a SELECT on the recorder
     DB and flushes before reading. Exercised via ``/api/events`` because
     the helper is a closure inside ``create_ui_app``.
@@ -4514,8 +4516,7 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
         flush_calls += 1
 
     mock_recorder._db = writer
-    mock_recorder._reader_db = reader
-    mock_recorder.reader_db = reader
+    mock_recorder.file_reader_db = reader
     # Debug server uses the public ``recorder.flush()`` (MED-4). Stub the
     # public name so the helper's ``await recorder.flush()`` actually hits
     # our counter — setting ``_flush`` would be a no-op because the mock
@@ -4543,14 +4544,16 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
     await reader.close()
 
 
-async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config, mock_recorder, mock_app):
-    """When ``reader_db`` is None the helper must return ``None``;
+async def test_recorder_select_returns_none_when_the_file_reader_is_missing(debug_config, mock_recorder, mock_app):
+    """When ``file_reader_db`` is None the helper must return ``None``;
     the endpoint maps that onto its empty-response shape (``[]`` for
     ``/api/events``).
     """
     mock_recorder._db = None
-    mock_recorder._reader_db = None
-    mock_recorder.reader_db = None
+    mock_recorder.file_reader_db = None
+    mock_recorder.persistence = 'sqlite'
+    mock_recorder.memory_store = None
+    mock_recorder.memory_coverage = MagicMock(return_value=None)
 
     flush_calls = 0
 
@@ -4575,7 +4578,7 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
     assert flush_calls == 1
 
 
-async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
+async def test_recorder_select_logs_the_missing_reader_once_per_interval(
     debug_config, mock_recorder, mock_app, monkeypatch
 ):
     """A degraded read must name its cause in the log, without flooding it.
@@ -4590,8 +4593,10 @@ async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
     monkeypatch.setattr(server_module, '_degraded_read_last_logged', {})
 
     mock_recorder._db = None
-    mock_recorder._reader_db = None
-    mock_recorder.reader_db = None
+    mock_recorder.file_reader_db = None
+    mock_recorder.persistence = 'sqlite'
+    mock_recorder.memory_store = None
+    mock_recorder.memory_coverage = MagicMock(return_value=None)
     mock_recorder.flush = AsyncMock()
     mock_recorder.config = debug_config
 
@@ -4608,7 +4613,7 @@ async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
     assert warnings[0]['log_level'] == 'warning'
 
 
-async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
+async def test_recorder_select_logs_a_dispatch_failure_as_its_own_cause(
     debug_config, mock_recorder, mock_app, monkeypatch
 ):
     """Reader-absent and dispatch-timeout are different problems; the log says which."""
@@ -4639,8 +4644,8 @@ async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
     assert 'ui_read_reader_db_absent' not in events
 
 
-async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, mock_recorder, debug_config, mock_app):
-    """Sanity check that the helper reads through ``reader_db`` not
+async def test_recorder_select_reads_the_file_reader_not_the_writer(tmp_path, mock_recorder, debug_config, mock_app):
+    """Sanity check that the helper reads through ``file_reader_db`` not
     ``_db`` when both are set (the whole point of the helper). Uses two
     independent DB files: a writer with one row, a reader with three.
     A helper that read the writer would return 1 row; the endpoint
@@ -4671,8 +4676,7 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     await reader.commit()
 
     mock_recorder._db = writer
-    mock_recorder._reader_db = reader
-    mock_recorder.reader_db = reader
+    mock_recorder.file_reader_db = reader
     mock_recorder.flush = AsyncMock()
     mock_recorder.config = debug_config
 
@@ -4685,7 +4689,7 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     data = resp.json()
     # Reader has 3 rows; writer has 1. Seeing 3 (and none of them being
     # the writer's row) is conclusive evidence that the helper routed
-    # through reader_db.
+    # through file_reader_db.
     assert len(data) == 3
     assert all(e['task_id'].startswith('reader-') for e in data)
 

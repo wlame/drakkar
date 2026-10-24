@@ -1245,7 +1245,7 @@ async def test_start_creates_both_writer_and_reader_connections(tmp_path):
     # The reader is a separate connection object, not an alias to the writer.
     assert rec._db is not rec._reader_db
     # The public property returns the reader connection.
-    assert rec.reader_db is rec._reader_db
+    assert rec.file_reader_db is rec._reader_db
 
     await rec.stop()
 
@@ -1266,7 +1266,7 @@ async def test_stop_closes_both_connections(tmp_path):
     # Both references are cleared so a post-stop access returns None.
     assert rec._db is None
     assert rec._reader_db is None
-    assert rec.reader_db is None
+    assert rec.file_reader_db is None
     # The underlying connections were closed — attempting to use them
     # should raise a ValueError from aiosqlite (operation on closed
     # connection). We check the reader first since stop() closes it
