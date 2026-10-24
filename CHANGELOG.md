@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows of the memory store: first the rows older than the time window, then
   the rows above the row cap, then rows until the data bytes (pages in use
   times the page size) fit the byte budget. It deletes at most 5000 rows per
-  transaction and at most 64 batches per byte pass. A read from the UI
-  starts this at most once per second. The memory gauges are set after each
+  transaction. The byte part stops once the pass has run 64 delete batches,
+  and the next pass goes on. A read from the UI starts this at most once per
+  second. The memory gauges are set after each
   pass. A failed pass logs `recorder_memory_eviction_failed` with the reason
   `window`, `rows`, `bytes` or `floor`, and the next pass starts again.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
