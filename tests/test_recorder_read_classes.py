@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 from drakkar.config import DrakkarConfig
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
+from drakkar.recorder import core as core_mod
 from drakkar.recorder import memstore as memstore_mod
 from drakkar.recorder import queries as queries_mod
 from drakkar.recorder.memstore import MemoryCoverage
@@ -390,7 +391,7 @@ async def test_default_timeline_reads_the_file_with_sqlite(started):
     assert sorted(task['task_id'] for task in resp.json()['tasks']) == ['new', 'old']
 
 
-async def test_reads_answer_their_empty_shape_once_the_memory_store_is_closed(started):
+async def test_reads_answer_their_empty_shape_when_the_memory_store_is_already_closed(started):
     rec = await started('none')
     rec._record({**_consumed(1), 'labels': json.dumps({'tenant': 'a'})})
     await rec.flush_memory()
@@ -401,6 +402,37 @@ async def test_reads_answer_their_empty_shape_once_the_memory_store_is_closed(st
 
     assert (resp.status_code, resp.json()) == (200, [])
     assert await rec.trace_by_label('tenant', 'a') == []
+
+
+async def test_a_read_answers_its_empty_shape_when_the_memory_store_closes_under_it(started):
+    rec = await started('none')
+    rec._record(_consumed(1))
+    store = rec.memory_store
+    real_read = store.read
+
+    async def read_while_the_recorder_stops(query, params=()):
+        await store.close()
+        return await real_read(query, params)
+
+    store.read = read_while_the_recorder_stops
+
+    async with _client(rec) as client:
+        resp = await client.get('/api/v1/events')
+
+    assert (resp.status_code, resp.json()) == (200, [])
+
+
+async def test_a_runtime_error_while_the_memory_store_is_open_propagates(started):
+    rec = await started('none')
+    store = rec.memory_store
+
+    async def broken_read(query, params=()):
+        raise RuntimeError('a bug, not a stop')
+
+    store.read = broken_read
+
+    with pytest.raises(RuntimeError, match='a bug'):
+        await queries_mod.read_memory(store, COUNT_QUERY, (), endpoint='e')
 
 
 def _waiting_file_stages() -> list[asyncio.Task]:
@@ -426,3 +458,107 @@ async def test_timed_out_file_reads_share_one_waiting_file_stage(started):
 
     assert _waiting_file_stages() == []
     assert await _file_count(rec) == 3
+
+
+async def test_a_flush_after_a_run_took_the_lock_starts_a_new_run_that_writes_its_row(started):
+    rec = await started('sqlite')
+    real_write = rec._write_file_chunk
+    first_write_started, release_first_write = asyncio.Event(), asyncio.Event()
+
+    async def write(db, batch):
+        if not first_write_started.is_set():
+            first_write_started.set()
+            await release_first_write.wait()
+        return await real_write(db, batch)
+
+    rec._write_file_chunk = write
+    rec._record(_consumed(1))
+    first_flush = asyncio.ensure_future(rec.flush())
+    await first_write_started.wait()  # the first run holds the lock and took row 1
+    first_run = [
+        task for task in asyncio.all_tasks() if task.get_coro().__qualname__.endswith('_run_queued_stage_file')
+    ]
+
+    rec._record(_consumed(2))
+    second_flush = asyncio.ensure_future(rec.flush())
+    await asyncio.sleep(0.01)
+    assert rec._waiting_stage_file is not None
+    assert rec._waiting_stage_file not in first_run
+    release_first_write.set()
+    await asyncio.gather(first_flush, second_flush)
+
+    assert await _file_count(rec) == 2
+
+
+def _file_stage_failure_logs(logs: list[dict]) -> list[dict]:
+    return [entry for entry in logs if entry['event'] == 'recorder_flush_loop_iteration_failed']
+
+
+async def _failing_file_stage(rec: EventRecorder) -> None:
+    async def broken_stage() -> None:
+        raise RuntimeError('disk gone')
+
+    rec._stage_file_locked = broken_stage
+
+
+async def test_a_file_stage_failure_that_no_flush_receives_is_logged(started):
+    rec = await started('sqlite')
+    await _failing_file_stage(rec)
+    await rec._flush_lock.acquire()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(rec.flush(), timeout=0.05)
+    run = rec._waiting_stage_file
+
+    with capture_logs() as logs:
+        rec._flush_lock.release()
+        await asyncio.wait([run])
+        await asyncio.sleep(0)
+
+    failures = _file_stage_failure_logs(logs)
+    assert [(entry['stage'], entry['error']) for entry in failures] == [('file', 'disk gone')]
+
+
+async def test_a_file_stage_failure_that_a_flush_receives_is_raised_not_logged(started):
+    rec = await started('sqlite')
+    await _failing_file_stage(rec)
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match='disk gone'):
+        await rec.flush()
+
+    assert _file_stage_failure_logs(logs) == []
+
+
+async def test_a_file_stage_queued_during_stop_does_not_write_after_the_seal_starts(tmp_path, monkeypatch):
+    (tmp_path / 'storage').mkdir()
+    rec = _recorder(tmp_path, 'sqlite')
+    await rec.start()
+    steps: list[str] = []
+    real_write, real_sync_state = rec._write_file_chunk, rec._sync_state
+    real_seal_connection = core_mod.seal_connection
+    queued: list[asyncio.Future] = []
+
+    async def write(db, batch):
+        steps.append('write')
+        await asyncio.sleep(0)
+        return await real_write(db, batch)
+
+    async def sync_state_with_a_read_arriving():
+        rec._record(_consumed(2))
+        queued.append(asyncio.ensure_future(rec.flush()))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await real_sync_state()
+
+    def seal_connection(*args, **kwargs):
+        steps.append('seal')
+        return real_seal_connection(*args, **kwargs)
+
+    rec._write_file_chunk = write
+    rec._sync_state = sync_state_with_a_read_arriving
+    monkeypatch.setattr(core_mod, 'seal_connection', seal_connection)
+    rec._record(_consumed(1))
+
+    await rec.stop()
+    await asyncio.gather(*queued)
+
+    assert steps == ['write', 'seal']

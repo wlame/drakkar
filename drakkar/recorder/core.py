@@ -206,12 +206,6 @@ def _is_running(future: Future[None] | None) -> bool:
     return future is not None and not future.done()
 
 
-def _retrieve_outcome(task: asyncio.Task[None]) -> None:
-    """Mark a task's exception as retrieved; whoever awaited the task got it raised."""
-    if not task.cancelled():
-        task.exception()
-
-
 def _log_job_failure(job: str, future: Future[None]) -> None:
     """Log a job of the archive thread that raised, when nothing awaits its result."""
     if future.cancelled() or (exc := future.exception()) is None:
@@ -431,6 +425,8 @@ class EventRecorder(EventWriter):
         # ``_flush_lock`` (see ``_queued_stage_file``): while the disk hangs,
         # each timed-out read would otherwise leave one more waiting run.
         self._waiting_stage_file: asyncio.Task[None] | None = None
+        # Flushes still waiting for each shared stage F run: they receive its outcome.
+        self._stage_file_receivers: dict[asyncio.Task[None], int] = {}
         # Consecutive failures of the file chunk at the front of the file
         # queue. Reset on a successful stage F or when a chunk is dropped
         # after ``max_flush_retries``; one counter is enough because a
@@ -552,7 +548,23 @@ class EventRecorder(EventWriter):
         finishes on its own.
         """
         await asyncio.shield(self._stage_memory(EVICT_MIN_INTERVAL_SECONDS))
-        await asyncio.shield(self._queued_stage_file())
+        task = self._queued_stage_file()
+        # Count this flush as a receiver of the run's outcome while it
+        # waits; a flush cancelled meanwhile (a read that timed out) stops
+        # counting before the run ends.
+        self._stage_file_receivers[task] = self._stage_file_receivers.get(task, 0) + 1
+        try:
+            await asyncio.shield(task)
+        finally:
+            self._forget_stage_file_receiver(task)
+
+    def _forget_stage_file_receiver(self, task: asyncio.Task[None]) -> None:
+        """Stop counting one waiting flush for ``task``."""
+        left = self._stage_file_receivers.get(task, 0) - 1
+        if left > 0:
+            self._stage_file_receivers[task] = left
+        else:
+            self._stage_file_receivers.pop(task, None)
 
     def _queued_stage_file(self) -> asyncio.Task[None]:
         """The stage F run that has not taken its rows yet, shared by every flush that asks for one.
@@ -566,11 +578,33 @@ class EventRecorder(EventWriter):
         if task is None or task.done():
             task = asyncio.ensure_future(self._run_queued_stage_file())
             # Every flush that awaited the run may have given up (a read
-            # that timed out): retrieve the outcome so it is never left
-            # unretrieved on the loop. A flush still waiting gets it raised.
-            task.add_done_callback(_retrieve_outcome)
+            # that timed out): then nobody receives a failure, and the
+            # callback logs it. A flush still waiting gets it raised.
+            task.add_done_callback(self._log_unreceived_stage_file_failure)
             self._waiting_stage_file = task
         return task
+
+    def _log_unreceived_stage_file_failure(self, task: asyncio.Task[None]) -> None:
+        """Log the exception of a shared stage F run that no waiting flush receives.
+
+        Runs as the run's first done callback, before any waiting flush
+        resumes: a flush still counted in ``_stage_file_receivers`` gets the
+        exception raised, and its caller answers it. When every flush gave
+        up, this line is the only trace of the failure.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None or self._stage_file_receivers.get(task, 0) > 0:
+            return
+        logger.error(
+            'recorder_flush_loop_iteration_failed',
+            category='recorder',
+            stage='file',
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
     async def _run_queued_stage_file(self) -> None:
         """One shared stage F run: wait for ``_flush_lock``, leave the waiting slot, run stage F."""
@@ -1155,16 +1189,52 @@ class EventRecorder(EventWriter):
         # Final stages + state sync are best-effort: a failure in any must
         # not skip the seal and the _LIVE_RECORDERS discard below, or
         # shutdown would leak connections and interpreter exit would try to
-        # flush into a recorder that never tore down. Stage M first, then
-        # stage F, each under its own lock.
+        # flush into a recorder that never tore down. Stage M first, under
+        # its own lock.
         try:
             await self._stage_memory(0.0)
         except Exception as exc:
             await logger.awarning('recorder_final_flush_failed', category='recorder', stage='memory', error=str(exc))
-        try:
-            await self._stage_file()
-        except Exception as exc:
-            await logger.awarning('recorder_final_flush_failed', category='recorder', stage='file', error=str(exc))
+        # From the final stage F to the end of the seal, ``_flush_lock`` is
+        # held: a stage F run queued by a read meanwhile then waits, finds no
+        # writer once it gets the lock, and never writes into the file
+        # being sealed. Nothing below awaits ``flush()``.
+        sealed: tuple[str, dict[str, Any] | None] | None = None
+        async with self._flush_lock:
+            await self._final_file_stage()
+            if self._db:
+                writer, path = self._db, self._db_path
+                self._db = None
+                meta = await self._seal(path, seal_connection(writer, db_path=path, **self._seal_identity()))
+                sealed = (path, meta)
+        if sealed is not None and sealed[1] is not None:
+            await self._publish_until(sealed[0], sealed[1], deadline)
+        # Last: an archive pass still running in its thread checks its lease
+        # through the election, which the worker stops after this wait.
+        await self._wait_for_archive_pass(deadline, reserve_seconds)
+        # The memory store goes last: by-name readers still open get up to
+        # MEMORY_CLOSE_WAIT_SECONDS, inside the shutdown time left, to
+        # finish, and later opens get nothing.
+        left = _time_left(deadline)
+        await self._close_memory_store(
+            MEMORY_CLOSE_WAIT_SECONDS if left is None else min(MEMORY_CLOSE_WAIT_SECONDS, left)
+        )
+        # Clean shutdown flushed everything above — leave the live set so
+        # interpreter exit does not reopen the closed DB. Discarding a
+        # never-added recorder (start() not reached) is a no-op.
+        _LIVE_RECORDERS.discard(self)
+        await logger.ainfo('recorder_stopped', category='recorder')
+
+    async def _final_file_stage(self) -> None:
+        """The last stage F, the state sync and the reader close at stop; ``_flush_lock`` is held by the caller.
+
+        Each step is best-effort: a failure is logged and the seal still runs.
+        """
+        if self._has_file:
+            try:
+                await self._stage_file_locked()
+            except Exception as exc:
+                await logger.awarning('recorder_final_flush_failed', category='recorder', stage='file', error=str(exc))
         try:
             await self._sync_state()
         except Exception as exc:
@@ -1186,27 +1256,6 @@ class EventRecorder(EventWriter):
                     error=str(exc),
                 )
             self._reader_db = None
-        if self._db:
-            writer, path = self._db, self._db_path
-            self._db = None
-            meta = await self._seal(path, seal_connection(writer, db_path=path, **self._seal_identity()))
-            if meta is not None:
-                await self._publish_until(path, meta, deadline)
-        # Last: an archive pass still running in its thread checks its lease
-        # through the election, which the worker stops after this wait.
-        await self._wait_for_archive_pass(deadline, reserve_seconds)
-        # The memory store goes last: by-name readers still open get up to
-        # MEMORY_CLOSE_WAIT_SECONDS, inside the shutdown time left, to
-        # finish, and later opens get nothing.
-        left = _time_left(deadline)
-        await self._close_memory_store(
-            MEMORY_CLOSE_WAIT_SECONDS if left is None else min(MEMORY_CLOSE_WAIT_SECONDS, left)
-        )
-        # Clean shutdown flushed everything above — leave the live set so
-        # interpreter exit does not reopen the closed DB. Discarding a
-        # never-added recorder (start() not reached) is a no-op.
-        _LIVE_RECORDERS.discard(self)
-        await logger.ainfo('recorder_stopped', category='recorder')
 
     async def _publish_until(self, path: str, meta: dict[str, Any], deadline: float | None) -> None:
         """Publish a sealed file at stop, waiting no later than ``deadline``."""

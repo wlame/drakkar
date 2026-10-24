@@ -300,9 +300,12 @@ class UIDeps:
         again on the file with ``sqlite``, and keeps the shorter answer
         with ``none``.
 
-        ``None`` (no reader, the read limit, a recorder that is stopping,
-        or a main loop that did not answer in time) is logged, rate-limited,
-        and the caller answers its endpoint's empty shape.
+        ``None`` means no answer, and the caller answers its endpoint's
+        empty shape. A missing file reader and a main loop that did not
+        answer in time are logged (rate-limited), and so is a memory read
+        stopped by the read limit (``ui_read_memory_timed_out``). A memory
+        store that is not open, or closed under the read while the
+        recorder stops, answers ``None`` without a log line.
         """
         recorder = self.recorder
 
