@@ -828,6 +828,24 @@ recorder_memory_write_failures = Counter(
     'Event chunks that could not be written to the recorder memory store',
 )
 
+# The recorder Postgres table (persistence ``postgres``): the P queue, the
+# rows stage P wrote, and the rows that never got there.
+recorder_postgres_queue_rows = Gauge(
+    'drakkar_recorder_postgres_queue_rows',
+    'Rows waiting to be written to the recorder Postgres table',
+)
+
+recorder_postgres_rows_written = Counter(
+    'drakkar_recorder_postgres_rows_written_total',
+    'Rows written to the recorder Postgres table',
+)
+
+recorder_postgres_dropped_rows = Counter(
+    'drakkar_recorder_postgres_dropped_rows_total',
+    'Rows that never reached the recorder Postgres table, by reason',
+    ['reason'],
+)
+
 # Recorder flush retry observability.
 #
 # The file write (stage F) catches ``sqlite3.Error`` (disk full, WAL

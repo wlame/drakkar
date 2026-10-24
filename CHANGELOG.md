@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder mode `postgres` (config and table DDL so far).**
+- **Recorder mode `postgres` (config, table DDL and the row queue so far).**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys
   `connection` (`main`), `table_prefix`, `retention_hours` (6),
@@ -70,7 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ` recorder=postgres`. `drakkar-schema postgres` has the new flags
   `--recorder`, `--table-prefix` and `--retention-hours` (1 to 168, default
   6). With `--recorder` it also prints the DDL of the recorder events table,
-  one table partitioned by UTC hour.
+  one table partitioned by UTC hour. Rows that the memory store takes wait
+  in a queue for the table, with the same ids. The queue is bounded by
+  `ui.recorder.max_buffer` rows and by `queue_max_mib`. When it is full, the
+  oldest rows are dropped and counted in
+  `drakkar_recorder_postgres_dropped_rows_total{reason="queue_full"}`, and
+  `recorder_postgres_rows_dropped` is logged. New metrics:
+  `drakkar_recorder_postgres_queue_rows`,
+  `drakkar_recorder_postgres_rows_written_total` and
+  `drakkar_recorder_postgres_dropped_rows_total`.
 - **Recorder memory store and the persistence choice.** When
   `ui.recorder.store_events` is on, the recorder keeps its recent events in
   an in-memory SQLite database, the memory store. New keys:

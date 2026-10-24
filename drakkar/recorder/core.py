@@ -50,7 +50,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import HistoryArchiveConfig, UIConfig
-from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_SQLITE, Persistence
+from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -65,6 +65,7 @@ from drakkar.metrics import (
     recorder_memory_oldest_age_seconds,
     recorder_memory_rows,
     recorder_memory_write_failures,
+    recorder_postgres_dropped_rows,
     recorder_requeue_overflow,
     recorder_seal_failures,
     recorder_unsealed_files,
@@ -95,6 +96,7 @@ from drakkar.recorder.memstore import (
     is_transient_memory_error,
     run_eviction_pass,
 )
+from drakkar.recorder.postgres import PostgresQueue, QueuedPair, RecorderPostgresSettings
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -267,6 +269,7 @@ class EventRecorder(EventWriter):
         memory_window_seconds: int = 120,
         memory_max_rows: int = 3000,
         memory_max_bytes: int = 256 * MIB,
+        postgres: RecorderPostgresSettings | None = None,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -289,15 +292,24 @@ class EventRecorder(EventWriter):
         (the caller multiplies the per-executor cap by the executor count)
         and its data budget in bytes.
 
+        ``postgres`` holds the table settings of the ``'postgres'`` mode,
+        which needs them; the other modes ignore it.
+
         The archive pass runs as the cluster task
         :meth:`archive_cluster_task` returns; the worker's election decides
         which worker of the cluster runs each slot.
         """
         if persistence == PERSISTENCE_SQLITE and not storage_dir:
             raise ValueError('recorder: persistence sqlite needs a storage_dir')
+        if persistence == PERSISTENCE_POSTGRES and postgres is None:
+            raise ValueError('recorder: persistence postgres needs postgres settings')
         super().__init__(config)
         self._persistence: Persistence = persistence
         self._has_file: bool = persistence == PERSISTENCE_SQLITE
+        # Whether the rows stage M wrote go on somewhere: to the file queue
+        # (``sqlite``) or to the P queue (``postgres``).
+        self._has_downstream: bool = persistence in (PERSISTENCE_SQLITE, PERSISTENCE_POSTGRES)
+        self._postgres = postgres if persistence == PERSISTENCE_POSTGRES else None
         self._worker_name = worker_name
         self._cluster_name = cluster_name
         self._storage_dir = storage_dir
@@ -320,6 +332,21 @@ class EventRecorder(EventWriter):
         # rides next to the row, never inside the event dict: the fan-out may
         # encode that dict on the UI thread at any time.
         self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.recorder.max_buffer)
+        # The P queue: the same pairs on their way to the Postgres table,
+        # bounded by count and by text size; only with ``postgres``.
+        self._pg_queue: PostgresQueue | None = (
+            PostgresQueue(max_rows=config.recorder.max_buffer, max_bytes=self._postgres.queue_max_bytes)
+            if self._postgres is not None
+            else None
+        )
+        # Set on the main loop when an append leaves the P queue at least half
+        # full, so stage P writes before the next tick.
+        self._pg_wakeup = asyncio.Event()
+        # Pairs the P queue dropped and no log line has reported yet; stage M
+        # reports them when it ends (the append itself may not await).
+        self._pg_unlogged_drops = 0
+        # One ``recorder_postgres_rows_dropped`` line per 60 s per reason.
+        self._pg_drop_log = RateLimitedLog(time.monotonic)
         # Approximate payload bytes appended since the last stage M. Reset
         # at the stage rather than decremented per drained row: it exists to
         # decide "write now", where over-counting costs one early write and
@@ -1482,7 +1509,8 @@ class EventRecorder(EventWriter):
 
         Pops the intake in chunks of at most ``FLUSH_CHUNK_ROWS``. For each
         chunk: assign ids, build the row tuples once, write and commit them,
-        then, with a file, append the ``(id, row)`` pairs to the file queue.
+        then, with a file or Postgres, append the ``(id, row)`` pairs to the
+        file queue or the P queue.
         A chunk that fails follows the failure rules of
         :meth:`_write_memory_chunk`; a transient failure stops the stage
         and skips the eviction pass (the next tick runs both).
@@ -1519,6 +1547,7 @@ class EventRecorder(EventWriter):
                     completed = False
                     break
             self._update_buffer_gauge()
+            await self._log_postgres_queue_drops()
             if completed:
                 await self._evict(evict_min_interval)
 
@@ -1628,8 +1657,9 @@ class EventRecorder(EventWriter):
         transient error (busy or locked) puts the chunk back at the front of
         the intake and gives its ids back: the stage stops and the next tick
         retries it, so nothing is dropped. A final error keeps the store one
-        contiguous range: the chunk goes to the file queue (with a file) or
-        is lost, and every memory row up to its last id is deleted. When
+        contiguous range: the chunk goes to the file queue (``sqlite``) or
+        the P queue (``postgres``) or is lost, and every memory row up to its
+        last id is deleted. When
         that rollback or delete fails, the stage stops too, so no later
         chunk lands above the rows still to delete; the next stage M
         deletes them first.
@@ -1686,12 +1716,12 @@ class EventRecorder(EventWriter):
                     self._requeue_front(self._intake, batch)
                     self._next_id = first_id
         self._last_id = last_id
-        if self._has_file:
-            self._append_file_queue([(row[0], row) for row in rows])
+        if self._has_downstream:
+            self._append_downstream([(row[0], row) for row in rows])
         return True
 
     def _keep_rows_without_memory(self, rows: list[tuple]) -> None:
-        """Account for a chunk that did not reach the memory store: file queue (with a file) and a gap.
+        """Account for a chunk that did not reach the memory store: the downstream queue and a gap.
 
         The memory store then starts after the chunk: every row up to its
         last id is due for deletion (:meth:`_delete_pending_gap`), the floor
@@ -1700,8 +1730,8 @@ class EventRecorder(EventWriter):
         rules stay right. Synchronous.
         """
         last_id = rows[-1][0]
-        if self._has_file:
-            self._append_file_queue([(row[0], row) for row in rows])
+        if self._has_downstream:
+            self._append_downstream([(row[0], row) for row in rows])
         self._pending_gap_id = last_id
         self._last_id = last_id
         self._floor_id = last_id + 1
@@ -1746,6 +1776,39 @@ class EventRecorder(EventWriter):
             )
             return
         self._memory_dirty = False
+
+    def _append_downstream(self, pairs: list[QueuedPair]) -> None:
+        """Hand ``(id, row)`` pairs on: to the file queue with ``sqlite``, to the P queue with ``postgres``.
+
+        Synchronous: it also runs while a cancelled write unwinds. Pairs the
+        P queue drops are counted at once and logged when stage M ends.
+        """
+        queue = self._pg_queue
+        if queue is None:
+            self._append_file_queue(pairs)
+            return
+        dropped = queue.append(pairs)
+        if dropped:
+            recorder_postgres_dropped_rows.labels(reason='queue_full').inc(dropped)
+            self._pg_unlogged_drops += dropped
+        if queue.past_half():
+            self._pg_wakeup.set()
+
+    async def _log_postgres_queue_drops(self) -> None:
+        """Log the pairs the P queue dropped since the last line, at most one line per 60 s."""
+        rows = self._pg_unlogged_drops
+        if not rows:
+            return
+        self._pg_unlogged_drops = 0
+        await self._pg_drop_log.emit(
+            'queue_full',
+            logger.awarning,
+            'recorder_postgres_rows_dropped',
+            category='recorder',
+            reason='queue_full',
+            rows=rows,
+            error='',
+        )
 
     def _append_file_queue(self, pairs: list[tuple[int, tuple]]) -> None:
         """Append ``(id, row)`` pairs to the file queue; pairs pushed out of a full queue count as dropped events."""
