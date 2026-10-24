@@ -8,7 +8,7 @@ RAM to plan for it, and what each page shows in each mode.
 
 The memory store exists when `ui.enabled` and `ui.recorder.store_events` are
 both on (the defaults). With `store_events: false` there is no memory store
-and no recorder file; the live WebSocket view still streams.
+and no event rows anywhere; the live WebSocket view still streams.
 
 ## The two modes
 
@@ -168,9 +168,9 @@ With `none`, the pages cover the memory window only. The UI does not label it.
 - **`/debug/periodic`** totals count only the runs inside the window.
 - **Task detail** shows only the rows of the task that are still in the
   window. A task whose older rows left the window shows its newer rows only.
-- **Trace** and **trace by label** find the rows of the window, plus the
-  sealed history of the cluster when you ask for history and a shared folder
-  resolves.
+- **Trace** finds the rows of the window, plus the sealed history of the
+  cluster when you ask for it (`history=1`) and a shared folder resolves.
+  **Trace by label** finds the rows of the window.
 
 Rare events leave with the window too. An event that happens once an hour is
 in the store for two minutes with the defaults. Use a `sqlite` worker, or the
