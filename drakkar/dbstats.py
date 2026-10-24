@@ -159,9 +159,11 @@ def measure_memory_store(
     ``ts`` index, the per-event counts from one ``GROUP BY event`` over the
     event index, and ``size_bytes`` is the data in use (pages in use times
     the page size), not the memory the store holds. ``cluster_name`` comes
-    from the store's ``worker_config`` row, else ``fallback_cluster``. Every
-    statement runs under the memory read limit; a statement it stops
-    answers its empty part (no timestamps, ``{}``, the fallback cluster).
+    from the store's ``worker_config`` row, else ``fallback_cluster``. The
+    three reads of the events and config tables run under the memory read
+    limit, and a read it stops answers its empty part (no timestamps,
+    ``{}``, the fallback cluster); the table probe and the page pragmas are
+    single lookups.
     """
     span = _bounded_rows(conn, 'SELECT MIN(ts), MAX(ts) FROM events')
     first_ts, last_ts = span[0] if span else (None, None)
