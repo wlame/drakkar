@@ -84,7 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_recorder_buffer_size` now counts the events that wait for the
   memory store plus the rows that wait for the file. The log events
   `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
-  gain a `stage` field (`memory` or `file`).
+  gain a `stage` field (`memory` or `file`). After each memory write, and on
+  every memory tick when the worker is idle, the recorder removes the oldest
+  rows of the memory store: first the rows older than the time window, then
+  the rows above the row cap, then rows until the data bytes (pages in use
+  times the page size) fit the byte budget. It deletes at most 5000 rows per
+  transaction and at most 64 batches per byte pass. A read from the UI
+  starts this at most once per second. The memory gauges are set after each
+  pass. A failed pass logs `recorder_memory_eviction_failed` with the reason
+  `window`, `rows`, `bytes` or `floor`, and the next pass starts again.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part

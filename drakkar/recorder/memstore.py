@@ -120,6 +120,7 @@ class PrefixDeletion:
     max_ts: float | None
     error: sqlite3.Error | None = None
     rollback_error: sqlite3.Error | None = None
+    batches: int = 0
 
 
 async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixDeletion:
@@ -130,9 +131,11 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
     back the open batch and ends the deletion; the batches committed before
     it stay deleted and are counted in the result, with the error. The
     failed batch is never counted: it is rolled back, or, when the rollback
-    fails as well, still open, which ``rollback_error`` reports.
+    fails as well, still open, which ``rollback_error`` reports. ``batches``
+    counts the committed batches.
     """
     deleted = 0
+    batches = 0
     max_ts: float | None = None
     try:
         while True:
@@ -149,15 +152,230 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
                 batch_deleted = cursor.rowcount
             await conn.commit()
             deleted += batch_deleted
+            batches += 1
             if batch_max_ts is not None:
                 max_ts = batch_max_ts if max_ts is None else max(max_ts, batch_max_ts)
     except sqlite3.Error as exc:
         try:
             await conn.rollback()
         except sqlite3.Error as rollback_exc:
-            return PrefixDeletion(deleted, max_ts, exc, rollback_exc)
-        return PrefixDeletion(deleted, max_ts, exc)
-    return PrefixDeletion(deleted, max_ts)
+            return PrefixDeletion(deleted, max_ts, exc, rollback_exc, batches)
+        return PrefixDeletion(deleted, max_ts, exc, batches=batches)
+    return PrefixDeletion(deleted, max_ts, batches=batches)
+
+
+async def read_page_numbers(conn: aiosqlite.Connection) -> tuple[int, int, int]:
+    """The ``page_count``, ``freelist_count`` and ``page_size`` of the database behind ``conn``."""
+    numbers = []
+    for pragma in ('page_count', 'freelist_count', 'page_size'):
+        async with conn.execute(f'PRAGMA {pragma}') as cursor:
+            row = await cursor.fetchone()
+        numbers.append(int(row[0]) if row else 0)
+    return numbers[0], numbers[1], numbers[2]
+
+
+EVICTION_REASONS = ('window', 'rows', 'bytes')
+# Reason of a failed read of the floor, the oldest ts or the page numbers at
+# the end of a pass.
+EVICTION_FLOOR_REASON = 'floor'
+
+
+@dataclass(frozen=True)
+class EvictionResult:
+    """What one eviction pass did and measured.
+
+    ``coverage`` is the id range the store holds after the pass.
+    ``evicted_by_reason`` has a row count for each of
+    :data:`EVICTION_REASONS`. ``used_bytes`` (pages in use times the page
+    size), ``allocated_bytes`` (every page) and ``oldest_ts`` (``None`` when
+    the table is empty) are measured at the end of a pass that did not fail;
+    after a failure they are 0, 0 and ``None``. ``failed_reason`` names the
+    part of the pass whose statement failed, with ``error``, and
+    ``rollback_error`` when the rollback after it failed too (the connection
+    may then hold an open transaction).
+    """
+
+    coverage: MemoryCoverage
+    evicted_by_reason: dict[str, int]
+    used_bytes: int
+    allocated_bytes: int
+    oldest_ts: float | None
+    failed_reason: str | None
+    error: sqlite3.Error | None = None
+    rollback_error: sqlite3.Error | None = None
+
+
+@dataclass(frozen=True)
+class _PassFailure:
+    reason: str
+    error: sqlite3.Error
+    rollback_error: sqlite3.Error | None
+
+
+@dataclass
+class _EvictionTally:
+    """The running state of one pass: the floor after the deletes so far, rows deleted, batches run."""
+
+    coverage: MemoryCoverage
+    floor_id: int
+    evicted_max_ts: float
+    deleted: dict[str, int]
+    batches: int = 0
+
+    @classmethod
+    def starting_from(cls, coverage: MemoryCoverage) -> _EvictionTally:
+        return cls(coverage, coverage.floor_id, coverage.evicted_max_ts, dict.fromkeys(EVICTION_REASONS, 0))
+
+    @property
+    def rows(self) -> int:
+        return self.coverage.last_id - self.floor_id + 1
+
+    def take(self, reason: str, deletion: PrefixDeletion) -> None:
+        """Count a prefix deletion; the store is one contiguous range, so the floor moves by the rows deleted."""
+        self.deleted[reason] += deletion.deleted
+        self.floor_id += deletion.deleted
+        self.batches += deletion.batches
+        if deletion.max_ts is not None:
+            self.evicted_max_ts = max(self.evicted_max_ts, deletion.max_ts)
+
+    def coverage_with_floor(self, floor_id: int) -> MemoryCoverage:
+        return MemoryCoverage(
+            floor_id=floor_id,
+            last_id=self.coverage.last_id,
+            evicted=self.coverage.evicted or any(self.deleted.values()),
+            evicted_max_ts=self.evicted_max_ts,
+        )
+
+
+async def run_eviction_pass(
+    conn: aiosqlite.Connection,
+    coverage: MemoryCoverage,
+    *,
+    now: float,
+    window_seconds: int,
+    max_rows: int,
+    max_bytes: int,
+) -> EvictionResult:
+    """Evict the oldest rows of the memory store by the time window, then the row cap, then the data bytes.
+
+    Every delete removes an id prefix through :func:`delete_id_prefix`, so
+    the store stays one contiguous id range. The window removes the rows
+    before the first row (in id order) whose ``ts`` is at least
+    ``now - window_seconds``; a late row after it stays until the prefix
+    passes it. The row cap removes the oldest rows above ``max_rows``. The
+    byte budget compares pages in use times the page size with
+    ``max_bytes`` (the page count alone never falls after a delete) and
+    removes 1 % of the rows (1 to :data:`EVICT_BATCH_ROWS`) per batch until
+    it fits, the table is empty, or the pass ran :data:`EVICT_MAX_BATCHES`
+    batches. A failed statement rolls back and ends the pass; the next pass
+    starts again with the window. No vacuum: freed pages are reused.
+    """
+    tally = _EvictionTally.starting_from(coverage)
+    failure = (
+        await _evict_by_window(conn, tally, now - window_seconds)
+        or await _evict_by_row_cap(conn, tally, max_rows)
+        or await _evict_by_bytes(conn, tally, max_bytes)
+    )
+    if failure is not None:
+        return _failed_pass(tally, failure)
+    return await _finish_pass(conn, tally)
+
+
+async def _evict_by_window(conn: aiosqlite.Connection, tally: _EvictionTally, cutoff: float) -> _PassFailure | None:
+    try:
+        # A scan in id order that stops at the first row to keep.
+        async with conn.execute(
+            'SELECT id FROM events NOT INDEXED WHERE ts >= ? ORDER BY id LIMIT 1', (cutoff,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    except sqlite3.Error as exc:
+        return await _failure_after_rollback(conn, 'window', exc)
+    boundary_id = row[0] if row else tally.coverage.last_id + 1
+    return await _delete_below(conn, tally, 'window', boundary_id)
+
+
+async def _evict_by_row_cap(conn: aiosqlite.Connection, tally: _EvictionTally, max_rows: int) -> _PassFailure | None:
+    excess = tally.rows - max_rows
+    if excess <= 0:
+        return None
+    return await _delete_below(conn, tally, 'rows', tally.floor_id + excess)
+
+
+async def _evict_by_bytes(conn: aiosqlite.Connection, tally: _EvictionTally, max_bytes: int) -> _PassFailure | None:
+    while tally.rows > 0 and tally.batches < EVICT_MAX_BATCHES:
+        try:
+            page_count, freelist_count, page_size = await read_page_numbers(conn)
+        except sqlite3.Error as exc:
+            return await _failure_after_rollback(conn, 'bytes', exc)
+        if (page_count - freelist_count) * page_size <= max_bytes:
+            return None
+        batches_before = tally.batches
+        count = min(EVICT_BATCH_ROWS, max(1, tally.rows // 100))
+        failure = await _delete_below(conn, tally, 'bytes', tally.floor_id + count)
+        if failure is not None:
+            return failure
+        if tally.batches == batches_before:
+            # Nothing was below the bound: never spin on a range the store does not hold.
+            return None
+    return None
+
+
+async def _delete_below(
+    conn: aiosqlite.Connection, tally: _EvictionTally, reason: str, below_id: int
+) -> _PassFailure | None:
+    if below_id <= tally.floor_id:
+        return None
+    deletion = await delete_id_prefix(conn, below_id)
+    tally.take(reason, deletion)
+    if deletion.error is not None:
+        return _PassFailure(reason, deletion.error, deletion.rollback_error)
+    return None
+
+
+async def _failure_after_rollback(conn: aiosqlite.Connection, reason: str, exc: sqlite3.Error) -> _PassFailure:
+    try:
+        await conn.rollback()
+    except sqlite3.Error as rollback_exc:
+        return _PassFailure(reason, exc, rollback_exc)
+    return _PassFailure(reason, exc, None)
+
+
+def _failed_pass(tally: _EvictionTally, failure: _PassFailure) -> EvictionResult:
+    return EvictionResult(
+        coverage=tally.coverage_with_floor(tally.floor_id),
+        evicted_by_reason=tally.deleted,
+        used_bytes=0,
+        allocated_bytes=0,
+        oldest_ts=None,
+        failed_reason=failure.reason,
+        error=failure.error,
+        rollback_error=failure.rollback_error,
+    )
+
+
+async def _finish_pass(conn: aiosqlite.Connection, tally: _EvictionTally) -> EvictionResult:
+    """Read the floor, the oldest ``ts`` and the page numbers; an empty table has ``floor_id = last_id + 1``."""
+    try:
+        # Two statements: each MIN alone is one index or rowid lookup, both
+        # in one SELECT would scan the table.
+        async with conn.execute('SELECT MIN(id) FROM events') as cursor:
+            row = await cursor.fetchone()
+        lowest_id = row[0] if row else None
+        async with conn.execute('SELECT MIN(ts) FROM events') as cursor:
+            row = await cursor.fetchone()
+        oldest_ts = row[0] if row else None
+        page_count, freelist_count, page_size = await read_page_numbers(conn)
+    except sqlite3.Error as exc:
+        return _failed_pass(tally, await _failure_after_rollback(conn, EVICTION_FLOOR_REASON, exc))
+    floor_id = tally.coverage.last_id + 1 if lowest_id is None else lowest_id
+    return EvictionResult(
+        coverage=tally.coverage_with_floor(floor_id),
+        evicted_by_reason=tally.deleted,
+        used_bytes=(page_count - freelist_count) * page_size,
+        allocated_bytes=page_count * page_size,
+        oldest_ts=oldest_ts,
+        failed_reason=None,
+    )
 
 
 def _primary_code(exc: sqlite3.Error) -> int | None:
@@ -369,10 +587,4 @@ class MemoryStore:
         return page_count * page_size
 
     async def _page_numbers(self) -> tuple[int, int, int]:
-        writer = self.writer
-        numbers = []
-        for pragma in ('page_count', 'freelist_count', 'page_size'):
-            async with writer.execute(f'PRAGMA {pragma}') as cursor:
-                row = await cursor.fetchone()
-            numbers.append(int(row[0]) if row else 0)
-        return numbers[0], numbers[1], numbers[2]
+        return await read_page_numbers(self.writer)

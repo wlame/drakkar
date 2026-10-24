@@ -59,7 +59,11 @@ from drakkar.metrics import (
     recorder_flush_batches_dropped,
     recorder_flush_duration,
     recorder_flush_retries,
+    recorder_memory_allocated_bytes,
+    recorder_memory_bytes,
     recorder_memory_evicted_rows,
+    recorder_memory_oldest_age_seconds,
+    recorder_memory_rows,
     recorder_memory_write_failures,
     recorder_requeue_overflow,
     recorder_seal_failures,
@@ -84,10 +88,12 @@ from drakkar.recorder.memstore import (
     EVICT_MIN_INTERVAL_SECONDS,
     MEMORY_CLOSE_WAIT_SECONDS,
     MIB,
+    EvictionResult,
     MemoryCoverage,
     MemoryStore,
     delete_id_prefix,
     is_transient_memory_error,
+    run_eviction_pass,
 )
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
@@ -333,6 +339,10 @@ class EventRecorder(EventWriter):
         self._floor_id = 1
         self._evicted = False
         self._evicted_max_ts = 0.0
+        # Monotonic start of the last eviction pass; a stage M with a minimum
+        # interval (a UI read) skips the pass until that much time passed.
+        self._evict_clock: Callable[[], float] = time.monotonic
+        self._last_evict_at: float | None = None
         # The memory store holds rows up to this id that must go (a gap
         # left by a failed or cancelled chunk); the next stage M deletes
         # them before it writes anything.
@@ -1416,7 +1426,75 @@ class EventRecorder(EventWriter):
                 await self._evict(evict_min_interval)
 
     async def _evict(self, evict_min_interval: float) -> None:
-        """The eviction pass at the end of a stage M, under ``_memory_lock``; it removes nothing yet."""
+        """The eviction pass at the end of a stage M, under ``_memory_lock``; then set the memory gauges.
+
+        Runs at most once per ``evict_min_interval`` seconds (0: every
+        time). The pass's coverage becomes the recorder's; a failed pass is
+        logged, and the next one starts again with the window.
+        """
+        store = self._memory_store
+        if store is None:
+            return
+        started_at = self._evict_clock()
+        last = self._last_evict_at
+        if evict_min_interval > 0 and last is not None and started_at - last < evict_min_interval:
+            return
+        self._last_evict_at = started_at
+        now = time.time()
+        result = await run_eviction_pass(
+            store.writer,
+            MemoryCoverage(
+                floor_id=self._floor_id,
+                last_id=self._last_id,
+                evicted=self._evicted,
+                evicted_max_ts=self._evicted_max_ts,
+            ),
+            now=now,
+            window_seconds=self._memory_window_seconds,
+            max_rows=self._memory_max_rows,
+            max_bytes=self._memory_max_bytes,
+        )
+        self._adopt_eviction(result, now)
+        if result.failed_reason is not None and result.error is not None:
+            await self._log_eviction_failure(result.failed_reason, result.error, result.rollback_error)
+
+    def _adopt_eviction(self, result: EvictionResult, now: float) -> None:
+        """Take the pass's coverage, count its rows by reason and set the gauges.
+
+        After a failed pass only the row gauge is set; the byte and age
+        gauges keep the values of the last pass that measured them.
+        """
+        coverage = result.coverage
+        self._floor_id = coverage.floor_id
+        self._evicted = coverage.evicted
+        self._evicted_max_ts = coverage.evicted_max_ts
+        for reason, count in result.evicted_by_reason.items():
+            if count:
+                recorder_memory_evicted_rows.labels(reason=reason).inc(count)
+        if result.rollback_error is not None:
+            self._memory_dirty = True
+        recorder_memory_rows.set(coverage.rows)
+        if result.failed_reason is not None:
+            return
+        recorder_memory_bytes.set(result.used_bytes)
+        recorder_memory_allocated_bytes.set(result.allocated_bytes)
+        oldest_age = 0.0 if result.oldest_ts is None else max(0.0, now - result.oldest_ts)
+        recorder_memory_oldest_age_seconds.set(oldest_age)
+
+    async def _log_eviction_failure(
+        self, reason: str, error: sqlite3.Error, rollback_error: sqlite3.Error | None
+    ) -> None:
+        """Log ``recorder_memory_eviction_failed``, at most one line per 60 s."""
+        fields: dict[str, Any] = {'error': str(error), 'reason': reason}
+        if rollback_error is not None:
+            fields['rollback_error'] = str(rollback_error)
+        await self._memory_log.emit(
+            'recorder_memory_eviction_failed',
+            logger.awarning,
+            'recorder_memory_eviction_failed',
+            category='recorder',
+            **fields,
+        )
 
     async def _settle_previous_chunk(self, writer: aiosqlite.Connection) -> bool:
         """Before a memory write: roll back an earlier chunk's open transaction and delete a pending gap.
@@ -1538,17 +1616,9 @@ class EventRecorder(EventWriter):
         if result.error is None:
             self._pending_gap_id = None
             return True
-        fields: dict[str, Any] = {'error': str(result.error), 'reason': 'gap'}
         if result.rollback_error is not None:
             self._memory_dirty = True
-            fields['rollback_error'] = str(result.rollback_error)
-        await self._memory_log.emit(
-            'recorder_memory_eviction_failed',
-            logger.awarning,
-            'recorder_memory_eviction_failed',
-            category='recorder',
-            **fields,
-        )
+        await self._log_eviction_failure('gap', result.error, result.rollback_error)
         return False
 
     async def _rollback_memory(self, writer: aiosqlite.Connection) -> None:
