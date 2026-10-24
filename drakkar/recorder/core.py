@@ -1795,20 +1795,33 @@ class EventRecorder(EventWriter):
             self._pg_wakeup.set()
 
     async def _log_postgres_queue_drops(self) -> None:
-        """Log the pairs the P queue dropped since the last line, at most one line per 60 s."""
+        """Log the pairs the P queue dropped since the last line, at most one line per 60 s.
+
+        A line the rate limit holds back keeps its rows: they add up until a
+        line is written, so every dropped row reaches a log line.
+        """
         rows = self._pg_unlogged_drops
         if not rows:
             return
-        self._pg_unlogged_drops = 0
+        written = False
+
+        async def log_and_note(event: str, **fields: Any) -> None:
+            nonlocal written
+            written = True
+            await logger.awarning(event, **fields)
+
         await self._pg_drop_log.emit(
             'queue_full',
-            logger.awarning,
+            log_and_note,
             'recorder_postgres_rows_dropped',
             category='recorder',
             reason='queue_full',
             rows=rows,
             error='',
         )
+        if written:
+            # Drops counted while the line was written wait for the next one.
+            self._pg_unlogged_drops -= rows
 
     def _append_file_queue(self, pairs: list[tuple[int, tuple]]) -> None:
         """Append ``(id, row)`` pairs to the file queue; pairs pushed out of a full queue count as dropped events."""

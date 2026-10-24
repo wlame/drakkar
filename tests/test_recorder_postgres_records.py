@@ -321,6 +321,33 @@ def test_queue_byte_bound_drops_oldest_and_counts_queue_full():
     assert queue.bytes == 0
 
 
+def test_oversized_row_is_dropped_alone_and_the_queued_rows_stay():
+    small = row_text_bytes(_pair(1, 'x' * 10)[1])
+    queue = PostgresQueue(max_rows=1000, max_bytes=4 * small)
+
+    dropped = queue.append([_pair(1, 'x' * 10), _pair(2, 'x' * (5 * small)), _pair(3, 'x' * 10)])
+
+    assert dropped == 1
+    assert queue.bytes == 2 * small
+    assert _queue_ids(queue) == [1, 3]
+
+
+async def test_oversized_row_counts_one_queue_full_drop():
+    rec = _recorder(max_buffer=1000, queue_max_bytes=1000)
+    await rec.start()
+    try:
+        before = _dropped('queue_full')
+        rec._record(_event(0, args='x' * 10))
+        rec._record(_event(1, args='x' * 2000))
+        rec._record(_event(2, args='x' * 10))
+        await rec.flush_memory()
+
+        assert _dropped('queue_full') - before == 1
+        assert _queue_ids(rec._pg_queue) == [1, 3]
+    finally:
+        await rec.stop()
+
+
 async def test_queue_full_on_append_counts_and_keeps_the_newest_pairs(monkeypatch):
     rec = _recorder(max_buffer=1000)
     await rec.start()
@@ -522,6 +549,7 @@ async def test_queue_full_drop_logs_once_per_minute_with_suppressed():
         with capture_logs() as captured:
             await rec.flush_memory()
         lines = _logs(captured, 'recorder_postgres_rows_dropped')
-        assert [(line['rows'], line['suppressed']) for line in lines] == [(10, 1)]
+        assert [(line['rows'], line['suppressed']) for line in lines] == [(40, 1)]
+        assert rec._pg_unlogged_drops == 0
     finally:
         await rec.stop()

@@ -177,13 +177,21 @@ class PostgresQueue:
             return self._bytes
 
     def append(self, pairs: list[QueuedPair]) -> int:
-        """Append ``pairs`` in order; return how many of the oldest pairs were dropped to keep both bounds."""
+        """Append ``pairs`` in order; return how many pairs were dropped to keep both bounds.
+
+        A pair larger than the byte bound on its own is dropped alone and
+        never queued, so it cannot push out the pairs already waiting. Then
+        the oldest pairs go until both bounds hold.
+        """
         with self._lock:
+            dropped = 0
             for pair in pairs:
                 size = row_text_bytes(pair[1])
+                if size > self._max_bytes:
+                    dropped += 1
+                    continue
                 self._entries.append((pair, size))
                 self._bytes += size
-            dropped = 0
             while self._entries and (len(self._entries) > self._max_rows or self._bytes > self._max_bytes):
                 _, size = self._entries.popleft()
                 self._bytes -= size
