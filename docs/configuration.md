@@ -995,21 +995,43 @@ Budget of one Message Trace request with `history=1`, which searches the sealed 
 
 ### Flight Recorder (`ui.recorder:`)
 
-Flight-recorder persistence — the UI's data store. The recorder writes into [`storage.dir`](#storage-and-shared); all flags below need it to be non-empty. Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
+Flight-recorder persistence — the UI's data store. The recorder keeps recent events in an in-memory database, the memory store, and with `persistence: sqlite` it also writes recorder files into [`storage.dir`](#storage-and-shared). See [Recent Events in Memory](recent-events.md). Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
+
+The persistence mode follows this table when `persistence` is not set:
+
+| `persistence` | `storage.dir` | Mode |
+|---|---|---|
+| not set | a folder | `sqlite` |
+| not set | `''` | `none` |
+| `none` | anything | `none` |
+| `sqlite` | a folder | `sqlite` |
+| `sqlite` | `''` | the config does not load |
+
+So a config with `storage.dir: ''` runs in `none` mode with no change. An explicit `sqlite` with an empty `storage.dir` fails the load (whatever `ui.enabled` says) with:
+
+```
+ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only
+```
+
+This check runs after the source check and before the history window check. The config summary line shows ` recorder=none` after ` storage=...` (and the optional ` shared=...`) when the mode is `none` and `storage.dir` is not empty. With an empty `storage.dir` the line shows `storage=mem` and no token.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `store_events` | `bool` | `true` | | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table. Disable to reduce disk I/O on high-throughput workers. |
+| `persistence` | `none` \| `sqlite` \| `null` | `null` | one of the two when given | Where recorder events live besides the memory store: `sqlite` writes recorder files into `storage.dir`; `none` keeps events in memory only. Unset, the mode follows the table above. Env `DK_UI__RECORDER__PERSISTENCE`. |
+| `memory.window_seconds` | `int` | `120` | `10` to `86400` | Keep recorder events in the memory store this many seconds. Env `DK_UI__RECORDER__MEMORY__WINDOW_SECONDS`. |
+| `memory.rows_per_executor` | `int` | `3000` | `100` to `1000000` | Row cap of the memory store per executor slot: the store holds at most this many rows times `executor.max_executors`. The cap does not scale with the window; a longer window needs a larger value (rows per executor per window is about 4 x window / average task seconds). Env `DK_UI__RECORDER__MEMORY__ROWS_PER_EXECUTOR`. |
+| `memory.max_mib` | `int` | `256` | `16` to `512` | Budget for the data in the memory store, in MiB (pages in use). It bounds the data, not the memory the store holds. Plan up to about 600 MiB of RAM for the store at the default. Env `DK_UI__RECORDER__MEMORY__MAX_MIB`. |
+| `store_events` | `bool` | `true` | | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table of the memory store and, with `sqlite`, of the file. Off, there is no memory store. Disable to reduce disk I/O on high-throughput workers. |
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
-| `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
+| `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. Used only with `sqlite`; with `none` the key loads and is ignored. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Used only with `sqlite`; with `none` the key loads and is ignored. Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
-| `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
-| `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
-| `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
+| `flush_interval_seconds` | `int` | `5` | >= 1 | The tick (seconds) of both the memory loop and the file loop. |
+| `max_buffer` | `int` | `50000` | >= 1000 | The intake buffer and, with `sqlite`, the file queue each hold at most this many rows. When one is full, its oldest rows are dropped and counted. |
+| `max_flush_retries` | `int` | `3` | >= 1 | Used only with `sqlite`. How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
 | `event_min_duration_ms` | `int` | `0` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
 | `output_min_duration_ms` | `int` | `500` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
 | `annotations_enabled` | `bool` | `true` | | Record handler [annotations](annotations.md) (diagnostic records attached to a window, message, or task from inside a hook) as rows in the `events` table. |
@@ -1107,7 +1129,7 @@ under [`fleet.cache_exchange`](#fleet-cache-exchange).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `storage.dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''` runs memory-only: no own files, no history, no cache file and no cache exchange. |
+| `storage.dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''`: no own files, no cache file and no cache exchange; the recorder mode derives to `none` and keeps recent events in memory only. With a `shared.dir` the worker still reads the sealed history. |
 | `shared.dir` | `str` | `''` | The folder every worker of one fleet sees: registry cards, sealed history, daily archives, merge results. `''` means the same folder as `storage.dir`, which is right for workers on one host. |
 
 ```yaml
@@ -1128,7 +1150,7 @@ What happens to recorder history after a worker is done with a file. See
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `archive.enabled` | `bool` | `true` | | Fold recorder files into one compressed archive per cluster and window, then delete the files a pass merged. `false` disables the pass entirely — no sealed recorder file and no merge result is ever deleted automatically. |
+| `archive.enabled` | `bool` | `true` | | Fold recorder files into one compressed archive per cluster and window, then delete the files a pass merged. `false` disables the pass entirely — no sealed recorder file and no merge result is ever deleted automatically. The pass runs only with `ui.recorder.persistence` `sqlite`; with `none` every `history.archive.*` key loads and is ignored. |
 | `archive.window_hours` | `int` | `24` | >= 1, and >= `ui.recorder.rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned). |
 | `archive.due_after_hours` | `int` | `48` | >= 1, and >= `ui.recorder.rotation_interval_hours` | A window is archived this many hours after it ends, so late files of that window are still in it. |
 | `archive.retention_days` | `int` | `30` | >= 0; when non-zero, `retention_days * 24 >= due_after_hours + window_hours` | How long archives are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |

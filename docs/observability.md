@@ -155,16 +155,22 @@ CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.m
 
 #### Recorder
 
-Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). Track flight-recorder health -- buffer depth, drops under load, and flush latency. Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
+Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). Track flight-recorder health -- buffer depth, drops under load, flush latency, and the memory store. The memory metrics are explained in [Recent Events in Memory](recent-events.md#metrics). Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_recorder_buffer_size` | Gauge | -- | Current depth of the in-memory event buffer. Updated on every `_record()` call and after each flush. A sustained value near `max_buffer` signals the flush loop can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
-| `drakkar_recorder_dropped_events_total` | Counter | -- | Events evicted from the ring buffer because it was full at record time. Non-zero means event history has gaps; scale the buffer up or speed up flushes. This was previously a silent failure mode -- the counter makes it alertable. |
-| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of the full flush body (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
+| `drakkar_recorder_buffer_size` | Gauge | -- | Events that wait in the intake plus rows that wait in the file queue. Updated on every `_record()` call and after each stage. A sustained value near `max_buffer` signals the loops can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
+| `drakkar_recorder_dropped_events_total` | Counter | -- | Rows evicted from the intake or the file queue because it was full. Non-zero means event history has gaps; scale the buffer up or speed up flushes. |
+| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of one stage F, the file write (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
 | `drakkar_recorder_flush_retries_total` | Counter | -- | Flush attempts that failed with `aiosqlite.OperationalError` and re-queued their batch at the front of the buffer. A non-zero `rate(...[5m])` signals a transient DB-health issue (WAL lock, disk pressure); if it climbs without stabilising, the recorder is about to start dropping batches. Pair with `drakkar_recorder_flush_batches_dropped_total` to distinguish "retrying" from "giving up". |
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
 | `drakkar_recorder_requeue_overflow_total` | Counter | -- | Events silently dropped from the recorder buffer tail when an `OperationalError`-triggered requeue exceeded `max_buffer` capacity (concurrent records filled the deque during the flush). Any non-zero value is data loss on the flush-retry path — alert alongside `flush_batches_dropped_total`. |
+| `drakkar_recorder_memory_rows` | Gauge | -- | Rows in the events table of the recorder memory store |
+| `drakkar_recorder_memory_bytes` | Gauge | -- | Bytes of data in the recorder memory store: pages in use times the page size |
+| `drakkar_recorder_memory_allocated_bytes` | Gauge | -- | Database size of the recorder memory store, free pages included; the memory it holds is at least this. The process RSS is larger; see [RAM to plan](recent-events.md#ram-to-plan). |
+| `drakkar_recorder_memory_oldest_age_seconds` | Gauge | -- | Age in seconds of the oldest event in the recorder memory store, 0 when it is empty. Shows how much time the store really covers when the row cap or the budget binds first. |
+| `drakkar_recorder_memory_evicted_rows_total` | Counter | `reason` | Rows removed from the recorder memory store, by reason: `window`, `rows`, `bytes`, `gap`. |
+| `drakkar_recorder_memory_write_failures_total` | Counter | -- | Event chunks that could not be written to the recorder memory store. Final errors only; a busy or locked store is retried and logs `recorder_memory_write_retry`. |
 | `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
 | `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in its history folder (`<shared.dir>/history/<cluster>/`), refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `history.archive.retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
 | `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in its history folder. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
@@ -173,6 +179,8 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_archive_failures_total` | Counter | -- | Archive passes that failed after taking the archive lock (the lease of the election provider): a window failed, the pass was fenced (another worker took the lease over, or the provider could not confirm it; see `reason` of `recorder_archive_fenced`), or an unexpected error. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
+
+The memory store logs `recorder_memory_write_retry`, `recorder_memory_write_failed`, `recorder_memory_eviction_failed` (with `rollback_error` when the rollback failed too), `recorder_memory_rollback_failed` and `recorder_memory_config_write_failed`, and a UI read stopped by the 2 second memory read limit logs `ui_read_memory_timed_out` (category `debug`). Each appears at most once per 60 seconds. See [Recent Events in Memory](recent-events.md#log-events). `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed` carry `stage` (`memory` or `file`); see [Buffer Mechanics](#buffer-mechanics).
 
 #### Cache
 
@@ -563,9 +571,9 @@ Multi-purpose debug page with:
 - **Cross-worker message trace** -- two search modes:
     - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across the partitions of this worker.
-    A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. See [Cross-Worker Trace](#cross-worker-trace).
-- **Database management** -- list this worker's own recorder files and the shared history folders (sealed files, archives, merge results) with event counts and sizes, download history files, merge several of them into one, and view per-file breakdown by event type. See [The Databases page](local-databases.md#the-databases-page).
-- **Live file download** -- `GET /api/v1/debug/download-live` answers a consistent snapshot of this worker's live recorder file: a copy made with the SQLite backup API on its own read-only connection, in rollback-journal format, so it opens on its own. The temp copy is removed at once. `404` in memory-only mode, `500` `{"error": "Snapshot failed: ..."}` when the copy fails. Behind `ui.auth_token` like the other debug routes.
+    A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. With `ui.recorder.persistence: none` both search the memory store instead of the own files. See [Cross-Worker Trace](#cross-worker-trace).
+- **Database management** -- list this worker's memory store (one row, `kind: "memory"`), its own recorder files and the shared history folders (sealed files, archives, merge results) with event counts and sizes, download history files, merge several of them into one, and view per-file breakdown by event type. See [The Databases page](local-databases.md#the-databases-page).
+- **Live file and memory download** -- `GET /api/v1/debug/download-live` answers a consistent snapshot of this worker's live recorder file (`source=file`) or of its memory store (`source=memory`). The default is `file` when a live file is open, else `memory`. A file copy is made with the SQLite backup API on its own read-only connection, in rollback-journal format, so it opens on its own. The temp copy is removed at once. `404` when the asked source does not exist, `400` for another `source` value, `500` `{"error": "Snapshot failed: ..."}` when the copy fails. Behind `ui.auth_token` like the other debug routes. See [The snapshot download](recent-events.md#the-snapshot-download).
 - **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, nothing for peers to pull. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
@@ -611,7 +619,7 @@ For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --ver
 
 ## Flight Recorder
 
-The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the operator UI and survives worker restarts (within retention limits).
+The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the operator UI. It keeps recent events in an in-memory database, the memory store, and with `ui.recorder.persistence: sqlite` it also writes files that survive worker restarts (within retention limits). See [Recent Events in Memory](recent-events.md).
 
 ### Configuration
 
@@ -620,12 +628,17 @@ storage:
   dir: /tmp/drakkar                   # This worker's own files; '' disables disk persistence
 ui:
   recorder:
+    persistence: null                 # none | sqlite | null (derived: sqlite with a storage.dir, none without)
+    memory:
+      window_seconds: 120             # Keep events in the memory store this long
+      rows_per_executor: 3000         # Row cap = this x executor.max_executors
+      max_mib: 256                    # Data budget of the memory store
     store_events: true                # Write processing events to the events table
     store_config: true                # Write worker config into each file
     store_state: true                 # Periodic state snapshots
     state_sync_interval_seconds: 10   # Snapshot frequency for worker_state
-    flush_interval_seconds: 5         # Buffer flush interval
-    max_buffer: 50000                 # In-memory event buffer size
+    flush_interval_seconds: 5         # Tick of the memory loop and the file loop
+    max_buffer: 50000                 # Capacity of the intake and of the file queue, each
     max_flush_retries: 3              # Failed-batch retries before the batch is dropped
     rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
     store_output: true                # Include stdout/stderr in event records
@@ -912,39 +925,55 @@ Two operational gotchas worth knowing:
 
 ### Buffer Mechanics
 
-Events are not written to SQLite immediately. They accumulate in an
-in-memory ring buffer (`collections.deque` with `maxlen=max_buffer`,
-default 50,000). A background task flushes the buffer to disk every
-`flush_interval_seconds` (default: 5) as a batch INSERT. This design:
+Events are not written to SQLite immediately. They wait in the **intake**,
+an in-memory buffer (`collections.deque` with `maxlen=max_buffer`, default
+50,000). Two background loops then write them, each on the tick of
+`flush_interval_seconds` (default: 5):
+
+- **Stage M** (the memory loop, background task `memory_flush`) takes the
+  intake in chunks, gives each row its id, and writes the chunk to the
+  [memory store](recent-events.md). With `persistence: sqlite` it then puts
+  the `(id, row)` pairs in the **file queue**, which also holds at most
+  `max_buffer` rows. After the write it runs one eviction pass.
+- **Stage F** (the file loop, background task `file_flush`, `sqlite` only)
+  writes the file queue to the recorder file in transactions of up to 5000
+  rows.
+
+The two loops have their own locks, so a slow or hung disk holds only stage
+F. The memory store keeps taking events, and the UI keeps reading them. This
+design:
 
 - Avoids per-event disk I/O (thousands of events/sec would bottleneck SQLite)
 - Keeps the main event loop fast (recording an event is a deque append, ~1us)
-- Provides a short window of recent events even when `storage.dir` is empty (in-memory only mode)
+- Keeps the recent events readable even when `storage.dir` is empty or the
+  disk stalls
 
-If the buffer fills before the next flush (e.g., during a burst),
-oldest events are evicted (ring buffer behavior). Drops are no longer
-silent — the `drakkar_recorder_dropped_events_total` counter
-([see Recorder metrics](#recorder)) increments on every evicted
-event, and the `drakkar_recorder_buffer_size` gauge shows the current
-depth. Alert on sustained non-zero drops and raise `max_buffer` or
-shorten `flush_interval_seconds` when they appear.
+When the intake or the file queue is full, its oldest rows are evicted.
+Drops are not silent: `drakkar_recorder_dropped_events_total`
+([see Recorder metrics](#recorder)) counts the evictions of both, and
+`drakkar_recorder_buffer_size` shows the intake plus the file queue. While
+the disk stalls, up to twice `max_buffer` rows wait in memory: a full intake
+and a full file queue. While stage M is held back (the memory store is busy
+or locked), the intake fills, and its overflow counts as dropped. Alert on
+sustained non-zero drops and raise `max_buffer` or shorten
+`flush_interval_seconds` when they appear.
 
-The buffer is written in chunks of 5000 rows, and the loop is handed back
-between chunks: building a row tuple costs one lookup per column, so an
-unchunked flush of tens of thousands of events would stall the loop for tens
-of milliseconds and show up as loop lag in
-[runtime health](runtime-health.md). A flush also starts early, before
-`flush_interval_seconds` elapses, once the buffer is half full — a burst is
-written out rather than left to reach `max_buffer` and evict.
+Stage M writes in chunks of 5000 rows, and the loop is handed back between
+chunks: building a row tuple costs one lookup per column, so an unchunked
+write of tens of thousands of events would stall the loop for tens of
+milliseconds and show up as loop lag in [runtime health](runtime-health.md).
+Stage M also starts early, before `flush_interval_seconds` elapses, once the
+intake is half full, and stage F once the file queue is half full. A burst
+is written out rather than left to reach `max_buffer` and evict.
 
-A flush starts early on **size** as well as on count, once the buffered
+Stage M starts early on **size** as well as on count, once the buffered
 payload passes roughly 64 MiB. `max_buffer` bounds the buffer by event count,
 which says nothing about how much memory it holds: with `store_output` on,
 every task at or above `output_min_duration_ms` has its whole stdout and
 stderr buffered, and `executor.max_stdout_bytes` is unlimited by default. A
 handler producing hundreds of kilobytes per task therefore reaches gigabytes
 of resident buffer long before it reaches 25,000 events. The size trigger is
-not configurable: it is a safety floor rather than a tuning knob, and flushing
+not configurable: it is a safety floor rather than a tuning knob, and writing
 early is never wrong. Nothing is truncated — the stored row keeps the whole
 output, which is what the task-detail page shows.
 
@@ -954,10 +983,17 @@ output is dropped when the event is handed to the fan-out, not when it is
 encoded. Otherwise a browser tab on a slow link could pin up to 10,000 events'
 worth of full output in its subscriber queue, on top of the buffer above.
 
-The chunk is also the unit of loss. A chunk that still fails after
-`max_flush_retries` consecutive attempts is dropped and
-`drakkar_recorder_flush_batches_dropped_total` ticks; the rest of the buffer
-stays and is retried on the next tick. Size `max_buffer` for how long a
+A memory chunk that fails because the store is busy or locked goes back to
+the front of the intake with its ids and is written on the next tick
+(`recorder_memory_write_retry`). Any other failed memory write deletes the
+memory rows up to that chunk (`recorder_memory_write_failed`); with `sqlite`
+the chunk still goes to the file, with `none` it is lost. See
+[Recent Events in Memory](recent-events.md#log-events).
+
+The file chunk is the unit of loss on disk. A file chunk that still fails
+after `max_flush_retries` consecutive attempts is dropped from the file and
+`drakkar_recorder_flush_batches_dropped_total` ticks; the rest of the file
+queue stays and is retried on the next tick. Size `max_buffer` for how long a
 database stall you want to ride out:
 
     max_buffer >= event_rate x flush_interval_seconds x (max_flush_retries + 1)
@@ -967,14 +1003,18 @@ twice the default `max_buffer`. Raise it if your workers must survive a
 15-second SQLite stall — the usual cause is a network filesystem — without
 losing a chunk.
 
-Buffering happens only when the worker will actually write the events. In
-memory-only mode (`storage.dir` empty) and with `store_events: false` there is no
-flush loop, so events are streamed to the live WebSocket view and not
-buffered at all: the buffer gauge stays at 0 and the drop counter never
-moves. A non-zero drop count therefore always means real flush pressure.
+With `persistence: none` (for example `storage.dir` empty) there is no file
+queue and no stage F: events are buffered and written to the memory store
+only. With `store_events: false` there is no memory store and no loop, so
+events are streamed to the live WebSocket view and not buffered at all: the
+buffer gauge stays at 0 and the drop counter never moves.
 
-On shutdown, the buffer is flushed one final time before closing the
-database.
+A loop iteration that raises logs `recorder_flush_loop_iteration_failed`
+with `stage` `memory` or `file`, and the loop goes on.
+
+On shutdown, stage M and then stage F run one final time before the
+database closes. A failure there logs `recorder_final_flush_failed` with
+`stage` `memory` or `file`. The memory store closes last.
 
 ### Merging Databases
 

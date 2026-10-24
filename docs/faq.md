@@ -299,7 +299,11 @@ Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label
 
 ### Do UI readers slow down the pipeline?
 
-Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and UI](performance.md#bottleneck-recorder-and-ui).
+Mildly. Recent rows come from the in-memory [memory store](recent-events.md), and each memory read stops after 2 seconds, so it can delay a memory write but not make it fail. Heavy read traffic on the file increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and UI](performance.md#bottleneck-recorder-and-ui).
+
+### Where are my events with no disk?
+
+In memory. A worker with `storage.dir: ''` (for example in a container with no writable disk) runs the recorder with `persistence: none`: it keeps the recent events in an in-memory SQLite database, the memory store, and writes no recorder file. The History, Trace and Task Detail pages read the memory store, and the Databases tab shows it as its first row, with a download button for a snapshot. The store keeps two minutes of events by default (`ui.recorder.memory.window_seconds`), bounded also by a row cap and a data budget, so the pages show that window only. Nothing is sealed or archived, and the events are gone after a restart. With a `shared.dir`, the worker still reads the sealed history of the other workers of its cluster. See [Recent Events in Memory](recent-events.md).
 
 ### What happens to old recorder database files? Where did `retention_hours` go?
 

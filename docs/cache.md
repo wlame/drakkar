@@ -214,6 +214,11 @@ entry behaves like a `memory` entry: an entry the LRU evicts is gone, a
 restart loses all of them, and nothing is pulled from or served to peers.
 The worker logs `cache_engine_disabled_no_storage_dir` at start. The cache
 then keeps no pending writes, so `max_memory_entries` bounds its memory.
+The same empty `storage.dir` makes the recorder derive `persistence: none`:
+it keeps its recent events in memory only (see
+[Recent Events in Memory](recent-events.md)). `ui.recorder.persistence: none`
+with a folder set keeps the cache file, because the recorder mode does not
+change where the cache lives.
 
 ---
 

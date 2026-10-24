@@ -60,73 +60,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder memory store.** When `ui.recorder.store_events` is on, the
-  recorder opens an in-memory SQLite database for recent events. It opens
-  before the recorder file and closes last at stop. A SQLite library without
-  the memdb VFS fails the start with a clear message. A read of the store
-  stops after 2 seconds. New metrics: `drakkar_recorder_memory_rows`,
+- **Recorder memory store and the persistence choice.** When
+  `ui.recorder.store_events` is on, the recorder keeps its recent events in
+  an in-memory SQLite database, the memory store. New keys:
+  `ui.recorder.persistence` (`none` or `sqlite`; unset, it is `sqlite` when
+  `storage.dir` is set and `none` when it is empty) and
+  `ui.recorder.memory.window_seconds` (120), `rows_per_executor` (3000,
+  times `executor.max_executors`) and `max_mib` (256). With `sqlite` the
+  recorder also writes recorder files as before; with `none` it writes no
+  file, and the archive pass does not run. `persistence: sqlite` with an
+  empty `storage.dir` fails the load with a message that says what to set.
+  The config summary line shows ` recorder=none` when the mode is `none` and
+  `storage.dir` is set. A config with `storage.dir: ''` keeps working and is
+  now queryable: the UI pages read the memory store. A `none` worker with a
+  shared folder still reads the sealed history of its cluster. A SQLite
+  library without the memdb VFS fails the start with a clear message.
+  The recorder gives each row its id and writes the row with the same id to
+  the memory store and to the file, on two separate loops, so a slow disk
+  does not stop the memory store. Ids continue across file rotations and
+  start again at 1 after a restart. After each memory write, and on every
+  memory tick when the worker is idle, the recorder removes the oldest rows:
+  first the rows older than the window, then the rows above the row cap,
+  then rows until the data bytes fit the budget, at most 5000 rows per
+  transaction and at most 64 byte batches per pass. A busy or locked memory
+  store is tried again on the next tick and loses nothing; any other failed
+  memory write deletes the memory rows up to that chunk.
+  With `sqlite`, a time-window read, a newest-N read and an `after_id` poll
+  use the memory store when it still holds every row they ask for, and the
+  live file otherwise; reads by task, message or label and the whole-table
+  reads use the file; the label keys always use the memory store. With
+  `none` every read uses the memory store, so the pages show the memory
+  window only. A memory read stops after 2 seconds and answers an empty
+  page. `/api/v1/partitions` answers an empty list when the main loop does
+  not answer in time.
+  Contract v1.25: `/api/v1/debug/databases` shows the memory store as the
+  first row (`kind: "memory"`, named `<worker>-memory`), and
+  `/api/v1/debug/download-live` takes `source=memory` or `source=file`
+  (default `file` when a live file is open, else `memory`). The memory
+  snapshot `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` is copied in steps of
+  1024 pages into a temporary file in `storage.dir` (a copy that does not
+  finish in 30 seconds answers 500),
+  or in RAM when there is no such folder or file.
+  New metrics: `drakkar_recorder_memory_rows`,
   `drakkar_recorder_memory_bytes`, `drakkar_recorder_memory_allocated_bytes`,
   `drakkar_recorder_memory_oldest_age_seconds`,
   `drakkar_recorder_memory_evicted_rows_total` and
-  `drakkar_recorder_memory_write_failures_total`. The `recorder_started` log
-  line gains `persistence`, the memory bounds, and, with persistence `none`,
-  `ignored_keys`. The recorder now gives each row its id and writes the row
-  with the same id to the memory store and to the file. Two separate loops
-  write the memory store and the file, so a slow disk does not stop the
-  memory store. With persistence `none`, events are buffered and kept in the
-  memory store. A memory write that fails because the store is busy or
-  locked is tried again on the next tick and loses nothing
-  (`recorder_memory_write_retry`). Any other failed memory write deletes the
-  memory rows up to that chunk (`recorder_memory_write_failed`,
-  `recorder_memory_eviction_failed`). With persistence `sqlite` the chunk
-  still goes to the file; with persistence `none` it is lost. Each of
-  these log lines appears at most once per 60 seconds.
-  `drakkar_recorder_buffer_size` now counts the events that wait for the
-  memory store plus the rows that wait for the file. The log events
+  `drakkar_recorder_memory_write_failures_total`.
+  `drakkar_recorder_buffer_size` and `drakkar_recorder_dropped_events_total`
+  now cover the intake and the file queue. New log events, each at most
+  once per 60 seconds: `recorder_memory_write_retry`,
+  `recorder_memory_write_failed`, `recorder_memory_eviction_failed`,
+  `recorder_memory_rollback_failed`, `recorder_memory_config_write_failed`
+  and `ui_read_memory_timed_out`. `recorder_started` gains `persistence`,
+  the memory bounds and, with `none`, `ignored_keys`;
   `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
-  gain a `stage` field (`memory` or `file`). After each memory write, and on
-  every memory tick when the worker is idle, the recorder removes the oldest
-  rows of the memory store: first the rows older than the time window, then
-  the rows above the row cap, then rows until the data bytes (pages in use
-  times the page size) fit the byte budget. It deletes at most 5000 rows per
-  transaction. The byte part stops once the pass has run 64 delete batches,
-  and the next pass goes on. A read from the UI starts this at most once per
-  second. The memory gauges are set after each
-  pass. A failed pass logs `recorder_memory_eviction_failed` with the reason
-  `window`, `rows`, `bytes` or `floor`, and the next pass starts again.
-  The UI reads recent events from the memory store. With persistence
-  `none`, every UI read uses the memory store, so the pages show the memory
-  window only. With persistence `sqlite`, a time-window read, a newest-N
-  read and an `after_id` poll use the memory store when it still holds
-  every row they ask for, and the live file otherwise; reads by task, by
-  message, by label and the whole-table reads (partitions, event pages)
-  always use the file, and the label keys always use the memory store. A
-  page with two queries reads both from the same source. A memory read
-  stopped by its 2-second limit answers an empty page and logs
-  `ui_read_memory_timed_out` (at most once per 60 seconds).
-  `/api/v1/partitions` answers an empty list when the main loop does not
-  answer in time. `EventRecorder.reader_db` is removed; use
-  `file_reader_db` or `memory_store`.
-  `/api/v1/debug/databases` shows the memory store as the first row
-  (`kind: "memory"`, named `<worker>-memory`): its row count, the first and
-  last event time, the count per event type (empty when the 2-second limit
-  stops the count) and the data bytes in use. A statistics read stopped by
-  that limit logs `ui_read_memory_timed_out`. `/api/v1/debug/download-live`
-  takes `source=memory` or `source=file` (default: `file` when a live file
-  is open, else `memory`, so a worker before its first file serves the
-  memory store). The memory snapshot is named
-  `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db`. With `storage.dir` set, it is
-  copied in steps of 1024 pages into a temporary file there, and a copy that
-  does not finish in 30 seconds answers 500. Without `storage.dir`, or when
-  no temporary file can be made there (the folder is missing or not
-  writable), it is copied in RAM, so the download holds one more copy of the
-  store in memory.
+  gain `stage` (`memory` or `file`). `EventRecorder.reader_db` is removed;
+  use `file_reader_db` or `memory_store`. New docs page: Recent Events in
+  Memory.
 - **Config wizard.** The calculator page is now the Config Wizard (the URL
   `calculator/` stays). It also asks how many workers run, on one host or on
   several, and which services every worker reaches. It prints the fleet part
   of the config (`connections`, `fleet.registry`, `periodic.election`,
-  `shared.dir`) and the `DK_` variables that hold the secrets. The link keeps
-  every answer. The rules are one data file, `docs/data/config-wizard.json`,
+  `shared.dir`) and the `DK_` variables that hold the secrets. It asks
+  whether each worker has a local disk; with no disk it prints
+  `storage.dir: ''`, and with no shared folder it turns the registry off.
+  The link keeps every answer. The rules are one data file, `docs/data/config-wizard.json`,
   and a test loads every combination it prints.
 
 - **Cluster periodic tasks.** `@periodic(..., scope='cluster')` runs each

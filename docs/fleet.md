@@ -93,7 +93,11 @@ fleet:
 The folder is `fleet.registry.filesystem.dir` when you set it, else
 `<shared.dir>/fleet`, else `<storage.dir>/fleet`. When none of these
 resolves (memory-only `storage.dir: ''` and no `shared.dir`), the registry
-is off and the worker logs `fleet_registry_disabled_no_dir` once.
+is off and the worker logs `fleet_registry_disabled_no_dir` once. An empty
+`storage.dir` also makes the recorder derive `persistence: none` (see
+[Recent Events in Memory](recent-events.md)); with a `shared.dir` such a
+worker still keeps its card there and reads the sealed history of its
+cluster.
 
 The two ways of getting a folder fail differently:
 
@@ -775,7 +779,10 @@ always listed and always `online: true`. A peer row carries the fields of
 its card that are present; see the UI contract for the full row shape.
 Every row also has `cluster_tasks_hash` and `cluster_tasks_match`, which
 compare the worker's cluster periodic task definitions with this worker's
-(see [Definition hash](periodic-tasks.md#definition-hash)).
+(see [Definition hash](periodic-tasks.md#definition-hash)). The archive
+runs only on workers with `ui.recorder.persistence: sqlite`, so a cluster
+that mixes `none` and `sqlite` workers shows `cluster_tasks_match: false`.
+Give every worker of a cluster the same persistence.
 
 ## Connections {#connections}
 

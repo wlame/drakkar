@@ -19,7 +19,10 @@ A worker uses two folders:
 
 - **`storage.dir`** holds the worker's own files. The live recorder file
   and the cache file are opened only by their owner, so this folder does
-  not need to be shared.
+  not need to be shared. The recorder file exists only with
+  `ui.recorder.persistence: sqlite`. Every worker with a recorder also keeps
+  its recent events in an in-memory database, the memory store, which is no
+  file. See [Recent Events in Memory](recent-events.md).
 - **`shared.dir`** is the folder every worker of a fleet sees. It holds the
   recorder history of each cluster, the archives, the merge results and the
   [registry cards](fleet.md). When `shared.dir` is empty, the worker uses
@@ -29,7 +32,7 @@ A worker uses two folders:
 
 | File | Purpose |
 |---|---|
-| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. The **live file**: WAL mode, opened only by its owner. Rotated. |
+| `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. The **live file**: WAL mode, opened only by its owner. Rotated. Only with `persistence: sqlite`. |
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` *(older ones)* | The **backlog**: own files that are closed but not yet moved into the history folder, because a seal or a move failed, or a clean stop had no time left. See [Sealing](#sealing-and-the-history-folder). |
 | `<worker>-cache.db` | LWW key/value cache. A plain file, never rotated, opened only by its owner. Peers get its `cluster` and `global` rows over HTTP; see [Cache exchange](#cache-exchange). |
 | `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). |
@@ -81,14 +84,15 @@ Rules:
 
 ## Modes: which files exist when
 
-The recorder and the cache are switched independently, and every
-persistence flag needs a directory to write into:
+The recorder and the cache are switched independently. The recorder file
+needs `persistence: sqlite` and a folder; the memory store needs neither:
 
 | Config | Effect |
 |---|---|
 | `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and `storage.dir` is set. |
-| `storage.dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, nothing sealed, no history, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, the Databases tab, downloads. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
-| `ui.recorder.store_events: false` | The `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
+| `storage.dir: ''` | **Memory-only mode.** The persistence mode derives to `none`. No recorder files, no watchdog file, nothing sealed or published, no archive pass. The UI reads the [memory store](recent-events.md): History, Trace, Task Detail, the Databases tab (the memory row) and the memory snapshot download work, and they cover the memory window only. With a `shared.dir` the worker still reads the sealed history of its cluster. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
+| `ui.recorder.persistence: none` with a `storage.dir` | Same recorder behaviour as memory-only mode. The cache file and the watchdog file stay in `storage.dir`. |
+| `ui.recorder.store_events: false` | No memory store, the `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
 | `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster inside the database. The meta file of each sealed file still names both. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
 | `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |
@@ -351,12 +355,17 @@ The connection discipline is:
 
 ## Write patterns & archiving
 
-**Recorder**: events buffer in memory (capped at
-`ui.recorder.max_buffer`), flushed every
-`ui.recorder.flush_interval_seconds` as one multi-row transaction. On
-flush failure the batch is re-queued at the front (tail evictions are
-counted) and dropped after `ui.recorder.max_flush_retries` consecutive
-failures. Recording-side filters (`event_min_duration_ms`,
+**Recorder**: events wait in the intake buffer (capped at
+`ui.recorder.max_buffer`). Every `ui.recorder.flush_interval_seconds` the
+memory loop gives each row its id and writes it to the
+[memory store](recent-events.md); with `sqlite` it then puts the rows in the
+file queue (capped at `max_buffer` too). The file loop writes the file queue
+in transactions of up to 5000 rows. A row has the same id in memory and in
+the file. Ids continue across rotations, so a new file does not start at
+id 1; they start again at 1 after a restart. On a file write failure the
+chunk is re-queued at the front of the file queue (tail evictions are
+counted) and dropped from the file after `ui.recorder.max_flush_retries`
+consecutive failures. Recording-side filters (`event_min_duration_ms`,
 `output_min_duration_ms`, `store_output`) gate what enters the buffer —
 they affect row presence, never layout.
 
@@ -366,7 +375,8 @@ the clean shutdown path. An `atexit` hook (armed at recorder start,
 disarmed by a clean stop) writes the remaining buffer synchronously through
 a direct SQLite connection — covering startup failures after the recorder
 came up, unhandled exceptions, and stray `sys.exit` calls. It is
-best-effort and logs `recorder_last_breath_flush` when it fires.
+best-effort and logs `recorder_last_breath_flush` when it fires. With
+`persistence: none` there is no file, and it writes nothing.
 Neither can help against SIGKILL / the OOM killer — the watchdog file
 covers *detecting* those, and the last periodic flush is what remains.
 
@@ -404,7 +414,10 @@ check for files still in use.
 - **Leftovers** of an earlier process, after the worker starts. See
   [Leftovers](#leftovers).
 
-Memory-only mode (`storage.dir: ""`) creates no files and seals nothing.
+Memory-only mode (`storage.dir: ""`) and `persistence: none` create no
+recorder files and seal nothing. A leftover file of an earlier `sqlite` run
+under the same worker name stays in `storage.dir` and is not sealed. Stop a
+worker cleanly before you switch it to `none`.
 
 ### How a file is sealed
 
@@ -528,7 +541,10 @@ no matter which worker does the work for a given cluster.
 ### When the pass runs: archive slots {#archive-slots}
 
 The archive pass is the system [cluster periodic task](periodic-tasks.md)
-`history.archive`. Its slots are the same on every worker of the cluster:
+`history.archive`. It runs only on a worker with `ui.enabled`,
+`history.archive.enabled`, `ui.recorder.persistence` `sqlite` (derived or
+set) and a `storage.dir`. A `none` worker does not take part in the archive
+election. Its slots are the same on every worker of the cluster:
 
 - `history.archive.interval` (default 3600): a slot at every whole multiple
   of that many seconds since 1970-01-01T00:00:00Z, so at the top of each
@@ -1260,9 +1276,16 @@ CLI or any tool that already reads a merged `.db`.
 {"own": [...], "history": {"folders": [...]}}
 ```
 
-- **`own`** lists this worker's own files in `storage.dir`: the live file
-  (`kind: "live"`) and the backlog files (`kind: "backlog"`). They have no
-  meta file, so their statistics are measured on request. The worker keeps
+- **`own`** starts with one **memory row** when the worker has an open
+  [memory store](recent-events.md): `kind: "memory"`, `filename`
+  `<worker>-memory` (a label, not a file), `worker_name`, `cluster_name`,
+  `event_count`, `event_counts` (the count per event type, `{}` when the
+  2 second read limit stops the count), `first_event_ts`, `last_event_ts`
+  and `size_bytes` (the data in use, not the RAM the store holds). The UI
+  shows it with the title "Recent events in memory; not a file" and a
+  download button. Then come this worker's own files in `storage.dir`: the
+  live file (`kind: "live"`) and the backlog files (`kind: "backlog"`). They
+  have no meta file, so their statistics are measured on request. The worker keeps
   the statistics in memory and refreshes them incrementally: the `events`
   table is append-only with a monotonic `id`, so a refresh of the live file
   reads only its new rows.
@@ -1273,8 +1296,10 @@ CLI or any tool that already reads a merged `.db`.
   file, `null` for the other kinds. No sealed file is opened to build this
   list.
 
-Memory-only mode answers `{"own": [], "history": {"folders": []}}`. The
-normative shape is in `drakkar-ui/docs/api-contract-v1.md`.
+A memory-only worker answers the memory row only in `own`. A worker with
+neither a memory store nor a file answers `own: []`. `history.folders` is
+listed whenever a shared folder resolves, in both modes. The normative shape
+is in `drakkar-ui/docs/api-contract-v1.md`.
 
 **Download.** `GET /api/v1/debug/download/{path}` takes a path relative to
 `shared.dir` and serves only these shapes:
@@ -1288,15 +1313,23 @@ outside `shared.dir`, or a missing file answers `404`. Own files in
 `storage.dir` are not downloadable by path: download a file once it is
 sealed.
 
-**Live file.** `GET /api/v1/debug/download-live` takes no path. It answers
-a consistent snapshot of the serving worker's live recorder file. The
-worker makes the copy with the SQLite backup API, on its own read-only
-connection, so the recorder keeps writing during the copy. The copy uses a
-rollback journal, so it opens on its own. It goes to an owner-only temp
-file in `storage.dir`, which is removed before the answer starts. The route
-answers `404` in memory-only mode or before the first live file exists, and
-`500` `{"error": "Snapshot failed: ..."}` when the copy fails. It is behind
-`ui.auth_token` like the other debug routes.
+**Live file and memory store.** `GET /api/v1/debug/download-live` takes no
+path. It takes `source=file` or `source=memory`; the default is `file` when
+a live file is open, else `memory`. With `source=file` it answers a
+consistent snapshot of the serving worker's live recorder file. The worker
+makes the copy with the SQLite backup API, on its own read-only connection,
+so the recorder keeps writing during the copy. The copy uses a rollback
+journal, so it opens on its own. It goes to an owner-only temp file in
+`storage.dir`, which is removed before the answer starts. With
+`source=memory` it answers a snapshot of the memory store, named
+`<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db`; see
+[The snapshot download](recent-events.md#the-snapshot-download). The route
+answers `404` `{"error": "No live recorder file on this worker"}` for
+`source=file` with no live file, `404` `{"error": "No memory store on this
+worker"}` for `source=memory` with no memory store, `400` `{"error":
+"source must be memory or file"}` for another value, and `500` `{"error":
+"Snapshot failed: ..."}` when the copy fails. It is behind `ui.auth_token`
+like the other debug routes.
 
 **Merge.** `POST /api/v1/debug/merge` takes the same `.db` paths (sealed
 files and merge results) and writes

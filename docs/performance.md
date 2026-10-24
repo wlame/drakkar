@@ -360,9 +360,26 @@ blocks the partition pipeline for the duration of that call.
 
 With `event_min_duration_ms: 0` (default), every task writes events to
 the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At the ~400 tasks/sec per-worker ceiling, that's
-~1,200 events/sec (started + completed + consumed), flushed to SQLite
-every `flush_interval_seconds`. The flush itself is a batch INSERT that
-takes ~10-50ms for 10,000 rows.
+~1,200 events/sec (started + completed + consumed), written every
+`flush_interval_seconds`. Each write is a batch INSERT that takes ~10-50ms
+for 10,000 rows.
+
+The recorder writes in two stages. Stage M writes the events to the
+in-memory [memory store](recent-events.md); with `persistence: sqlite`
+stage F then writes them to the file. The two run on separate loops, so the
+memory intake does not wait for the disk: a slow disk delays only the file,
+and the recent events stay readable. The UI reads recent rows (time windows,
+newest rows, polls) from memory while the store still holds them. Pages
+keyed by task, message or label, and the whole-table pages, still read the
+file with `sqlite`, so they still compete with the file writer for the disk.
+
+A memory read holds a read lock on the store, and the memory writer waits
+for it. Every memory read has a 2 second limit, under the writer's 5 second
+busy timeout, so a slow read delays a memory write and never makes it fail.
+The default memory store (a 120 second window, 3000 rows per executor and a
+256 MiB budget) keeps each read small. See
+[Sizing the row cap](recent-events.md#sizing-the-row-cap) and
+[RAM to plan](recent-events.md#ram-to-plan).
 
 The WebSocket broadcast is handled in the UI server's **separate
 thread**, so it doesn't block the main event loop. However, the

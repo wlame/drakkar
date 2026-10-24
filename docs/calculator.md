@@ -1,9 +1,10 @@
 # Config Wizard
 
 This page builds a starting [configuration](configuration.md) for your workers.
-It asks for the hardware and the task timing of one worker, then for the
-workers of one cluster: how many, on one host or on several, and which
-services every worker reaches. It prints one YAML block, the environment
+It asks for the hardware and the task timing of one worker, whether each
+worker has a local disk for its own files, then for the workers of one
+cluster: how many, on one host or on several, and which services every worker
+reaches. It prints one YAML block, the environment
 variables that hold the secrets, and a link that keeps every answer. Open the
 link again to get the same config. See [Performance Tuning](performance.md)
 for detailed bottleneck analysis and tuning strategies, and
@@ -29,6 +30,7 @@ password or a token. Set those in the worker's environment.
 <div id="wizard-body" hidden>
 <nav class="wizard-steps" aria-label="Wizard steps">
 <button type="button" data-step="workload">Workload</button>
+<button type="button" data-step="disk" hidden>Disk</button>
 <button type="button" data-step="hosts" hidden>Hosts</button>
 <button type="button" data-step="services" hidden>Services</button>
 <button type="button" data-step="choose" hidden>Providers</button>
@@ -82,6 +84,10 @@ password or a token. Set those in the worker's environment.
   <span class="wizard-error" id="error-partitions"></span>
 </div>
 </fieldset>
+</section>
+<section data-step="disk" hidden>
+<h3 tabindex="-1">Disk</h3>
+<div id="wizard-disk"></div>
 </section>
 <section data-step="hosts" hidden>
 <h3 tabindex="-1">Hosts</h3>

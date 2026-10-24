@@ -546,15 +546,22 @@ ui:
                                    # '' = off. Must exist at boot when set. Referenced from
                                    # probe_field(view='custom', renderer=...) / Column(renderer=...).
 
-  # --- Flight recorder (persistence; files go to storage.dir, see Own storage below) ---
+  # --- Flight recorder (memory store + optional files in storage.dir; see recent-events.md) ---
   recorder:
-    store_events: true               # write per-message events. env: DK_UI__RECORDER__STORE_EVENTS
+    persistence: null                # none | sqlite | null. null = sqlite when storage.dir is set, none when it is ''.
+                                     # sqlite with storage.dir: '' fails the load. env: DK_UI__RECORDER__PERSISTENCE
+    memory:
+      window_seconds: 120            # keep events in memory this long, 10-86400. env: DK_UI__RECORDER__MEMORY__WINDOW_SECONDS
+      rows_per_executor: 3000        # row cap = this x executor.max_executors, 100-1000000; about
+                                     # 4 x window / average task seconds. env: DK_UI__RECORDER__MEMORY__ROWS_PER_EXECUTOR
+      max_mib: 256                   # data budget of the memory store, 16-512 MiB. env: DK_UI__RECORDER__MEMORY__MAX_MIB
+    store_events: true               # write per-message events (off = no memory store). env: DK_UI__RECORDER__STORE_EVENTS
     store_config: true               # write worker config into each file (history attribution). env: DK_UI__RECORDER__STORE_CONFIG
-    store_state: true                # periodic worker-state snapshots. env: DK_UI__RECORDER__STORE_STATE
+    store_state: true                # periodic worker-state snapshots (sqlite only). env: DK_UI__RECORDER__STORE_STATE
     state_sync_interval_seconds: 10  # snapshot frequency. env: DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS
 
     # --- Database rotation & archiving (see docs/local-databases.md#archiving) ---
-    rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour. env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
+    rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour (sqlite only). env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
                                      # Archiving settings live in history.archive (see History and archives below).
 
     # --- Output (stdout/stderr) capture ---
@@ -563,9 +570,9 @@ ui:
                                      # metadata; failures always store it. env: DK_UI__RECORDER__STORE_STDIN
     stdin_max_bytes: 65536           # byte cap for stored stdin, 0 = unlimited.
                                      # env: DK_UI__RECORDER__STDIN_MAX_BYTES
-    flush_interval_seconds: 5        # in-memory buffer → SQLite cadence. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
-    max_buffer: 50000                # ring-buffer capacity. env: DK_UI__RECORDER__MAX_BUFFER
-    max_flush_retries: 3             # retries on transient SQLite errors. env: DK_UI__RECORDER__MAX_FLUSH_RETRIES
+    flush_interval_seconds: 5        # tick of the memory loop and the file loop. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
+    max_buffer: 50000                # capacity of the intake and of the file queue, each. env: DK_UI__RECORDER__MAX_BUFFER
+    max_flush_retries: 3             # retries on transient file errors (sqlite only). env: DK_UI__RECORDER__MAX_FLUSH_RETRIES
     event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_UI__RECORDER__EVENT_MIN_DURATION_MS
     output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS
 
@@ -653,7 +660,8 @@ This worker's own files: the live recorder file, the cache file, the crash marke
 
 ```yaml
 storage:
-  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = memory-only (no own files). env: DK_STORAGE__DIR
+  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = memory-only (no own files;
+                                   # the recorder mode derives to none). env: DK_STORAGE__DIR
 ```
 
 ---

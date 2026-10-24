@@ -27,6 +27,17 @@ daemon thread of their own (`drakkar-fleet-<worker>`,
 thread from the blocking-I/O pool, so a hung network mount under
 `shared.dir` holds only their own threads.
 
+The recorder runs two loops as tasks on the main event loop: the memory
+loop (`memory_flush`) writes the in-memory [memory store](recent-events.md)
+and the file loop (`file_flush`, only with `persistence: sqlite`) writes the
+recorder file. Each loop only awaits; the SQL runs on the aiosqlite thread
+of its connection. The memory store has one writer connection and one
+read-only reader connection, each with its own aiosqlite thread, so a hung
+disk holds only the file loop and its connection. A memory read stops after
+2 seconds. The memory snapshot download and the memory row of the databases
+list open a short-lived connection to the store by name on a thread of the
+UI server loop's `to_thread` pool; a snapshot runs for at most 30 seconds.
+
 Two other kinds of work read such a folder from a `to_thread` pool:
 
 - At startup, the check that the folder named by

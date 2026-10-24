@@ -15,7 +15,9 @@ This page has two guides, one for each move:
   every worker computes the same way and a `cluster` scope, and turns the
   archive pass into a cluster periodic task: the archive keys and the
   archive lock changed. Some keys moved, one default changed, and some log
-  events were replaced.
+  events were replaced. The recorder keeps recent events in memory and has a
+  persistence choice; see
+  [The recorder memory store](#recorder-memory-store).
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.
@@ -106,7 +108,7 @@ These keys are new. Their defaults work for most deployments.
 
 | Key | Default | What it does |
 |---|---|---|
-| `storage.dir` | `/tmp/drakkar` | This worker's own files. The worker creates the folder with mode `0700` when it is missing. `''` = memory-only. |
+| `storage.dir` | `/tmp/drakkar` | This worker's own files. The worker creates the folder with mode `0700` when it is missing. `''` = memory-only (recorder persistence `none`). |
 | `shared.dir` | `''` | The folder all workers see. `''` = `storage.dir`. |
 | `history.archive.due_after_hours` | `48` | A window is archived this many hours after it ends. |
 | `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. The second guide replaces it with `history.archive.lease_seconds` and `history.archive.sweep_after_seconds`. |
@@ -423,3 +425,37 @@ under `<key_prefix>/task-locks/<cluster>/<task>`, with sessions named
 `drakkar/task-lock/<cluster>/<task>/<token>`. A Redis user or a Consul
 token limited to the key prefix needs no change. A lock key of an older
 build ends by itself.
+
+### 7. The recorder memory store {#recorder-memory-store}
+
+The recorder now keeps its recent events in an in-memory database, and
+`ui.recorder.persistence` (`none` or `sqlite`) says whether it also writes
+recorder files. See [Recent Events in Memory](recent-events.md).
+
+- **Memory-only configs keep working.** A config with `storage.dir: ''` and
+  no `persistence` key derives `none`. Such a worker is now queryable: the
+  History, Trace and Task Detail pages, the memory row of the Databases tab
+  and the memory snapshot download read the memory store. They cover the
+  memory window only (two minutes by default).
+- **`persistence: sqlite` needs a folder.** With an empty `storage.dir` the
+  config does not load:
+
+    ```
+    ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only
+    ```
+
+- **Stop a worker cleanly before you switch it to `none`.** A `none` worker
+  seals nothing, so a recorder file that an earlier `sqlite` run left in
+  `storage.dir` stays there and never reaches the history folder. A clean
+  stop seals and moves the live file first.
+- **Ids no longer start at 1 per file.** The recorder gives each row its id
+  in the process. Ids continue across rotations and start again at 1 after a
+  restart. A client that polls `/api/v1/events` with `after_id` now sees new
+  rows right after a rotation.
+- **Give every worker of a cluster the same persistence.** A `none` worker
+  does not run the archive, so its cluster task hash differs from the
+  `sqlite` workers and they log `periodic_cluster_mismatch`.
+- **Plan RAM.** With the default budget of 256 MiB, plan up to about 600 MiB
+  per worker for the store. See [RAM to plan](recent-events.md#ram-to-plan).
+- **`EventRecorder.reader_db` is gone.** Use `file_reader_db` for the live
+  file, or `memory_store` for the memory store.

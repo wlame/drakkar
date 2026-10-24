@@ -53,11 +53,15 @@ class UIRecorderConfig(BaseModel):
     writes no file. Unset, the mode follows ``storage.dir`` (a folder means
     ``sqlite``, an empty ``storage.dir`` means ``none``).
 
-    Granular persistence flags (all need a ``storage.dir``):
-    - ``store_events``: write processing events to the ``events`` table.
+    Granular flags of what the recorder keeps:
+    - ``store_events``: write processing events to the ``events`` table of
+      the memory store and, with ``sqlite``, of the file. Off, there is no
+      memory store.
     - ``store_config``: write worker config to ``worker_config`` (names the
-      worker and cluster inside each file, for history and merges).
-    - ``store_state``: periodically dump counters to ``worker_state``.
+      worker and cluster inside each file, for history and merges), in the
+      memory store and, with ``sqlite``, in the file.
+    - ``store_state``: periodically dump counters to ``worker_state``. Only
+      with ``sqlite``; the memory store has no ``worker_state`` table.
     """
 
     persistence: Persistence | None = Field(

@@ -224,6 +224,20 @@ other unmatched route.
 
 ---
 
+## Where the rows come from
+
+`EventsSource`, `AnnotationsSource` and `TasksSource` read the flight
+recorder through the endpoints above. Those endpoints read their newest rows
+from the recorder's in-memory [memory store](recent-events.md) while it still
+holds them, and from the live file otherwise. With
+`ui.recorder.persistence: none` there is no file, so a widget shows only the
+rows of the memory window (two minutes by default). The Databases tab of the
+debug UI shows the memory store as its first row, "Recent events in memory;
+not a file", with a download button; see
+[The Databases page](local-databases.md#the-databases-page).
+
+---
+
 ## Workers that declare no pages
 
 A worker whose handler sets no `ui_pages` answers `GET /api/v1/pages`

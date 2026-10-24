@@ -291,6 +291,46 @@ More: [Fleet registry: consul](fleet.md#consul),
 [The postgres election provider](local-databases.md#the-postgres-election-provider),
 [Security: provider credentials](security.md#provider-credentials).
 
+## A worker with no writable disk
+
+A worker in a container with no writable disk leaves `storage.dir` empty.
+The recorder mode then derives to `none`: the worker keeps its recent events
+in the [memory store](recent-events.md) only, and the UI pages read them from
+there. The worker writes no recorder file, no cache file and no crash marker,
+and it seals, publishes and archives nothing.
+
+```yaml
+storage:
+  dir: ''
+connections:
+  redis:
+    main:
+      key_prefix: "drakkar:"
+fleet:
+  registry:
+    provider: redis
+    connection: main
+periodic:
+  election:
+    provider: redis
+    connection: main
+```
+
+Points to check:
+
+- The `filesystem` registry and election need a folder. With no
+  `storage.dir` and no `shared.dir`, use a service provider as above, or
+  `fleet.registry.provider: none`. A `filesystem` election with no folder
+  stops the start of a worker that declares a cluster task.
+- With a `shared.dir` mounted, the worker still reads the sealed history of
+  its cluster, but it publishes nothing into it.
+- Plan RAM for the memory store: up to about 600 MiB per worker with the
+  default 256 MiB budget. See [RAM to plan](recent-events.md#ram-to-plan).
+- A memory snapshot download holds one more copy of the store in RAM while
+  it runs, because there is no folder for a temporary file.
+- `ui.recorder.persistence: sqlite` with an empty `storage.dir` fails the
+  load.
+
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the

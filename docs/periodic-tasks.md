@@ -345,7 +345,7 @@ are `election_failed` until it answers.
 
 Every worker computes a hash of the cluster tasks it runs: the enabled user
 cluster tasks after the overrides, and `history.archive` when the worker
-runs it. Two workers of one cluster with different hashes run different
+runs it (never with `ui.recorder.persistence: none`). Two workers of one cluster with different hashes run different
 schedules or leases for their cluster tasks, which usually means a rolling
 change that is not finished, or a config that differs by mistake.
 
@@ -394,8 +394,18 @@ The archive pass is a system cluster task named `history.archive`. Its slots
 come from `history.archive.interval` (default 3600, a whole number of at
 least 30) or `history.archive.cron`, and its lease from
 `history.archive.lease_seconds` (default 60). A worker runs it when the UI
-is on (the recorder exists), `history.archive.enabled` is true and
-`storage.dir` is set.
+is on (the recorder exists), `history.archive.enabled` is true, the
+recorder persistence is `sqlite` (set, or derived from a non-empty
+`storage.dir`) and `storage.dir` is set. A worker with `persistence: none`
+writes no recorder file, so it does not run the archive and leaves
+`history.archive` out of its definition hash. It still reads the sealed
+history of its cluster when a shared folder resolves.
+
+Mixed persistence in one cluster is a misconfiguration. The `none` workers
+hash differently from the `sqlite` workers, so the workers list shows
+`cluster_tasks_match: false` and the workers log `periodic_cluster_mismatch`
+(see [Definition hash](#definition-hash)). Give every worker of a cluster the
+same persistence.
 
 The worker that wins a slot runs the archive pass; every other worker
 updates the archive footprint gauges at that slot. The pass checks its lease

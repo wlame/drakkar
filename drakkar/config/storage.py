@@ -46,8 +46,8 @@ class StorageConfig(BaseModel):
         default='/tmp/drakkar',
         description=(
             "Folder for this worker's own files (live recorder file, cache file, crash marker). "
-            'Only this worker opens them. The worker creates it with mode 0700. Empty runs '
-            'memory-only: no own files, no history, no cache file.'
+            'Only this worker opens them. The worker creates it with mode 0700. Empty: no own files and '
+            'no cache file; the recorder keeps recent events in memory only (persistence none).'
         ),
     )
 

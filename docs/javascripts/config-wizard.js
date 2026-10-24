@@ -1,8 +1,9 @@
 /*
  * Config wizard of the calculator page (calculator/).
  *
- * The page asks for hardware and timing answers and, for a fleet, where the
- * workers run and which services they reach. It prints one YAML block, the
+ * The page asks for hardware and timing answers, whether each worker has a
+ * local disk and, for a fleet, where the workers run and which services they
+ * reach. It prints one YAML block, the
  * environment variables that hold the secrets, and a link that carries every
  * answer in its query.
  *
@@ -15,7 +16,7 @@
 (function (root) {
   'use strict';
 
-  var STEPS = ['workload', 'hosts', 'services', 'choose', 'result'];
+  var STEPS = ['workload', 'disk', 'hosts', 'services', 'choose', 'result'];
   var INTEGER_TEXT = /^[0-9]{1,7}$/;
   // A string is printed bare when it starts with a letter, '_' or '/', holds only these
   // characters and does not end with ':' (a plain scalar that ends with ':' starts a mapping).
@@ -187,6 +188,7 @@
     Object.keys(table.inputs).forEach(function (name) { numbers[name] = table.inputs[name]['default']; });
     return {
       numbers: numbers,
+      disk: hasRules(table) ? table.choices.disk['default'] : 'yes',
       hosts: hasRules(table) ? table.choices.hosts['default'] : 'one',
       services: hasRules(table) ? table.choices.services['default'].slice() : [],
       reg: null,
@@ -200,6 +202,7 @@
     var hosts = answers.numbers.workers >= 2 ? answers.hosts : 'one';
     return {
       numbers: answers.numbers,
+      disk: answers.disk,
       hosts: hosts,
       services: hosts === 'many' ? answers.services : [],
       reg: answers.reg,
@@ -213,6 +216,7 @@
     return Object.keys(when).every(function (key) {
       var options = asList(when[key]);
       if (key === 'workers') { return options.indexOf(answers.numbers.workers === 1 ? 'one' : 'many') >= 0; }
+      if (key === 'disk') { return options.indexOf(answers.disk) >= 0; }
       if (key === 'hosts') { return options.indexOf(answers.hosts) >= 0; }
       if (key === 'services_include') { return options.some(function (o) { return answers.services.indexOf(o) >= 0; }); }
       if (key === 'services_exclude') { return !options.some(function (o) { return answers.services.indexOf(o) >= 0; }); }
@@ -225,6 +229,12 @@
     return preferences.filter(function (name) {
       return table.providers[feature][name].needs.every(function (need) { return services.indexOf(need) >= 0; });
     });
+  }
+
+  /** The fragment of the chosen disk value; an empty mapping when it has none. */
+  function diskFragment(table, disk) {
+    var value = table.choices.disk.values.filter(function (item) { return item.value === disk; })[0];
+    return value.fragment || {};
   }
 
   /** Deep-merge a fragment into the target; a leaf set twice is an error. An empty mapping is a leaf. */
@@ -266,6 +276,7 @@
     var kinds = Object.keys(table.connections).filter(function (kind) { return needed.indexOf(kind) >= 0; });
 
     var fleet = {};
+    mergeFragment(fleet, diskFragment(table, answers.disk), '');
     mergeFragment(fleet, table.shared[rule.shared].fragment, '');
     kinds.forEach(function (kind) { mergeFragment(fleet, table.connections[kind].fragment, ''); });
     mergeFragment(fleet, table.providers.registry[registry].fragment, '');
@@ -293,6 +304,7 @@
     var resolution = resolve(table, answers);
     var shown = {
       workload: true,
+      disk: true,
       hosts: answers.numbers.workers >= 2,
       services: answers.hosts === 'many',
       choose: resolution.registryAllowed.length > 1 || resolution.electionAllowed.length > 1,
@@ -361,7 +373,7 @@
   // ------------------------------------------------------------ URL
 
   function queryKeyOrder(table) {
-    return ['v', 'step'].concat(Object.keys(table.inputs), ['hosts', 'svc', 'reg', 'elect']);
+    return ['v', 'step'].concat(Object.keys(table.inputs), ['disk', 'hosts', 'svc', 'reg', 'elect']);
   }
 
   /** Read the answers from a query string; return them with the keys whose values were refused. */
@@ -383,8 +395,15 @@
       }
     });
 
-    var answers = { numbers: numbers, hosts: defaults.hosts, services: defaults.services, reg: null, elect: null, step: 'workload' };
+    var answers = {
+      numbers: numbers, disk: defaults.disk, hosts: defaults.hosts, services: defaults.services,
+      reg: null, elect: null, step: 'workload'
+    };
     if (hasRules(table)) {
+      if (params.has('disk')) {
+        if (choiceValues(table, 'disk').indexOf(params.get('disk')) >= 0) { answers.disk = params.get('disk'); }
+        else { invalid.disk = true; }
+      }
       if (numbers.workers >= 2 && params.has('hosts')) {
         if (choiceValues(table, 'hosts').indexOf(params.get('hosts')) >= 0) { answers.hosts = params.get('hosts'); }
         else { invalid.hosts = true; }
@@ -429,6 +448,7 @@
       if (answers.numbers[name] !== defaults.numbers[name]) { parts.push(name + '=' + answers.numbers[name]); }
     });
     if (!hasRules(table)) { return parts.join('&'); }
+    if (answers.disk !== defaults.disk) { parts.push('disk=' + answers.disk); }
     if (answers.hosts !== defaults.hosts) { parts.push('hosts=' + answers.hosts); }
     if (answers.services.length) {
       parts.push('svc=' + choiceValues(table, 'services').filter(function (v) { return answers.services.indexOf(v) >= 0; }).join(','));
@@ -598,6 +618,12 @@
       target.appendChild(fieldset);
     }
 
+    function buildDisk() {
+      var choice = table.choices.disk;
+      radioGroup(byId('wizard-disk'), 'wizard-disk', choice.label, choice.help, choice.values, state.disk,
+        function (value) { state.disk = value; changed(); });
+    }
+
     function buildHosts() {
       var choice = table.choices.hosts;
       radioGroup(byId('wizard-hosts'), 'wizard-hosts', choice.label, choice.help, choice.values, state.hosts,
@@ -718,7 +744,7 @@
       if (resolution) { addDefinitions(explain, 'Fleet', fleetExplanations(resolution)); }
     }
 
-    var builders = { hosts: buildHosts, services: buildServices, choose: buildChoose, result: buildResult };
+    var builders = { disk: buildDisk, hosts: buildHosts, services: buildServices, choose: buildChoose, result: buildResult };
 
     function showStep(step, moveFocus) {
       if (step !== 'workload' && Object.keys(refused).length) { return; }
