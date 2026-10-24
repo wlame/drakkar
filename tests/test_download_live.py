@@ -142,15 +142,6 @@ async def test_the_route_never_uses_the_recorders_reader(tmp_path, storage):
     assert recorder._reader_db.method_calls == []
 
 
-async def test_no_live_file_yet_answers_404(tmp_path, storage):
-    client, _recorder = _client(tmp_path)
-    async with client:
-        resp = await client.get('/api/v1/debug/download-live')
-
-    assert resp.status_code == 404
-    assert not os.listdir(storage)
-
-
 MEMORY_NAME_RE = re.compile(r'^w-1-memory-\d{4}-\d{2}-\d{2}__\d{2}_\d{2}_\d{2}\.db$')
 
 
@@ -377,3 +368,38 @@ async def test_stepped_snapshot_over_limit_answers_500(tmp_path, storage, starte
     assert resp.status_code == 500
     assert resp.json() == {'error': 'Snapshot failed: the memory store copy did not finish in 0.1 s'}
     assert os.listdir(storage) == []
+
+
+async def test_download_live_before_the_first_file_serves_the_memory_store(tmp_path, storage, started):
+    rec = await started('sqlite', storage_dir=str(storage), events=2)
+    # A file worker whose live file does not exist (yet); the real path is
+    # put back for the stop, which seals it.
+    real_path, rec._db_path = rec._db_path, str(storage / LIVE_NAME)
+    try:
+        async with _client_of(rec) as client:
+            default = await client.get('/api/v1/debug/download-live')
+            file = await client.get('/api/v1/debug/download-live', params={'source': 'file'})
+    finally:
+        rec._db_path = real_path
+
+    assert default.status_code == 200
+    assert 'w-1-memory-' in default.headers['content-disposition']
+    with contextlib.closing(_open_snapshot(default.content, tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=2)
+    assert file.status_code == 404
+    assert file.json() == {'error': 'No live recorder file on this worker'}
+
+
+async def test_memory_download_falls_back_to_ram_when_the_storage_folder_is_missing(tmp_path, started):
+    missing = tmp_path / 'not-created'
+    rec = await started('none', storage_dir=str(missing), events=3)
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live')
+
+    assert resp.status_code == 200
+    name = resp.headers['content-disposition'].removeprefix('attachment; filename="').removesuffix('"')
+    assert MEMORY_NAME_RE.fullmatch(name)
+    with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=3)
+    assert not missing.exists()

@@ -248,6 +248,22 @@ def still_covered(read_class: ReadClass, bound: ReadBound, coverage: MemoryCover
 _memory_read_log = RateLimitedLog(time.monotonic)
 
 
+async def log_memory_read_stopped(endpoint: str) -> None:
+    """Log ``ui_read_memory_timed_out`` for a memory read of ``endpoint`` that the read limit stopped.
+
+    Rate-limited: at most one line per minute for every endpoint together.
+    """
+    await _memory_read_log.emit(
+        'ui_read_memory_timed_out',
+        logger.awarning,
+        'ui_read_memory_timed_out',
+        category='debug',
+        endpoint=endpoint,
+        # Read at call time: the limit the read just ran under.
+        limit_seconds=memstore.MEMORY_READ_LIMIT_SECONDS,
+    )
+
+
 async def read_memory(
     store: MemoryStore | None, query: str, params: Sequence[Any], *, endpoint: str
 ) -> tuple[list[str], list[Any]] | None:
@@ -264,15 +280,7 @@ async def read_memory(
     except sqlite3.OperationalError as exc:
         if not is_read_interrupted(exc):
             raise
-        await _memory_read_log.emit(
-            'ui_read_memory_timed_out',
-            logger.awarning,
-            'ui_read_memory_timed_out',
-            category='debug',
-            endpoint=endpoint,
-            # Read at call time: the limit the read just ran under.
-            limit_seconds=memstore.MEMORY_READ_LIMIT_SECONDS,
-        )
+        await log_memory_read_stopped(endpoint)
         return None
     except (RuntimeError, ValueError):
         # The store closed under the read (the recorder is stopping): the

@@ -145,3 +145,32 @@ def test_measure_memory_store_of_an_empty_store_without_a_cluster_answers_nulls(
 def test_measure_memory_store_raises_a_failure_that_is_not_the_read_limit(conn):
     with pytest.raises(sqlite3.OperationalError, match='no such table'):
         dbstats_mod.measure_memory_store(conn, worker_name='w1', fallback_cluster='', event_count=0)
+
+
+@pytest.mark.parametrize('query', [dbstats_mod.FIRST_TS_QUERY, dbstats_mod.LAST_TS_QUERY])
+def test_memory_row_timestamps_are_index_lookups_not_scans(conn, query):
+    conn.executescript(SCHEMA_EVENTS)
+
+    (plan,) = [row[3] for row in conn.execute(f'EXPLAIN QUERY PLAN {query}')]
+
+    assert plan == 'SEARCH events USING COVERING INDEX idx_events_ts'
+
+
+def test_measure_memory_store_reports_each_read_the_limit_stopped(conn, monkeypatch):
+    conn.executescript(SCHEMA_EVENTS)
+    add_events(conn, [('consumed', 5.0), ('consumed', 7.0)])
+    real_bounded = dbstats_mod._bounded_rows
+
+    def stop_the_count(db, query):
+        # Only the GROUP BY is stopped; the timestamps still answer.
+        return None if query == dbstats_mod.EVENT_COUNTS_QUERY else real_bounded(db, query)
+
+    monkeypatch.setattr(dbstats_mod, '_bounded_rows', stop_the_count)
+    stopped: list[str] = []
+
+    row = dbstats_mod.measure_memory_store(
+        conn, worker_name='w1', fallback_cluster='', event_count=2, on_read_stopped=lambda: stopped.append('read')
+    )
+
+    assert (row['first_event_ts'], row['last_event_ts'], row['event_counts']) == (5.0, 7.0, {})
+    assert stopped == ['read']

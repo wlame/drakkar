@@ -52,7 +52,7 @@ from drakkar.recorder import memstore
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
 from drakkar.recorder.helpers import make_db_path
 from drakkar.recorder.history import HISTORY_FOLDER, MERGED_FOLDER, meta_path, read_meta
-from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, trace_history
+from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, log_memory_read_stopped, trace_history
 from drakkar.recorder.schema import EventType
 from drakkar.recorder.sealing import own_db_files
 from drakkar.timefmt import format_epoch_ns
@@ -106,6 +106,7 @@ _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
 NO_MEMORY_STORE_ERROR = 'No memory store on this worker'
+DATABASES_ENDPOINT = '/api/v1/debug/databases'
 BAD_SOURCE_ERROR = 'source must be memory or file'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
@@ -129,17 +130,26 @@ def _backup_into(source: sqlite3.Connection, target: sqlite3.Connection) -> None
     source.backup(target)
 
 
-def _snapshot_into_temp_file(folder: str, name: str, fill: Callable[[sqlite3.Connection], None]) -> BinaryIO:
-    """Copy a database into a private temp file in ``folder``; return an open handle to the unlinked file.
+def _create_snapshot_temp(folder: str, name: str) -> str:
+    """Create an empty, private temp file in ``folder``, dot-named after ``name``; return its path.
 
-    The temp file is dot-named after ``name``, created exclusive and
-    owner-only, filled by ``fill`` through a connection to it, and switched
-    to a rollback journal, so it opens on its own. It is unlinked before the
-    handle is returned, so nothing is left behind even when the download
-    breaks. Blocking: run it in a thread.
+    Exclusive, owner-only, never through a link: the temp file holds a copy
+    of recorder data. Raises :class:`OSError` when the folder is missing or
+    not writable. Blocking.
     """
     temp = os.path.join(folder, f'.{name}.{secrets.token_hex(8)}.download')
     os.close(os.open(temp, _SNAPSHOT_FLAGS, 0o600))
+    return temp
+
+
+def _fill_snapshot_temp(temp: str, fill: Callable[[sqlite3.Connection], None]) -> BinaryIO:
+    """Fill the temp file ``temp`` through ``fill``; return an open handle to it, unlinked. Blocking.
+
+    The copy is switched to a rollback journal, so it opens on its own. The
+    file and its sidecars are unlinked before the handle is returned (or
+    when the copy fails), so nothing is left behind even when the download
+    breaks.
+    """
     try:
         target = sqlite3.connect(temp)
         try:
@@ -153,6 +163,11 @@ def _snapshot_into_temp_file(folder: str, name: str, fill: Callable[[sqlite3.Con
         for suffix in _SNAPSHOT_SIDECARS:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp + suffix)
+
+
+def _snapshot_into_temp_file(folder: str, name: str, fill: Callable[[sqlite3.Connection], None]) -> BinaryIO:
+    """Copy a database into a private temp file in ``folder``; return an open handle to the unlinked file. Blocking."""
+    return _fill_snapshot_temp(_create_snapshot_temp(folder, name), fill)
 
 
 def _snapshot_live_file(live_path: str) -> BinaryIO:
@@ -199,15 +214,21 @@ def _backup_in_steps(source: sqlite3.Connection, target: sqlite3.Connection) -> 
     source.backup(target, pages=memstore.SNAPSHOT_STEP_PAGES, progress=_snapshot_step_check(deadline))
 
 
-def _snapshot_memory_stepped(conn: sqlite3.Connection, storage_dir: str, worker_name: str) -> tuple[BinaryIO, str]:
+def _snapshot_memory_stepped(
+    conn: sqlite3.Connection, storage_dir: str, worker_name: str
+) -> tuple[BinaryIO, str] | None:
     """A stepped copy of the memory store into a temp file in ``storage_dir``; the handle and the attachment name.
 
-    ``conn`` is a by-name connection to the store (the open guard holds it
-    open). Blocking: run it in a thread.
+    ``None`` when no temp file can be created there (the folder is missing
+    or not writable). ``conn`` is a by-name connection to the store (the
+    open guard holds it open). Blocking: run it in a thread.
     """
     name = _memory_snapshot_name(worker_name)
-    handle = _snapshot_into_temp_file(storage_dir, name, lambda target: _backup_in_steps(conn, target))
-    return handle, name
+    try:
+        temp = _create_snapshot_temp(storage_dir, name)
+    except OSError:
+        return None
+    return _fill_snapshot_temp(temp, lambda target: _backup_in_steps(conn, target)), name
 
 
 def _snapshot_memory_serialized(conn: sqlite3.Connection) -> bytes:
@@ -230,15 +251,17 @@ def _snapshot_memory(recorder: EventRecorder) -> tuple[BinaryIO, str] | None:
     """A snapshot of the memory store and its attachment name; ``None`` when there is no open store. Blocking.
 
     With ``storage.dir`` set, a stepped copy into a temp file there;
-    without it, a copy in RAM. The by-name connection goes through the
-    open guard, so a snapshot that races the stop never creates a new,
-    empty store.
+    without it, or when no temp file can be created there, a copy in RAM.
+    The by-name connection goes through the open guard, so a snapshot that
+    races the stop never creates a new, empty store.
     """
     with recorder.open_memory_reader() as conn:
         if conn is None:
             return None
         if recorder.storage_dir:
-            return _snapshot_memory_stepped(conn, recorder.storage_dir, recorder.worker_name)
+            stepped = _snapshot_memory_stepped(conn, recorder.storage_dir, recorder.worker_name)
+            if stepped is not None:
+                return stepped
         return io.BytesIO(_snapshot_memory_serialized(conn)), _memory_snapshot_name(recorder.worker_name)
 
 
@@ -460,7 +483,10 @@ def _history_answer(shared: Path) -> list[dict[str, Any]]:
 
 
 def _databases_answer(
-    recorder: EventRecorder, own_stats: OwnFileStats, coverage: MemoryCoverage | None
+    recorder: EventRecorder,
+    own_stats: OwnFileStats,
+    coverage: MemoryCoverage | None,
+    on_read_stopped: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """The ``/debug/databases`` answer: the memory row, own files measured now, then the shared history. Blocking.
 
@@ -468,7 +494,8 @@ def _databases_answer(
     the main loop; with it, the memory row comes first, read on a by-name
     connection through the open guard (no row once the store is closed).
     The file rows follow when the recorder writes a file, and the shared
-    history is listed whenever a shared folder is set.
+    history is listed whenever a shared folder is set. ``on_read_stopped``
+    is called for each memory read that the read limit stopped.
     """
     own: list[dict[str, Any]] = []
     if coverage is not None:
@@ -480,6 +507,7 @@ def _databases_answer(
                         worker_name=recorder.worker_name,
                         fallback_cluster=recorder.cluster_name,
                         event_count=coverage.rows,
+                        on_read_stopped=on_read_stopped,
                     )
                 )
     if recorder.has_file:
@@ -595,7 +623,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     # request (sealed files carry theirs in meta files).
     own_stats = OwnFileStats()
 
-    @router.get('/api/v1/debug/databases', dependencies=[Depends(deps.require_auth)])
+    @router.get(DATABASES_ENDPOINT, dependencies=[Depends(deps.require_auth)])
     async def api_debug_databases():
         """This worker's own files with measured stats, then every shared history folder.
 
@@ -604,7 +632,13 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         /readyz live on this same loop.
         """
         coverage = recorder.memory_coverage()
-        return JSONResponse(await asyncio.to_thread(_databases_answer, recorder, own_stats, coverage))
+        reads_stopped: list[bool] = []
+        answer = await asyncio.to_thread(
+            _databases_answer, recorder, own_stats, coverage, on_read_stopped=lambda: reads_stopped.append(True)
+        )
+        if reads_stopped:
+            await log_memory_read_stopped(DATABASES_ENDPOINT)
+        return JSONResponse(answer)
 
     @router.post('/api/v1/debug/merge', dependencies=[Depends(deps.require_auth)])
     async def api_debug_merge(request: Request):
@@ -840,22 +874,30 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """Download a consistent snapshot of the live recorder file or of the memory store.
 
         ``source`` is ``file`` or ``memory``; it defaults to ``file`` when
-        the recorder writes a file, else ``memory``. 400 for another value;
+        a live file is open, else ``memory`` (so a worker before its first
+        file serves the memory store). 400 for another value;
         404 without a live file (``file``) or without an open memory store
         (``memory``); 500 when the snapshot fails. See
         :func:`_snapshot_live_file` and :func:`_snapshot_memory`.
         """
         if source is None:
-            source = DOWNLOAD_SOURCE_FILE if recorder.has_file else DOWNLOAD_SOURCE_MEMORY
+            source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
         if source == DOWNLOAD_SOURCE_FILE:
             return await _download_live_file()
         if source == DOWNLOAD_SOURCE_MEMORY:
             return await _download_memory_store()
         return JSONResponse({'error': BAD_SOURCE_ERROR}, status_code=400)
 
-    async def _download_live_file():
+    async def _live_file_path() -> str:
+        """The path of the open live file; ``''`` without a file or before the first one exists."""
         live_path = recorder.db_path if recorder.has_file else ''
         if not live_path or not await asyncio.to_thread(os.path.isfile, live_path):
+            return ''
+        return live_path
+
+    async def _download_live_file():
+        live_path = await _live_file_path()
+        if not live_path:
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
         try:
             handle = await asyncio.to_thread(_snapshot_live_file, live_path)

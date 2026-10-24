@@ -20,6 +20,7 @@ from urllib.parse import quote
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from drakkar.config import (
     DrakkarConfig,
@@ -31,7 +32,9 @@ from drakkar.config import (
 )
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder, memstore
+from drakkar.recorder import queries as queries_mod
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
@@ -1519,6 +1522,22 @@ async def test_databases_memory_count_stopped_by_the_limit_answers_empty_event_c
     assert row['event_counts'] == {}
     assert row['event_count'] == 4
     assert row['cluster_name'] == 'fallback'
+
+
+async def test_databases_memory_read_stopped_by_the_limit_logs_one_rate_limited_line(started_recorder, monkeypatch):
+    rec = await started_recorder('none', events=3)
+    monkeypatch.setattr(queries_mod, '_memory_read_log', RateLimitedLog(time.monotonic))
+    monkeypatch.setattr(memstore, 'PROGRESS_HANDLER_STEPS', 1)
+    monkeypatch.setattr(memstore, 'MEMORY_READ_LIMIT_SECONDS', -1.0)
+
+    with capture_logs() as logs:
+        await _databases(rec)
+        await _databases(rec)
+
+    timed_out = [entry for entry in logs if entry['event'] == 'ui_read_memory_timed_out']
+    assert len(timed_out) == 1
+    assert timed_out[0]['endpoint'] == '/api/v1/debug/databases'
+    assert timed_out[0]['category'] == 'debug'
 
 
 async def test_databases_and_download_after_stop_answer_empty_shapes(started_recorder):

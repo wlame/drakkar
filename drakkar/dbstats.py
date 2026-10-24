@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 
@@ -149,8 +151,20 @@ def _delta_scan(path: str, prev: DbStats) -> DbStats | None:
             db.close()
 
 
+# Two statements, not one: ``MIN`` alone and ``MAX`` alone are each one
+# lookup in the ``ts`` index, both in one SELECT scan the whole index.
+FIRST_TS_QUERY = 'SELECT MIN(ts) FROM events'
+LAST_TS_QUERY = 'SELECT MAX(ts) FROM events'
+EVENT_COUNTS_QUERY = 'SELECT event, COUNT(*) FROM events GROUP BY event'
+
+
 def measure_memory_store(
-    conn: sqlite3.Connection, *, worker_name: str, fallback_cluster: str, event_count: int
+    conn: sqlite3.Connection,
+    *,
+    worker_name: str,
+    fallback_cluster: str,
+    event_count: int,
+    on_read_stopped: Callable[[], None] | None = None,
 ) -> dict:
     """The memory row of the databases page, read on a by-name connection to the memory store. Blocking.
 
@@ -160,19 +174,26 @@ def measure_memory_store(
     event index, and ``size_bytes`` is the data in use (pages in use times
     the page size), not the memory the store holds. ``cluster_name`` comes
     from the store's ``worker_config`` row, else ``fallback_cluster``. The
-    three reads of the events and config tables run under the memory read
-    limit, and a read it stops answers its empty part (no timestamps,
-    ``{}``, the fallback cluster); the table probe and the page pragmas are
-    single lookups.
+    reads of the events and config tables run under the memory read limit,
+    and a read it stops answers its empty part (no timestamp, ``{}``, the
+    fallback cluster) and calls ``on_read_stopped``; the table probe and the
+    page pragmas are single lookups.
     """
-    span = _bounded_rows(conn, 'SELECT MIN(ts), MAX(ts) FROM events')
-    first_ts, last_ts = span[0] if span else (None, None)
-    counts = _bounded_rows(conn, 'SELECT event, COUNT(*) FROM events GROUP BY event')
+
+    def bounded(query: str) -> list[tuple] | None:
+        rows = _bounded_rows(conn, query)
+        if rows is None and on_read_stopped is not None:
+            on_read_stopped()
+        return rows
+
+    first_ts = _single_value(bounded(FIRST_TS_QUERY))
+    last_ts = _single_value(bounded(LAST_TS_QUERY))
+    counts = bounded(EVENT_COUNTS_QUERY)
     cluster_name = fallback_cluster
     if _table_exists(conn, 'worker_config'):
-        config_rows = _bounded_rows(conn, 'SELECT cluster_name FROM worker_config WHERE id = 1')
-        if config_rows and config_rows[0][0]:
-            cluster_name = config_rows[0][0]
+        configured = _single_value(bounded('SELECT cluster_name FROM worker_config WHERE id = 1'))
+        if configured:
+            cluster_name = configured
     return {
         'filename': f'{worker_name}-memory',
         'worker_name': worker_name,
@@ -184,6 +205,11 @@ def measure_memory_store(
         'last_event_ts': last_ts,
         'size_bytes': _used_bytes(conn),
     }
+
+
+def _single_value(rows: list[tuple] | None) -> Any:
+    """The first column of the first row; ``None`` without a row."""
+    return rows[0][0] if rows else None
 
 
 def _bounded_rows(conn: sqlite3.Connection, query: str) -> list[tuple] | None:
