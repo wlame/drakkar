@@ -891,9 +891,9 @@ recorder_flush_batches_dropped = Counter(
 recorder_requeue_overflow = Counter(
     'drakkar_recorder_requeue_overflow_total',
     (
-        'Total events silently dropped from the recorder buffer tail when '
-        'an OperationalError-triggered requeue exceeded max_buffer capacity. '
-        'Any nonzero value indicates data loss on the flush-retry path.'
+        'Total events dropped from the tail of a full recorder queue (the intake '
+        'or the file queue, max_buffer) while a chunk was put back at its front '
+        'after a failed or cancelled write. Any nonzero value indicates data loss.'
     ),
 )
 

@@ -332,6 +332,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The help text of `drakkar_recorder_requeue_overflow_total` names both
+  recorder queues.** It said only the buffer tail and one error type; it now
+  says the intake or the file queue, after a failed or cancelled write.
 - **A periodic run whose recorder row fails is counted once.** It counted as
   both `ok` and `error` in `drakkar_periodic_task_runs_total`; it now counts
   as `error` only.
