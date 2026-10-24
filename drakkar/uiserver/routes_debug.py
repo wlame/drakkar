@@ -45,7 +45,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from drakkar.concurrency import dispatch_to_loop
 from drakkar.dbstats import OwnFileStats, measure_memory_store
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder import memstore
@@ -719,7 +718,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                 )
             )
             return JSONResponse(events)
-        events = await dispatch_to_loop(recorder.cross_trace(partition, offset), deps.drakkar_app.main_loop)
+        # Bounded like every other recorder read: with a recorder file the
+        # trace waits for the file stage, so a hung disk answers ``[]`` after
+        # the dispatch limit instead of hanging the request.
+        events = await deps.dispatch_bounded(recorder.cross_trace(partition, offset), default=[])
         return JSONResponse(events)
 
     @router.get('/api/v1/debug/label-keys')
@@ -755,7 +757,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         value: str = Query(min_length=1),
     ):
         """Trace tasks by label value through this worker's live file."""
-        events = await dispatch_to_loop(recorder.cross_trace_by_label(key, value), deps.drakkar_app.main_loop)
+        # Bounded for the same reason as ``api_debug_trace``.
+        events = await deps.dispatch_bounded(recorder.cross_trace_by_label(key, value), default=[])
         return JSONResponse(events)
 
     @router.get('/api/v1/debug/metrics')

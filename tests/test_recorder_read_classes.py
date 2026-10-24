@@ -562,3 +562,40 @@ async def test_a_file_stage_queued_during_stop_does_not_write_after_the_seal_sta
     await asyncio.gather(*queued)
 
     assert steps == ['write', 'seal']
+
+
+@pytest.mark.parametrize(
+    ('url', 'empty'),
+    [
+        ('/api/v1/task/t-1', 'task'),
+        ('/api/v1/debug/trace?partition=0&offset=1', []),
+        ('/api/v1/debug/trace-by-label?key=k&value=v', []),
+    ],
+)
+async def test_keyed_reads_answer_their_empty_shape_when_the_file_stage_stalls(started, monkeypatch, url, empty):
+    rec = await started('sqlite')
+    monkeypatch.setattr(server_mod, 'MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.05)
+    rec._record({'ts': time.time(), 'event': 'task_started', 'task_id': 't-1', 'partition': 0, 'metadata': '{}'})
+    disk_answers = asyncio.Event()
+
+    async def hung_disk() -> None:
+        await disk_answers.wait()
+
+    # A hung disk: the file stage never ends while the request runs.
+    rec._stage_file = hung_disk
+    rec._run_queued_stage_file = hung_disk
+    try:
+        with capture_logs() as cap:
+            async with _client(rec) as client:
+                resp = await asyncio.wait_for(client.get(url), timeout=5)
+    finally:
+        disk_answers.set()
+        del rec._stage_file
+        del rec._run_queued_stage_file
+
+    expected = empty
+    if empty == 'task':
+        expected = queries_mod.build_task_detail('t-1', [])
+        expected['binary_path'] = _drakkar_app()._config.executor.binary_path
+    assert (resp.status_code, resp.json()) == (200, expected)
+    assert any(e['event'] == 'ui_main_loop_dispatch_timeout' for e in cap)

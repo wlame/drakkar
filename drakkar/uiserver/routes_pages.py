@@ -365,10 +365,10 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         ``task_id`` is echoed back as requested; the recorder lookup strips
         the ``:r…`` retry composite-key suffix to the base id.
         """
-        events = await dispatch_to_loop(
-            recorder.get_task_events(queries.base_task_id(task_id)),
-            deps.drakkar_app.main_loop,
-        )
+        # Bounded like every other recorder read: with a recorder file this
+        # read waits for the file stage, so a hung disk answers the empty
+        # lifecycle after the dispatch limit instead of hanging the page.
+        events = await deps.dispatch_bounded(recorder.get_task_events(queries.base_task_id(task_id)), default=[])
         detail = queries.build_task_detail(task_id, events)
         # The configured binary is app state, not recorder state, so it is
         # added here rather than inside the reconstruction.

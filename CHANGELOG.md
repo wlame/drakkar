@@ -332,6 +332,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The task detail and the two trace reads give up after 5 seconds.**
+  `/api/v1/task/{task_id}`, `/api/v1/debug/trace` and
+  `/api/v1/debug/trace-by-label` waited with no limit for the recorder file
+  stage, so a hung disk hung them. They now answer their empty shape after
+  the main-loop dispatch limit, like the other recorder reads.
 - **The help text of `drakkar_recorder_requeue_overflow_total` names both
   recorder queues.** It said only the buffer tail and one error type; it now
   says the intake or the file queue, after a failed or cancelled write.
