@@ -123,7 +123,15 @@ class PrefixDeletion:
     batches: int = 0
 
 
-async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixDeletion:
+# Called before each delete batch with the batch bound (every row with a
+# lower id goes) and the largest ``ts`` of the batch (``None`` when it holds
+# no row).
+BatchHook = Callable[[int, float | None], None]
+
+
+async def delete_id_prefix(
+    conn: aiosqlite.Connection, below_id: int, *, on_batch: BatchHook | None = None
+) -> PrefixDeletion:
     """Delete every event row with ``id < below_id``, in committed batches of at most :data:`EVICT_BATCH_ROWS`.
 
     Before each batch, ``MAX(ts)`` of the rows about to go is read, so the
@@ -133,6 +141,10 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
     failed batch is never counted: it is rolled back, or, when the rollback
     fails as well, still open, which ``rollback_error`` reports. ``batches``
     counts the committed batches.
+
+    ``on_batch`` runs on the caller's loop after the ``MAX(ts)`` read and
+    before the batch's DELETE, so a caller can publish the new floor and
+    largest removed ``ts`` before any reader can miss the rows.
     """
     deleted = 0
     batches = 0
@@ -148,6 +160,8 @@ async def delete_id_prefix(conn: aiosqlite.Connection, below_id: int) -> PrefixD
             async with conn.execute('SELECT MAX(ts) FROM events NOT INDEXED WHERE id < ?', (bound,)) as cursor:
                 row = await cursor.fetchone()
             batch_max_ts = row[0] if row else None
+            if on_batch is not None:
+                on_batch(bound, batch_max_ts)
             async with conn.execute('DELETE FROM events WHERE id < ?', (bound,)) as cursor:
                 batch_deleted = cursor.rowcount
             await conn.commit()
@@ -220,11 +234,18 @@ class _EvictionTally:
     floor_id: int
     evicted_max_ts: float
     deleted: dict[str, int]
+    on_batch: BatchHook | None = None
     batches: int = 0
 
     @classmethod
-    def starting_from(cls, coverage: MemoryCoverage) -> _EvictionTally:
-        return cls(coverage, coverage.floor_id, coverage.evicted_max_ts, dict.fromkeys(EVICTION_REASONS, 0))
+    def starting_from(cls, coverage: MemoryCoverage, on_batch: BatchHook | None) -> _EvictionTally:
+        return cls(
+            coverage=coverage,
+            floor_id=coverage.floor_id,
+            evicted_max_ts=coverage.evicted_max_ts,
+            deleted=dict.fromkeys(EVICTION_REASONS, 0),
+            on_batch=on_batch,
+        )
 
     @property
     def rows(self) -> int:
@@ -255,6 +276,7 @@ async def run_eviction_pass(
     window_seconds: int,
     max_rows: int,
     max_bytes: int,
+    on_batch: BatchHook | None = None,
 ) -> EvictionResult:
     """Evict the oldest rows of the memory store by the time window, then the row cap, then the data bytes.
 
@@ -269,8 +291,9 @@ async def run_eviction_pass(
     it fits, the table is empty, or the pass ran :data:`EVICT_MAX_BATCHES`
     batches. A failed statement rolls back and ends the pass; the next pass
     starts again with the window. No vacuum: freed pages are reused.
+    ``on_batch`` is passed to every :func:`delete_id_prefix` call.
     """
-    tally = _EvictionTally.starting_from(coverage)
+    tally = _EvictionTally.starting_from(coverage, on_batch)
     failure = (
         await _evict_by_window(conn, tally, now - window_seconds)
         or await _evict_by_row_cap(conn, tally, max_rows)
@@ -325,7 +348,7 @@ async def _delete_below(
 ) -> _PassFailure | None:
     if below_id <= tally.floor_id:
         return None
-    deletion = await delete_id_prefix(conn, below_id)
+    deletion = await delete_id_prefix(conn, below_id, on_batch=tally.on_batch)
     tally.take(reason, deletion)
     if deletion.error is not None:
         return _PassFailure(reason, deletion.error, deletion.rollback_error)

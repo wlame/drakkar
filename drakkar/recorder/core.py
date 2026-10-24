@@ -1453,10 +1453,24 @@ class EventRecorder(EventWriter):
             window_seconds=self._memory_window_seconds,
             max_rows=self._memory_max_rows,
             max_bytes=self._memory_max_bytes,
+            on_batch=self._note_evicting_batch,
         )
         self._adopt_eviction(result, now)
         if result.failed_reason is not None and result.error is not None:
             await self._log_eviction_failure(result.failed_reason, result.error, result.rollback_error)
+
+    def _note_evicting_batch(self, bound: int, batch_max_ts: float | None) -> None:
+        """Before a delete batch: move the coverage past the rows about to go.
+
+        A memory read checks the coverage again after its SELECT; moving it
+        before the DELETE means a read that runs after the commit never
+        trusts a range it lost. Moved early, the values can only send a read
+        to the file. The pass's result sets the final values.
+        """
+        self._evicted = True
+        if batch_max_ts is not None:
+            self._evicted_max_ts = max(self._evicted_max_ts, batch_max_ts)
+        self._floor_id = max(self._floor_id, bound)
 
     def _adopt_eviction(self, result: EvictionResult, now: float) -> None:
         """Take the pass's coverage, count its rows by reason and set the gauges.
@@ -1608,7 +1622,7 @@ class EventRecorder(EventWriter):
         gap_id = self._pending_gap_id
         if gap_id is None:
             return True
-        result = await delete_id_prefix(writer, gap_id + 1)
+        result = await delete_id_prefix(writer, gap_id + 1, on_batch=self._note_evicting_batch)
         if result.deleted:
             recorder_memory_evicted_rows.labels(reason='gap').inc(result.deleted)
         if result.max_ts is not None:

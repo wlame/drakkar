@@ -415,7 +415,7 @@ async def test_failed_delete_keeps_the_committed_batches_and_names_its_reason(st
     now = time.time()
     await _insert_rows(store, [now] * 12_000)
 
-    async def failing_after_one_batch(conn, below_id):
+    async def failing_after_one_batch(conn, below_id, *, on_batch=None):
         return memstore_mod.PrefixDeletion(5000, now, _locked_error(), batches=1)
 
     monkeypatch.setattr(memstore_mod, 'delete_id_prefix', failing_after_one_batch)
@@ -479,7 +479,7 @@ async def test_eviction_failure_with_a_failed_rollback_marks_the_writer_dirty(st
     rec = await started(max_rows=1)
     rec._memory_log = RateLimitedLog(lambda: 1000.0)
 
-    async def failing_delete(conn, below_id):
+    async def failing_delete(conn, below_id, *, on_batch=None):
         return memstore_mod.PrefixDeletion(0, None, _locked_error(), sqlite3.OperationalError('cannot roll back'))
 
     monkeypatch.setattr(memstore_mod, 'delete_id_prefix', failing_delete)
@@ -492,3 +492,89 @@ async def test_eviction_failure_with_a_failed_rollback_marks_the_writer_dirty(st
     assert [(line['reason'], line['rollback_error']) for line in lines] == [('rows', 'cannot roll back')]
     assert rec._memory_dirty is True
     assert recorder_memory_rows._value.get() == 3
+
+
+def _hold_after_first_commit(monkeypatch, conn) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make the first ``commit`` on ``conn`` wait for the returned gate after it committed; ``held`` is set then."""
+    real_commit = conn.commit
+    gate = asyncio.Event()
+    held = asyncio.Event()
+
+    async def commit():
+        await real_commit()
+        if not held.is_set():
+            held.set()
+            await gate.wait()
+
+    monkeypatch.setattr(conn, 'commit', commit)
+    return gate, held
+
+
+async def test_coverage_moves_before_a_committed_batch_is_read(started, monkeypatch):
+    rec = await started()
+    now = time.time()
+    _record(rec, [now - 300, now - 100, now - 200, now, now])
+    await rec._stage_memory(0.0)
+    rec._memory_window_seconds = 60
+    gate, held = _hold_after_first_commit(monkeypatch, rec.memory_store.writer)
+
+    stage = asyncio.create_task(rec._stage_memory(0.0))
+    await asyncio.wait_for(held.wait(), WAIT_SECONDS)
+    coverage = rec.memory_coverage()
+    _, rows = await rec.memory_store.read('SELECT MIN(id) FROM events')
+    gate.set()
+    await stage
+
+    assert rows == [(4,)]
+    assert (coverage.floor_id, coverage.evicted, coverage.evicted_max_ts) == (4, True, now - 100)
+
+
+async def test_gap_delete_raises_evicted_max_ts_before_its_rows_are_read(started, monkeypatch):
+    rec = await started()
+    now = time.time()
+    _record(rec, [now - 10, now - 5, now - 20])
+    await rec._stage_memory(0.0)
+    writer = rec.memory_store.writer
+    real_executemany = writer.executemany
+
+    async def full_once(sql, rows):
+        monkeypatch.setattr(writer, 'executemany', real_executemany)
+        exc = sqlite3.OperationalError('database or disk is full')
+        exc.sqlite_errorcode = 13
+        raise exc
+
+    monkeypatch.setattr(writer, 'executemany', full_once)
+    gate, held = _hold_after_first_commit(monkeypatch, writer)
+    _record(rec, [now - 50] * 2)
+
+    stage = asyncio.create_task(rec._stage_memory(0.0))
+    await asyncio.wait_for(held.wait(), WAIT_SECONDS)
+    coverage = rec.memory_coverage()
+    gate.set()
+    await stage
+
+    assert await _memory_ids(rec) == []
+    assert (coverage.floor_id, coverage.evicted, coverage.evicted_max_ts) == (6, True, now - 5)
+
+
+async def test_batch_cap_counts_every_batch_of_the_pass(store):
+    now = time.time()
+    await _insert_rows(store, [now - OLD_SECONDS] * 10_000 + [now] * 10_000)
+    statements = await _trace_statements(store)
+    coverage = MemoryCoverage(floor_id=1, last_id=20_000, evicted=False, evicted_max_ts=0.0)
+
+    first = await run_eviction_pass(
+        store.writer, coverage, now=now, window_seconds=60, max_rows=LARGE_MAX_ROWS, max_bytes=1
+    )
+    deletes_in_first = len([s for s in statements if s.startswith('DELETE FROM events')])
+    statements.clear()
+    second = await run_eviction_pass(
+        store.writer, first.coverage, now=now, window_seconds=60, max_rows=LARGE_MAX_ROWS, max_bytes=1
+    )
+
+    assert deletes_in_first == EVICT_MAX_BATCHES
+    assert first.evicted_by_reason['window'] == 10_000
+    assert 0 < first.evicted_by_reason['bytes'] < 10_000
+    assert len([s for s in statements if s.startswith('DELETE FROM events')]) == EVICT_MAX_BATCHES
+    assert second.evicted_by_reason['bytes'] > 0
+    assert second.coverage.floor_id > first.coverage.floor_id

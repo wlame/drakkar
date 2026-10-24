@@ -501,11 +501,11 @@ async def test_failed_gap_delete_stays_pending_and_the_next_stage_deletes_it(non
     real_delete = core_mod.delete_id_prefix
     attempts: list[int] = []
 
-    async def failing_once(conn, below_id):
+    async def failing_once(conn, below_id, *, on_batch=None):
         attempts.append(below_id)
         if len(attempts) == 1:
             return PrefixDeletion(0, None, _sqlite_error(SQLITE_FULL))
-        return await real_delete(conn, below_id)
+        return await real_delete(conn, below_id, on_batch=on_batch)
 
     monkeypatch.setattr(core_mod, 'delete_id_prefix', failing_once)
     gap_before = recorder_memory_evicted_rows.labels(reason='gap')._value.get()
@@ -559,11 +559,11 @@ async def test_final_error_with_a_failed_gap_delete_stops_the_stage_and_keeps_on
     real_delete = core_mod.delete_id_prefix
     attempts: list[int] = []
 
-    async def failing_once(conn, below_id):
+    async def failing_once(conn, below_id, *, on_batch=None):
         attempts.append(below_id)
         if len(attempts) == 1:
             return PrefixDeletion(0, None, _sqlite_error(SQLITE_FULL))
-        return await real_delete(conn, below_id)
+        return await real_delete(conn, below_id, on_batch=on_batch)
 
     monkeypatch.setattr(core_mod, 'delete_id_prefix', failing_once)
     _record_many(rec, 10)
@@ -591,12 +591,12 @@ async def test_gap_delete_with_a_failed_rollback_logs_it_and_the_next_stage_roll
     calls: list[str] = []
     deletes: list[int] = []
 
-    async def failing_once(conn, below_id):
+    async def failing_once(conn, below_id, *, on_batch=None):
         calls.append('delete')
         deletes.append(below_id)
         if len(deletes) == 1:
             return PrefixDeletion(0, None, _sqlite_error(SQLITE_FULL), sqlite3.OperationalError('rollback failed'))
-        return await real_delete(conn, below_id)
+        return await real_delete(conn, below_id, on_batch=on_batch)
 
     writer = rec.memory_store.writer
     real_rollback = writer.rollback
