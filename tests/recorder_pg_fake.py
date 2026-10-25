@@ -28,7 +28,9 @@ raises.
 records the DSN and hands back one connection. The trace statement answers
 ``trace_rows``; ``connect_error`` and ``trace_error`` make the connect or the
 trace raise, and ``hang_connect`` and ``hang_trace`` make them wait until they
-are cancelled. ``connections`` lists every connection handed out.
+are cancelled. ``conn_close_error`` and ``hang_conn_close`` make the graceful
+close of such a connection raise or wait. ``connections`` lists every
+connection handed out.
 """
 
 import asyncio
@@ -83,6 +85,8 @@ class RecorderFakePostgres:
         self.trace_rows: list[dict[str, Any]] = []
         self.trace_error: BaseException | None = None
         self.hang_trace = False
+        self.conn_close_error: BaseException | None = None
+        self.hang_conn_close = False
 
     async def open_pool(self, settings: PostgresConnectionConfig) -> 'FakePool':
         """Record the settings and open a pool, or raise ``open_error``."""
@@ -231,7 +235,12 @@ class FakeConnection:
         self.terminated = True
 
     async def close(self) -> None:
-        self._server.calls.append(('conn_close',))
+        server = self._server
+        server.calls.append(('conn_close',))
+        if server.hang_conn_close:
+            await asyncio.sleep(HANG_SECONDS)
+        if server.conn_close_error is not None:
+            raise server.conn_close_error
         self.closed = True
 
     def is_closed(self) -> bool:

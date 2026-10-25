@@ -25,11 +25,14 @@ from drakkar.providers.postgres import (
     render_recorder,
 )
 from drakkar.providers.resilience import describe_error
-from drakkar.recorder.postgres import RecorderPostgresSettings
+from drakkar.recorder.postgres import RecorderPostgresSettings, replace_nul
 
 MILLISECONDS_PER_SECOND = 1000
 # The smallest statement_timeout sent: 0 would mean no limit on the server.
 MIN_STATEMENT_TIMEOUT_MS = 1
+# The longest a search may take; a larger or non-finite
+# ``ui.trace.history_max_seconds`` uses this limit.
+MAX_SEARCH_SECONDS = 3600.0
 
 HistoryFailureReason = Literal['timeout', 'error']
 Connect = Callable[..., Awaitable[Any]]
@@ -47,9 +50,20 @@ class PostgresHistoryError(Exception):
         self.error = error
 
 
+def search_limit_seconds(max_seconds: float) -> float:
+    """The time limit of a search: ``max_seconds``, or :data:`MAX_SEARCH_SECONDS` when it is larger or not finite."""
+    if not math.isfinite(max_seconds) or max_seconds > MAX_SEARCH_SECONDS:
+        return MAX_SEARCH_SECONDS
+    return max_seconds
+
+
 def statement_timeout_ms(max_seconds: float) -> str:
-    """The server-side time limit of a search, in whole milliseconds (rounded down, at least 1), as text."""
-    return str(max(MIN_STATEMENT_TIMEOUT_MS, math.floor(max_seconds * MILLISECONDS_PER_SECOND)))
+    """The server-side time limit of a search, in whole milliseconds (rounded down, at least 1), as text.
+
+    The limit is capped first (:func:`search_limit_seconds`).
+    """
+    limit = search_limit_seconds(max_seconds)
+    return str(max(MIN_STATEMENT_TIMEOUT_MS, math.floor(limit * MILLISECONDS_PER_SECOND)))
 
 
 async def search_postgres_history(
@@ -75,9 +89,13 @@ async def search_postgres_history(
     connect = connect if connect is not None else asyncpg.connect
     statement = render_recorder(RECORDER_STATEMENT_TEMPLATES['trace'], schema=settings.schema, table=settings.table)
     set_local = RECORDER_STATEMENT_TEMPLATES['set_local']
+    # The writer stores the cluster name with every NUL replaced; the search
+    # must ask for the same text.
+    stored_cluster = replace_nul(cluster)
+    deadline = asyncio.get_running_loop().time() + search_limit_seconds(max_seconds)
     conn: Any = None
     try:
-        async with asyncio.timeout(max_seconds):
+        async with asyncio.timeout_at(deadline):
             conn = await connect(dsn=settings.connection.dsn)
             # Started and committed by hand: on a failure or a time-out nothing
             # more is sent (a ROLLBACK would wait for the server); closing the
@@ -86,16 +104,32 @@ async def search_postgres_history(
             await transaction.start()
             await conn.execute(set_local, STATEMENT_TIMEOUT_SETTING, statement_timeout_ms(max_seconds))
             await conn.execute(set_local, SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT])
-            rows = await conn.fetch(statement, cluster, partition, offset)
+            rows = await conn.fetch(statement, stored_cluster, partition, offset)
             await transaction.commit()
-            await conn.close()
+        await _close_after_search(conn, deadline)
     except TimeoutError as exc:
         raise PostgresHistoryError('timeout', describe_error(exc)) from exc
     except Exception as exc:
         raise PostgresHistoryError('error', describe_error(exc)) from exc
     finally:
-        # Never waits: a connection left open by a failure, a time-out or a
-        # cancel is closed at once.
+        # Never waits: a connection left open by a failure, a time-out, a
+        # cancel or a close that did not end is closed at once.
         if conn is not None and not conn.is_closed():
             conn.terminate()
     return [dict(row) for row in rows]
+
+
+async def _close_after_search(conn: Any, deadline: float) -> None:
+    """Close the connection of a search that already has its rows, within the search's time limit.
+
+    The rows are committed and complete, so a close that fails or runs out
+    of time does not fail the search: the caller terminates the connection,
+    which ends it on the server anyway. The close error is dropped on
+    purpose; a cancel still leaves as a cancel.
+    """
+    try:
+        async with asyncio.timeout_at(deadline):
+            await conn.close()
+    except Exception:
+        # The caller terminates the connection right after; nothing is lost.
+        return

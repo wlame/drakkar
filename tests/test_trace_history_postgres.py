@@ -20,7 +20,7 @@ from drakkar.providers.postgres import RECORDER_STATEMENT_TEMPLATES, render_reco
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.memstore import MIB
-from drakkar.recorder.postgres import RecorderPostgresSettings
+from drakkar.recorder.postgres import RecorderPostgresSettings, build_record
 from drakkar.recorder.postgres_history import PostgresHistoryError, search_postgres_history
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.uiserver import routes_debug
@@ -69,6 +69,11 @@ def _trace_row(row_id: int, worker: str = 'w-2') -> dict:
     row.update(id=row_id, ts=1.5 + row_id, dt='dt', event='consumed', partition=3, offset=42, origin='kafka')
     row['worker_name'] = worker
     return row
+
+
+def _event_row() -> tuple:
+    values = {'id': 1, 'ts': 1.5, 'dt': 'dt', 'event': 'consumed', 'origin': 'kafka'}
+    return tuple(values.get(column) for column in EVENT_COLUMNS)
 
 
 def _statement(table_prefix: str = '') -> str:
@@ -135,6 +140,50 @@ async def test_trace_history_postgres_opens_one_connection_and_closes_it():
     (conn,) = fake.connections
     assert (conn.closed, conn.terminated) == (True, False)
     assert fake.calls[0] == ('connect', DSN)
+
+
+@pytest.mark.parametrize(
+    ('max_seconds', 'expected'), [(float('inf'), '3600000'), (3600.5, '3600000'), (1e9, '3600000'), (3600.0, '3600000')]
+)
+async def test_trace_history_postgres_caps_the_time_limit_at_one_hour(max_seconds, expected):
+    fake = RecorderFakePostgres()
+
+    rows = await search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=max_seconds, connect=fake.connect)
+
+    assert rows == []
+    assert ('execute', SET_LOCAL, ('statement_timeout', expected)) in fake.calls
+
+
+async def test_trace_history_postgres_sends_the_cluster_with_nul_replaced_as_the_writer_stores_it():
+    fake = RecorderFakePostgres()
+    cluster = 'fast\x00cluster'
+
+    await search_postgres_history(_settings(), cluster, 3, 42, max_seconds=5.0, connect=fake.connect)
+
+    (fetch,) = [call for call in fake.calls if call[0] == 'fetch']
+    stored = build_record(_event_row(), cluster=cluster, worker=WORKER, instance='i', store_output=False)[0]
+    assert fetch[2][0] == stored == 'fast\ufffdcluster'
+
+
+@pytest.mark.parametrize('knob', ['conn_close_error', 'hang_conn_close'])
+async def test_trace_history_postgres_keeps_its_rows_when_the_close_fails_and_terminates(knob):
+    fake = RecorderFakePostgres()
+    fake.trace_rows = [_trace_row(1)]
+    if knob == 'conn_close_error':
+        fake.conn_close_error = OSError('connection reset')
+    else:
+        fake.hang_conn_close = True
+
+    started_at = time.monotonic()
+    rows = await search_postgres_history(
+        _settings(), CLUSTER, 3, 42, max_seconds=SHORT_LIMIT_SECONDS, connect=fake.connect
+    )
+
+    assert time.monotonic() - started_at < ANSWER_BOUND_SECONDS
+    assert [row['id'] for row in rows] == [1]
+    (conn,) = fake.connections
+    assert conn.terminated
+    assert [call[0] for call in fake.calls][-3:] == ['COMMIT', 'conn_close', 'terminate']
 
 
 @pytest.mark.parametrize(
