@@ -79,6 +79,10 @@ PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
 # values that would silently truncate when narrowed to the recorder's
 # int32 partition column (contract v1).
 _INT32_MAX = 2**31 - 1
+# Offsets are int64, as in the recorder's offset column: a larger value
+# answers 422 before any search instead of failing inside one.
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 def _has_unsafe_filename_char(filename: str) -> bool:
@@ -733,7 +737,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     @router.get(TRACE_ENDPOINT)
     async def api_debug_trace(
         partition: int = Query(ge=0, le=_INT32_MAX),
-        offset: int = Query(),
+        offset: int = Query(ge=_INT64_MIN, le=_INT64_MAX),
         history: bool = Query(False),
     ):
         """Trace a message: this worker's own files, or with ``history`` its cluster's history.

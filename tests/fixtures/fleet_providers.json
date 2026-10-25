@@ -49,7 +49,7 @@
     {"args": ["postgres", "--schema=drakkar", "--recorder", "--retention-hours=6.0"], "exit": 2}
   ],
   "recorder": {
-    "_comment": "The recorder events table of the postgres persistence mode. {schema} is the schema of the connection, {table} the table name (recorder_events, or <prefix>_recorder_events), {partition} a partition name, {from} and {to} its bounds in whole epoch seconds, {retention_hours} the value of the table comment. ddl holds the start DDL in the order it runs (ddl_example renders it once), partition_ddl the two partition templates, statements the texts of the recorder alone (check_table and ddl_lock are the ones above). partition_names map an epoch hour to its partition name and bounds; partition_parse_cases map a listed name to its epoch hour, or null for a name that is not the upkeep's. constants pins the numbers and the values given to set_local (statement_timeout gets the time limit of the search in whole milliseconds). missing_table_command gains missing_table_prefix_flag only for a non-empty prefix. retention_comment_cases map a table comment (null: no comment) to the stored retention, or null. trace_offsets_cases map an event and its metadata text to trace_offsets, or null. text_cases map a text value to the text written. upkeep_cases map the server clock, the stored retention and the listed partitions to the partitions created ([name, from, to], ascending) and dropped (ascending).",
+    "_comment": "The recorder events table of the postgres persistence mode. {schema} is the schema of the connection, {table} the table name (recorder_events, or <prefix>_recorder_events), {partition} a partition name, {from} and {to} its bounds in whole epoch seconds, {retention_hours} the value of the table comment. ddl holds the start DDL in the order it runs (ddl_example renders it once), partition_ddl the two partition templates, statements the texts of the recorder alone (check_table and ddl_lock are the ones above). partition_names map an epoch hour to its partition name and bounds; partition_parse_cases map a listed name to its epoch hour, or null for a name that is not the upkeep's. constants pins the numbers and the values given to set_local (statement_timeout gets the time limit of the search in whole milliseconds, and copy_statement_timeout in a COPY transaction). final_sqlstate_classes are the SQLSTATE classes of a COPY error that the rows cause: only these count toward dropping a chunk, and any other server error keeps it. missing_table_command gains missing_table_prefix_flag only for a non-empty prefix. retention_comment_cases map a table comment (null: no comment) to the stored retention, or null. trace_offsets_cases map an event and its metadata text to trace_offsets, or null. text_cases map a text value to the text written. upkeep_cases map the server clock, the stored retention and the listed partitions to the partitions created ([name, from, to], ascending) and dropped (ascending).",
     "placeholders": ["{schema}", "{table}", "{partition}", "{from}", "{to}", "{retention_hours}"],
     "table_names": [
       {"prefix": "", "table": "recorder_events"},
@@ -135,8 +135,10 @@
       "chunk_max_bytes": 4194304,
       "chunk_final_failures": 2,
       "set_local_values": {"jit": "off", "lock_timeout": "3000", "synchronous_commit": "off"},
-      "statement_timeout_setting": "statement_timeout"
+      "statement_timeout_setting": "statement_timeout",
+      "copy_statement_timeout": "0"
     },
+    "final_sqlstate_classes": ["22", "23"],
     "messages": {
       "missing_table": "table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; create it with: {command}",
       "missing_table_command": "drakkar-schema postgres --schema={schema} --recorder --retention-hours={retention_hours}",

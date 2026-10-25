@@ -20,8 +20,12 @@ One run (:meth:`PostgresWriter.run_once`):
    the slot.
 
 A chunk is dropped only after ``POSTGRES_CHUNK_FINAL_FAILURES`` final COPY
-errors; a transient failure, an open breaker or a writer that has not started
-never drops it. At stop, :meth:`PostgresWriter.final` makes one attempt per
+errors: an error that its rows cause (a data or integrity error of the server,
+or a value the client cannot encode). Any other failure keeps it: a transient
+failure, any other server error (counted as a failed operation, so the breaker
+opens as in an outage), an open breaker or a writer that has not started. A
+missing table (42P01) on a COPY or in the upkeep makes the next run start the
+writer again, which creates the table when the schema is managed. At stop, :meth:`PostgresWriter.final` makes one attempt per
 chunk within the time left and drops what is left with ``shutdown``.
 """
 
@@ -44,6 +48,7 @@ from drakkar.metrics import recorder_postgres_dropped_rows, recorder_postgres_qu
 from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.postgres import (
     COPY_COLUMNS,
+    COPY_STATEMENT_TIMEOUT,
     PARTITION_DDL_TEMPLATES,
     PARTITION_MAINTENANCE_SECONDS,
     PARTITIONS_AHEAD_HOURS,
@@ -57,9 +62,12 @@ from drakkar.providers.postgres import (
     SETTING_LOCK_TIMEOUT,
     SETTING_SYNCHRONOUS_COMMIT,
     SQLSTATE_CHECK_VIOLATION,
+    SQLSTATE_UNDEFINED_TABLE,
     SQLSTATE_UNIQUE_VIOLATION,
+    STATEMENT_TIMEOUT_SETTING,
     borrow_transaction,
     ensure_recorder_table,
+    is_recorder_final_sqlstate,
     parse_partition_hour,
     parse_retention_comment,
     partition_bounds,
@@ -342,6 +350,13 @@ class PostgresWriter:
         retention stored in the table comment, never by this worker's own
         setting.
         """
+        try:
+            return await self._upkeep_statements()
+        except asyncpg.PostgresError as exc:
+            self._restart_when_table_missing(exc)
+            raise
+
+    async def _upkeep_statements(self) -> UpkeepActions | None:
         settings = self._settings
         qualified = settings.qualified_table
         async with borrow_transaction(self._pool) as conn:
@@ -375,6 +390,12 @@ class PostgresWriter:
                     )
                 )
         return actions
+
+    def _restart_when_table_missing(self, exc: asyncpg.PostgresError) -> None:
+        """Make the next run start the writer again after a missing-table error, so the table is made available."""
+        # asyncpg sets ``sqlstate`` on each error class, but its type stubs do not declare it.
+        if getattr(exc, 'sqlstate', None) == SQLSTATE_UNDEFINED_TABLE:
+            self._started = False
 
     async def _check_retention(self, stored: int | None) -> None:
         """Warn once when the table stores no valid retention or one that differs from the setting."""
@@ -429,14 +450,19 @@ class PostgresWriter:
         return outcome
 
     async def _copy(self, records: list[tuple]) -> CopyAnswer:
-        """One COPY attempt in one transaction; a final Postgres error comes back as a value.
+        """One COPY attempt in one transaction; an error that the rows cause comes back as a value.
 
         The error is caught outside the transaction block, after its rollback.
-        A transient error leaves the block as ``TransientError`` and is not
-        caught, so the caller retries it; a final one is no breaker failure.
-        A value the client cannot encode for its column (the client encodes
-        every record before it sends it) is a final error too, with no
-        SQLSTATE: the same records would fail the same way on every retry.
+        A data or integrity error of the server is final and no breaker
+        failure. A value the client cannot encode for its column (the client
+        encodes every record before it sends it) is a final error too, with
+        no SQLSTATE: the same records would fail the same way on every retry.
+        Every other error leaves the attempt, so the caller retries a
+        transient one and counts each as a failed operation; the chunk stays.
+
+        The transaction sets no server limit on its statements: the attempt
+        time limit of the caller bounds the COPY, not a ``statement_timeout``
+        set for the role or the database.
         """
         settings = self._settings
         try:
@@ -445,6 +471,9 @@ class PostgresWriter:
                     RECORDER_STATEMENT_TEMPLATES['set_local'],
                     SETTING_SYNCHRONOUS_COMMIT,
                     SET_LOCAL_VALUES[SETTING_SYNCHRONOUS_COMMIT],
+                )
+                await conn.execute(
+                    RECORDER_STATEMENT_TEMPLATES['set_local'], STATEMENT_TIMEOUT_SETTING, COPY_STATEMENT_TIMEOUT
                 )
                 await conn.copy_records_to_table(
                     settings.table, schema_name=settings.schema, columns=COPY_COLUMNS, records=records
@@ -455,6 +484,9 @@ class PostgresWriter:
             if sqlstate == SQLSTATE_UNIQUE_VIOLATION:
                 # An earlier attempt of this same record set landed and its answer was lost.
                 return CopyOutcome.ALREADY_WRITTEN, sqlstate, ''
+            if not is_recorder_final_sqlstate(sqlstate):
+                self._restart_when_table_missing(exc)
+                raise
             return CopyOutcome.REJECTED, sqlstate, describe_error(exc)
         except CLIENT_ENCODE_ERRORS as exc:
             return CopyOutcome.REJECTED, None, describe_error(exc)

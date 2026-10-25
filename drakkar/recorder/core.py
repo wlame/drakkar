@@ -1323,10 +1323,14 @@ class EventRecorder(EventWriter):
         """The final stage P, the write pool close and the thread stop, within the shutdown time left.
 
         The COPYs of the final stage get the time left minus
-        ``reserve_seconds``. Each wait for the thread gets the same, plus at
-        most ``POSTGRES_STOP_ANSWER_SECONDS`` of the reserve for the thread
-        to answer, and never more than the time left; without a deadline the
-        close and the join wait at most ``POSTGRES_STOP_STEP_SECONDS``. The
+        ``reserve_seconds``. The final stage and the close each wait the
+        same, plus at most ``POSTGRES_STOP_ANSWER_SECONDS`` of the reserve
+        for the thread to answer, and never more than the time left. The
+        join waits as long, and at least ``POSTGRES_STOP_ANSWER_SECONDS``
+        even when no time is left: a thread that was just told to stop needs
+        that long to end, and one still running after it is the only one
+        reported. Without a deadline the close and the join wait at most
+        ``POSTGRES_STOP_STEP_SECONDS``. The
         final stage is never cancelled: after its wait it still counts and
         logs the rows it drops on the thread. Each step is best-effort: a
         failure is logged and the next step runs.
@@ -1357,7 +1361,7 @@ class EventRecorder(EventWriter):
             await thread.run(writer.close, step_seconds())
         except Exception as exc:
             await self._log_postgres_stop_failure(describe_error(exc))
-        if not await thread.stop(step_seconds()):
+        if not await thread.stop(max(step_seconds(), POSTGRES_STOP_ANSWER_SECONDS)):
             await self._log_postgres_stop_failure('the stage P thread did not end in the shutdown time left')
 
     @staticmethod

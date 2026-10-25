@@ -211,7 +211,7 @@ async def test_postgres_down_at_start_retries_per_tick_and_drops_only_queue_full
 # --- one COPY ---
 
 
-async def test_copy_runs_after_set_local_synchronous_commit_off():
+async def test_copy_runs_after_set_local_synchronous_commit_off_and_statement_timeout_zero():
     fake = RecorderFakePostgres()
     writer = _writer(fake, table_prefix='fast')
     await writer.run_once()
@@ -220,9 +220,10 @@ async def test_copy_runs_after_set_local_synchronous_commit_off():
 
     await writer.run_once()
 
-    assert [call[0] for call in fake.calls] == ['BEGIN', 'execute', 'copy', 'COMMIT']
+    assert [call[0] for call in fake.calls] == ['BEGIN', 'execute', 'execute', 'copy', 'COMMIT']
     assert fake.calls[1] == ('execute', RECORDER_STATEMENT_TEMPLATES['set_local'], ('synchronous_commit', 'off'))
-    _, schema, table, columns, records = fake.calls[2]
+    assert fake.calls[2] == ('execute', RECORDER_STATEMENT_TEMPLATES['set_local'], ('statement_timeout', '0'))
+    _, schema, table, columns, records = fake.calls[3]
     assert (schema, table, columns) == ('drakkar', 'fast_recorder_events', COPY_COLUMNS)
     assert [record[:4] for record in records] == [(CLUSTER, WORKER, INSTANCE, 1), (CLUSTER, WORKER, INSTANCE, 2)]
 
@@ -337,14 +338,14 @@ async def test_a_value_the_client_cannot_encode_is_a_final_error_and_drops_with_
     assert writer._slot is None
 
 
-async def test_two_final_errors_drop_with_rejected_and_log():
+@pytest.mark.parametrize(
+    'error_class', [asyncpg.exceptions.InvalidTextRepresentationError, asyncpg.exceptions.NotNullViolationError]
+)
+async def test_two_row_errors_drop_with_rejected_and_log(error_class):
     fake = RecorderFakePostgres()
     writer = _writer(fake)
     writer._queue.append(_pairs(1, 4))
-    fake.fail_copies(
-        _final_error(asyncpg.exceptions.InvalidTextRepresentationError),
-        _final_error(asyncpg.exceptions.InvalidTextRepresentationError, 'still bad'),
-    )
+    fake.fail_copies(_final_error(error_class), _final_error(error_class, 'still bad'))
     dropped_before = _dropped()
 
     await writer.run_once()
@@ -409,6 +410,103 @@ async def test_check_violation_keeps_the_chunk_and_the_next_run_upkeeps_then_wri
     assert second[4] == first[4]
     assert fake.copied_ids() == [1, 2, 3]
     assert _dropped() == dropped_before
+
+
+@pytest.mark.parametrize(
+    'error_class',
+    [
+        asyncpg.exceptions.ReadOnlySQLTransactionError,
+        asyncpg.exceptions.InsufficientPrivilegeError,
+        asyncpg.exceptions.InternalServerError,
+        asyncpg.exceptions.LockNotAvailableError,
+    ],
+)
+async def test_a_server_error_the_rows_did_not_cause_keeps_the_chunk_and_opens_the_breaker(error_class):
+    fake = RecorderFakePostgres()
+    clock = FakeClock()
+    writer = _writer(fake, clock=clock, resilience=_resilience(retries=0, breaker={'failure_threshold': 3}))
+    await writer.run_once()
+    writer._queue.append(_pairs(1, 4))
+    fake.fail_copies(*(_final_error(error_class, 'not the rows') for _ in range(20)))
+    dropped_before = _dropped()
+    errors_before = _calls('copy', 'error')
+    skipped_before = _calls('copy', 'skipped_open')
+
+    with capture_logs() as captured:
+        for _ in range(8):
+            await writer.run_once()
+            clock.now += 1
+
+    assert [pair[0] for pair in writer._slot.pairs] == [1, 2, 3, 4]
+    assert writer._slot.final_failures == 0
+    assert _dropped() == dropped_before
+    assert writer._caller.breaker_open
+    assert len(fake.copy_calls()) == 3
+    assert _calls('copy', 'error') == errors_before + 3
+    assert _calls('copy', 'skipped_open') == skipped_before + 5
+    assert _logs(captured, 'recorder_postgres_copy_rejected') == []
+    assert [line['op'] for line in _logs(captured, 'provider_call_failed')] == ['copy']
+
+
+async def test_a_missing_table_on_copy_starts_the_writer_again_and_writes_the_kept_chunk():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake)
+    await writer.run_once()
+    writer._queue.append(_pairs(1, 3))
+    fake.fail_copies(asyncpg.exceptions.UndefinedTableError('relation "drakkar.recorder_events" does not exist'))
+    dropped_before = _dropped()
+
+    await writer.run_once()
+
+    assert [pair[0] for pair in writer._slot.pairs] == [1, 2, 3]
+    assert not writer._started
+    (first,) = fake.copy_calls()
+    fake.table_exists = False
+    fake.calls.clear()
+
+    await writer.run_once()
+
+    checks = [call for call in fake.calls if call[1:2] == (STATEMENT_TEMPLATES['check_table'],)]
+    assert len(checks) == 2
+    assert ('execute', STATEMENT_TEMPLATES['ddl_lock'], ('drakkar',)) in fake.calls
+    assert writer._started
+    assert fake.copied_ids() == [1, 2, 3]
+    (second,) = fake.copy_calls()
+    assert second[4] == first[4]
+    assert _dropped() == dropped_before
+
+
+async def test_a_missing_table_on_copy_with_an_unmanaged_schema_names_the_schema_command():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake, manage_schema=False)
+    await writer.run_once()
+    writer._queue.append(_pairs(1, 2))
+    fake.fail_copies(asyncpg.exceptions.UndefinedTableError('relation "drakkar.recorder_events" does not exist'))
+    await writer.run_once()
+    fake.table_exists = False
+
+    with capture_logs() as captured:
+        await writer.run_once()
+
+    expected = recorder_missing_table_message('drakkar', 'recorder_events', 'main', 6, '')
+    assert [line['error'] for line in _logs(captured, 'provider_call_failed')] == [expected]
+    assert [pair[0] for pair in writer._slot.pairs] == [1, 2]
+
+
+async def test_a_missing_table_in_the_upkeep_starts_the_writer_again():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake)
+    fake.fail_partition_ddl(asyncpg.exceptions.UndefinedTableError('relation "drakkar.recorder_events" does not exist'))
+
+    await writer.run_once()
+
+    assert not writer._started
+    fake.calls.clear()
+
+    await writer.run_once()
+
+    assert writer._started
+    assert fake.calls[0] == ('fetchval', STATEMENT_TEMPLATES['check_table'], ('drakkar.recorder_events',))
 
 
 async def test_final_copy_error_is_not_a_breaker_failure():
@@ -574,6 +672,21 @@ async def test_stop_with_time_spent_drops_with_shutdown():
     assert _dropped()['shutdown'] == dropped_before['shutdown'] + 6
     lines = _logs(captured, 'recorder_postgres_rows_dropped')
     assert [(line['reason'], line['rows'], line['error']) for line in lines] == [('shutdown', 6, '')]
+
+
+async def test_stop_with_time_spent_gives_the_thread_its_grace_and_logs_no_thread_failure():
+    fake = RecorderFakePostgres()
+    rec = _recorder(fake)
+    await rec.start()
+    await _start_stage_p(rec)
+    stage_p_thread = rec._pg_thread.thread
+
+    with capture_logs() as captured:
+        await rec.stop(timeout=0.0)
+
+    assert not stage_p_thread.is_alive()
+    errors = [line['error'] for line in _logs(captured, 'recorder_final_flush_failed')]
+    assert 'the stage P thread did not end in the shutdown time left' not in errors
 
 
 async def test_stop_while_a_copy_attempt_hangs_returns_within_the_time_left():

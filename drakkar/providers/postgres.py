@@ -229,6 +229,12 @@ POSTGRES_CHUNK_FINAL_FAILURES = 2
 SQLSTATE_UNIQUE_VIOLATION = '23505'
 SQLSTATE_CHECK_VIOLATION = '23514'
 SQLSTATE_LOCK_NOT_AVAILABLE = '55P03'
+SQLSTATE_UNDEFINED_TABLE = '42P01'
+# SQLSTATE classes that the rows of a recorder COPY cause: data exceptions (22)
+# and integrity constraint violations (23). Only these count toward dropping a
+# chunk; a COPY that fails with any other server error keeps its chunk, since
+# the same rows can land once the server is fixed. Matched as a prefix.
+RECORDER_FINAL_SQLSTATE_CLASSES = ('22', '23')
 SECONDS_PER_HOUR = 3600
 RETENTION_HOURS_MIN = 1
 RETENTION_HOURS_MAX = 168
@@ -244,6 +250,10 @@ SET_LOCAL_VALUES: dict[str, str] = {
     SETTING_LOCK_TIMEOUT: str(LOCK_TIMEOUT_MS),
     SETTING_SYNCHRONOUS_COMMIT: 'off',
 }
+# The statement_timeout of a COPY transaction: no server limit, so a limit
+# set for the role or the database never cuts a COPY; the attempt time limit
+# of the provider caller bounds it instead.
+COPY_STATEMENT_TIMEOUT = '0'
 
 RECORDER_MISSING_TABLE_MESSAGE = (
     'table {schema}.{table} does not exist and connections.postgres.{connection}.manage_schema is false; '
@@ -387,6 +397,11 @@ def recorder_missing_table_message(schema: str, table: str, connection: str, ret
 def is_transient_sqlstate(sqlstate: str | None) -> bool:
     """Tell whether a SQLSTATE belongs to a class that a retry can cure."""
     return sqlstate is not None and sqlstate.startswith(TRANSIENT_SQLSTATE_PREFIXES)
+
+
+def is_recorder_final_sqlstate(sqlstate: str | None) -> bool:
+    """Tell whether a SQLSTATE of a recorder COPY is caused by its rows (a data or integrity error)."""
+    return sqlstate is not None and sqlstate.startswith(RECORDER_FINAL_SQLSTATE_CLASSES)
 
 
 def classify(exc: Exception) -> Exception:

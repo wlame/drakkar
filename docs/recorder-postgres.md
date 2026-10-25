@@ -408,13 +408,19 @@ and stage P counts the chunk as written. A row never appears twice.
 | The start fails (Postgres down, missing table) | Rows wait in the queue. The next tick tries again. The worker keeps running and serves the UI. |
 | A COPY fails with a network error, a time-out or a transient SQLSTATE after its retries | The chunk stays in its slot; the run stops; the next run tries the same chunk. It is never dropped for this. |
 | The breaker of the recorder calls is open | Stage P skips at once, one probe per cooldown. No chunk is dropped. |
-| A COPY fails with a final error (for example `23514`, a row with no partition, or `22xxx`) | The chunk stays and its count of final failures goes up by one; `recorder_postgres_copy_rejected` is logged. After `23514` the next run starts with an upkeep. At the second final failure the chunk is dropped. |
+| A COPY fails with an error that its rows cause: the server refuses them as bad data (SQLSTATE class `22`) or for a constraint (class `23`, for example `23514`, a row with no partition), or the client cannot encode a value | The chunk stays and its count of final failures goes up by one; `recorder_postgres_copy_rejected` is logged. After `23514` the next run starts with an upkeep. At the second final failure the chunk is dropped. |
+| A COPY fails with any other server error (for example `25006` on a read-only server, `42501` for a missing right, `42P01` for a missing table, or a disk error) | The chunk stays in its slot and is never dropped for this; `provider_call_failed` is logged. The failure counts toward the breaker as in an outage. |
+| A COPY or the upkeep fails with `42P01` (the table was dropped) | The next run starts stage P again: with `manage_schema: true` it creates the table again, with `manage_schema: false` it logs the missing-table message (see [Schema management and ownership](#schema-management-and-ownership)). Then it writes the kept chunk. |
 | The queue passes a bound | The oldest rows are dropped (`queue_full`). |
 | The worker stops | Stage P writes what it can in the time left, one attempt per COPY and no upkeep. The rest is dropped (`shutdown`). |
 
 A final COPY error is not counted by the breaker: a healthy server that
-rejects two bad chunks does not open it. A failed start or upkeep counts as
-usual.
+rejects two bad chunks does not open it. Any other failed COPY, start or
+upkeep counts as usual.
+
+The COPY transaction sets `statement_timeout` to `0` for itself, so a limit
+set for the role or the database never cuts a COPY; the attempt time limit
+of `ui.recorder.postgres.resilience.timeout_seconds` bounds it.
 
 When Postgres comes back, the probe succeeds and the queue drains chunk after
 chunk in one run. At the defaults the queue holds about 10 seconds of a

@@ -452,6 +452,28 @@ async def test_trace_history_postgres_sends_the_own_cluster_and_never_lists_the_
     assert fetch[2] == (CLUSTER, 3, 42)
 
 
+@pytest.mark.parametrize(
+    'params',
+    [
+        {'partition': 3, 'offset': 2**63},
+        {'partition': 3, 'offset': -(2**63) - 1},
+        {'partition': 2**31, 'offset': 42},
+        {'partition': -1, 'offset': 42},
+    ],
+)
+async def test_trace_history_postgres_values_outside_the_integer_ranges_answer_422_and_open_no_connection(
+    started, history_fake, params
+):
+    rec = await started('postgres')
+
+    async with _client(rec) as client:
+        resp = await client.get(TRACE_ENDPOINT, params={**params, 'history': 1})
+
+    assert resp.status_code == 422
+    assert history_fake.connections == []
+    assert [call for call in history_fake.calls if call[0] == 'connect'] == []
+
+
 async def test_trace_history_postgres_failure_answers_503_only_for_history(started, history_fake):
     rec = await started('postgres')
     history_fake.trace_error = asyncpg.exceptions.UndefinedTableError('relation does not exist')

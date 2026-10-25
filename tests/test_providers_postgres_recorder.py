@@ -18,6 +18,7 @@ from drakkar.config.ui import TABLE_PREFIX_RE
 from drakkar.providers import postgres
 from drakkar.providers.postgres import (
     COPY_COLUMNS,
+    COPY_STATEMENT_TIMEOUT,
     LOCK_TIMEOUT_MS,
     PARTITION_DDL_TEMPLATES,
     PARTITION_MAINTENANCE_SECONDS,
@@ -25,6 +26,7 @@ from drakkar.providers.postgres import (
     POSTGRES_CHUNK_FINAL_FAILURES,
     POSTGRES_CHUNK_MAX_BYTES,
     RECORDER_DDL_TEMPLATES,
+    RECORDER_FINAL_SQLSTATE_CLASSES,
     RECORDER_MISSING_TABLE_COMMAND,
     RECORDER_MISSING_TABLE_MESSAGE,
     RECORDER_MISSING_TABLE_PREFIX_FLAG,
@@ -34,6 +36,7 @@ from drakkar.providers.postgres import (
     STATEMENT_TEMPLATES,
     STATEMENT_TIMEOUT_SETTING,
     ensure_recorder_table,
+    is_recorder_final_sqlstate,
     parse_partition_hour,
     parse_retention_comment,
     partition_bounds,
@@ -81,7 +84,31 @@ def test_recorder_templates_match_the_fixture():
         'chunk_final_failures': POSTGRES_CHUNK_FINAL_FAILURES,
         'set_local_values': SET_LOCAL_VALUES,
         'statement_timeout_setting': STATEMENT_TIMEOUT_SETTING,
+        'copy_statement_timeout': COPY_STATEMENT_TIMEOUT,
     }
+    assert list(RECORDER_FINAL_SQLSTATE_CLASSES) == RECORDER['final_sqlstate_classes']
+
+
+@pytest.mark.parametrize(
+    ('sqlstate', 'expected'),
+    [
+        ('22P02', True),
+        ('22003', True),
+        ('23502', True),
+        ('23505', True),
+        ('23514', True),
+        ('25006', False),
+        ('42501', False),
+        ('42P01', False),
+        ('58030', False),
+        ('XX000', False),
+        ('55P03', False),
+        ('2', False),
+        (None, False),
+    ],
+)
+def test_is_recorder_final_sqlstate_follows_the_pinned_classes(sqlstate, expected):
+    assert is_recorder_final_sqlstate(sqlstate) is expected
 
 
 def test_recorder_statements_do_not_repeat_the_provider_statements():

@@ -80,7 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection. It starts on the first tick and tries again on each tick while
   Postgres is down; rows wait in the queue. A chunk is dropped only after two
   final COPY errors (`reason` `no_partition` or `rejected`); each final error
-  logs `recorder_postgres_copy_rejected`. At stop, the rows that stage P
+  logs `recorder_postgres_copy_rejected`. A final error is one that the rows
+  cause: SQLSTATE class 22 or 23, or a value the client cannot encode. Any
+  other server error keeps the chunk and counts toward the breaker. After
+  `42P01` (a missing table) the next run starts stage P again, which creates
+  the table with `manage_schema: true`. The COPY transaction sets
+  `statement_timeout` to `0`. At stop, the rows that stage P
   cannot write in the time left are dropped with `reason` `shutdown`.
   `recorder_started` names `postgres_connection` and `postgres_table`.
   Stage P keeps one partition per UTC hour, from one hour behind to three
@@ -100,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.trace.history_max_seconds` on the client and on the server. A failed
   or timed-out search answers 503 `{"detail": "history search failed"}` and
   logs `ui_read_postgres_failed` (at most once per minute; `reason` is
-  `timeout`, `error` or `busy`). The answer is API contract v1.26. The
+  `timeout`, `error` or `busy`). An `offset` outside the 64-bit range
+  answers 422. The answer is API contract v1.26. The
   server time limit is at most 3600 s. At most two history searches run at
   once on one worker; a third answers the same 503 and logs `reason=busy`.
   A complete search whose connection does not close cleanly still answers
