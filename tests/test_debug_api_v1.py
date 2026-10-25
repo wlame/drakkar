@@ -24,6 +24,8 @@ from structlog.testing import capture_logs
 
 from drakkar.config import (
     DrakkarConfig,
+    PostgresConnectionConfig,
+    ResilienceConfig,
     TimelineColorRule,
     TimelineLabels,
     TimelineRuleCondition,
@@ -35,9 +37,11 @@ from drakkar.fleet.service import PeerView
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder import queries as queries_mod
+from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
+from tests.recorder_pg_fake import RecorderFakePostgres
 
 _INT32_MAX = 2**31 - 1
 
@@ -1428,6 +1432,19 @@ async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_re
 MEMORY_WORKER = 'w-1'
 
 
+def _postgres_settings() -> RecorderPostgresSettings:
+    return RecorderPostgresSettings(
+        connection_name='main',
+        connection=PostgresConnectionConfig(dsn='postgresql://drakkar:secret@db:5432/drakkar'),
+        table_prefix='',
+        retention_hours=6,
+        store_output=False,
+        batch_rows=100,
+        queue_max_bytes=128 * memstore.MIB,
+        resilience=ResilienceConfig(),
+    )
+
+
 @pytest.fixture
 async def started_recorder(tmp_path):
     """Start recorders built in the test, record a few events, and stop them at the end."""
@@ -1445,6 +1462,8 @@ async def started_recorder(tmp_path):
             cluster_name='fallback',
             persistence=persistence,
             storage_dir=str(storage) if persistence == 'sqlite' else '',
+            postgres=_postgres_settings() if persistence == 'postgres' else None,
+            postgres_open_pool=RecorderFakePostgres().open_pool,
         )
         await rec.start()
         recorders.append(rec)
@@ -1483,6 +1502,52 @@ async def test_databases_memory_row_comes_first_in_both_modes(started_recorder, 
     assert [row['kind'] for row in own] == (['memory'] if persistence == 'none' else ['memory', 'live'])
     assert own[0]['filename'] == 'w-1-memory'
     assert own[0]['worker_name'] == MEMORY_WORKER
+
+
+async def test_download_live_defaults_to_memory_and_databases_has_one_memory_row_with_postgres(started_recorder):
+    rec = await started_recorder('postgres')
+    app = MagicMock()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config.ui.release.enabled = False
+
+    async with make_client(rec.config, rec, app) as c:
+        databases = (await c.get('/api/v1/debug/databases')).json()
+        download = await c.get('/api/v1/debug/download-live')
+        file_download = await c.get('/api/v1/debug/download-live', params={'source': 'file'})
+
+    assert [row['kind'] for row in databases['own']] == ['memory']
+    assert databases['own'][0]['filename'] == 'w-1-memory'
+    assert download.status_code == 200
+    assert 'filename="w-1-memory-' in download.headers['content-disposition']
+    assert (file_download.status_code, file_download.json()) == (404, {'error': 'No live recorder file on this worker'})
+
+
+async def test_postgres_worker_answers_live_and_label_reads_from_memory(started_recorder):
+    rec = await started_recorder('postgres')
+    rec._record(
+        {
+            'ts': time.time(),
+            'event': 'task_started',
+            'task_id': 't-1',
+            'partition': 0,
+            'offset': 1,
+            'labels': '{"color": "red"}',
+            'metadata': '{"source_offsets": [1]}',
+        }
+    )
+    await rec.flush()
+    app = MagicMock()
+    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config.ui.release.enabled = False
+
+    async with make_client(rec.config, rec, app) as c:
+        trace = (await c.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 1})).json()
+        by_label = (await c.get('/api/v1/debug/trace-by-label', params={'key': 'color', 'value': 'red'})).json()
+        label_keys = (await c.get('/api/v1/debug/label-keys')).json()
+
+    assert {(event['event'], event['offset']) for event in trace} >= {('consumed', 1), ('task_started', 1)}
+    assert [event['task_id'] for event in by_label if event['event'] == 'task_started'] == ['t-1']
+    assert label_keys == ['color']
 
 
 async def test_databases_memory_row_numbers(started_recorder):

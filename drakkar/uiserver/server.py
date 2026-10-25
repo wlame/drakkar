@@ -52,8 +52,8 @@ from starlette.responses import Response
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
-from drakkar.config.ui import PERSISTENCE_NONE
 from drakkar.loopserver import LoopLoggingServer
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.queries import (
     SOURCE_FILE,
@@ -185,6 +185,9 @@ class UIDeps:
         # fetched or cached bundle and ``''`` when none is served.
         self.ui_version = ui_version
         self.ui_source = ui_source
+        # A failing Postgres history search repeats on every search of every
+        # open page, so its line goes out at most once per minute.
+        self.postgres_read_log = RateLimitedLog(time.monotonic)
 
     # --- Sink-UI / Kafka-UI helpers ---
 
@@ -298,7 +301,7 @@ class UIDeps:
         the coverage read after its SELECT (:func:`still_covered`): when an
         eviction in between removed rows the read asked for, the read runs
         again on the file with ``sqlite``, and keeps the shorter answer
-        with ``none``.
+        without a recorder file (``none`` and ``postgres``).
 
         ``None`` means no answer, and the caller answers its endpoint's
         empty shape. A missing file reader and a main loop that did not
@@ -317,7 +320,7 @@ class UIDeps:
                 if result is None:
                     return None
                 columns, rows = result
-                if recorder.persistence == PERSISTENCE_NONE:
+                if not recorder.has_file:
                     return RecorderRows(columns=columns, rows=rows, source=SOURCE_MEMORY)
                 # The coverage now, read on the main loop after the SELECT.
                 coverage = recorder.memory_coverage()

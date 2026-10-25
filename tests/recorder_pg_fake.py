@@ -23,6 +23,12 @@ changes ``partitions`` when its transaction commits; ``fail_partition_ddl``
 makes the next ones raise. With ``require_partition`` a COPY of a record
 whose ``ts`` hour has no partition raises the check violation a real server
 raises.
+
+``connect`` stands in for :func:`asyncpg.connect` for the history search: it
+records the DSN and hands back one connection. The trace statement answers
+``trace_rows``; ``connect_error`` and ``trace_error`` make the connect or the
+trace raise, and ``hang_connect`` and ``hang_trace`` make them wait until they
+are cancelled. ``connections`` lists every connection handed out.
 """
 
 import asyncio
@@ -46,6 +52,8 @@ HANG_SECONDS = 3600
 # The partition DDL shapes of PARTITION_DDL_TEMPLATES; group 1 is the partition name.
 CREATE_PARTITION_RE = re.compile(r'CREATE TABLE IF NOT EXISTS [a-z0-9_]+\.([a-z0-9_]+) PARTITION OF ')
 DROP_PARTITION_RE = re.compile(r'DROP TABLE IF EXISTS [a-z0-9_]+\.([a-z0-9_]+)$')
+# How the rendered trace statement starts, whatever its schema and table.
+TRACE_PREFIX = RECORDER_STATEMENT_TEMPLATES['trace'].split('{', 1)[0]
 # The ts column of a COPY record: after cluster, worker, instance and id.
 RECORD_TS_INDEX = 4
 
@@ -69,6 +77,12 @@ class RecorderFakePostgres:
         self.partitions: set[str] = set()
         self.partition_ddl_failures: list[BaseException] = []
         self.require_partition = False
+        self.connections: list[FakeConnection] = []
+        self.connect_error: BaseException | None = None
+        self.hang_connect = False
+        self.trace_rows: list[dict[str, Any]] = []
+        self.trace_error: BaseException | None = None
+        self.hang_trace = False
 
     async def open_pool(self, settings: PostgresConnectionConfig) -> 'FakePool':
         """Record the settings and open a pool, or raise ``open_error``."""
@@ -76,6 +90,17 @@ class RecorderFakePostgres:
         if self.open_error is not None:
             raise self.open_error
         return FakePool(self)
+
+    async def connect(self, *, dsn: str) -> 'FakeConnection':
+        """Record the DSN and open one connection, or raise ``connect_error``."""
+        self.calls.append(('connect', dsn))
+        if self.hang_connect:
+            await asyncio.sleep(HANG_SECONDS)
+        if self.connect_error is not None:
+            raise self.connect_error
+        conn = FakeConnection(self)
+        self.connections.append(conn)
+        return conn
 
     def fail_copies(self, *errors: BaseException) -> None:
         """Make the next COPYs raise these errors, one per COPY."""
@@ -138,6 +163,8 @@ class FakeConnection:
         self._pending: list[tuple] = []
         # Partition changes of the open transaction: (name, True) for a create, (name, False) for a drop.
         self._pending_partitions: list[tuple[str, bool]] = []
+        self.closed = False
+        self.terminated = False
 
     async def execute(self, sql: str, *args: Any) -> str:
         server = self._server
@@ -170,6 +197,12 @@ class FakeConnection:
         server.calls.append(('fetch', sql, args))
         if sql == RECORDER_STATEMENT_TEMPLATES['partitions_list']:
             return [(name,) for name in sorted(server.partitions)]
+        if sql.startswith(TRACE_PREFIX):
+            if server.hang_trace:
+                await asyncio.sleep(HANG_SECONDS)
+            if server.trace_error is not None:
+                raise server.trace_error
+            return [dict(row) for row in server.trace_rows]
         raise AssertionError(f'statement not known to the fake: {sql}')
 
     async def copy_records_to_table(
@@ -195,6 +228,14 @@ class FakeConnection:
 
     def terminate(self) -> None:
         self._server.calls.append(('terminate',))
+        self.terminated = True
+
+    async def close(self) -> None:
+        self._server.calls.append(('conn_close',))
+        self.closed = True
+
+    def is_closed(self) -> bool:
+        return self.closed or self.terminated
 
     def commit_pending(self) -> None:
         server = self._server

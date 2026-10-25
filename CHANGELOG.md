@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder mode `postgres` (config, table DDL, the row queue, the writer and the partition upkeep so far).**
+- **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys
   `connection` (`main`), `table_prefix`, `retention_hours` (6),
@@ -93,6 +93,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   differs from the comment, or finds none, logs
   `recorder_postgres_retention_mismatch` once. A change logs
   `recorder_postgres_partitions_changed`.
+  With `postgres`, every local read uses the memory store, as with `none`.
+  `trace?history=1` searches the table rows of the worker's own cluster,
+  not the sealed files. The search runs on the UI server loop with one
+  connection, one attempt, JIT off, and the time limit
+  `ui.trace.history_max_seconds` on the client and on the server. A failed
+  or timed-out search answers 503 `{"detail": "history search failed"}` and
+  logs `ui_read_postgres_failed` (at most once per minute).
   New metrics:
   `drakkar_recorder_postgres_queue_rows`,
   `drakkar_recorder_postgres_rows_written_total` and

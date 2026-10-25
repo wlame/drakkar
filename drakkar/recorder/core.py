@@ -505,7 +505,7 @@ class EventRecorder(EventWriter):
 
     @property
     def persistence(self) -> Persistence:
-        """The effective persistence mode, ``'none'`` or ``'sqlite'``."""
+        """The effective persistence mode, ``'none'``, ``'sqlite'`` or ``'postgres'``."""
         return self._persistence
 
     @property

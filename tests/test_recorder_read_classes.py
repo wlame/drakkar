@@ -55,6 +55,13 @@ WHOLE = MemoryCoverage(floor_id=1, last_id=20, evicted=False, evicted_max_ts=0.0
         ('none', ReadClass.KEYED, ReadBound(), EVICTED, 'memory'),
         ('none', ReadClass.WHOLE, ReadBound(), EVICTED, 'memory'),
         ('none', ReadClass.WINDOW, ReadBound(since=1.0), None, 'file'),
+        ('postgres', ReadClass.WINDOW, ReadBound(since=1.0), EVICTED, 'memory'),
+        ('postgres', ReadClass.POLL, ReadBound(after_id=1), EVICTED, 'memory'),
+        ('postgres', ReadClass.NEWEST, ReadBound(limit=50), EVICTED, 'memory'),
+        ('postgres', ReadClass.KEYED, ReadBound(), EVICTED, 'memory'),
+        ('postgres', ReadClass.WHOLE, ReadBound(), EVICTED, 'memory'),
+        ('postgres', ReadClass.KEYED, ReadBound(), WHOLE, 'memory'),
+        ('postgres', ReadClass.WINDOW, ReadBound(since=1.0), None, 'file'),
         ('sqlite', ReadClass.WINDOW, ReadBound(since=1.0), None, 'file'),
     ],
 )

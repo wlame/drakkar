@@ -34,7 +34,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import UIConfig, UIRecorderConfig
-from drakkar.config.ui import PERSISTENCE_NONE, Persistence
+from drakkar.config.ui import PERSISTENCE_SQLITE, Persistence
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import memstore
 from drakkar.recorder.archive import parse_db_start_ts
@@ -167,8 +167,9 @@ def trace_history(folder: str, partition: int, msg_offset: int, *, max_files: in
 # file, and never merges two answers: the file holds every row of the
 # memory store with the same id once stage F ran. The memory store answers
 # a read only when it is sure to hold every row the read asks for; its
-# coverage says what it holds. With ``none`` every read uses the memory
-# store, and an older range simply gives a shorter answer.
+# coverage says what it holds. Without a recorder file (``none`` and
+# ``postgres``) every read uses the memory store, and an older range simply
+# gives a shorter answer.
 # ---------------------------------------------------------------------------
 
 Source = Literal['memory', 'file']
@@ -211,8 +212,9 @@ def pick_source(
 ) -> Source:
     """The source a read starts on.
 
-    No memory store (``coverage`` is ``None``) means the file. With
-    ``none`` every other read uses memory. With ``sqlite``, keyed and
+    No memory store (``coverage`` is ``None``) means the file. Without a
+    recorder file (``none`` and ``postgres``) every other read uses memory.
+    With ``sqlite``, keyed and
     whole-table reads use the file; a window or poll read uses memory
     when the memory store holds its whole range; a newest-N read starts on
     memory and :func:`still_covered` sends it to the file when memory was
@@ -220,7 +222,7 @@ def pick_source(
     """
     if coverage is None:
         return SOURCE_FILE
-    if persistence == PERSISTENCE_NONE:
+    if persistence != PERSISTENCE_SQLITE:
         return SOURCE_MEMORY
     if read_class is ReadClass.NEWEST:
         return SOURCE_MEMORY

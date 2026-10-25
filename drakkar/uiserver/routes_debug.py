@@ -9,7 +9,7 @@ Routes:
   * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
   * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file or the memory store.
   * ``/api/v1/debug/archives``          — compressed archives of every cluster folder.
-  * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or sealed history.
+  * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or the cluster history.
   * ``/api/v1/debug/label-keys``        — distinct label keys across events.
   * ``/api/v1/debug/trace-by-label``    — trace by (key, value) in the live file.
   * ``/api/v1/debug/metrics``           — Prometheus metric snapshot as JSON.
@@ -45,12 +45,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from drakkar.config.ui import PERSISTENCE_POSTGRES
 from drakkar.dbstats import OwnFileStats, measure_memory_store
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder import memstore
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
 from drakkar.recorder.helpers import make_db_path
 from drakkar.recorder.history import HISTORY_FOLDER, MERGED_FOLDER, meta_path, read_meta
+from drakkar.recorder.postgres_history import PostgresHistoryError, search_postgres_history
 from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, log_memory_read_stopped, trace_history
 from drakkar.recorder.schema import EventType
 from drakkar.recorder.sealing import own_db_files
@@ -60,6 +62,7 @@ from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
     from drakkar.recorder.memstore import MemoryCoverage
+    from drakkar.recorder.postgres import RecorderPostgresSettings
     from drakkar.uiserver.server import UIDeps
 
 logger = structlog.get_logger()
@@ -106,6 +109,9 @@ _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
 NO_MEMORY_STORE_ERROR = 'No memory store on this worker'
 DATABASES_ENDPOINT = '/api/v1/debug/databases'
+TRACE_ENDPOINT = '/api/v1/debug/trace'
+# The body of a failed or timed-out Postgres history search (503).
+HISTORY_SEARCH_FAILED_DETAIL = 'history search failed'
 BAD_SOURCE_ERROR = 'source must be memory or file'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
@@ -724,17 +730,21 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             }
         )
 
-    @router.get('/api/v1/debug/trace')
+    @router.get(TRACE_ENDPOINT)
     async def api_debug_trace(
         partition: int = Query(ge=0, le=_INT32_MAX),
         offset: int = Query(),
         history: bool = Query(False),
     ):
-        """Trace a message: this worker's own files, or with ``history`` its cluster's sealed files.
+        """Trace a message: this worker's own files, or with ``history`` its cluster's history.
 
-        The history search reads only sealed files, so it runs in a thread
-        here and never touches the worker's main loop.
+        The history search never touches the worker's main loop. With
+        ``postgres`` it reads the events table rows of the worker's own
+        cluster on this loop, and a failed or timed-out search answers 503;
+        otherwise it reads the sealed files in a thread.
         """
+        if history and recorder.persistence == PERSISTENCE_POSTGRES and recorder.postgres_settings is not None:
+            return await _trace_postgres_history(recorder.postgres_settings, partition, offset)
         if history:
             events = await asyncio.to_thread(
                 functools.partial(
@@ -751,6 +761,29 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # trace waits for the file stage, so a hung disk answers ``[]`` after
         # the dispatch limit instead of hanging the request.
         events = await deps.dispatch_bounded(recorder.cross_trace(partition, offset), default=[])
+        return JSONResponse(events)
+
+    async def _trace_postgres_history(settings: RecorderPostgresSettings, partition: int, offset: int) -> JSONResponse:
+        """The Postgres history search, or 503 ``history search failed`` with a rate-limited log line."""
+        try:
+            events = await search_postgres_history(
+                settings,
+                recorder.cluster_name,
+                partition,
+                offset,
+                max_seconds=config.trace.history_max_seconds,
+            )
+        except PostgresHistoryError as exc:
+            await deps.postgres_read_log.emit(
+                TRACE_ENDPOINT,
+                logger.awarning,
+                'ui_read_postgres_failed',
+                category='debug',
+                endpoint=TRACE_ENDPOINT,
+                reason=exc.reason,
+                error=exc.error,
+            )
+            return JSONResponse({'detail': HISTORY_SEARCH_FAILED_DETAIL}, status_code=503)
         return JSONResponse(events)
 
     @router.get('/api/v1/debug/label-keys')
