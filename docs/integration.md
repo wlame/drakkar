@@ -586,7 +586,7 @@ A run with `postgres`, `redis` or `consul` and the `full` profile takes about tw
 the producer take about 7 minutes, and the main cluster then needs an hour or more to
 work off the backlog before `just verify-delivery` can check it. The outage
 scenario allows up to two hours for that drain. With `filesystem` the outage
-scenario does not apply, and the other five take a few minutes each (the
+scenario does not apply, and the other six take a few minutes each (the
 cluster-tasks scenario watches its slots for about five minutes).
 
 | Script | What it does | What it proves |
