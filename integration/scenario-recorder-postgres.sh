@@ -16,8 +16,9 @@
 #      non-empty list: every row has worker_name, one row is consumed, and
 #      no row has a cluster key,
 #   4. a partition of the hour 5 hours ago, created by hand, is gone within
-#      60 s of a restart of fast-worker-1 (its start runs an upkeep), and
-#      fast-worker-1 logged recorder_postgres_partitions_changed with it,
+#      60 s of a restart of fast-worker-1 (its start runs an upkeep), and a
+#      fast worker logged recorder_postgres_partitions_changed with it
+#      (fast-worker-2's own upkeep every 300 s may drop it first),
 #   5. while postgres-fleet is paused for 60 s, fast-worker-1's
 #      drakkar_recorder_postgres_queue_rows rises above 0; within 60 s of
 #      the unpause it falls below batch_rows, and
@@ -160,6 +161,12 @@ cluster_rows() {
     psql_query "SELECT count(*) || ' ' || coalesce(string_agg(DISTINCT worker, ',' ORDER BY worker), '-') FROM ${SCHEMA}.${TABLE} WHERE cluster = '${CLUSTER}'"
 }
 
+# The docker time now, in seconds, as `docker logs --since` takes it. The
+# clock of a container is the clock the log timestamps come from.
+docker_clock() {
+    "${COMPOSE[@]}" exec -T "$PAUSED_SERVICE" date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
 # Print the log of service $1 since the docker time $2.
 service_log_since() {
     "${COMPOSE[@]}" logs --no-color --no-log-prefix --since="$2" "$1" 2>/dev/null
@@ -174,11 +181,26 @@ logged_partition_change() {
     grep -qF "$3" <<<"$lines"
 }
 
+# The fast workers that logged the drop of the expired partition since the
+# docker time it was created, comma-separated, or nothing.
+expired_partition_droppers() {
+    local service droppers=
+    for service in "$FAST_SERVICE" "$OTHER_FAST_SERVICE"; do
+        if logged_partition_change "$service" "$created_at" "$expired_partition"; then
+            droppers=${droppers:+${droppers},}${service}
+        fi
+    done
+    echo "$droppers"
+}
+
+# True when the expired partition is gone and a fast worker logged its drop;
+# the workers that logged it are left in $dropped_by.
 partition_gone_and_logged() {
     local listed
     listed=$(listed_partitions) || return 1
-    ! grep -qxF "$expired_partition" <<<"$listed" \
-        && logged_partition_change "$FAST_SERVICE" "$restarted_at" "$expired_partition"
+    grep -qxF "$expired_partition" <<<"$listed" && return 1
+    dropped_by=$(expired_partition_droppers)
+    [ -n "$dropped_by" ]
 }
 
 fast_worker_ready() {
@@ -270,7 +292,9 @@ print(f"{len(rows)} rows, workers {workers}")
 ' "$scratch/trace.json" 2>&1) || fail "check 3: GET :${FAST_UI_PORT}${trace_path} answered ${trace_summary}"
 ok "check 3: GET :${FAST_UI_PORT}${trace_path} answered ${trace_summary}"
 
-# Check 4: the upkeep at the start of fast-worker-1 drops an expired partition.
+# Check 4: an upkeep drops an expired partition. The restart of fast-worker-1
+# runs one at its start; fast-worker-2's periodic upkeep may come first, so
+# the logs of both fast workers count, from the docker time before the create.
 expired_hour=$(hour_ago "$EXPIRED_HOURS_AGO")
 expired_partition=$(partition_name "$expired_hour")
 create_sql=${PARTITION_CREATE_TEMPLATE//\{schema\}/$SCHEMA}
@@ -278,21 +302,21 @@ create_sql=${create_sql//\{table\}/$TABLE}
 create_sql=${create_sql//\{partition\}/$expired_partition}
 create_sql=${create_sql//\{from\}/$((expired_hour * 3600))}
 create_sql=${create_sql//\{to\}/$(((expired_hour + 1) * 3600))}
+created_at=$(docker_clock) || fail "check 4: the docker clock could not be read"
 psql_query "$create_sql" >/dev/null || fail "check 4: the partition ${expired_partition} could not be created"
 grep -qxF "$expired_partition" <<<"$(listed_partitions)" \
     || fail "check 4: the partition ${expired_partition} is not listed after it was created"
 log "created ${expired_partition}; restarting ${FAST_SERVICE}"
 "${COMPOSE[@]}" restart "$FAST_SERVICE" >/dev/null || fail "check 4: ${FAST_SERVICE} could not be restarted"
-restarted_at=$(docker inspect -f '{{.State.StartedAt}}' "$(container_id "$FAST_SERVICE")")
+dropped_by=
 if ! wait_until "$DROP_LIMIT_SECONDS" partition_gone_and_logged; then
-    other=no
-    logged_partition_change "$OTHER_FAST_SERVICE" "$restarted_at" "$expired_partition" && other=yes
     still=no
     grep -qxF "$expired_partition" <<<"$(listed_partitions)" && still=yes
-    fail "check 4: ${DROP_LIMIT_SECONDS}s after the restart of ${FAST_SERVICE}: ${expired_partition} still listed ${still}, ${FAST_SERVICE} logged the change no, ${OTHER_FAST_SERVICE} logged it ${other}"
+    logged_by=$(expired_partition_droppers)
+    fail "check 4: ${DROP_LIMIT_SECONDS}s after the restart of ${FAST_SERVICE}: ${expired_partition} still listed ${still}, logged as changed by ${logged_by:-no fast worker}"
 fi
 drop_seconds=$WAITED
-ok "check 4: ${expired_partition} was dropped and logged by ${FAST_SERVICE} ${drop_seconds}s after its restart"
+ok "check 4: ${expired_partition} was dropped and logged by ${dropped_by} ${drop_seconds}s after the restart of ${FAST_SERVICE}"
 wait_until "$READY_LIMIT_SECONDS" fast_worker_ready \
     || fail "check 4: ${FAST_SERVICE} /readyz did not answer 200 within ${READY_LIMIT_SECONDS}s of its restart"
 
@@ -361,4 +385,4 @@ print(",".join(str(row.get("kind")) for row in own) or "-")
     || fail "check 7: GET :${FAST_UI_PORT}/api/v1/debug/databases shows own=${own_kinds}, expected exactly one memory row"
 ok "check 7: GET :${FAST_UI_PORT}/api/v1/debug/databases shows own=${own_kinds}"
 
-pass "rows ${rows_after} (workers ${workers}); partitions ${partitions}; expired partition dropped ${drop_seconds}s after the restart; queue peak ${queue_peak}, drained ${drain_seconds}s, written ${written_seconds}s after the unpause; 503 after ${search_seconds}s"
+pass "rows ${rows_after} (workers ${workers}); partitions ${partitions}; expired partition dropped by ${dropped_by} ${drop_seconds}s after the restart; queue peak ${queue_peak}, drained ${drain_seconds}s, written ${written_seconds}s after the unpause; 503 after ${search_seconds}s"

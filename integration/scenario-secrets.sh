@@ -5,11 +5,15 @@
 # docker-compose.yml gives the main-cluster workers the Postgres DSN with
 # its password (DK_CONNECTIONS__POSTGRES__MAIN__DSN), the Redis URL with
 # its password (DK_CONNECTIONS__REDIS__MAIN__URL) and the Consul ACL token
-# (DK_CONNECTIONS__CONSUL__MAIN__TOKEN). This proves that none of the three
-# reaches any of the places an operator reads:
+# (DK_CONNECTIONS__CONSUL__MAIN__TOKEN). The fast-cluster workers get the
+# Postgres DSN with its password for their recorder history. This proves
+# that none of these reaches any of the places an operator reads:
 #   - the config reference of each worker (GET /api/v1/config-reference),
-#     which must list connections.consul.main.token with its value masked,
-#   - the logs of worker-1, worker-2 and worker-3,
+#     which must list connections.consul.main.token with its value masked
+#     on the main workers and connections.postgres.main.dsn masked on the
+#     fast workers,
+#   - the logs of worker-1, worker-2, worker-3, fast-worker-1 and
+#     fast-worker-2,
 #   - the metrics page of each worker.
 # A hit prints the matching lines and where they came from. The Consul token
 # is read from docker-compose.yml, so the harness value lives in one file.
@@ -49,6 +53,9 @@ while IFS= read -r consul_token; do
 done <<<"$CONSUL_TOKENS"
 UI_PORTS=(8081 8082 8083)
 METRICS_PORTS=(9090 9091 9093)
+FAST_WORKERS=(fast-worker-1 fast-worker-2)
+FAST_UI_PORTS=(8084 8085)
+FAST_METRICS_PORTS=(9094 9095)
 # The config reference must list every connection, or an answer without them
 # would pass the check. The reference lists every configured connection,
 # whichever provider uses it.
@@ -57,6 +64,8 @@ CONNECTION_PATHS=('connections.postgres.main.dsn' 'connections.redis.main.url' '
 # secret is shown as it is.
 SECRET_MASK='••••••'
 TOKEN_PATH='connections.consul.main.token'
+# The fast workers configure only the Postgres connection.
+DSN_PATH='connections.postgres.main.dsn'
 
 # Fail when the text on stdin contains a secret pattern: check_clean <source>
 check_clean() {
@@ -88,30 +97,45 @@ print("absent")
 '
 }
 
-step "Scenario: secrets stay out of the config API, the logs and the metrics"
-
-for port in "${UI_PORTS[@]}"; do
+# Check the config reference of one worker: it lists every given connection
+# path, shows the masked path as the mask, and contains no secret.
+#   check_reference <port> <masked path> <listed path>...
+check_reference() {
+    local port=$1 masked_path=$2 reference connection_path masked_row
+    shift 2
     # curl's long options take no `=`, so they keep the space form here.
     reference=$(curl -sf --connect-timeout 2 --max-time 10 "http://localhost:${port}/api/v1/config-reference") \
         || fail "the config reference on port ${port} could not be read"
-    for connection_path in "${CONNECTION_PATHS[@]}"; do
+    for connection_path in "$@"; do
         grep -qF -- "\"path\":\"${connection_path}\"" <<<"$reference" \
             || fail "the config reference on port ${port} does not list ${connection_path}"
     done
-    token_row=$(reference_row "$TOKEN_PATH" <<<"$reference")
-    [ "$token_row" = "\"${SECRET_MASK}\" secret=true" ] \
-        || fail "the config reference on port ${port} shows ${TOKEN_PATH} as ${token_row}, expected the mask \"${SECRET_MASK}\" with secret=true"
+    masked_row=$(reference_row "$masked_path" <<<"$reference")
+    [ "$masked_row" = "\"${SECRET_MASK}\" secret=true" ] \
+        || fail "the config reference on port ${port} shows ${masked_path} as ${masked_row}, expected the mask \"${SECRET_MASK}\" with secret=true"
     check_clean "config reference :${port}" <<<"$reference"
+}
+
+step "Scenario: secrets stay out of the config API, the logs and the metrics"
+
+for port in "${UI_PORTS[@]}"; do
+    check_reference "$port" "$TOKEN_PATH" "${CONNECTION_PATHS[@]}"
+done
+for port in "${FAST_UI_PORTS[@]}"; do
+    check_reference "$port" "$DSN_PATH" "$DSN_PATH"
 done
 
-for service in "${MAIN_WORKERS[@]}"; do
+for service in "${MAIN_WORKERS[@]}" "${FAST_WORKERS[@]}"; do
     "${COMPOSE[@]}" logs --no-color "$service" 2>&1 | check_clean "logs of ${service}"
 done
 
-for port in "${METRICS_PORTS[@]}"; do
+for port in "${METRICS_PORTS[@]}" "${FAST_METRICS_PORTS[@]}"; do
     page=$(curl -sf --connect-timeout 2 --max-time 5 "http://localhost:${port}/metrics") \
         || fail "the metrics page on port ${port} could not be read"
     check_clean "metrics :${port}" <<<"$page"
 done
 
-pass "no DSN or URL password and no Consul token in ${#UI_PORTS[@]} config references (${TOKEN_PATH} masked), ${#MAIN_WORKERS[@]} worker logs, ${#METRICS_PORTS[@]} metrics pages"
+reference_count=$((${#UI_PORTS[@]} + ${#FAST_UI_PORTS[@]}))
+log_count=$((${#MAIN_WORKERS[@]} + ${#FAST_WORKERS[@]}))
+metrics_count=$((${#METRICS_PORTS[@]} + ${#FAST_METRICS_PORTS[@]}))
+pass "no DSN or URL password and no Consul token in ${reference_count} config references (${TOKEN_PATH} masked, ${DSN_PATH} masked on the fast workers), ${log_count} worker logs, ${metrics_count} metrics pages"
