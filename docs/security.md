@@ -239,8 +239,8 @@ below applies to the entries you declare and to any provider that uses them.
   creates the table with `drakkar-schema postgres --schema=<name> --recorder`
   (add `--table-prefix=<p>` and `--retention-hours=<n>` as needed) and then
   runs `ALTER TABLE <schema>.<table> OWNER TO <worker role>`. The worker role
-  also needs `USAGE` on the schema. An owner can drop the whole table, so use
-  a schema or a table prefix that holds nothing but this history. See
+  also needs `USAGE` on the schema. The owner can drop that table and its
+  history, so give the ownership only to the worker role. See
   [Recorder History in Postgres](recorder-postgres.md#schema-management-and-ownership).
 - **The recorder rows hold what the recorder holds.** Every row carries the
   cluster, the worker, the task `args`, the event `metadata` (with the stored

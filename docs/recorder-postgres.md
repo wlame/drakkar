@@ -464,7 +464,7 @@ cluster only. It never reads the history folder.
   joins tasks of the same content across the whole retention of the cluster,
   where a sealed file joined only inside itself.
 
-The search has no time bound: it plans and locks every partition, about 10 at
+The search has no filter on `ts`, so it plans and locks every partition, about 10 at
 the default retention and about 172 at 168 hours. A long search holds its
 locks, and an upkeep that waits for them holds every COPY of that table for
 at most 3 seconds.
