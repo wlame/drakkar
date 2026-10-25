@@ -21,7 +21,11 @@ from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import RecorderPostgresSettings, build_record
-from drakkar.recorder.postgres_history import PostgresHistoryError, search_postgres_history
+from drakkar.recorder.postgres_history import (
+    POSTGRES_HISTORY_MAX_CONCURRENT,
+    PostgresHistoryError,
+    search_postgres_history,
+)
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.routes_debug import create_debug_router
@@ -285,6 +289,92 @@ async def test_trace_history_postgres_cancel_closes_the_connection_and_leaves_as
     assert fake.connections[0].terminated
 
 
+async def _hold_searches(fake: RecorderFakePostgres, count: int) -> list[asyncio.Task]:
+    """Start ``count`` searches that stay open on a hanging trace statement."""
+    fake.hang_trace = True
+    tasks = [
+        asyncio.create_task(
+            search_postgres_history(
+                _settings(), CLUSTER, 3, 42, max_seconds=60.0, connect=fake.connect, on_close_failed=_no_close_failure
+            )
+        )
+        for _ in range(count)
+    ]
+    while sum(1 for call in fake.calls if call[0] == 'fetch') < count:
+        await asyncio.sleep(0)
+    return tasks
+
+
+async def _end_searches(tasks: list[asyncio.Task]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_trace_history_postgres_third_concurrent_search_is_busy_and_opens_no_connection():
+    fake = RecorderFakePostgres()
+    held = await _hold_searches(fake, POSTGRES_HISTORY_MAX_CONCURRENT)
+
+    try:
+        with pytest.raises(PostgresHistoryError) as raised:
+            await search_postgres_history(
+                _settings(), CLUSTER, 3, 42, max_seconds=60.0, connect=fake.connect, on_close_failed=_no_close_failure
+            )
+        assert raised.value.reason == 'busy'
+        assert len(fake.connections) == POSTGRES_HISTORY_MAX_CONCURRENT
+    finally:
+        await _end_searches(held)
+
+
+async def test_trace_history_postgres_slot_comes_back_when_a_search_ends():
+    fake = RecorderFakePostgres()
+    held = await _hold_searches(fake, POSTGRES_HISTORY_MAX_CONCURRENT)
+    await _end_searches(held[:1])
+    fake.hang_trace = False
+    fake.trace_rows = [_trace_row(1)]
+
+    try:
+        rows = await search_postgres_history(
+            _settings(), CLUSTER, 3, 42, max_seconds=60.0, connect=fake.connect, on_close_failed=_no_close_failure
+        )
+        assert [row['id'] for row in rows] == [1]
+    finally:
+        await _end_searches(held[1:])
+
+
+FAILURE_KNOBS = {
+    'connect_error': OSError('boom'),
+    'hang_connect': True,
+    'trace_error': RuntimeError('boom'),
+    'hang_trace': True,
+    'conn_close_error': OSError('boom'),
+}
+
+
+async def _ignore_close_failure(error: str) -> None:
+    """A close failure is expected in the test that uses this."""
+
+
+@pytest.mark.parametrize('knob', list(FAILURE_KNOBS))
+async def test_trace_history_postgres_slot_comes_back_after_a_failed_search(knob):
+    fake = RecorderFakePostgres()
+    setattr(fake, knob, FAILURE_KNOBS[knob])
+    for _ in range(POSTGRES_HISTORY_MAX_CONCURRENT + 1):
+        try:
+            await search_postgres_history(
+                _settings(),
+                CLUSTER,
+                3,
+                42,
+                max_seconds=SHORT_LIMIT_SECONDS,
+                connect=fake.connect,
+                on_close_failed=_ignore_close_failure,
+            )
+        except PostgresHistoryError as exc:
+            # A busy answer here would mean an earlier search kept its slot.
+            assert exc.reason != 'busy'
+
+
 # --- the route ---
 
 
@@ -406,6 +496,21 @@ async def test_trace_history_postgres_timeout_answers_503_within_the_limit_and_l
         'suppressed': 0,
     }
     assert all(conn.terminated for conn in history_fake.connections)
+
+
+async def test_trace_history_postgres_busy_answers_503_and_logs_reason_busy(started, history_fake):
+    rec = await started('postgres')
+    held = await _hold_searches(history_fake, POSTGRES_HISTORY_MAX_CONCURRENT)
+
+    try:
+        with capture_logs() as captured:
+            async with _client(rec) as client:
+                resp = await client.get(TRACE_ENDPOINT, params={'partition': 3, 'offset': 42, 'history': 1})
+        assert (resp.status_code, resp.json()) == (503, FAILED_BODY)
+        assert [line['reason'] for line in _logs(captured, 'ui_read_postgres_failed')] == ['busy']
+        assert len(history_fake.connections) == POSTGRES_HISTORY_MAX_CONCURRENT
+    finally:
+        await _end_searches(held)
 
 
 async def test_trace_history_postgres_close_failure_answers_the_rows_and_logs_under_the_same_rate_limit(

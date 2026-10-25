@@ -99,7 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, one attempt, JIT off, and the time limit
   `ui.trace.history_max_seconds` on the client and on the server. A failed
   or timed-out search answers 503 `{"detail": "history search failed"}` and
-  logs `ui_read_postgres_failed` (at most once per minute).
+  logs `ui_read_postgres_failed` (at most once per minute). At most two
+  history searches run at once on one worker; a third answers the same 503
+  and logs `reason=busy`.
   New metrics:
   `drakkar_recorder_postgres_queue_rows`,
   `drakkar_recorder_postgres_rows_written_total` and

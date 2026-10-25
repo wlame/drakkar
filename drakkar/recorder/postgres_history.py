@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 
 import asyncpg
@@ -33,15 +34,19 @@ MIN_STATEMENT_TIMEOUT_MS = 1
 # The longest a search may take; a larger or non-finite
 # ``ui.trace.history_max_seconds`` uses this limit.
 MAX_SEARCH_SECONDS = 3600.0
+# Searches that may hold a connection at once in one worker process. The debug
+# UI has no authentication, so this keeps a burst of requests from using up the
+# connections of a database that many writers share.
+POSTGRES_HISTORY_MAX_CONCURRENT = 2
 
-HistoryFailureReason = Literal['timeout', 'error']
+HistoryFailureReason = Literal['timeout', 'error', 'busy']
 Connect = Callable[..., Awaitable[Any]]
 # Told the error text of a close that failed after a complete search.
 CloseFailed = Callable[[str], Awaitable[None]]
 
 
 class PostgresHistoryError(Exception):
-    """A history search that failed (``reason`` ``'error'``) or ran out of time (``'timeout'``).
+    """A history search that failed (``reason`` ``'error'``), ran out of time (``'timeout'``) or found no free slot (``'busy'``).
 
     ``error`` is a log-friendly text without credentials.
     """
@@ -50,6 +55,27 @@ class PostgresHistoryError(Exception):
         super().__init__(f'{reason}: {error}')
         self.reason: HistoryFailureReason = reason
         self.error = error
+
+
+# Searches now holding a slot. Read and changed only on the event loop with no
+# await in between, so a plain counter is enough and nothing ever blocks.
+_running_searches = 0
+
+
+@contextmanager
+def _search_slot() -> Iterator[None]:
+    """Hold one of the :data:`POSTGRES_HISTORY_MAX_CONCURRENT` slots, or raise ``busy`` at once.
+
+    The slot is given back on every exit, a cancel included.
+    """
+    global _running_searches
+    if _running_searches >= POSTGRES_HISTORY_MAX_CONCURRENT:
+        raise PostgresHistoryError('busy', f'{POSTGRES_HISTORY_MAX_CONCURRENT} history searches are already running')
+    _running_searches += 1
+    try:
+        yield
+    finally:
+        _running_searches -= 1
 
 
 def search_limit_seconds(max_seconds: float) -> float:
@@ -90,9 +116,26 @@ async def search_postgres_history(
     ``on_close_failed`` is awaited with the error text (no credentials).
 
     ``connect`` defaults to :func:`asyncpg.connect`, looked up at call time.
-    Raises :class:`PostgresHistoryError` when the search fails or does not
-    end within ``max_seconds``, connect included.
+    At most :data:`POSTGRES_HISTORY_MAX_CONCURRENT` searches run at once in
+    the process; another one does not wait and opens no connection.
+    Raises :class:`PostgresHistoryError` when the search fails, does not end
+    within ``max_seconds`` (connect included), or finds no free slot
+    (``reason`` ``'busy'``).
     """
+    with _search_slot():
+        return await _search(settings, cluster, partition, offset, max_seconds, on_close_failed, connect)
+
+
+async def _search(
+    settings: RecorderPostgresSettings,
+    cluster: str,
+    partition: int,
+    offset: int,
+    max_seconds: float,
+    on_close_failed: CloseFailed,
+    connect: Connect | None,
+) -> list[dict]:
+    """One search with a connection of its own; the caller holds the slot."""
     connect = connect if connect is not None else asyncpg.connect
     statement = render_recorder(RECORDER_STATEMENT_TEMPLATES['trace'], schema=settings.schema, table=settings.table)
     set_local = RECORDER_STATEMENT_TEMPLATES['set_local']
