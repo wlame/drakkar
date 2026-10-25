@@ -432,12 +432,22 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      postgres-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: fast-worker-1
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9094"
       DK_UI__PORT: "8084"
       DK_UI__PUBLIC_URL: "http://localhost:8084/"
+      # The fast cluster keeps its recorder history in Postgres: the table
+      # drakkar.fast_recorder_events on postgres-fleet, with hourly partitions
+      # kept for 2 hours (scenario-recorder-postgres.sh checks it). The main
+      # cluster keeps its own modes.
+      DK_UI__RECORDER__PERSISTENCE: "postgres"
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_UI__RECORDER__POSTGRES__TABLE_PREFIX: "fast"
+      DK_UI__RECORDER__POSTGRES__RETENTION_HOURS: "2"
     ports:
       - "9094:9094"
       - "8084:8084"
@@ -455,12 +465,19 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      postgres-fleet:
+        condition: service_healthy
     environment:
       WORKER_ID: fast-worker-2
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9095"
       DK_UI__PORT: "8085"
       DK_UI__PUBLIC_URL: "http://localhost:8085/"
+      # Postgres recorder history, as fast-worker-1 (see there).
+      DK_UI__RECORDER__PERSISTENCE: "postgres"
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_UI__RECORDER__POSTGRES__TABLE_PREFIX: "fast"
+      DK_UI__RECORDER__POSTGRES__RETENTION_HOURS: "2"
     ports:
       - "9095:9095"
       - "8085:8085"

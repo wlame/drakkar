@@ -94,7 +94,11 @@ framework-level redistribution.
 
 ### Fast Cluster (symbol counting)
 
-2 workers, consumer group `drakkar-fast`, same source topic.
+2 workers, consumer group `drakkar-fast`, same source topic. Both keep
+their recorder history in Postgres (`DK_UI__RECORDER__PERSISTENCE:
+"postgres"`): the table `drakkar.fast_recorder_events` on `postgres-fleet`,
+with the table prefix `fast` and a retention of 2 hours. `postgres-fleet`
+starts with every provider.
 
 | Worker | Operator UI | Metrics | Config |
 |--------|----------|---------|--------|
@@ -567,7 +571,7 @@ just integration-scenarios provider=redis
 just integration-down
 ```
 
-`just integration-scenarios` runs the six scripts in the order below and
+`just integration-scenarios` runs the seven scripts in the order below and
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
@@ -593,6 +597,7 @@ cluster-tasks scenario watches its slots for about five minutes).
 | `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token, and the config reference lists the three connections, with `connections.consul.main.token` masked. Runs with every provider. |
 | `scenario-cluster-tasks.sh` | Watches 8 slots of `harness_cluster_tick`, a cluster task of the harness handler with a slot every 30 s of epoch time, and 15 s after the last of them. Each run logs `harness_cluster_tick` with its slot. Then it reads `/api/v1/workers` on worker-2. | No slot ran on two workers, and at least 7 of the 8 slots ran exactly once (a slot whose lease does not come within its 10 s acquire window is skipped, so one missed slot is allowed). worker-2 lists worker-1 with `cluster_tasks_match: false` (worker-1 turns the archive off, so its cluster task definitions differ), and worker-3 and itself with `true`. worker-3 matches only because worker-2 and worker-3 run the archive with the same settings and the same handler: a config change on one of them makes the check fail. Runs with every provider. |
 | `scenario-recorder-memory.sh` | Reads `/api/v1/debug/databases`, `/api/v1/events`, the metrics and `/api/v1/debug/download-live` of worker-1, which keeps its recorder events in memory only (`DK_UI__RECORDER__PERSISTENCE: "none"`, a memory window of 60 s), and of worker-2, which keeps the recorder file. When the shared history folder is still empty (a fresh harness, the script run alone), it first plants one small due window with `integration/plant_history.py`. | worker-1 lists exactly one own database, the memory store, and no live file, and it lists the shared history folders. Its events answer has rows. Once it has run for 90 s, `drakkar_recorder_memory_rows` is above 0, `drakkar_recorder_memory_evicted_rows_total{reason="window"}` is above 0, `drakkar_recorder_memory_oldest_age_seconds` is at most 75 (the window, one flush interval and slack), and `drakkar_recorder_memory_allocated_bytes` is at least `drakkar_recorder_memory_bytes`. Its `download-live` without `source` answers a SQLite database (the memory store), and with `source=file` 404. worker-2 lists a memory row and a live row, and both `source=file` and `source=memory` download a SQLite database. The verdict line carries worker-1's memory numbers and the count of `ui_read_memory_timed_out` lines in the logs of the three workers. Runs with every provider. |
+| `scenario-recorder-postgres.sh` | Reads the table `drakkar.fast_recorder_events` with `psql` in `postgres-fleet`, and the history search, the metrics and `/api/v1/debug/databases` of fast-worker-1. It creates a partition of the hour 5 hours ago by hand and restarts fast-worker-1, then pauses `postgres-fleet` for 60 s and, later, for 15 s. | The table exists, its comment is `retention_hours=2`, and the partitions of the current hour to 3 hours ahead exist. The rows of the cluster `fast cluster` grow over 30 s, with the names of both fast workers. `/api/v1/debug/trace?history=1` for one consumed message answers a non-empty list: every row has `worker_name`, one row is `consumed`, and no row has a `cluster` key. Within 60 s of the restart the hand-made partition is gone and fast-worker-1 logged `recorder_postgres_partitions_changed` with it. During the 60 s pause `drakkar_recorder_postgres_queue_rows` rises above 0; within 60 s of the unpause it falls below 5000 (`batch_rows`) and `drakkar_recorder_postgres_rows_written_total` rises; `drakkar_recorder_postgres_dropped_rows_total` does not change. During the 15 s pause the history search answers 503 `{"detail": "history search failed"}` within 12 s (`ui.trace.history_max_seconds` and 2 s). fast-worker-1 lists exactly one own database, the memory store. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
@@ -673,7 +678,7 @@ just integration-matrix profile=quick
 For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
 `integration-down` does not clear), starts the harness with
-`integration-up`, waits with `wait-ready.sh`, runs the six scenarios and
+`integration-up`, waits with `wait-ready.sh`, runs the seven scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
 provider and step, and exits non-zero when any step failed. `N/A` means the
