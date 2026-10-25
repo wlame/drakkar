@@ -115,7 +115,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have the new `stage` value `postgres`. The new docs page
   `recorder-postgres.md` describes the mode, and the config wizard has the
   new question "Where should the long event history live?" (`files` or
-  `postgres`).
+  `postgres`). The fast cluster of the integration harness runs in this
+  mode, and `integration/scenario-recorder-postgres.sh` checks the table,
+  its partitions, the history search, a paused database and the 503.
 - **Recorder memory store and the persistence choice.** When
   `ui.recorder.store_events` is on, the recorder keeps its recent events in
   an in-memory SQLite database, the memory store. New keys:
