@@ -31,7 +31,8 @@ import asyncio
 import concurrent.futures
 import threading
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -43,18 +44,27 @@ from drakkar.metrics import recorder_postgres_dropped_rows, recorder_postgres_qu
 from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.postgres import (
     COPY_COLUMNS,
+    PARTITION_DDL_TEMPLATES,
     PARTITION_MAINTENANCE_SECONDS,
+    PARTITIONS_AHEAD_HOURS,
     POSTGRES_CHUNK_FINAL_FAILURES,
     POSTGRES_CHUNK_MAX_BYTES,
     POSTGRES_PROVIDER,
     RECORDER_FEATURE,
     RECORDER_STATEMENT_TEMPLATES,
+    SECONDS_PER_HOUR,
     SET_LOCAL_VALUES,
+    SETTING_LOCK_TIMEOUT,
     SETTING_SYNCHRONOUS_COMMIT,
     SQLSTATE_CHECK_VIOLATION,
     SQLSTATE_UNIQUE_VIOLATION,
     borrow_transaction,
     ensure_recorder_table,
+    parse_partition_hour,
+    parse_retention_comment,
+    partition_bounds,
+    partition_name,
+    render_recorder,
 )
 from drakkar.providers.resilience import OUTCOME_NOT_STARTED, RateLimitedLog, ResilientCaller, describe_error
 from drakkar.recorder.postgres import PendingChunk, PostgresQueue, RecorderPostgresSettings, build_record
@@ -89,6 +99,45 @@ class CopyOutcome(StrEnum):
 
 
 WRITTEN_OUTCOMES = frozenset((CopyOutcome.WRITTEN, CopyOutcome.ALREADY_WRITTEN))
+# The upkeep keeps the partitions of the hour before the current one up to
+# PARTITIONS_AHEAD_HOURS after it, so a row of a slightly late clock still has one.
+PARTITIONS_BEHIND_HOURS = 1
+
+
+@dataclass(frozen=True)
+class UpkeepActions:
+    """What one upkeep changes: the partitions to create (name, from, to) and the ones to drop, each ascending."""
+
+    create: list[tuple[str, int, int]]
+    drop: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.create or self.drop)
+
+
+def upkeep_actions(table: str, now: float, stored_retention: int | None, listed: Sequence[str]) -> UpkeepActions:
+    """Return the partitions an upkeep at server time ``now`` creates and drops.
+
+    It creates every missing partition of the hours ``H - 1`` to
+    ``H + PARTITIONS_AHEAD_HOURS``, where ``H`` is the hour of ``now``. With a
+    stored retention ``R`` it drops every listed partition whose hour ended
+    ``R`` hours before ``now`` or earlier; without one it drops nothing. A
+    listed name that is not a partition name of ``table`` is left alone.
+    """
+    listed_hours = {hour for name in listed if (hour := parse_partition_hour(table, name)) is not None}
+    current_hour = int(now // SECONDS_PER_HOUR)
+    create = [
+        (partition_name(table, hour), *partition_bounds(hour))
+        for hour in range(current_hour - PARTITIONS_BEHIND_HOURS, current_hour + PARTITIONS_AHEAD_HOURS + 1)
+        if hour not in listed_hours
+    ]
+    if stored_retention is None:
+        return UpkeepActions(create=create, drop=[])
+    expired_before = now - stored_retention * SECONDS_PER_HOUR
+    drop = [
+        partition_name(table, hour) for hour in sorted(listed_hours) if (hour + 1) * SECONDS_PER_HOUR <= expired_before
+    ]
+    return UpkeepActions(create=create, drop=drop)
 
 
 class PostgresLoopThread:
@@ -198,6 +247,8 @@ class PostgresWriter:
         # True after a start and after a check violation: the next run upkeeps first.
         self._upkeep_requested = False
         self._last_upkeep_at: float | None = None
+        # The retention warning is written once per process; a process has one writer.
+        self._retention_mismatch_logged = False
         self._lock = asyncio.Lock()
         self._copy_rejected_log = RateLimitedLog(now_monotonic)
         self._drop_log = RateLimitedLog(now_monotonic)
@@ -266,8 +317,78 @@ class PostgresWriter:
         )
 
     async def upkeep(self) -> None:
-        """The partition upkeep: creates the partitions ahead and drops the expired ones."""
-        return None
+        """The partition upkeep, as one ``partitions`` operation; it never raises.
+
+        A failure is the caller's ``provider_call_failed`` line; the run goes
+        on with its COPYs either way.
+        """
+        result = await self._caller.call('partitions', self._upkeep_attempt)
+        if result.ok and result.value:
+            actions: UpkeepActions = result.value
+            await logger.ainfo(
+                'recorder_postgres_partitions_changed',
+                category=LOG_CATEGORY,
+                table=self._settings.qualified_table,
+                created=sorted(name for name, _, _ in actions.create),
+                dropped=sorted(actions.drop),
+            )
+
+    async def _upkeep_attempt(self) -> UpkeepActions | None:
+        """One upkeep transaction; ``None`` when another writer holds the table's try-lock.
+
+        The try-lock is a transaction lock, so the loser only commits. The
+        server's clock sets the hours, so every writer of the table agrees on
+        them whatever its own clock says. Partitions are dropped only by the
+        retention stored in the table comment, never by this worker's own
+        setting.
+        """
+        settings = self._settings
+        qualified = settings.qualified_table
+        async with borrow_transaction(self._pool) as conn:
+            if not await conn.fetchval(RECORDER_STATEMENT_TEMPLATES['try_lock'], qualified):
+                return None
+            await conn.execute(
+                RECORDER_STATEMENT_TEMPLATES['set_local'], SETTING_LOCK_TIMEOUT, SET_LOCAL_VALUES[SETTING_LOCK_TIMEOUT]
+            )
+            now = await conn.fetchval(RECORDER_STATEMENT_TEMPLATES['server_now'])
+            stored = parse_retention_comment(
+                await conn.fetchval(RECORDER_STATEMENT_TEMPLATES['retention_read'], qualified)
+            )
+            await self._check_retention(stored)
+            listed = [row[0] for row in await conn.fetch(RECORDER_STATEMENT_TEMPLATES['partitions_list'], qualified)]
+            actions = upkeep_actions(settings.table, now, stored, listed)
+            for name, from_, to in actions.create:
+                await conn.execute(
+                    render_recorder(
+                        PARTITION_DDL_TEMPLATES['create'],
+                        schema=settings.schema,
+                        table=settings.table,
+                        partition=name,
+                        from_=from_,
+                        to=to,
+                    )
+                )
+            for name in actions.drop:
+                await conn.execute(
+                    render_recorder(
+                        PARTITION_DDL_TEMPLATES['drop'], schema=settings.schema, table=settings.table, partition=name
+                    )
+                )
+        return actions
+
+    async def _check_retention(self, stored: int | None) -> None:
+        """Warn once when the table stores no valid retention or one that differs from the setting."""
+        configured = self._settings.retention_hours
+        if self._retention_mismatch_logged or stored == configured:
+            return
+        self._retention_mismatch_logged = True
+        await logger.awarning(
+            'recorder_postgres_retention_mismatch',
+            category=LOG_CATEGORY,
+            table=self._settings.qualified_table,
+            stored_retention_hours=stored,
+            configured_retention_hours=configured,
+        )
 
     def _fill_slot(self) -> bool:
         """Form a chunk into an empty slot; True when the slot holds one."""

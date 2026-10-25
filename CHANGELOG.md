@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recorder mode `postgres` (config, table DDL, the row queue and the writer so far).**
+- **Recorder mode `postgres` (config, table DDL, the row queue, the writer and the partition upkeep so far).**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys
   `connection` (`main`), `table_prefix`, `retention_hours` (6),
@@ -83,6 +83,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs `recorder_postgres_copy_rejected`. At stop, the rows that stage P
   cannot write in the time left are dropped with `reason` `shutdown`.
   `recorder_started` names `postgres_connection` and `postgres_table`.
+  Stage P keeps one partition per UTC hour, from one hour behind to three
+  hours ahead of the server clock. It does this upkeep at start and every
+  300 s, in one transaction under a try-lock, so one writer of a table works
+  at a time. It drops old partitions only by the retention in the table
+  comment (`retention_hours=<n>`), never by its own setting. Change it with
+  `COMMENT ON TABLE <schema>.<table> IS 'retention_hours=<n>'`. A table
+  without a valid comment keeps every partition. A worker whose setting
+  differs from the comment, or finds none, logs
+  `recorder_postgres_retention_mismatch` once. A change logs
+  `recorder_postgres_partitions_changed`.
   New metrics:
   `drakkar_recorder_postgres_queue_rows`,
   `drakkar_recorder_postgres_rows_written_total` and

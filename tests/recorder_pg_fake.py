@@ -14,17 +14,40 @@ same way), makes every COPY hang with ``hang_copies``, makes the pool close
 hang with ``hang_close``, and makes the pool open fail with ``open_error``. The fake is driven from the stage P thread's
 loop and read from the test's loop; each access is one plain list or
 attribute operation.
+
+The fake also answers the partition upkeep: ``try_lock`` answers
+``try_lock_answer``, ``server_now`` answers ``server_now`` (the worker's wall
+clock when it is ``None``), ``retention_read`` answers ``retention_comment``,
+and ``partitions_list`` lists ``partitions``. A partition create or drop
+changes ``partitions`` when its transaction commits; ``fail_partition_ddl``
+makes the next ones raise. With ``require_partition`` a COPY of a record
+whose ``ts`` hour has no partition raises the check violation a real server
+raises.
 """
 
 import asyncio
+import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import asyncpg
+
 from drakkar.config.connections import PostgresConnectionConfig
-from drakkar.providers.postgres import STATEMENT_TEMPLATES
+from drakkar.providers.postgres import (
+    RECORDER_STATEMENT_TEMPLATES,
+    SECONDS_PER_HOUR,
+    STATEMENT_TEMPLATES,
+    partition_name,
+)
 
 HANG_SECONDS = 3600
+# The partition DDL shapes of PARTITION_DDL_TEMPLATES; group 1 is the partition name.
+CREATE_PARTITION_RE = re.compile(r'CREATE TABLE IF NOT EXISTS [a-z0-9_]+\.([a-z0-9_]+) PARTITION OF ')
+DROP_PARTITION_RE = re.compile(r'DROP TABLE IF EXISTS [a-z0-9_]+\.([a-z0-9_]+)$')
+# The ts column of a COPY record: after cluster, worker, instance and id.
+RECORD_TS_INDEX = 4
 
 
 class RecorderFakePostgres:
@@ -40,6 +63,12 @@ class RecorderFakePostgres:
         self.hang = False
         self.hang_close = False
         self.copies_started = 0
+        self.try_lock_answer = True
+        self.server_now: float | None = None
+        self.retention_comment: str | None = 'retention_hours=6'
+        self.partitions: set[str] = set()
+        self.partition_ddl_failures: list[BaseException] = []
+        self.require_partition = False
 
     async def open_pool(self, settings: PostgresConnectionConfig) -> 'FakePool':
         """Record the settings and open a pool, or raise ``open_error``."""
@@ -51,6 +80,23 @@ class RecorderFakePostgres:
     def fail_copies(self, *errors: BaseException) -> None:
         """Make the next COPYs raise these errors, one per COPY."""
         self.copy_failures.extend(errors)
+
+    def fail_partition_ddl(self, *errors: BaseException) -> None:
+        """Make the next partition creates or drops raise these errors, one per statement."""
+        self.partition_ddl_failures.extend(errors)
+
+    def statements(self, name: str) -> list[tuple[Any, ...]]:
+        """The calls that sent the recorder statement ``name``, in order."""
+        sql = RECORDER_STATEMENT_TEMPLATES[name]
+        return [call for call in self.calls if len(call) > 1 and call[1] == sql]
+
+    def partition_ddl(self) -> list[str]:
+        """The partition creates and drops sent, committed or not, in order."""
+        return [
+            call[1]
+            for call in self.calls
+            if call[0] == 'execute' and (CREATE_PARTITION_RE.match(call[1]) or DROP_PARTITION_RE.match(call[1]))
+        ]
 
     def hang_copies(self) -> None:
         """Make every COPY from now on wait until it is cancelled."""
@@ -90,15 +136,40 @@ class FakeConnection:
     def __init__(self, server: RecorderFakePostgres) -> None:
         self._server = server
         self._pending: list[tuple] = []
+        # Partition changes of the open transaction: (name, True) for a create, (name, False) for a drop.
+        self._pending_partitions: list[tuple[str, bool]] = []
 
     async def execute(self, sql: str, *args: Any) -> str:
-        self._server.calls.append(('execute', sql, args))
+        server = self._server
+        server.calls.append(('execute', sql, args))
+        created = CREATE_PARTITION_RE.match(sql)
+        dropped = DROP_PARTITION_RE.match(sql)
+        if created or dropped:
+            if server.partition_ddl_failures:
+                raise server.partition_ddl_failures.pop(0)
+            match = created or dropped
+            assert match is not None
+            self._pending_partitions.append((match.group(1), created is not None))
         return 'SELECT 1'
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
-        self._server.calls.append(('fetchval', sql, args))
+        server = self._server
+        server.calls.append(('fetchval', sql, args))
         if sql == STATEMENT_TEMPLATES['check_table']:
-            return self._server.table_exists
+            return server.table_exists
+        if sql == RECORDER_STATEMENT_TEMPLATES['try_lock']:
+            return server.try_lock_answer
+        if sql == RECORDER_STATEMENT_TEMPLATES['server_now']:
+            return server.server_now if server.server_now is not None else time.time()
+        if sql == RECORDER_STATEMENT_TEMPLATES['retention_read']:
+            return server.retention_comment
+        raise AssertionError(f'statement not known to the fake: {sql}')
+
+    async def fetch(self, sql: str, *args: Any) -> list[tuple[str]]:
+        server = self._server
+        server.calls.append(('fetch', sql, args))
+        if sql == RECORDER_STATEMENT_TEMPLATES['partitions_list']:
+            return [(name,) for name in sorted(server.partitions)]
         raise AssertionError(f'statement not known to the fake: {sql}')
 
     async def copy_records_to_table(
@@ -111,6 +182,11 @@ class FakeConnection:
             await asyncio.sleep(HANG_SECONDS)
         if server.copy_failures:
             raise server.copy_failures.pop(0)
+        if server.require_partition:
+            for record in records:
+                hour = int(record[RECORD_TS_INDEX] // SECONDS_PER_HOUR)
+                if partition_name(table_name, hour) not in server.partitions:
+                    raise asyncpg.exceptions.CheckViolationError('no partition of relation found for row')
         self._pending = list(records)
         return f'COPY {len(records)}'
 
@@ -121,8 +197,19 @@ class FakeConnection:
         self._server.calls.append(('terminate',))
 
     def commit_pending(self) -> None:
-        self._server.copied.extend(self._pending)
+        server = self._server
+        server.copied.extend(self._pending)
         self._pending = []
+        for name, created in self._pending_partitions:
+            if created:
+                server.partitions.add(name)
+            else:
+                server.partitions.discard(name)
+        self._pending_partitions = []
+
+    def roll_back_pending(self) -> None:
+        self._pending = []
+        self._pending_partitions = []
 
 
 class FakeTransaction:
@@ -140,4 +227,4 @@ class FakeTransaction:
 
     async def rollback(self) -> None:
         self._conn._server.calls.append(('ROLLBACK',))
-        self._conn._pending = []
+        self._conn.roll_back_pending()
