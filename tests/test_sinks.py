@@ -2902,7 +2902,6 @@ async def test_dlq_sink_send_returns_false_on_message_error():
 async def test_dlq_sink_send_returns_false_without_a_delivery_report():
     """A callback with neither an error nor a message carries no confirmation."""
     sink, _ = _make_dlq_sink(_FakeSyncProducer(report=(None, None)))
-    sink._producer.report = (None, None)
 
     assert await sink.send(_sample_record(), partition_id=0) is False
 

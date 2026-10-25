@@ -141,11 +141,11 @@ class DLQSink(BaseSink[BaseModel]):
             return False
 
         stamped = self._stamp(record)
-        headers = render_headers(stamped)
         loop = asyncio.get_running_loop()
         report: asyncio.Future[DeliveryReport] = loop.create_future()
         on_delivery = _delivery_callback(loop, report)
         try:
+            headers = render_headers(stamped)
             deadline = time.monotonic() + self._flush_timeout_seconds
             # The flush is per write: the producer buffers for up to a second
             # otherwise, and the DLQ sits on the hot failure paths, so that

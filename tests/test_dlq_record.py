@@ -136,6 +136,11 @@ def test_error_cut_cases(case):
     assert len(cut.encode('utf-8')) <= FIXTURE['error_cut_bytes']
 
 
+def test_error_with_a_lone_surrogate_is_still_written():
+    """Text decoded with surrogateescape has no UTF-8 form; the record must not be lost over it."""
+    assert cut_error('exit 1: \udcff tail') == 'exit 1: ? tail'
+
+
 def test_absent_values_write_no_header():
     bare = DLQRecord(key=None, value=b'v', stage='sink', error='boom')
     assert render_headers(bare) == [

@@ -137,8 +137,10 @@ def cut_error(text: str) -> str:
     """Redact URL credentials in ``text``, then cut it to 2000 bytes at a UTF-8 character boundary.
 
     Redaction runs first so a cut can never leave half a password behind.
+    A lone surrogate (text decoded with ``surrogateescape``, as subprocess
+    output can be) has no UTF-8 form and becomes ``?``.
     """
-    encoded = redact_url(text).encode('utf-8')
+    encoded = redact_url(text).encode('utf-8', errors='replace')
     # A cut inside a multi-byte character leaves an incomplete tail, which
     # 'ignore' drops, so the result ends at the last whole character.
     return encoded[:DLQ_ERROR_CUT_BYTES].decode('utf-8', errors='ignore')
