@@ -55,7 +55,8 @@ class KafkaSourceConfig(BaseModel):
         description=(
             "What to do with a message whose value fails input_model parsing. 'skip' passes it to "
             "arrange() with payload=None and msg.parse_error set; 'dlq' excludes it from arrange(), "
-            'writes a ParseFailurePayload to the DLQ topic, and commits once the write is confirmed; '
+            'writes the message to the DLQ topic as a record with the dk-stage: parse header, and commits '
+            'once the write is confirmed; '
             "'raise' fails fast — a MessageParseError stops the partition processor."
         ),
     )

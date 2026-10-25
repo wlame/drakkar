@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from drakkar.sinks.dlq import DLQEntry
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'replay_dlq.py'
 
 
@@ -34,24 +36,15 @@ def replay_module():
     return module
 
 
-def _dlq_entry(payload_json: str, offset: int = 0) -> dict:
-    """Build a minimal DLQ entry matching the format produced by DLQMessage.serialize().
-
-    Only the fields the script actually reads are included; extra keys the
-    real framework writes (sink_name, timestamp, etc.) are irrelevant to the
-    replay logic.
-    """
-    return {
-        'original_payloads': [payload_json],
-        'sink_name': 'results',
-        'sink_type': 'kafka',
-        'error': 'BrokerDown',
-        'timestamp': 1_700_000_000.0,
-        'partition': 0,
-        'attempt_count': 1,
-        '_kafka_offset': offset,
-        '_kafka_partition': 0,
-    }
+def _dlq_entry(value: str, offset: int = 0) -> DLQEntry:
+    """Build a DLQ record as ``read_dlq_entries`` yields it, with ``value`` as the source message value."""
+    return DLQEntry(
+        key=None,
+        value=value.encode(),
+        headers=[('dk-record-version', b'1'), ('dk-stage', b'sink')],
+        partition=0,
+        offset=offset,
+    )
 
 
 async def _async_iter(items):
@@ -381,32 +374,17 @@ def test_entry_matches_filter_empty_pattern(replay_module):
     assert replay_module._entry_matches_filter(entry, '') is True
 
 
-def test_entry_matches_filter_bytes_payload(replay_module):
-    """Bytes payloads are handled — some older DLQ records may have bytes."""
-    entry = {'original_payloads': [b'{"id": "raw-bytes"}']}
+def test_entry_matches_filter_on_value_bytes(replay_module):
+    """The filter matches the record value, which need not be UTF-8."""
+    entry = DLQEntry(key=None, value=b'\xff{"id": "raw-bytes"}', headers=[], partition=0, offset=0)
     assert replay_module._entry_matches_filter(entry, 'raw-bytes') is True
     assert replay_module._entry_matches_filter(entry, 'missing') is False
 
 
-def test_entry_matches_filter_no_payloads(replay_module):
-    """Entry with empty original_payloads never matches a non-empty filter."""
-    entry = {'original_payloads': []}
-    assert replay_module._entry_matches_filter(entry, 'x') is False
-
-
-def test_extract_payload_values_handles_mixed_types(replay_module):
-    """_extract_payload_values tolerates strings, bytes, and objects."""
-    entry = {
-        'original_payloads': [
-            '{"a": 1}',
-            b'{"b": 2}',
-            {'c': 3},  # fallback branch — serializes via json.dumps
-        ]
-    }
-    values = replay_module._extract_payload_values(entry)
-    assert values[0] == b'{"a": 1}'
-    assert values[1] == b'{"b": 2}'
-    assert b'"c": 3' in values[2]
+def test_extract_payload_values_republishes_the_record_value(replay_module):
+    """One record is one source message: its value is republished as it is."""
+    entry = DLQEntry(key=b'k', value=b'\xff raw', headers=[], partition=0, offset=7)
+    assert replay_module._extract_payload_values(entry) == [b'\xff raw']
 
 
 def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):

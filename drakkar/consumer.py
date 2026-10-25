@@ -184,6 +184,9 @@ class KafkaConsumer:
                     key=msg.key(),
                     value=msg.value(),
                     timestamp=msg.timestamp()[1],
+                    # The client answers None for a record without headers.
+                    # Kept so a DLQ record can carry the source headers on.
+                    headers=msg.headers() or [],
                 )
             )
         return messages

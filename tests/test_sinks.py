@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2733,86 +2734,119 @@ async def test_file_sink_absolute_path_outside_base_raises(tmp_path):
 # =============================================================================
 
 
-def _make_dlq_sink():
-    """Helper: create a DLQSink with a mocked AIOProducer."""
+class _FakeSyncProducer:
+    """Stands in for ``confluent_kafka.Producer``.
+
+    ``produce()`` keeps the delivery callback and ``flush()`` serves it, as
+    librdkafka does: the callback runs on the thread that flushes.
+    ``report`` is the ``(error, message)`` pair handed to the callback;
+    ``serves_reports=False`` models a broker that never answers.
+    """
+
+    def __init__(self, *, report=None, remaining=0, serves_reports=True, produce_error=None, flush_error=None):
+        self.report = report if report is not None else (None, _make_mock_message())
+        self.remaining = remaining
+        self.serves_reports = serves_reports
+        self.produce_error = produce_error
+        self.flush_error = flush_error
+        self.produced: list[dict] = []
+        self.flush_timeouts: list[float] = []
+        self.pending_callbacks: list = []
+
+    def produce(self, **kwargs):
+        if self.produce_error is not None:
+            raise self.produce_error
+        self.produced.append(kwargs)
+        self.pending_callbacks.append(kwargs['on_delivery'])
+
+    def flush(self, timeout):
+        self.flush_timeouts.append(timeout)
+        if self.flush_error is not None:
+            raise self.flush_error
+        if self.serves_reports:
+            for callback in self.pending_callbacks:
+                callback(*self.report)
+            self.pending_callbacks.clear()
+        return self.remaining
+
+
+def _make_dlq_sink(producer: _FakeSyncProducer | None = None):
+    """Helper: a DLQSink of worker ``w-1``, instance ``abc``, with a fake producer."""
     from drakkar.sinks.dlq import DLQSink
 
-    mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = lambda **kw: _make_future()
-    # 0 = the broker took everything; send() reads a non-zero remainder as
-    # "the DLQ write was not confirmed".
-    mock_producer.flush.return_value = 0
-    sink = DLQSink(topic='test-dlq', brokers='localhost:9092')
-    sink._producer = mock_producer
-    return sink, mock_producer
+    fake = producer or _FakeSyncProducer()
+    sink = DLQSink(topic='test-dlq', brokers='localhost:9092', worker='w-1', instance='abc')
+    sink._producer = fake
+    return sink, fake
 
 
-def _sample_delivery_error():
-    from drakkar.models import DeliveryError
+def _sample_record():
+    from drakkar.sinks.dlq_record import DLQRecord
 
-    return DeliveryError(
-        sink_name='results',
-        sink_type='kafka',
+    return DLQRecord(
+        key=b'order-1',
+        value=b'\xff raw value',
+        source_headers=[('x-trace', b'1'), ('dk-stage', b'parse')],
+        stage='sink',
         error='BrokerNotAvailableError: broker down',
-        payloads=[SampleOutput(request_id='r1')],
+        sink='kafka/results',
+        attempts=2,
+        source_topic='orders',
+        source_partition=3,
+        source_offset=10,
+        source_timestamp_ms=1000,
     )
 
 
-@patch('drakkar.sinks.dlq.AIOProducer')
+def _unconnected_dlq_sink():
+    from drakkar.sinks.dlq import DLQSink
+
+    return DLQSink(topic='dlq', brokers='localhost:9092', worker='w-1', instance='abc')
+
+
+@patch('drakkar.sinks.dlq.Producer')
 async def test_dlq_sink_connect(mock_cls):
     from drakkar.sinks.dlq import DLQSink
 
-    sink = DLQSink(topic='my-dlq', brokers='kafka:9092')
+    sink = DLQSink(topic='my-dlq', brokers='kafka:9092', worker='w-1', instance='abc')
     await sink.connect()
 
     mock_cls.assert_called_once_with({'bootstrap.servers': 'kafka:9092'})
     assert sink._producer is not None
 
 
-def test_dlq_message_serialize_fallback_logs_warning():
-    """The str(p) fallback stays, but the degraded entry must leave a trace."""
-    from drakkar.sinks.dlq import DLQMessage
+async def test_dlq_sink_send_writes_key_value_and_headers():
+    from drakkar.sinks.dlq_record import DLQ_HEADER_ORDER
 
-    class _Broken(SampleOutput):
-        def model_dump_json(self, **kwargs):
-            raise RuntimeError('cannot serialize')
+    sink, producer = _make_dlq_sink()
 
-    from drakkar.models import DeliveryError
+    assert await sink.send(_sample_record(), partition_id=3) is True
 
-    error = DeliveryError(sink_name='results', sink_type='kafka', error='boom', payloads=[_Broken()])
-    msg = DLQMessage(delivery_error=error, partition_id=0)
-
-    with patch('drakkar.sinks.dlq.logger') as mock_logger:
-        serialized = msg.serialize()
-
-    mock_logger.warning.assert_called_once()
-    assert mock_logger.warning.call_args[0][0] == 'dlq_payload_serialization_fallback'
-    assert mock_logger.warning.call_args[1]['payload_type'] == '_Broken'
-    entry = json.loads(serialized)
-    # The fallback representation still reached the DLQ entry.
-    assert len(entry['original_payloads']) == 1
-    assert 'request_id' in entry['original_payloads'][0]
+    assert len(producer.produced) == 1
+    produced = producer.produced[0]
+    assert produced['topic'] == 'test-dlq'
+    assert produced['key'] == b'order-1'
+    assert produced['value'] == b'\xff raw value'
+    headers = produced['headers']
+    assert headers[0] == ('x-trace', b'1')
+    assert [name for name, _ in headers[1:]] == [
+        name for name in DLQ_HEADER_ORDER if name not in ('dk-task-id', 'dk-delivered-sinks', 'dk-request-id')
+    ]
+    by_name = dict(headers)
+    assert by_name['dk-stage'] == b'sink'
+    assert by_name['dk-attempts'] == b'2'
 
 
-async def test_dlq_sink_send():
-    sink, mock_producer = _make_dlq_sink()
-    error = _sample_delivery_error()
+async def test_dlq_sink_send_stamps_worker_instance_and_failed_at():
+    """The sink, not the record's builder, names the worker and the write time."""
+    sink, producer = _make_dlq_sink()
 
-    await sink.send(error, partition_id=3, attempt_count=2)
+    await sink.send(_sample_record(), partition_id=0)
 
-    mock_producer.produce.assert_called_once()
-    call_kwargs = mock_producer.produce.call_args[1]
-    assert call_kwargs['topic'] == 'test-dlq'
-
-    import json
-
-    body = json.loads(call_kwargs['value'])
-    assert body['sink_name'] == 'results'
-    assert body['sink_type'] == 'kafka'
-    assert 'BrokerNotAvailableError' in body['error']
-    assert body['partition'] == 3
-    assert body['attempt_count'] == 2
-    assert len(body['original_payloads']) == 1
+    by_name = dict(producer.produced[0]['headers'])
+    assert by_name['dk-worker'] == b'w-1'
+    assert by_name['dk-instance'] == b'abc'
+    assert re.fullmatch(rb'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z', by_name['dk-failed-at'])
 
 
 async def test_dlq_sink_send_increments_metric():
@@ -2821,95 +2855,65 @@ async def test_dlq_sink_send_increments_metric():
     sink, _ = _make_dlq_sink()
     before = sink_dlq_messages._value.get()
 
-    await sink.send(_sample_delivery_error(), partition_id=0)
+    await sink.send(_sample_record(), partition_id=0)
 
     assert sink_dlq_messages._value.get() == before + 1
 
 
 async def test_dlq_sink_send_not_connected():
-    from drakkar.sinks.dlq import DLQSink
-
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
-    # should log warning but not raise
-    await sink.send(_sample_delivery_error(), partition_id=0)
+    sink = _unconnected_dlq_sink()
+    assert await sink.send(_sample_record(), partition_id=0) is False
 
 
-async def test_dlq_sink_send_produce_failure():
-    from drakkar.sinks.dlq import DLQSink
-
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
-    mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = RuntimeError('kafka down')
-    sink._producer = mock_producer
-
-    # should log error but not raise (DLQ is last resort)
-    await sink.send(_sample_delivery_error(), partition_id=0)
-
-
-async def test_dlq_sink_send_failure_increments_counter():
-    """When DLQ send fails, dlq_send_failures counter increments."""
+async def test_dlq_sink_send_produce_failure_increments_counter():
+    """``produce()`` raising (a full queue raises ``BufferError``) is a failed write, not a crash."""
     from drakkar.metrics import dlq_send_failures
-    from drakkar.sinks.dlq import DLQSink
 
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
-    mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = RuntimeError('kafka down')
-    sink._producer = mock_producer
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(produce_error=BufferError('queue full')))
 
     before = dlq_send_failures._value.get()
-    await sink.send(_sample_delivery_error(), partition_id=0)
+    assert await sink.send(_sample_record(), partition_id=0) is False
     assert dlq_send_failures._value.get() == before + 1
 
 
-async def test_dlq_sink_send_delivery_report_failure_increments_counter():
-    """H3: produce() can succeed while the delivery-report future rejects
-    (e.g. broker ACK timeout, topic authorization denied). This mode must
-    be caught and reflected in the failure metric — not silently lost.
-
-    The pre-fix code relied on flush() to raise, which masked delivery-
-    report failures under a generic "flush failed" path with less context.
-    """
+async def test_dlq_sink_send_delivery_error_increments_counter():
+    """The callback reports a failed delivery in its error argument; that is no confirmation."""
     from drakkar.metrics import dlq_send_failures, sink_dlq_messages
-    from drakkar.sinks.dlq import DLQSink
 
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
-
-    # produce() succeeds and returns a future that will REJECT.
-    async def produce_returns_failed_future(**kwargs):
-        f = asyncio.get_event_loop().create_future()
-        f.set_exception(RuntimeError('delivery report: broker ack timeout'))
-        return f
-
-    mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = produce_returns_failed_future
-    sink._producer = mock_producer
-
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(report=('broker ack timeout', None)))
     failures_before = dlq_send_failures._value.get()
     successes_before = sink_dlq_messages._value.get()
 
-    # Must NOT raise — DLQ is last-resort; caller should keep going.
-    await sink.send(_sample_delivery_error(), partition_id=7)
+    assert await sink.send(_sample_record(), partition_id=7) is False
 
-    # Delivery-report failure must be observable via the counter.
     assert dlq_send_failures._value.get() == failures_before + 1
-    # And the success counter must NOT have incremented.
     assert sink_dlq_messages._value.get() == successes_before
 
 
+async def test_dlq_sink_send_returns_false_on_message_error():
+    """A failed delivery can also be carried in ``Message.error()``."""
+    failed = _make_mock_message()
+    failed.error.return_value = 'BrokerNotAvailable'
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(report=(None, failed)))
+
+    assert await sink.send(_sample_record(), partition_id=0) is False
+
+
+async def test_dlq_sink_send_returns_false_without_a_delivery_report():
+    """A callback with neither an error nor a message carries no confirmation."""
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(report=(None, None)))
+    sink._producer.report = (None, None)
+
+    assert await sink.send(_sample_record(), partition_id=0) is False
+
+
 async def test_dlq_sink_send_flushes_the_producer():
-    """``AIOProducer`` hands messages to librdkafka only once its internal
-    buffer reaches ``batch_size`` (1000) or the ``buffer_timeout`` (1.0 s)
-    inactivity timer fires. A DLQ write is a single message, so without an
-    explicit flush every ``send()`` waits out that timer — one second per
-    failed batch on the hot failure path. Same reasoning as ``KafkaSink``.
-    """
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.flush.return_value = 0
+    """The producer buffers for up to a second; a DLQ write flushes so it does not wait that out."""
+    sink, producer = _make_dlq_sink()
 
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
+    assert await sink.send(_sample_record(), partition_id=0) is True
 
-    mock_producer.produce.assert_called_once()
-    mock_producer.flush.assert_called_once()
+    assert producer.flush_timeouts == [sink._flush_timeout_seconds]
 
 
 async def test_dlq_sink_send_succeeds_when_flush_reports_other_writes_backlog():
@@ -2917,15 +2921,14 @@ async def test_dlq_sink_send_succeeds_when_flush_reports_other_writes_backlog():
 
     The DLQ producer serves the whole worker, so ``flush()`` counts messages
     other writes are waiting on. Reporting failure there would stall a
-    partition whose DLQ message the broker already accepted.
+    partition whose DLQ record the broker already accepted.
     """
     from drakkar.metrics import dlq_send_failures
 
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.flush.return_value = 2  # someone else's messages
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(remaining=2))
 
     failures_before = dlq_send_failures._value.get()
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
+    assert await sink.send(_sample_record(), partition_id=0) is True
     assert dlq_send_failures._value.get() == failures_before
 
 
@@ -2933,128 +2936,103 @@ async def test_dlq_sink_send_returns_false_when_own_write_is_not_acknowledged():
     """A delivery report that never arrives is the real DLQ failure."""
     from drakkar.metrics import dlq_send_failures
 
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.produce.side_effect = lambda **kw: asyncio.get_running_loop().create_future()
-    mock_producer.flush.return_value = 0  # the producer itself looks drained
+    sink, producer = _make_dlq_sink(_FakeSyncProducer(serves_reports=False))
     sink._flush_timeout_seconds = 0.05
 
     failures_before = dlq_send_failures._value.get()
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+    assert await sink.send(_sample_record(), partition_id=0) is False
     assert dlq_send_failures._value.get() == failures_before + 1
 
-
-async def test_dlq_sink_send_returns_false_on_delivery_report_error():
-    """The delivery future resolves to a Message, and a failed delivery is
-    carried in ``Message.error()`` rather than raised. Reporting success
-    there would commit the source offsets past payloads no broker holds.
-    """
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.flush.return_value = 0
-    failed = _make_mock_message()
-    failed.error.return_value = 'BrokerNotAvailable'
-
-    def _failing_future(**_kwargs):
-        fut = asyncio.get_event_loop().create_future()
-        fut.set_result(failed)
-        return fut
-
-    mock_producer.produce.side_effect = _failing_future
-
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+    # A report that arrives after the send gave up is dropped quietly.
+    producer.pending_callbacks[0](None, _make_mock_message())
+    await asyncio.sleep(0)
 
 
-async def test_dlq_sink_send_returns_false_when_future_resolves_to_none():
-    """Defensive twin of the KafkaSink guard: a ``None`` delivery report
-    carries no confirmation, so it must not be read as one.
-    """
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.flush.return_value = 0
+async def test_dlq_delivery_callback_keeps_the_first_report():
+    from drakkar.sinks.dlq import _delivery_callback
 
-    def _none_future(**_kwargs):
-        fut = asyncio.get_event_loop().create_future()
-        fut.set_result(None)
-        return fut
+    report = asyncio.get_running_loop().create_future()
+    first = _make_mock_message()
+    on_delivery = _delivery_callback(asyncio.get_running_loop(), report)
 
-    mock_producer.produce.side_effect = _none_future
+    on_delivery(None, first)
+    on_delivery('late error', None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+    assert report.result() == (None, first)
 
 
-async def test_dlq_message_serialization_cross_backend_golden():
-    """Byte-stability pin — this exact literal is the contract.
+def test_dlq_delivery_callback_after_the_loop_closed_is_dropped():
+    """A flush at shutdown may serve a report whose loop is gone; that must not raise."""
+    from drakkar.sinks.dlq import _delivery_callback
 
-    DLQ JSON byte-stability is contractual: tooling byte-compares entries.
-    The envelope carries ``json.dumps`` default separators (``", "`` and
-    ``": "``).
+    loop = asyncio.new_event_loop()
+    report = loop.create_future()
+    loop.close()
 
-    The embedded payload strings stay **compact** — they come from
-    ``model_dump_json()``. The flight recorder likewise encodes compact.
-    That asymmetry is deliberate; do not unify the two.
+    _delivery_callback(loop, report)(None, _make_mock_message())
 
-    The sibling test below parses the JSON before asserting, so it cannot see
-    separator drift — which is exactly how the two backends diverged
-    unnoticed until an audit generated both outputs and diffed them.
-    """
-    from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq import DLQMessage
-
-    error = DeliveryError(
-        sink_name='results',
-        sink_type='kafka',
-        error='connection refused',
-        payloads=[SampleOutput()],
-    )
-    msg = DLQMessage(delivery_error=error, partition_id=2, attempt_count=1)
-
-    with patch('drakkar.sinks.dlq.time.time', return_value=1700000000.0):
-        data = msg.serialize()
-
-    assert data == (
-        b'{"original_payloads": ["{\\"request_id\\":\\"abc\\",\\"answer\\":\\"42\\"}"], '
-        b'"sink_name": "results", "sink_type": "kafka", "error": "connection refused", '
-        b'"timestamp": 1700000000.0, "partition": 2, "attempt_count": 1}'
-    )
-
-
-async def test_dlq_message_serialization():
-    from drakkar.sinks.dlq import DLQMessage
-
-    error = _sample_delivery_error()
-    msg = DLQMessage(delivery_error=error, partition_id=5, attempt_count=3)
-    data = msg.serialize()
-
-    import json
-
-    parsed = json.loads(data)
-    assert parsed['sink_name'] == 'results'
-    assert parsed['sink_type'] == 'kafka'
-    assert parsed['partition'] == 5
-    assert parsed['attempt_count'] == 3
-    assert 'timestamp' in parsed
-    assert len(parsed['original_payloads']) == 1
+    assert not report.done()
 
 
 async def test_dlq_sink_close():
-    sink, mock_producer = _make_dlq_sink()
+    sink, producer = _make_dlq_sink()
     await sink.close()
 
-    mock_producer.close.assert_called_once()
+    assert producer.flush_timeouts == [sink._flush_timeout_seconds]
     assert sink._producer is None
 
 
 async def test_dlq_sink_close_not_connected():
-    from drakkar.sinks.dlq import DLQSink
-
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    sink = _unconnected_dlq_sink()
     await sink.close()  # should not raise
 
 
 def test_dlq_sink_topic():
     from drakkar.sinks.dlq import DLQSink
 
-    sink = DLQSink(topic='my-dlq', brokers='localhost:9092')
+    sink = DLQSink(topic='my-dlq', brokers='localhost:9092', worker='w-1', instance='abc')
     assert sink.topic == 'my-dlq'
     assert sink.sink_type == 'dlq'
+
+
+def test_dlq_record_from_delivery_error_holds_the_payloads_json():
+    from drakkar.models import DeliveryError
+    from drakkar.sinks.dlq_record import DLQRecord
+
+    error = DeliveryError(sink_name='results', sink_type='kafka', error='connection refused', payloads=[SampleOutput()])
+
+    record = DLQRecord.from_delivery_error(error, attempts=3)
+
+    assert record.key is None
+    assert json.loads(record.value) == ['{"request_id":"abc","answer":"42"}']
+    assert record.stage == 'sink'
+    assert record.sink == 'kafka/results'
+    assert record.attempts == 3
+    assert record.error == 'connection refused'
+
+
+def test_dlq_record_from_delivery_error_falls_back_to_str_and_logs():
+    """The str(p) fallback stays, but the degraded value must leave a trace."""
+    from drakkar.models import DeliveryError
+    from drakkar.sinks.dlq_record import DLQRecord
+
+    class _Broken(SampleOutput):
+        def model_dump_json(self, **kwargs):
+            raise RuntimeError('cannot serialize')
+
+    error = DeliveryError(sink_name='results', sink_type='kafka', error='boom', payloads=[_Broken()])
+
+    with patch('drakkar.sinks.dlq_record.logger') as mock_logger:
+        record = DLQRecord.from_delivery_error(error)
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args[0][0] == 'dlq_payload_serialization_fallback'
+    assert mock_logger.warning.call_args[1]['payload_type'] == '_Broken'
+    values = json.loads(record.value)
+    assert len(values) == 1
+    assert 'request_id' in values[0]
 
 
 # =============================================================================
@@ -3126,51 +3104,22 @@ async def test_redis_sink_close_exception_is_caught(redis_sink_config):
 
 
 async def test_dlq_sink_close_exception_is_caught():
-    """DLQ close() catches exception from producer.close() and still sets producer to None."""
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.close.side_effect = RuntimeError('flush timeout')
+    """DLQ close() catches an exception from the final flush and still drops the producer."""
+    sink, _ = _make_dlq_sink(_FakeSyncProducer(flush_error=RuntimeError('flush timeout')))
 
     await sink.close()  # should not raise
 
-    mock_producer.close.assert_called_once()
     assert sink._producer is None
 
 
 # =============================================================================
-# DLQ serialize fallback + deliver NotImplementedError
+# DLQ deliver NotImplementedError
 # =============================================================================
-
-
-def test_dlq_message_serialize_fallback_on_model_dump_failure():
-    """When model_dump_json() raises, serialize() falls back to str(payload)."""
-    from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq import DLQMessage
-
-    broken_payload = MagicMock(spec=BaseModel)
-    broken_payload.model_dump_json.side_effect = TypeError('not serializable')
-
-    error = DeliveryError(
-        sink_name='results',
-        sink_type='kafka',
-        error='some error',
-        payloads=[broken_payload],
-    )
-    msg = DLQMessage(delivery_error=error, partition_id=1, attempt_count=1)
-    data = msg.serialize()
-
-    import json
-
-    parsed = json.loads(data)
-    # fallback should be str(broken_payload)
-    assert len(parsed['original_payloads']) == 1
-    assert parsed['original_payloads'][0] == str(broken_payload)
 
 
 async def test_dlq_sink_deliver_raises_not_implemented():
     """DLQSink.deliver() always raises NotImplementedError."""
-    from drakkar.sinks.dlq import DLQSink
-
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    sink = _unconnected_dlq_sink()
     with pytest.raises(NotImplementedError, match=r'Use DLQSink\.send'):
         await sink.deliver([SampleOutput()])
 
@@ -3183,49 +3132,42 @@ async def test_dlq_sink_deliver_raises_not_implemented():
 def _mock_dlq_message(value_bytes: bytes | None, *, offset: int = 0, partition: int = 0, error=None):
     """Build a MagicMock that matches the confluent_kafka Message surface
     needed by ``read_dlq_entries``.
-
-    Only the handful of methods actually called (``error``, ``value``,
-    ``offset``, ``partition``) are stubbed — everything else falls through
-    to MagicMock defaults.
     """
     msg = MagicMock()
     msg.error.return_value = error
+    msg.key.return_value = b'k'
     msg.value.return_value = value_bytes
+    msg.headers.return_value = [('dk-stage', b'sink')]
     msg.offset.return_value = offset
     msg.partition.return_value = partition
     return msg
 
 
-async def test_read_dlq_entries_drains_and_stops_on_idle():
-    """The reader yields every well-formed message then exits when the
-    broker reports empty polls for ``idle_polls_before_stop`` ticks.
-    """
-    import json as _json
-
+async def _read_all(fake_consumer, **kwargs):
     from drakkar.sinks import dlq as dlq_module
 
-    entries = [
-        _json.dumps({'original_payloads': ['{"id": 1}']}).encode(),
-        _json.dumps({'original_payloads': ['{"id": 2}']}).encode(),
-    ]
-    messages = [_mock_dlq_message(b, offset=i) for i, b in enumerate(entries)]
+    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
+        return [
+            entry
+            async for entry in dlq_module.read_dlq_entries(
+                topic='test-dlq', brokers='localhost:9092', poll_timeout=0.01, **kwargs
+            )
+        ]
 
+
+async def test_read_dlq_entries_drains_and_stops_on_idle():
+    """The reader yields every record then exits when the broker reports
+    empty polls for ``idle_polls_before_stop`` ticks.
+    """
+    messages = [_mock_dlq_message(b'v1', offset=0), _mock_dlq_message(b'v2', offset=1)]
     fake_consumer = AsyncMock()
     fake_consumer.consume.side_effect = [messages, [], []]
 
-    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
-        yielded = []
-        async for entry in dlq_module.read_dlq_entries(
-            topic='test-dlq',
-            brokers='localhost:9092',
-            idle_polls_before_stop=2,
-            poll_timeout=0.01,
-        ):
-            yielded.append(entry)
+    yielded = await _read_all(fake_consumer, idle_polls_before_stop=2)
 
-    assert len(yielded) == 2
-    assert [e['_kafka_offset'] for e in yielded] == [0, 1]
-    assert yielded[0]['original_payloads'] == ['{"id": 1}']
+    assert [e.offset for e in yielded] == [0, 1]
+    assert [e.value for e in yielded] == [b'v1', b'v2']
+    assert yielded[0].headers == [('dk-stage', b'sink')]
     fake_consumer.close.assert_awaited()
 
 
@@ -3233,95 +3175,38 @@ async def test_read_dlq_entries_honors_limit():
     """When ``limit`` is set, iteration stops after exactly that many
     entries even if more messages are available in the batch.
     """
-    import json as _json
-
-    from drakkar.sinks import dlq as dlq_module
-
-    entries = [_json.dumps({'original_payloads': [f'{{"id": {i}}}']}).encode() for i in range(5)]
-    messages = [_mock_dlq_message(b, offset=i) for i, b in enumerate(entries)]
-
+    messages = [_mock_dlq_message(f'v{i}'.encode(), offset=i) for i in range(5)]
     fake_consumer = AsyncMock()
     fake_consumer.consume.side_effect = [messages, []]
 
-    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
-        yielded = []
-        async for entry in dlq_module.read_dlq_entries(
-            topic='test-dlq',
-            brokers='localhost:9092',
-            limit=3,
-            poll_timeout=0.01,
-        ):
-            yielded.append(entry)
+    yielded = await _read_all(fake_consumer, limit=3)
 
-    assert len(yielded) == 3
-    assert [e['_kafka_offset'] for e in yielded] == [0, 1, 2]
+    assert [e.offset for e in yielded] == [0, 1, 2]
 
 
-async def test_read_dlq_entries_skips_invalid_json():
-    """A message whose value is not valid JSON is logged and skipped
-    without aborting the iteration.
-    """
-    import json as _json
-
-    from drakkar.sinks import dlq as dlq_module
-
-    valid = _json.dumps({'original_payloads': ['{"id": 1}']}).encode()
-    invalid = b'this-is-not-json'
-    messages = [
-        _mock_dlq_message(invalid, offset=0),
-        _mock_dlq_message(valid, offset=1),
-    ]
-
+async def test_read_dlq_entries_reads_a_null_value_as_empty():
+    """A record with no value cannot come from the DLQ sink; it is read as empty, not skipped."""
     fake_consumer = AsyncMock()
-    fake_consumer.consume.side_effect = [messages, []]
+    fake_consumer.consume.side_effect = [[_mock_dlq_message(None, offset=4)], []]
 
-    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
-        yielded = []
-        async for entry in dlq_module.read_dlq_entries(
-            topic='test-dlq',
-            brokers='localhost:9092',
-            idle_polls_before_stop=1,
-            poll_timeout=0.01,
-        ):
-            yielded.append(entry)
+    yielded = await _read_all(fake_consumer, idle_polls_before_stop=1)
 
-    # Only the well-formed message makes it through.
-    assert len(yielded) == 1
-    assert yielded[0]['_kafka_offset'] == 1
+    assert [(e.offset, e.value) for e in yielded] == [(4, b'')]
 
 
 async def test_read_dlq_entries_skips_partition_eof():
     """Broker-issued ``_PARTITION_EOF`` messages are NOT treated as entries."""
-    import json as _json
-
     from confluent_kafka import KafkaError
-
-    from drakkar.sinks import dlq as dlq_module
 
     eof_error = MagicMock()
     eof_error.code.return_value = KafkaError._PARTITION_EOF
-
-    valid = _json.dumps({'original_payloads': ['{"id": 1}']}).encode()
-    messages = [
-        _mock_dlq_message(None, offset=0, error=eof_error),
-        _mock_dlq_message(valid, offset=1),
-    ]
-
+    messages = [_mock_dlq_message(None, offset=0, error=eof_error), _mock_dlq_message(b'v', offset=1)]
     fake_consumer = AsyncMock()
     fake_consumer.consume.side_effect = [messages, []]
 
-    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
-        yielded = []
-        async for entry in dlq_module.read_dlq_entries(
-            topic='test-dlq',
-            brokers='localhost:9092',
-            idle_polls_before_stop=1,
-            poll_timeout=0.01,
-        ):
-            yielded.append(entry)
+    yielded = await _read_all(fake_consumer, idle_polls_before_stop=1)
 
-    assert len(yielded) == 1
-    assert yielded[0]['_kafka_offset'] == 1
+    assert [e.offset for e in yielded] == [1]
 
 
 @pytest.mark.parametrize(
@@ -3866,12 +3751,10 @@ async def test_dlq_sink_flush_is_bounded_by_the_configured_timeout():
     """
     from drakkar.sinks.dlq import DLQSink
 
-    mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = lambda **kw: _make_future()
-    mock_producer.flush.return_value = 0
-    sink = DLQSink(topic='test-dlq', brokers='localhost:9092', flush_timeout_seconds=7.5)
-    sink._producer = mock_producer
+    producer = _FakeSyncProducer()
+    sink = DLQSink(topic='test-dlq', brokers='localhost:9092', worker='w-1', instance='abc', flush_timeout_seconds=7.5)
+    sink._producer = producer
 
-    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
+    assert await sink.send(_sample_record(), partition_id=0) is True
 
-    mock_producer.flush.assert_called_once_with(7.5)
+    assert producer.flush_timeouts == [7.5]

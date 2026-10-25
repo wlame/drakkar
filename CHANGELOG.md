@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart. Old lock files are not read; delete them. `EventRecorder` takes no
   election arguments, `run_archive_pass` takes a `fence`, and
   `EventRecorder.stop` takes `reserve_seconds=`. See `docs/upgrading.md`.
+- **The DLQ record changed shape.** A DLQ record is now the original source
+  message: its key and value unchanged, its headers, and `dk-` headers with
+  the failure facts (`dk-record-version`, `dk-stage`, `dk-error` and more).
+  The old JSON body and `ParseFailurePayload` are gone. `DLQSink.send` takes
+  a `DLQRecord`, and `read_dlq_entries` yields `DLQEntry` (key, value,
+  headers, partition, offset). `SourceMessage` has `headers`.
 
 ### Added
 

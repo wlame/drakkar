@@ -36,6 +36,7 @@ def make_mock_message(topic='test-source', partition=0, offset=0, key=b'k', valu
     msg.key.return_value = key
     msg.value.return_value = value
     msg.timestamp.return_value = (1, timestamp)
+    msg.headers.return_value = None
     return msg
 
 

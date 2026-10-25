@@ -49,6 +49,7 @@ from drakkar.recorder.helpers import detect_worker_ip
 from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
+from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.filesystem import FileSink
 from drakkar.sinks.http import HttpSink
 from drakkar.sinks.kafka import KafkaSink
@@ -765,6 +766,8 @@ class DrakkarApp:
             security=resolved.security,
             client_config=resolved.client_config,
             flush_timeout_seconds=self._config.dlq.flush_timeout_seconds,
+            worker=self._worker_id,
+            instance=self._instance,
         )
 
     def _get_worker_state(self) -> dict:
@@ -873,7 +876,12 @@ class DrakkarApp:
                         partition_id=partition_id,
                         reason='handler returned DLQ but no DLQ sink is configured',
                     )
-                elif not await self._dlq_sink.send(error, partition_id=partition_id):
+                elif not await self._dlq_sink.send(
+                    # The delivery path does not carry the source message
+                    # yet, so the record holds the failed payloads' JSON.
+                    DLQRecord.from_delivery_error(error),
+                    partition_id=partition_id,
+                ):
                     await self._handle_dlq_failure(
                         error,
                         partition_id=partition_id,

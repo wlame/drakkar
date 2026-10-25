@@ -339,16 +339,18 @@ async def test_kafka_sink_inherits_consumer_security(monkeypatch):
 async def test_dlq_sink_applies_security(monkeypatch):
     captured = {}
 
-    class FakeAIOProducer:
+    class FakeProducer:
         def __init__(self, conf):
             captured.update(conf)
 
-    monkeypatch.setattr('drakkar.sinks.dlq.AIOProducer', FakeAIOProducer)
+    monkeypatch.setattr('drakkar.sinks.dlq.Producer', FakeProducer)
     from drakkar.sinks.dlq import DLQSink
 
     sink = DLQSink(
         topic='dlq',
         brokers='b:9093',
+        worker='w',
+        instance='i',
         security=KafkaSecurityConfig(protocol='SSL', ssl_ca_location='/ca.pem'),
     )
     await sink.connect()

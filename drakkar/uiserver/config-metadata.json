@@ -253,7 +253,7 @@
           "path": "sources.kafka.on_parse_error",
           "env": "DK_SOURCES__KAFKA__ON_PARSE_ERROR",
           "description": "What to do with a message whose value fails input_model parsing.",
-          "full_description": "What to do with a message whose value fails input_model parsing. 'skip' passes it to arrange() with payload=None and msg.parse_error set; 'dlq' excludes it from arrange(), writes a ParseFailurePayload to the DLQ topic, and commits once the write is confirmed; 'raise' fails fast — a MessageParseError stops the partition processor.",
+          "full_description": "What to do with a message whose value fails input_model parsing. 'skip' passes it to arrange() with payload=None and msg.parse_error set; 'dlq' excludes it from arrange(), writes the message to the DLQ topic as a record with the dk-stage: parse header, and commits once the write is confirmed; 'raise' fails fast — a MessageParseError stops the partition processor.",
           "type": "string",
           "default": "skip",
           "secret": false,

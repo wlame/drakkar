@@ -83,6 +83,13 @@ class SourceMessage(BaseModel):
     key: bytes | None = Field(default=None, description='Optional message key bytes from Kafka.')
     value: bytes = Field(description='Raw message value bytes from Kafka.')
     timestamp: int = Field(description='Message timestamp in milliseconds (Kafka-provided).')
+    headers: list[tuple[str, bytes | None]] = Field(
+        default_factory=list,
+        description=(
+            'Kafka record headers in their original order. A header with no value '
+            '(null in Kafka) keeps None, which is not the same as an empty value.'
+        ),
+    )
     payload: Any = Field(
         default=None,
         description='Parsed payload object. Set by the handler arrange() method.',
@@ -141,21 +148,6 @@ class ConfigurationError(RuntimeError):
     mismatch into a startup error instead of a confusing failure at the
     first message or request.
     """
-
-
-class ParseFailurePayload(BaseModel):
-    """DLQ payload wrapper for a source message that failed deserialization.
-
-    Produced by the framework when ``sources.kafka.on_parse_error: dlq`` is set.
-    Carries the raw value (decoded with replacement characters) plus
-    enough metadata to locate the original message in Kafka.
-    """
-
-    topic: str = Field(description='Source topic of the unparseable message.')
-    partition: int = Field(description='Source partition of the unparseable message.')
-    offset: int = Field(description='Source offset of the unparseable message.')
-    raw_value: str = Field(description='Raw message value, UTF-8 decoded with errors replaced.')
-    parse_error: str = Field(description='The deserialization error message.')
 
 
 class PrecomputedResult(BaseModel):

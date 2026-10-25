@@ -371,12 +371,13 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
     # from SinkManager — the app's on_delivery_error handler is NOT invoked,
     # so there's no second call fan-out through the handler path.
     assert dlq_sink.send.await_count == 2
-    sent_errors = [call.args[0] for call in dlq_sink.send.await_args_list]
-    assert {e.sink_type for e in sent_errors} == {'kafka', 'postgres'}
-    # Every error must carry the "circuit open" sentinel so dashboards can
-    # filter DLQ entries routed by the breaker vs by terminal delivery failure.
-    for err in sent_errors:
-        assert err.error == CIRCUIT_OPEN_ERROR
+    sent_records = [call.args[0] for call in dlq_sink.send.await_args_list]
+    assert {r.sink.split('/')[0] for r in sent_records} == {'kafka', 'postgres'}
+    # Every record must carry the "circuit open" sentinel so dashboards can
+    # filter DLQ records routed by the breaker vs by terminal delivery failure.
+    for record in sent_records:
+        assert record.error == CIRCUIT_OPEN_ERROR
+        assert record.attempts == 0
 
 
 # --- Commit ---

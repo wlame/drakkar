@@ -1,6 +1,7 @@
 """Tests for SinkManager — routing, validation, delivery, error handling."""
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock
 
@@ -23,6 +24,7 @@ from drakkar.models import (
     SinkDeliveryFailedError,
 )
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.manager import (
     CIRCUIT_OPEN_ERROR,
     AmbiguousSinkError,
@@ -814,10 +816,10 @@ class _RecordingDLQ:
 
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
-        self.sent: list[tuple[DeliveryError, int, int]] = []
+        self.sent: list[tuple[DLQRecord, int]] = []
 
-    async def send(self, error: DeliveryError, partition_id: int, attempt_count: int = 1) -> bool:
-        self.sent.append((error, partition_id, attempt_count))
+    async def send(self, record: DLQRecord, partition_id: int) -> bool:
+        self.sent.append((record, partition_id))
         return self.ok
 
 
@@ -836,11 +838,11 @@ async def test_deliver_error_retry_exhausted_lands_in_dlq():
 
     assert on_error.call_count == 2
     assert len(dlq.sent) == 1
-    error, partition_id, attempt_count = dlq.sent[0]
-    assert error.sink_name == 'out'
-    assert len(error.payloads) == 1
+    record, partition_id = dlq.sent[0]
+    assert record.sink == 'kafka/out'
+    assert len(json.loads(record.value)) == 1
     assert partition_id == 5
-    assert attempt_count == 2
+    assert record.attempts == 2
 
 
 async def test_deliver_error_retry_exhausted_dlq_send_failure_stall_raises():

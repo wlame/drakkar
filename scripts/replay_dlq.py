@@ -1,8 +1,8 @@
 """DLQ replay tool — reads dead-lettered messages and republishes to a target topic.
 
-Reads entries from the configured DLQ Kafka topic (the same topic the worker
-writes via ``DLQSink``), then republishes each entry's preserved
-``original_payloads`` to a target Kafka topic. Intended as a reference /
+Reads records from the configured DLQ Kafka topic (the same topic the worker
+writes via ``DLQSink``), then republishes each record's value (the original
+source message) to a target Kafka topic. Intended as a reference /
 operator tool after a bug in the downstream sink has been fixed and a batch
 of previously dead-lettered messages should be re-driven through the pipeline.
 
@@ -19,9 +19,8 @@ Args:
         brokers are taken from ``dlq.topic`` / ``dlq.brokers`` (with fallback
         to ``kafka.brokers`` and auto-derived topic ``{sources.kafka.topic}_dlq``,
         identical to the runtime framework behavior).
-    --target-topic: Kafka topic the entries are republished to. When omitted,
-        the script uses the sink_name embedded in the DLQ entry as a best-effort
-        hint; operators are strongly encouraged to pass it explicitly.
+    --target-topic: Kafka topic the records are republished to. Required
+        unless --dry-run.
     --target-brokers: override the brokers used for producing. Defaults to
         ``dlq.brokers`` → ``kafka.brokers`` (same as the reader).
     --dry-run: iterate and log but never call ``producer.produce`` — useful
@@ -29,10 +28,9 @@ Args:
     --limit: stop after N records have been READ (not published — a
         filter-rejected entry still counts toward the limit, matching the
         semantics of ``head -n N``).
-    --filter: simple substring match applied to each payload string. An entry
-        whose ``original_payloads`` contain the substring (anywhere) is
-        published; non-matching entries are skipped. Empty string disables
-        filtering.
+    --filter: simple substring match applied to each record value. A record
+        whose value contains the substring (anywhere) is published;
+        non-matching records are skipped. Empty string disables filtering.
 
 Exit codes:
     0 — drained successfully or --limit reached without errors.
@@ -45,17 +43,15 @@ Exit codes:
 Notes:
     - This script uses ``confluent_kafka.aio.AIOProducer``, matching the
       Kafka client the rest of the project standardized on.
-    - The DLQ entry format is defined by ``DLQMessage.serialize()`` in
-      ``drakkar/sinks/dlq.py``. ``original_payloads`` is a JSON list of strings,
-      each string a ``model_dump_json()`` of the original failed payload —
-      we republish those strings verbatim as the target-topic message value.
+    - The DLQ record format is defined in ``drakkar/sinks/dlq_record.py``: the
+      record value is the original source message value, which we republish
+      verbatim as the target-topic message value.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -64,7 +60,7 @@ import structlog
 from confluent_kafka.aio import AIOProducer
 
 from drakkar.config import load_config
-from drakkar.sinks.dlq import read_dlq_entries
+from drakkar.sinks.dlq import DLQEntry, read_dlq_entries
 
 logger = structlog.get_logger()
 
@@ -129,49 +125,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--filter',
         default='',
-        help='Substring match on each payload string (empty disables filtering).',
+        help='Substring match on each record value (empty disables filtering).',
     )
     return parser
 
 
-def _entry_matches_filter(entry: dict, pattern: str) -> bool:
-    """Return True if any string payload in ``entry['original_payloads']`` contains ``pattern``.
+def _entry_matches_filter(entry: DLQEntry, pattern: str) -> bool:
+    """Return True if the record value contains ``pattern``.
 
     Empty ``pattern`` matches every entry (the default). The check is a plain
-    ``in`` substring test — no regex, no JSON-path syntax — to keep the
-    script dependency-free and predictable. Operators who want structural
-    filtering can fork the script and substitute ``jq`` / ``jmespath``.
+    ``in`` substring test on the value's bytes — no regex, no JSON-path
+    syntax — to keep the script dependency-free and predictable.
     """
     if not pattern:
         return True
-    for raw in entry.get('original_payloads', []) or []:
-        if isinstance(raw, str) and pattern in raw:
-            return True
-        if isinstance(raw, bytes) and pattern.encode() in raw:
-            return True
-    return False
+    return pattern.encode() in entry.value
 
 
-def _extract_payload_values(entry: dict) -> list[bytes]:
-    """Pull each preserved payload out of a DLQ entry as bytes for produce().
-
-    ``original_payloads`` holds JSON-encoded strings (produced by
-    ``BaseModel.model_dump_json()``); each one is an independent payload
-    that was meant for the sink. We emit one Kafka message per payload so a
-    multi-payload DLQ entry (e.g. a batched sink that failed atomically)
-    is unpacked to individual target-topic records.
-    """
-    values: list[bytes] = []
-    for raw in entry.get('original_payloads', []) or []:
-        if isinstance(raw, str):
-            values.append(raw.encode())
-        elif isinstance(raw, bytes):
-            values.append(raw)
-        else:
-            # Defensive — older DLQ payloads may have non-string fallbacks
-            # (see the ``except Exception`` branch in ``DLQMessage.serialize``).
-            values.append(json.dumps(raw).encode())
-    return values
+def _extract_payload_values(entry: DLQEntry) -> list[bytes]:
+    """The values to republish for one DLQ record: its value, the original source message."""
+    return [entry.value]
 
 
 def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
@@ -288,7 +261,7 @@ async def run(
                 if not dry_run:
                     await _maybe_publish(producer, target_topic or '', values)
                     stats.published += len(values)
-                    stats.last_successful_offset = entry.get('_kafka_offset')
+                    stats.last_successful_offset = entry.offset
                 else:
                     # Dry-run: track the would-be count separately so the
                     # summary line can show operators "this many messages
@@ -296,9 +269,9 @@ async def run(
                     # ``published`` counter (which means "actually written to
                     # the target topic").
                     stats.would_publish += len(values)
-                    stats.last_successful_offset = entry.get('_kafka_offset')
+                    stats.last_successful_offset = entry.offset
             except Exception as exc:
-                err = f'publish failed at dlq_offset={entry.get("_kafka_offset")!r}: {exc}'
+                err = f'publish failed at dlq_offset={entry.offset!r}: {exc}'
                 stats.errors.append(err)
                 print(err, file=sys.stderr)
                 if stats.last_successful_offset is not None:

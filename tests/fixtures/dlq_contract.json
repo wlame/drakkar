@@ -1,0 +1,379 @@
+{
+  "_comment": "DLQ record contract, shared byte for byte by every implementation. One record per failed source message: the key and value are the source message key and value, unchanged. The headers are the source headers in their order, minus every header whose name starts with \"dk-\", then the dk- headers in header_order. A dk- header whose value is absent (null, or an empty delivered_sinks) is not written; 0 is a value. dk-error is the error text with URL credentials redacted, then cut to error_cut_bytes bytes at a UTF-8 character boundary. dk-delivered-sinks is the sorted list joined with \",\". dk-failed-at is the RFC 3339 UTC text with six fraction digits and \"Z\". Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value (a null key, or a header with a null value). failed_at in an input is the text the header carries.",
+  "record_version": "1",
+  "header_order": [
+    "dk-record-version",
+    "dk-stage",
+    "dk-error",
+    "dk-sink",
+    "dk-task-id",
+    "dk-attempts",
+    "dk-delivered-sinks",
+    "dk-source-topic",
+    "dk-source-partition",
+    "dk-source-offset",
+    "dk-source-timestamp",
+    "dk-request-id",
+    "dk-worker",
+    "dk-instance",
+    "dk-failed-at"
+  ],
+  "error_cut_bytes": 2000,
+  "cases": [
+    {
+      "name": "parse",
+      "input": {
+        "key": "order-17",
+        "value": {
+          "base64": "//57ImlkIjogMTc="
+        },
+        "source_headers": [
+          [
+            "traceparent",
+            "00-4bf92f3577b34da6-01"
+          ],
+          [
+            "empty-value",
+            null
+          ]
+        ],
+        "stage": "parse",
+        "error": "Expecting property name enclosed in double quotes: line 1 column 1 (char 0)",
+        "sink": null,
+        "task_id": null,
+        "attempts": null,
+        "delivered_sinks": [],
+        "source_topic": "orders",
+        "source_partition": 3,
+        "source_offset": 1042,
+        "source_timestamp_ms": 1793000000123,
+        "request_id": null,
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-05T10:15:30.123456Z"
+      },
+      "expected_headers": [
+        [
+          "traceparent",
+          "00-4bf92f3577b34da6-01"
+        ],
+        [
+          "empty-value",
+          null
+        ],
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "parse"
+        ],
+        [
+          "dk-error",
+          "Expecting property name enclosed in double quotes: line 1 column 1 (char 0)"
+        ],
+        [
+          "dk-source-topic",
+          "orders"
+        ],
+        [
+          "dk-source-partition",
+          "3"
+        ],
+        [
+          "dk-source-offset",
+          "1042"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793000000123"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-05T10:15:30.123456Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
+    },
+    {
+      "name": "execute",
+      "input": {
+        "key": null,
+        "value": "{\"id\": 17, \"query\": \"café\"}",
+        "source_headers": [],
+        "stage": "execute",
+        "error": "exit code 2: segmentation fault",
+        "sink": null,
+        "task_id": "t-7f3a9c",
+        "attempts": 3,
+        "delivered_sinks": [
+          "kafka/results"
+        ],
+        "source_topic": "orders",
+        "source_partition": 0,
+        "source_offset": 0,
+        "source_timestamp_ms": 1793000000456,
+        "request_id": null,
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-05T10:15:30.123456Z"
+      },
+      "expected_headers": [
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "execute"
+        ],
+        [
+          "dk-error",
+          "exit code 2: segmentation fault"
+        ],
+        [
+          "dk-task-id",
+          "t-7f3a9c"
+        ],
+        [
+          "dk-attempts",
+          "3"
+        ],
+        [
+          "dk-delivered-sinks",
+          "kafka/results"
+        ],
+        [
+          "dk-source-topic",
+          "orders"
+        ],
+        [
+          "dk-source-partition",
+          "0"
+        ],
+        [
+          "dk-source-offset",
+          "0"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793000000456"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-05T10:15:30.123456Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
+    },
+    {
+      "name": "sink",
+      "input": {
+        "key": "order-18",
+        "value": "{\"id\": 18}",
+        "source_headers": [
+          [
+            "x-trace",
+            "1"
+          ]
+        ],
+        "stage": "sink",
+        "error": "connection to postgresql://app:secret@db:5432/main refused",
+        "sink": "postgres/main_db",
+        "task_id": null,
+        "attempts": 0,
+        "delivered_sinks": [
+          "redis/cache",
+          "kafka/results"
+        ],
+        "source_topic": "orders",
+        "source_partition": 1,
+        "source_offset": 77,
+        "source_timestamp_ms": 1793000000789,
+        "request_id": null,
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-05T10:15:30.123456Z"
+      },
+      "expected_headers": [
+        [
+          "x-trace",
+          "1"
+        ],
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "sink"
+        ],
+        [
+          "dk-error",
+          "connection to postgresql://***:***@db:5432/main refused"
+        ],
+        [
+          "dk-sink",
+          "postgres/main_db"
+        ],
+        [
+          "dk-attempts",
+          "0"
+        ],
+        [
+          "dk-delivered-sinks",
+          "kafka/results,redis/cache"
+        ],
+        [
+          "dk-source-topic",
+          "orders"
+        ],
+        [
+          "dk-source-partition",
+          "1"
+        ],
+        [
+          "dk-source-offset",
+          "77"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793000000789"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-05T10:15:30.123456Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
+    },
+    {
+      "name": "http_request",
+      "input": {
+        "key": null,
+        "value": "{\"query\": \"find me\", \"limit\": 10}",
+        "source_headers": [],
+        "stage": "sink",
+        "error": "HTTP 503 Service Unavailable",
+        "sink": "http/notify",
+        "task_id": null,
+        "attempts": 3,
+        "delivered_sinks": [],
+        "source_topic": null,
+        "source_partition": null,
+        "source_offset": null,
+        "source_timestamp_ms": 1793000001000,
+        "request_id": "req_20261105T101530_0042",
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-05T10:15:30.123456Z"
+      },
+      "expected_headers": [
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "sink"
+        ],
+        [
+          "dk-error",
+          "HTTP 503 Service Unavailable"
+        ],
+        [
+          "dk-sink",
+          "http/notify"
+        ],
+        [
+          "dk-attempts",
+          "3"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793000001000"
+        ],
+        [
+          "dk-request-id",
+          "req_20261105T101530_0042"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-05T10:15:30.123456Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
+    }
+  ],
+  "error_cut_cases": [
+    {
+      "name": "ascii_over_the_limit",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_bytes": 2000
+    },
+    {
+      "name": "multibyte_character_across_the_limit",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa€b",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_bytes": 1999
+    },
+    {
+      "name": "dsn_password_redacted",
+      "input": "connect failed: postgresql://app:hunter2@db:5432/main?sslmode=require",
+      "expected": "connect failed: postgresql://***:***@db:5432/main?sslmode=require",
+      "expected_bytes": 65
+    }
+  ],
+  "dropped_source_headers": {
+    "source_headers": [
+      [
+        "dk-stage",
+        "sink"
+      ],
+      [
+        "x-trace",
+        "1"
+      ]
+    ],
+    "kept": [
+      [
+        "x-trace",
+        "1"
+      ]
+    ]
+  }
+}

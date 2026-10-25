@@ -28,8 +28,10 @@ breaking change, never a refactor:
 
 - config format (YAML keys, defaults, `DK_` env overrides) and the
   config-summary one-liner
-- DLQ JSON byte-stability, metric names and help text, emitted Postgres SQL,
-  emitted Redis commands, emitted Mongo statements
+- the DLQ record: the source message key and value unchanged, and the
+  `dk-` headers in a fixed order (`tests/fixtures/dlq_contract.json`)
+- metric names and help text, emitted Postgres SQL, emitted Redis commands,
+  emitted Mongo statements
 - mapping-derived arguments are emitted **sorted** (Postgres columns, Redis
   hset fields / zadd members) so the bytes are reproducible from a payload
   whose decoded form carries no key order; caller-supplied lists keep the

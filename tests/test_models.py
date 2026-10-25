@@ -694,7 +694,7 @@ def test_dlq_message_preserves_payload_data():
     import json
 
     from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq import DLQMessage
+    from drakkar.sinks.dlq_record import DLQRecord
 
     error = DeliveryError(
         sink_name='main',
@@ -702,8 +702,8 @@ def test_dlq_message_preserves_payload_data():
         error='boom',
         payloads=[PostgresPayload(table='results', data=_DLQRow())],
     )
-    entry = json.loads(DLQMessage(error, partition_id=0).serialize())
-    assert json.loads(entry['original_payloads'][0])['data'] == _DLQ_ROW_JSON
+    values = json.loads(DLQRecord.from_delivery_error(error).value)
+    assert json.loads(values[0])['data'] == _DLQ_ROW_JSON
 
 
 # --- MongoPayload operations ---

@@ -79,6 +79,7 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
+from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.webapp.models import (
     CacheStats,
     SinkDeliverySummary,
@@ -900,7 +901,9 @@ class WebappRunner:
                 # without one gets the unconfigured-drop path below.
                 if app._dlq_sink is not None:
                     try:
-                        sent = await app._dlq_sink.send(error, partition_id=-1)
+                        # The runner does not pass the request body down
+                        # yet, so the record holds the failed payloads' JSON.
+                        sent = await app._dlq_sink.send(DLQRecord.from_delivery_error(error), partition_id=-1)
                     except Exception as exc:
                         # DLQ send raising is rare but should not crash
                         # the request — record and continue.

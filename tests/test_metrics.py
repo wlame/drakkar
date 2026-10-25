@@ -125,6 +125,7 @@ def make_kafka_ok_msg(partition=0, offset=0, value=b'v'):
     msg.key.return_value = b'k'
     msg.value.return_value = value
     msg.timestamp.return_value = (1, 1000)
+    msg.headers.return_value = None
     return msg
 
 

@@ -34,28 +34,27 @@ from drakkar.metrics import (
 )
 from drakkar.models import (
     CollectResult,
-    DeliveryError,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
     MessageParseError,
-    ParseFailurePayload,
     PendingContext,
     SinkDeliveryFailedError,
     SourceMessage,
 )
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
+from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.throughput import ThroughputTracker
 
 logger = structlog.get_logger()
 
 CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
-# Matches DLQSink.send(error, partition_id) -> bool (True = confirmed write).
-DLQSendCallback = Callable[[DeliveryError, int], Awaitable[bool]]
+# Matches DLQSink.send(record, partition_id) -> bool (True = confirmed write).
+DLQSendCallback = Callable[[DLQRecord, int], Awaitable[bool]]
 # Invoked once (per processor lifetime) when the first offset stalls under
 # dlq.on_send_failure=stall — the lifecycle pauses the partition in Kafka.
 StallCallback = Callable[[int], Awaitable[None]]
@@ -882,8 +881,8 @@ class PartitionProcessor:
 
         'raise' propagates a MessageParseError, stopping the partition
         processor with the offset uncommitted (fail-fast, redelivery on
-        restart). 'dlq' writes a ParseFailurePayload to the DLQ topic and
-        completes the offset when the write is confirmed; on a failed
+        restart). 'dlq' writes the message itself to the DLQ topic as a
+        ``parse`` record and completes the offset when the write is confirmed; on a failed
         write the ``dlq.on_send_failure`` strategy applies — 'drop'
         commits anyway (payload lost, loud log + metric), 'stall' leaves
         the offset uncommitted and pauses the partition.
@@ -895,22 +894,20 @@ class PartitionProcessor:
                 error=msg.parse_error or 'unknown parse error',
             )
 
-        payload = ParseFailurePayload(
-            topic=msg.topic,
-            partition=msg.partition,
-            offset=msg.offset,
-            raw_value=msg.value.decode('utf-8', errors='replace') if msg.value else '',
-            parse_error=msg.parse_error or 'unknown parse error',
-        )
-        error = DeliveryError(
-            sink_name='parse',
-            sink_type='parse_error',
+        record = DLQRecord(
+            key=msg.key,
+            value=msg.value,
+            source_headers=msg.headers,
+            stage='parse',
             error=msg.parse_error or 'unknown parse error',
-            payloads=[payload],
+            source_topic=msg.topic,
+            source_partition=msg.partition,
+            source_offset=msg.offset,
+            source_timestamp_ms=msg.timestamp,
         )
         sent = False
         if self._dlq_send is not None:
-            sent = await self._dlq_send(error, self._partition_id)
+            sent = await self._dlq_send(record, self._partition_id)
         if sent:
             self._offset_tracker.complete(msg.offset)
             await self._note_commit_due()

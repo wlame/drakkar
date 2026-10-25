@@ -1,95 +1,56 @@
-"""Dead letter queue sink — writes failed delivery payloads to a Kafka topic.
+"""Dead letter queue sink — writes DLQ records to a Kafka topic.
 
-When a sink delivery fails and the on_delivery_error hook returns DLQ,
-the framework uses this sink to persist the failed payloads with error
-metadata so they can be investigated and reprocessed later.
+A DLQ record is the failed source message itself (key and value unchanged)
+plus ``dk-`` headers that say where and why it failed; see
+``drakkar.sinks.dlq_record``. The framework writes one when a message cannot
+be parsed, a task or a delivery ends in the DLQ, or a sink's circuit is open.
 """
 
 import asyncio
-import json
+import functools
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from datetime import UTC, datetime
 
 import structlog
-from confluent_kafka import KafkaError
-from confluent_kafka.aio import AIOConsumer, AIOProducer
-from pydantic import BaseModel
+from confluent_kafka import KafkaError, Message, Producer
+from confluent_kafka.aio import AIOConsumer
+from pydantic import BaseModel, ConfigDict, Field
 
 from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 from drakkar.metrics import dlq_send_failures, sink_dlq_messages
-from drakkar.models import DeliveryError
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.dlq_record import DLQRecord, Header, render_headers
 from drakkar.sinks.kafka_delivery import settle_budget
 from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
 # Mirrors ``DLQConfig.flush_timeout_seconds``' default, for a DLQSink built
-# outside a ``DrakkarApp`` (tests, the replay tool).
+# outside a ``DrakkarApp`` (tests, tools).
 DEFAULT_FLUSH_TIMEOUT_SECONDS = 30.0
 
+DeliveryReport = tuple[KafkaError | None, Message | None]
 
-class DLQMessage:
-    """Wraps a failed payload with error metadata for the dead letter queue.
 
-    Serialized as JSON with fields:
-        - original_payloads: list of JSON strings, one per failed payload in the batch
-        - sink_name: which sink failed
-        - sink_type: type of the failed sink
-        - error: error message string
-        - timestamp: when the failure occurred (unix epoch)
-        - partition: source partition the message came from
-        - attempt_count: how many delivery attempts were made
-    """
+class DLQEntry(BaseModel):
+    """One record read back from the DLQ topic."""
 
-    def __init__(
-        self,
-        delivery_error: DeliveryError,
-        partition_id: int,
-        attempt_count: int = 1,
-    ) -> None:
-        self.delivery_error = delivery_error
-        self.partition_id = partition_id
-        self.attempt_count = attempt_count
+    model_config = ConfigDict(frozen=True)
 
-    def serialize(self) -> bytes:
-        """Serialize the DLQ message to JSON bytes."""
-        payloads_json = []
-        for p in self.delivery_error.payloads:
-            try:
-                payloads_json.append(p.model_dump_json())
-            except Exception as e:
-                # str(p) keeps the DLQ entry usable, but the degraded shape
-                # deserves a trace — a payload that cannot serialize itself
-                # usually points at a broken user model.
-                logger.warning(
-                    'dlq_payload_serialization_fallback',
-                    category='sink',
-                    payload_type=type(p).__name__,
-                    sink_name=self.delivery_error.sink_name,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                )
-                payloads_json.append(str(p))
-
-        msg = {
-            'original_payloads': payloads_json,
-            'sink_name': self.delivery_error.sink_name,
-            'sink_type': self.delivery_error.sink_type,
-            'error': self.delivery_error.error,
-            'timestamp': time.time(),
-            'partition': self.partition_id,
-            'attempt_count': self.attempt_count,
-        }
-        return json.dumps(msg).encode()
+    key: bytes | None = Field(description='The record key: the source message key, None when it had none.')
+    value: bytes = Field(description='The record value: the source message value, unchanged.')
+    headers: list[Header] = Field(description='The record headers in their order: source headers, then dk- headers.')
+    partition: int = Field(description='The DLQ topic partition the record was read from.')
+    offset: int = Field(description='The DLQ topic offset of the record.')
 
 
 class DLQSink(BaseSink[BaseModel]):
-    """Produces failed delivery payloads to a dead letter queue Kafka topic.
+    """Produces DLQ records to the dead letter queue Kafka topic.
 
-    Used internally by the framework when on_delivery_error returns DLQ.
-    Not registered in the SinkManager — managed separately by DrakkarApp.
+    Used internally by the framework. Not registered in the SinkManager —
+    managed separately by DrakkarApp.
     """
 
     sink_type = 'dlq'
@@ -105,6 +66,9 @@ class DLQSink(BaseSink[BaseModel]):
         self,
         topic: str,
         brokers: str,
+        *,
+        worker: str,
+        instance: str,
         security: KafkaSecurityConfig | None = None,
         client_config: Mapping[str, str] | None = None,
         flush_timeout_seconds: float = DEFAULT_FLUSH_TIMEOUT_SECONDS,
@@ -112,17 +76,22 @@ class DLQSink(BaseSink[BaseModel]):
         super().__init__('dlq')
         self._topic = topic
         self._brokers = brokers
+        # Stamped on every record as dk-worker and dk-instance: the sink is
+        # the one place that knows which worker writes the record.
+        self._worker = worker
+        self._instance = instance
         # Bound on the per-write flush. Unbounded, librdkafka waits out
         # ``message.timeout.ms`` (300s) against a wedged broker while holding
-        # a producer executor thread — and the DLQ is the last resort, so a
-        # write that blocks that long stalls the partition it was meant to
-        # rescue.
+        # an executor thread — and the DLQ is the last resort, so a write
+        # that blocks that long stalls the partition it was meant to rescue.
         self._flush_timeout_seconds = flush_timeout_seconds
         # Already resolved by the caller (DrakkarApp._build_dlq), which
         # applies the same empty-brokers-inherits rule the Kafka sinks use.
         self._security = security or KafkaSecurityConfig()
         self._client_config = dict(client_config or {})
-        self._producer: AIOProducer | None = None
+        # A plain (sync) producer: the asyncio producer of the client cannot
+        # send headers. Its blocking calls run in the loop's executor.
+        self._producer: Producer | None = None
 
     @property
     def topic(self) -> str:
@@ -130,8 +99,8 @@ class DLQSink(BaseSink[BaseModel]):
         return self._topic
 
     async def connect(self) -> None:
-        """Create the AIOProducer for the DLQ topic."""
-        self._producer = AIOProducer(
+        """Create the producer for the DLQ topic."""
+        self._producer = Producer(
             merge_client_config({'bootstrap.servers': self._brokers}, self._security, self._client_config)
         )
         await logger.ainfo(
@@ -146,63 +115,61 @@ class DLQSink(BaseSink[BaseModel]):
         """Not used directly — use send() instead."""
         raise NotImplementedError('Use DLQSink.send() instead of deliver()')
 
-    async def send(
-        self,
-        delivery_error: DeliveryError,
-        partition_id: int,
-        attempt_count: int = 1,
-    ) -> bool:
-        """Write a failed delivery to the DLQ topic.
+    def _stamp(self, record: DLQRecord) -> DLQRecord:
+        """Return ``record`` with this worker's name, instance and the write time set."""
+        return record.model_copy(
+            update={'worker': self._worker, 'instance': self._instance, 'failed_at': datetime.now(UTC)}
+        )
+
+    async def send(self, record: DLQRecord, partition_id: int) -> bool:
+        """Write one DLQ record to the DLQ topic.
 
         Returns ``True`` when the DLQ broker confirmed the write, ``False``
         otherwise. Does NOT raise — the caller decides what a failed DLQ
-        write means for its pipeline. The partition pipeline reacts to
-        ``False`` by stalling the affected offsets (no commit → redelivery
-        on restart) instead of silently losing the payloads. Failures are
-        additionally reported via:
+        write means for its pipeline (the ``dlq.on_send_failure`` strategy).
+        Failures are additionally reported via:
           - the ``dlq_send_failures`` Prometheus counter (alert on this!)
           - a CRITICAL-severity structured log entry with full context
 
         Operators MUST configure alerting on ``drakkar_dlq_send_failures_total``
-        — a non-zero value means deliveries are stalling behind a broken DLQ.
+        — a non-zero value means records are being lost or offsets stall
+        behind a broken DLQ.
         """
-        if self._producer is None:
+        producer = self._producer
+        if producer is None:
             await logger.awarning('dlq_send_skipped_not_connected', category='sink')
             return False
 
-        msg = DLQMessage(
-            delivery_error=delivery_error,
-            partition_id=partition_id,
-            attempt_count=attempt_count,
-        )
-        serialized = msg.serialize()
+        stamped = self._stamp(record)
+        headers = render_headers(stamped)
+        loop = asyncio.get_running_loop()
+        report: asyncio.Future[DeliveryReport] = loop.create_future()
+        on_delivery = _delivery_callback(loop, report)
         try:
-            # Produce enqueues the message into the AIOProducer's own buffer
-            # and returns a future that resolves on the delivery report. The
-            # buffer is handed to librdkafka only once it holds ``batch_size``
-            # messages (1000) or its ``buffer_timeout`` inactivity timer
-            # (1.0s) expires — a DLQ write is a single message, so without
-            # this flush every send() waits out that timer. The DLQ sits on
-            # the hot failure paths (breaker open, retries exhausted, the
-            # handler's DLQ action, the ``dlq`` parse-error policy), so a
-            # second per write throttles the whole partition and eats the
-            # revoke drain budget. ``KafkaSink.deliver`` flushes for the
-            # same reason.
-            future = await self._producer.produce(
-                topic=self._topic,
-                value=serialized,
-            )
             deadline = time.monotonic() + self._flush_timeout_seconds
-            remaining = await self._producer.flush(self._flush_timeout_seconds)
+            # The flush is per write: the producer buffers for up to a second
+            # otherwise, and the DLQ sits on the hot failure paths, so that
+            # second would throttle the whole partition.
+            remaining = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _produce_and_flush,
+                    producer=producer,
+                    topic=self._topic,
+                    record=stamped,
+                    headers=headers,
+                    on_delivery=on_delivery,
+                    flush_timeout_seconds=self._flush_timeout_seconds,
+                ),
+            )
 
             # ``remaining`` is producer-wide: librdkafka counts every message
             # still queued on this producer, and the DLQ producer serves the
             # whole worker. Treating it as this write's verdict would report a
-            # message the broker accepted as lost — stalling the partition, or
-            # telling the operator payloads are gone when they are on the DLQ
-            # topic — because some other write is stuck. This write is judged
-            # by its own delivery report; the count only explains a timeout.
-            _settled, pending = await asyncio.wait([future], timeout=settle_budget(deadline))
+            # record the broker accepted as lost because some other write is
+            # stuck. This write is judged by its own delivery report; the
+            # count only explains a timeout.
+            _settled, pending = await asyncio.wait([report], timeout=settle_budget(deadline))
             if pending:
                 await logger.acritical(
                     'dlq_flush_incomplete',
@@ -214,17 +181,16 @@ class DLQSink(BaseSink[BaseModel]):
                 )
                 dlq_send_failures.inc()
                 return False
-            report = future.result()
-            # A failed delivery is reported *in* the Message, not raised, so
-            # the future resolving is not on its own a confirmation. Reading
-            # it as one would commit the source offsets past payloads no
-            # broker ever accepted. Same check as ``KafkaSink.deliver``.
-            if report is None or report.error() is not None:
+            delivery_error, message = report.result()
+            # A failed delivery is reported in the callback, not raised, so
+            # the callback firing is not on its own a confirmation.
+            failure = _delivery_failure(delivery_error, message)
+            if failure is not None:
                 await logger.acritical(
                     'dlq_delivery_report_failed',
                     category='sink',
                     dlq_topic=self._topic,
-                    error=str(report.error()) if report is not None else 'no delivery report',
+                    error=failure,
                     action='ALERT: DLQ write not confirmed — offsets will stall',
                 )
                 dlq_send_failures.inc()
@@ -233,47 +199,101 @@ class DLQSink(BaseSink[BaseModel]):
             logger.info(
                 'dlq_message_sent',
                 category='sink',
-                sink_name=delivery_error.sink_name,
-                sink_type=delivery_error.sink_type,
+                stage=stamped.stage,
+                sink=stamped.sink,
                 partition=partition_id,
-                payload_count=len(delivery_error.payloads),
+                value_bytes=len(stamped.value),
             )
             return True
         except Exception as e:
             dlq_send_failures.inc()
-            # CRITICAL: the DLQ itself has failed after the original sink
-            # already failed. The caller stalls the affected offsets so
-            # the payloads are redelivered after restart instead of lost.
-            # Include full context so alerting tools surface enough to
-            # act on without a dashboard dive.
+            # CRITICAL: the DLQ itself has failed after the original failure.
+            # Include full context so alerting tools surface enough to act on
+            # without a dashboard dive.
             await logger.acritical(
                 'dlq_send_failed',
                 category='sink',
                 error=str(e),
                 error_type=type(e).__name__,
                 dlq_topic=self._topic,
-                source_sink_type=delivery_error.sink_type,
-                source_sink_name=delivery_error.sink_name,
+                stage=stamped.stage,
+                sink=stamped.sink,
                 partition=partition_id,
-                payload_count=len(delivery_error.payloads),
-                payload_bytes=len(serialized),
-                attempt_count=attempt_count,
-                action='ALERT: offsets stalled — investigate DLQ producer/broker',
+                value_bytes=len(stamped.value),
+                attempts=stamped.attempts,
+                action='ALERT: DLQ record not written — investigate DLQ producer/broker',
             )
             return False
 
     async def close(self) -> None:
-        """Flush and close the DLQ producer."""
-        if self._producer is not None:
-            try:
-                await self._producer.close()
-            except Exception as e:
-                await logger.awarning(
-                    'dlq_sink_close_error',
-                    category='sink',
-                    error=str(e),
-                )
-            self._producer = None
+        """Flush and drop the DLQ producer."""
+        producer = self._producer
+        if producer is None:
+            return
+        self._producer = None
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, producer.flush, self._flush_timeout_seconds)
+        except Exception as e:
+            await logger.awarning(
+                'dlq_sink_close_error',
+                category='sink',
+                error=str(e),
+            )
+
+
+def _delivery_callback(
+    loop: asyncio.AbstractEventLoop, report: asyncio.Future[DeliveryReport]
+) -> Callable[[KafkaError | None, Message | None], None]:
+    """Build the producer's delivery callback for one write.
+
+    librdkafka calls it from inside ``flush()``/``poll()``, so on an executor
+    thread, never on the loop: it may only hand the report over with
+    ``call_soon_threadsafe``.
+    """
+
+    def settle(error: KafkaError | None, message: Message | None) -> None:
+        # A send that timed out leaves the future pending, so a late report
+        # still settles it, harmlessly. librdkafka serves each report once;
+        # the check keeps a second call from raising inside the loop.
+        if not report.done():
+            report.set_result((error, message))
+
+    def on_delivery(error: KafkaError | None, message: Message | None) -> None:
+        try:
+            loop.call_soon_threadsafe(settle, error, message)
+        except RuntimeError:
+            # The loop is closed: a report served by a flush at shutdown has
+            # no send left waiting for it.
+            pass
+
+    return on_delivery
+
+
+def _produce_and_flush(
+    *,
+    producer: Producer,
+    topic: str,
+    record: DLQRecord,
+    headers: list[Header],
+    on_delivery: Callable[[KafkaError | None, Message | None], None],
+    flush_timeout_seconds: float,
+) -> int:
+    """Enqueue one record and flush the producer; blocking, so run in an executor."""
+    # The client also takes text header values; the record only ever holds bytes.
+    wire_headers: list[tuple[str, str | bytes | None]] = [*headers]
+    producer.produce(topic=topic, key=record.key, value=record.value, headers=wire_headers, on_delivery=on_delivery)
+    return producer.flush(flush_timeout_seconds)
+
+
+def _delivery_failure(error: KafkaError | None, message: Message | None) -> str | None:
+    """The reason a delivery report is not a confirmation, or None when it is one."""
+    if error is not None:
+        return str(error)
+    if message is None:
+        return 'no delivery report'
+    if message.error() is not None:
+        return str(message.error())
+    return None
 
 
 async def read_dlq_entries(
@@ -284,7 +304,7 @@ async def read_dlq_entries(
     idle_polls_before_stop: int = 2,
     security: KafkaSecurityConfig | None = None,
     client_config: Mapping[str, str] | None = None,
-) -> AsyncIterator[dict]:
+) -> AsyncIterator[DLQEntry]:
     """Consume DLQ entries from the DLQ Kafka topic, from the beginning.
 
     Opens a consumer with a unique, throwaway consumer group so every invocation
@@ -294,8 +314,8 @@ async def read_dlq_entries(
     has no real "end of topic" signal beyond _PARTITION_EOF events (which
     confluent-kafka emits only when the client is configured to surface them).
 
-    Each yielded value is the parsed JSON payload written by ``DLQSink.send()``
-    (see the ``DLQMessage.serialize()`` docstring for the field layout).
+    Each yielded value is one record as ``DLQSink.send()`` wrote it: key,
+    value and headers unchanged, plus where it sits on the DLQ topic.
 
     Yields at most ``limit`` entries when specified; yields indefinitely until
     drained otherwise. The caller is expected to iterate in an async for loop
@@ -351,18 +371,15 @@ async def read_dlq_entries(
                     continue
                 if limit is not None and yielded >= limit:
                     return
-                try:
-                    entry = json.loads(msg.value())
-                except json.JSONDecodeError as e:
-                    await logger.awarning(
-                        'dlq_reader_invalid_json',
-                        category='sink',
-                        error=str(e),
-                        offset=msg.offset(),
-                    )
-                    continue
-                entry['_kafka_offset'] = msg.offset()
-                entry['_kafka_partition'] = msg.partition()
+                entry = DLQEntry(
+                    key=msg.key(),
+                    # A record with a null value cannot come from the DLQ
+                    # sink; read it as empty rather than stopping the read.
+                    value=msg.value() or b'',
+                    headers=msg.headers() or [],
+                    partition=msg.partition(),
+                    offset=msg.offset(),
+                )
                 yield entry
                 yielded += 1
     finally:

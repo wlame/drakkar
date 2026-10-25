@@ -21,6 +21,7 @@ from drakkar.config import CircuitBreakerConfig, SinksConfig
 from drakkar.metrics import dlq_dropped_payloads, sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
+from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
 
@@ -772,7 +773,12 @@ class SinkManager:
             # payloads into, so the handler IS asked — and its answer is
             # honoured; see the else-branch below.
             if self._dlq_sink is not None:
-                if not await self._dlq_sink.send(error, partition_id=partition_id):
+                # The delivery path does not carry the source message yet,
+                # so the record holds the failed payloads' JSON. No hook
+                # attempt was made against an open circuit.
+                if not await self._dlq_sink.send(
+                    DLQRecord.from_delivery_error(error, attempts=0), partition_id=partition_id
+                ):
                     # The breaker is open AND the DLQ write failed — the
                     # payloads have nowhere safe to go. Apply the
                     # dlq.on_send_failure strategy.
@@ -1055,7 +1061,7 @@ class SinkManager:
         once the retry budget ran out.
         """
         if self._dlq_sink is not None and await self._dlq_sink.send(
-            error, partition_id=partition_id, attempt_count=attempts
+            DLQRecord.from_delivery_error(error, attempts=attempts), partition_id=partition_id
         ):
             logger.warning(
                 'sink_delivery_retries_exhausted_to_dlq',

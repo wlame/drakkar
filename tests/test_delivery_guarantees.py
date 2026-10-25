@@ -36,13 +36,13 @@ from drakkar.models import (
     DeliveryAction,
     DeliveryError,
     KafkaPayload,
-    ParseFailurePayload,
     SinkDeliveryFailedError,
     SourceMessage,
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
+from drakkar.sinks.dlq_record import DLQRecord, render_headers
 from tests.conftest import make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
@@ -141,13 +141,13 @@ async def test_policy_skip_keeps_message_in_window_and_commits(echo_pool):
 async def test_policy_dlq_excludes_message_and_commits_on_confirmed_send(echo_pool):
     handler = TypedHandler()
     committed: list[tuple[int, int]] = []
-    dlq_calls: list[DeliveryError] = []
+    dlq_calls: list[DLQRecord] = []
 
     async def on_commit(pid, off):
         committed.append((pid, off))
 
-    async def dlq_send(error: DeliveryError, partition_id: int) -> bool:
-        dlq_calls.append(error)
+    async def dlq_send(record: DLQRecord, partition_id: int) -> bool:
+        dlq_calls.append(record)
         return True
 
     proc = PartitionProcessor(
@@ -166,10 +166,9 @@ async def test_policy_dlq_excludes_message_and_commits_on_confirmed_send(echo_po
 
     assert handler.arranged == [], 'unparseable message must not reach arrange()'
     assert len(dlq_calls) == 1
-    payload = dlq_calls[0].payloads[0]
-    assert isinstance(payload, ParseFailurePayload)
-    assert payload.offset == 5
-    assert payload.raw_value == 'broken'
+    record = dlq_calls[0]
+    assert record.value == b'broken'
+    assert dict(render_headers(record))['dk-source-offset'] == b'5'
 
 
 async def test_policy_dlq_send_failure_stall_mode_stalls_offset_and_pauses(echo_pool):
@@ -182,7 +181,7 @@ async def test_policy_dlq_send_failure_stall_mode_stalls_offset_and_pauses(echo_
     async def on_commit(pid, off):
         committed.append((pid, off))
 
-    async def dlq_send(error: DeliveryError, partition_id: int) -> bool:
+    async def dlq_send(record: DLQRecord, partition_id: int) -> bool:
         return False  # DLQ broker down
 
     async def on_stall(pid: int) -> None:
@@ -224,7 +223,7 @@ async def test_policy_dlq_send_failure_drop_mode_commits_and_counts(echo_pool):
     async def on_commit(pid, off):
         committed.append((pid, off))
 
-    async def dlq_send(error: DeliveryError, partition_id: int) -> bool:
+    async def dlq_send(record: DLQRecord, partition_id: int) -> bool:
         return False  # DLQ broker down
 
     proc = PartitionProcessor(
@@ -324,9 +323,9 @@ async def test_task_delivery_failure_stalls_offset(echo_pool):
 
 
 async def test_dlq_send_returns_false_when_not_connected():
-    sink = DLQSink(topic='dlq', brokers='localhost:9092')
-    error = DeliveryError(sink_name='k', sink_type='kafka', error='boom', payloads=[])
-    assert await sink.send(error, partition_id=0) is False
+    sink = DLQSink(topic='dlq', brokers='localhost:9092', worker='w', instance='i')
+    record = DLQRecord(key=None, value=b'v', stage='sink', error='boom')
+    assert await sink.send(record, partition_id=0) is False
 
 
 # --- app-level DLQ fallback wiring ---
@@ -347,7 +346,7 @@ def _make_failing_kafka_app(app_config, dlq_sink) -> DrakkarApp:
 
 
 class _FailingDLQ:
-    async def send(self, error, partition_id, attempt_count=1):
+    async def send(self, record, partition_id):
         return False
 
 
