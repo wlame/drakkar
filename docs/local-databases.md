@@ -92,6 +92,7 @@ needs `persistence: sqlite` and a folder; the memory store needs neither:
 | `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and `storage.dir` is set. |
 | `storage.dir: ''` | **Memory-only mode.** The persistence mode derives to `none`. No recorder files, no watchdog file, nothing sealed or published, no archive pass. The UI reads the [memory store](recent-events.md): History, Trace, Task Detail, the Databases tab (the memory row) and the memory snapshot download work, and they cover the memory window only. With a `shared.dir` the worker still reads the sealed history of its cluster. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
 | `ui.recorder.persistence: none` with a `storage.dir` | Same recorder behaviour as memory-only mode. The cache file and the watchdog file stay in `storage.dir`. |
+| `ui.recorder.persistence: postgres` | No recorder files, as in memory-only mode. The worker also writes its events to a table in Postgres, and the trace with history reads that table instead of the sealed files. `storage.dir` is optional; with a folder, the cache file and the watchdog file stay there. See [Recorder History in Postgres](recorder-postgres.md). |
 | `ui.recorder.store_events: false` | No memory store, the `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
 | `ui.recorder.store_config: false` | No `worker_config` row, so this worker's recorder files do not name it or its cluster inside the database. The meta file of each sealed file still names both. Discovery and the cache exchange do not depend on it: they use the [fleet registry](fleet.md). |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
@@ -822,7 +823,10 @@ The connection string comes from the environment:
   `task_locks` and, when it is missing, fails with a message that names
   `drakkar-schema postgres --schema=<name>`; the next slot tries the
   start again. The command prints the DDL for an operator to run; see
-  [Fleet registry: postgres](fleet.md#postgres).
+  [Fleet registry: postgres](fleet.md#postgres). With `--recorder`
+  (and optional `--table-prefix=<p>` and `--retention-hours=<n>`) it also
+  prints the recorder events table of
+  [`persistence: postgres`](recorder-postgres.md#schema-management-and-ownership).
 - **The old table.** An older build may have created a table
   `archive_locks` for the archive lease. Nothing reads it any more. Once no
   worker of that build runs, drop it:
@@ -1361,12 +1365,22 @@ the file server's clock: a peer is `online` while its card is no older than
 [Fleet registry](fleet.md) for the card format and the rules.
 
 **Message trace** (`GET /api/v1/debug/trace`) searches this worker's own
-files by default: the live file and its closed own files in `storage.dir`.
-With `history=1` it searches only the sealed files of the history folder
-of the worker's own cluster, newest first. It stops after
-`ui.trace.history_max_files` files (default 256) or
-`ui.trace.history_max_seconds` (default 10), and it opens sealed files with
-`immutable=1`. **Trace by label** (`GET /api/v1/debug/trace-by-label`)
+files by default: the live file and its closed own files in `storage.dir`
+(with `none` and `postgres`, the memory store).
+What `history=1` reads depends on the recorder mode:
+
+| Mode | `trace?history=1` reads |
+|---|---|
+| `sqlite` | the sealed files of the history folder of the worker's own cluster, newest first |
+| `none` | the same sealed files, when a shared folder resolves |
+| `postgres` | the rows of the worker's own cluster in the Postgres table of its prefix, never the history folder |
+
+The search of sealed files stops after `ui.trace.history_max_files` files
+(default 256) or `ui.trace.history_max_seconds` (default 10), and it opens
+sealed files with `immutable=1`. The Postgres search is complete or answers
+503 `{"detail": "history search failed"}`, within
+`ui.trace.history_max_seconds`; see
+[The history search](recorder-postgres.md#the-history-search). **Trace by label** (`GET /api/v1/debug/trace-by-label`)
 searches the live file only. Every returned event carries `worker_name`. No
 worker opens another worker's live file.
 

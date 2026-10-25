@@ -986,7 +986,7 @@ page) into it — covered field-by-field on the dedicated
 
 ### Trace Over History (`ui.trace:`)
 
-Budget of one Message Trace request with `history=1`, which searches the sealed files in the history folder of the worker's own cluster, newest first. See [Cross-Worker Trace](observability.md#cross-worker-trace).
+Budget of one Message Trace request with `history=1`, which searches the sealed files in the history folder of the worker's own cluster, newest first. With `ui.recorder.persistence: postgres` the request searches the [Postgres table](recorder-postgres.md#the-history-search) instead: `history_max_seconds` is its time limit (at most 3600 seconds on the server) and `history_max_files` does not apply. See [Cross-Worker Trace](observability.md#cross-worker-trace).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
@@ -995,7 +995,7 @@ Budget of one Message Trace request with `history=1`, which searches the sealed 
 
 ### Flight Recorder (`ui.recorder:`)
 
-Flight-recorder persistence — the UI's data store. The recorder keeps recent events in an in-memory database, the memory store, and with `persistence: sqlite` it also writes recorder files into [`storage.dir`](#storage-and-shared). See [Recent Events in Memory](recent-events.md). Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
+Flight-recorder persistence — the UI's data store. The recorder keeps recent events in an in-memory database, the memory store, and with `persistence: sqlite` it also writes recorder files into [`storage.dir`](#storage-and-shared). With `persistence: postgres` it also writes the events to one table in Postgres; see [Recorder History in Postgres](recorder-postgres.md) and the `postgres.*` keys below. See [Recent Events in Memory](recent-events.md). Any combination of the `store_*` flags is valid. Archiving is configured under [`history.archive`](#history).
 
 The persistence mode follows this table when `persistence` is not set:
 
@@ -1006,32 +1006,46 @@ The persistence mode follows this table when `persistence` is not set:
 | `none` | anything | `none` |
 | `sqlite` | a folder | `sqlite` |
 | `sqlite` | `''` | the config does not load |
+| `postgres` | anything | `postgres` |
 
-So a config with `storage.dir: ''` runs in `none` mode with no change. An explicit `sqlite` with an empty `storage.dir` fails the load (whatever `ui.enabled` says) with:
+`postgres` is never derived: write it in the config. So a config with `storage.dir: ''` runs in `none` mode with no change. An explicit `sqlite` with an empty `storage.dir` fails the load (whatever `ui.enabled` says) with:
 
 ```
 ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only
 ```
 
-This check runs after the source check and before the history window check. The config summary line shows ` recorder=none` after ` storage=...` (and the optional ` shared=...`) when the mode is `none` and `storage.dir` is not empty. With an empty `storage.dir` the line shows `storage=mem` and no token.
+With `postgres`, the load fails when `ui.recorder.postgres.connection` is not declared:
+
+```
+ui.recorder.postgres.connection '<name>' is not defined under connections.postgres
+```
+
+These checks run after the source check and before the history window check: first the `sqlite` folder check, then the `postgres` connection check. The config summary line shows ` recorder=postgres` in the same place whenever the mode is `postgres`, with or without a `storage.dir`. It shows ` recorder=none` after ` storage=...` (and the optional ` shared=...`) when the mode is `none` and `storage.dir` is not empty. With an empty `storage.dir` the line shows `storage=mem` and no token.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `persistence` | `none` \| `sqlite` \| `null` | `null` | one of the two when given | Where recorder events live besides the memory store: `sqlite` writes recorder files into `storage.dir`; `none` keeps events in memory only. Unset, the mode follows the table above. Env `DK_UI__RECORDER__PERSISTENCE`. |
+| `persistence` | `none` \| `sqlite` \| `postgres` \| `null` | `null` | one of the three when given | Where recorder events live besides the memory store: `sqlite` writes recorder files into `storage.dir`; `none` keeps events in memory only; `postgres` writes them to a table in Postgres and is never derived. Unset, the mode follows the table above. Env `DK_UI__RECORDER__PERSISTENCE`. |
+| `postgres.connection` | `str` | `'main'` | a name under `connections.postgres` | The connection entry that holds the DSN and the schema. Env `DK_UI__RECORDER__POSTGRES__CONNECTION`. |
+| `postgres.table_prefix` | `str` | `''` | empty, or `^[a-z][a-z0-9_]{0,23}$` | Empty for the table `<schema>.recorder_events`, else `<schema>.<prefix>_recorder_events`. A bad value fails the load with `ui.recorder.postgres.table_prefix '<value>' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores`. Env `DK_UI__RECORDER__POSTGRES__TABLE_PREFIX`. |
+| `postgres.retention_hours` | `int` | `6` | `1` to `168` | Hours of history the table keeps. Read only when this worker creates the table; after that the value in the table comment rules. Env `DK_UI__RECORDER__POSTGRES__RETENTION_HOURS`. |
+| `postgres.store_output` | `bool` | `false` | | Send the `stdout` and `stderr` columns to Postgres. Off, both are written as `NULL`; `stdout_size` and `metadata` stay. Env `DK_UI__RECORDER__POSTGRES__STORE_OUTPUT`. |
+| `postgres.batch_rows` | `int` | `5000` | `100` to `50000` | Most rows in one COPY. Env `DK_UI__RECORDER__POSTGRES__BATCH_ROWS`. |
+| `postgres.queue_max_mib` | `int` | `128` | `16` to `1024` | Most text data, in MiB, waiting for Postgres. When full, the oldest rows are dropped and counted. Env `DK_UI__RECORDER__POSTGRES__QUEUE_MAX_MIB`. |
+| `postgres.resilience.*` | block | see [Resilience](#resilience-block) | | Timeout, retries, backoff and breaker of the recorder calls to Postgres (feature `recorder`). Env `DK_UI__RECORDER__POSTGRES__RESILIENCE__<KEY>`. |
 | `memory.window_seconds` | `int` | `120` | `10` to `86400` | Keep recorder events in the memory store this many seconds. Env `DK_UI__RECORDER__MEMORY__WINDOW_SECONDS`. |
 | `memory.rows_per_executor` | `int` | `3000` | `100` to `1000000` | Row cap of the memory store per executor slot: the store holds at most this many rows times `executor.max_executors`. The cap does not scale with the window; a longer window needs a larger value (rows per executor per window is about 4 x window / average task seconds). Env `DK_UI__RECORDER__MEMORY__ROWS_PER_EXECUTOR`. |
 | `memory.max_mib` | `int` | `256` | `16` to `512` | Budget for the data in the memory store, in MiB (pages in use). It bounds the data, not the memory the store holds. Plan up to about 600 MiB of RAM for the store at the default. Env `DK_UI__RECORDER__MEMORY__MAX_MIB`. |
 | `store_events` | `bool` | `true` | | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table of the memory store and, with `sqlite`, of the file. Off, there is no memory store. Disable to reduce disk I/O on high-throughput workers. |
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
-| `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. Used only with `sqlite`; with `none` the key loads and is ignored. |
+| `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Used only with `sqlite`; with `none` the key loads and is ignored. Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
-| `flush_interval_seconds` | `int` | `5` | >= 1 | The tick (seconds) of both the memory loop and the file loop. |
-| `max_buffer` | `int` | `50000` | >= 1000 | The intake buffer and, with `sqlite`, the file queue each hold at most this many rows. When one is full, its oldest rows are dropped and counted. |
-| `max_flush_retries` | `int` | `3` | >= 1 | Used only with `sqlite`. How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
+| `flush_interval_seconds` | `int` | `5` | >= 1 | The tick (seconds) of the memory loop, the file loop and, with `postgres`, the Postgres loop. |
+| `max_buffer` | `int` | `50000` | >= 1000 | The intake buffer and, with `sqlite`, the file queue each hold at most this many rows; with `postgres`, the Postgres queue too. When one is full, its oldest rows are dropped and counted. |
+| `max_flush_retries` | `int` | `3` | >= 1 | Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
 | `event_min_duration_ms` | `int` | `0` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
 | `output_min_duration_ms` | `int` | `500` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
 | `annotations_enabled` | `bool` | `true` | | Record handler [annotations](annotations.md) (diagnostic records attached to a window, message, or task from inside a hook) as rows in the `events` table. |
@@ -1397,7 +1411,7 @@ package. See [Fleet registry: redis](fleet.md#redis) and
 |-------|------|---------|-------------|-------------|
 | `dsn` | `str` | required | | asyncpg-compatible connection string, typically with user and password. **Secret.** |
 | `schema` | `str` | `drakkar` | lower-case identifier, `[a-z_][a-z0-9_]*` | Schema that holds the tables a feature creates. |
-| `manage_schema` | `bool` | `true` | | Create the schema and the tables at the first successful start of a provider that uses the connection. Off, they must already exist: create them with `drakkar-schema postgres --schema=<name>`, which prints the DDL; a provider whose table is missing then fails its start with a message that names the command. |
+| `manage_schema` | `bool` | `true` | | Create the schema and the tables at the first successful start of a provider that uses the connection. Off, they must already exist: create them with `drakkar-schema postgres --schema=<name>`, which prints the DDL; a provider whose table is missing then fails its start with a message that names the command. For the recorder events table of [`persistence: postgres`](recorder-postgres.md#schema-management-and-ownership) add `--recorder` and, as needed, `--table-prefix=<p>` and `--retention-hours=<n>` (1 to 168, default 6). Partitions are always created by the recorder, so the role must own that table. |
 | `pool_min` | `int` | `1` | >= 1 | Minimum connections in the pool. |
 | `pool_max` | `int` | `4` | >= 1, and >= `pool_min` | Maximum connections in the pool. The registry and the election share one pool when they name the same connection. |
 

@@ -546,10 +546,24 @@ ui:
                                    # '' = off. Must exist at boot when set. Referenced from
                                    # probe_field(view='custom', renderer=...) / Column(renderer=...).
 
-  # --- Flight recorder (memory store + optional files in storage.dir; see recent-events.md) ---
+  # --- Flight recorder (memory store + optional files in storage.dir or a Postgres table;
+  #     see recent-events.md and recorder-postgres.md) ---
   recorder:
-    persistence: null                # none | sqlite | null. null = sqlite when storage.dir is set, none when it is ''.
-                                     # sqlite with storage.dir: '' fails the load. env: DK_UI__RECORDER__PERSISTENCE
+    persistence: null                # none | sqlite | postgres | null. null = sqlite when storage.dir is set, none when it is ''.
+                                     # sqlite with storage.dir: '' fails the load. postgres is never derived; it needs
+                                     # postgres.connection declared under connections.postgres, and the summary line
+                                     # shows ' recorder=postgres'. env: DK_UI__RECORDER__PERSISTENCE
+    postgres:                        # used only with persistence: postgres (see recorder-postgres.md)
+      connection: main               # name under connections.postgres. env: DK_UI__RECORDER__POSTGRES__CONNECTION
+      table_prefix: ''               # '' -> <schema>.recorder_events; 'heavy' -> <schema>.heavy_recorder_events;
+                                     # [a-z][a-z0-9_]{0,23}. env: DK_UI__RECORDER__POSTGRES__TABLE_PREFIX
+      retention_hours: 6             # 1-168; written into the table comment when this worker creates the table.
+                                     # env: DK_UI__RECORDER__POSTGRES__RETENTION_HOURS
+      store_output: false            # send stdout and stderr to Postgres. env: DK_UI__RECORDER__POSTGRES__STORE_OUTPUT
+      batch_rows: 5000               # most rows in one COPY, 100-50000. env: DK_UI__RECORDER__POSTGRES__BATCH_ROWS
+      queue_max_mib: 128             # most text waiting for Postgres, 16-1024 MiB. env: DK_UI__RECORDER__POSTGRES__QUEUE_MAX_MIB
+      resilience: {}                 # the shared resilience block, feature recorder.
+                                     # env: DK_UI__RECORDER__POSTGRES__RESILIENCE__<KEY>
     memory:
       window_seconds: 120            # keep events in memory this long, 10-86400. env: DK_UI__RECORDER__MEMORY__WINDOW_SECONDS
       rows_per_executor: 3000        # row cap = this x executor.max_executors, 100-1000000; about
@@ -570,8 +584,9 @@ ui:
                                      # metadata; failures always store it. env: DK_UI__RECORDER__STORE_STDIN
     stdin_max_bytes: 65536           # byte cap for stored stdin, 0 = unlimited.
                                      # env: DK_UI__RECORDER__STDIN_MAX_BYTES
-    flush_interval_seconds: 5        # tick of the memory loop and the file loop. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
-    max_buffer: 50000                # capacity of the intake and of the file queue, each. env: DK_UI__RECORDER__MAX_BUFFER
+    flush_interval_seconds: 5        # tick of the memory, file and Postgres loops. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
+    max_buffer: 50000                # capacity of the intake, the file queue and the Postgres queue, each.
+                                     # env: DK_UI__RECORDER__MAX_BUFFER
     max_flush_retries: 3             # retries on transient file errors (sqlite only). env: DK_UI__RECORDER__MAX_FLUSH_RETRIES
     event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_UI__RECORDER__EVENT_MIN_DURATION_MS
     output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS
@@ -619,8 +634,10 @@ ui:
 
   # --- Trace search over sealed history (Trace page, history part) ---
   trace:
-    history_max_files: 256           # most sealed files one trace request with history=1 opens. env: DK_UI__TRACE__HISTORY_MAX_FILES
-    history_max_seconds: 10          # time limit for that request. env: DK_UI__TRACE__HISTORY_MAX_SECONDS
+    history_max_files: 256           # most sealed files one trace request with history=1 opens; not used with
+                                     # persistence: postgres. env: DK_UI__TRACE__HISTORY_MAX_FILES
+    history_max_seconds: 10          # time limit for that request; with postgres also the server statement limit
+                                     # (at most 3600). env: DK_UI__TRACE__HISTORY_MAX_SECONDS
 
   # --- Operator docs site served at /docs/ + contextual anchors (see ui-docs.md) ---
   docs:
@@ -816,7 +833,9 @@ connections:
       dsn: postgresql://user:password@host/db  # required; a secret. env: DK_CONNECTIONS__POSTGRES__MAIN__DSN
       schema: drakkar                  # lower-case identifier. env: DK_CONNECTIONS__POSTGRES__MAIN__SCHEMA
       manage_schema: true              # create the schema and tables at the first provider start. false: they must exist;
-                                       #   create them with `drakkar-schema postgres --schema=<name>`.
+                                       #   create them with `drakkar-schema postgres --schema=<name>`; add
+                                       #   `--recorder [--table-prefix=<p>] [--retention-hours=<n>]` for the
+                                       #   recorder events table (the role must own it).
                                        #   env: DK_CONNECTIONS__POSTGRES__MAIN__MANAGE_SCHEMA
       pool_min: 1                      # env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MIN
       pool_max: 4                      # must be >= pool_min. One pool serves the registry and the election.

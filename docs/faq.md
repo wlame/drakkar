@@ -303,7 +303,13 @@ Mildly. Recent rows come from the in-memory [memory store](recent-events.md), an
 
 ### Where are my events with no disk?
 
-In memory. A worker with `storage.dir: ''` (for example in a container with no writable disk) runs the recorder with `persistence: none`: it keeps the recent events in an in-memory SQLite database, the memory store, and writes no recorder file. The History, Trace and Task Detail pages read the memory store, and the Databases tab shows it as its first row, with a download button for a snapshot. The store keeps two minutes of events by default (`ui.recorder.memory.window_seconds`), bounded also by a row cap and a data budget, so the pages show that window only. Nothing is sealed or archived, and the events are gone after a restart. With a `shared.dir`, the worker still reads the sealed history of the other workers of its cluster. See [Recent Events in Memory](recent-events.md).
+In memory. A worker with `storage.dir: ''` (for example in a container with no writable disk) runs the recorder with `persistence: none`: it keeps the recent events in an in-memory SQLite database, the memory store, and writes no recorder file. The History, Trace and Task Detail pages read the memory store, and the Databases tab shows it as its first row, with a download button for a snapshot. The store keeps two minutes of events by default (`ui.recorder.memory.window_seconds`), bounded also by a row cap and a data budget, so the pages show that window only. Nothing is sealed or archived, and the events are gone after a restart. With a `shared.dir`, the worker still reads the sealed history of the other workers of its cluster. To keep a long history without a disk, use `persistence: postgres`. See [Recent Events in Memory](recent-events.md).
+
+### Can many clusters share one Postgres for recorder history?
+
+Yes. With `ui.recorder.persistence: postgres`, every worker writes its events to one table in Postgres, and every row carries its cluster and its worker. The history search of a worker reads only the rows of its own cluster, so clusters on one table do not see each other's events. All workers on one `table_prefix` share one table and one retention, which is stored in the table comment; no worker drops partitions by its own setting. Give a busy cluster, or a cluster with another retention, its own prefix (`table_prefix: heavy` gives `<schema>.heavy_recorder_events`).
+
+Size the database first: one busy worker writes about 9 GB per hour, so one database holds the history of a few busy workers at the default 6 hours, not of every worker of a large fleet at full load. Each worker uses up to 7 server connections with the defaults. See [Recorder History in Postgres](recorder-postgres.md).
 
 ### What happens to old recorder database files? Where did `retention_hours` go?
 

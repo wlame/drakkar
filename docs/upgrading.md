@@ -17,7 +17,9 @@ This page has two guides, one for each move:
   archive lock changed. Some keys moved, one default changed, and some log
   events were replaced. The recorder keeps recent events in memory and has a
   persistence choice; see
-  [The recorder memory store](#recorder-memory-store).
+  [The recorder memory store](#recorder-memory-store). A new recorder mode
+  keeps the history in Postgres; see
+  [The recorder history in Postgres](#recorder-history-in-postgres).
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.
@@ -459,3 +461,36 @@ recorder files. See [Recent Events in Memory](recent-events.md).
   per worker for the store. See [RAM to plan](recent-events.md#ram-to-plan).
 - **`EventRecorder.reader_db` is gone.** Use `file_reader_db` for the live
   file, or `memory_store` for the memory store.
+
+### 8. The recorder history in Postgres {#recorder-history-in-postgres}
+
+`ui.recorder.persistence` accepts a third value, `postgres`: every worker
+writes its events to one table in Postgres, and the trace with history reads
+that table. Nothing changes until you set it; it is never derived. See
+[Recorder History in Postgres](recorder-postgres.md).
+
+- **Switching a worker from `sqlite` to `postgres`.** Stop the worker
+  cleanly first: a clean stop seals and moves its live file. A file that a
+  worker left behind without a clean stop stays in `storage.dir`. The sealed
+  files stay in the history folder; merge, file downloads and the archives
+  list still show them, but `trace?history=1` on a `postgres` worker no
+  longer searches them. There is no migration of old files into the table.
+- **Switch a whole cluster at once.** A cluster that mixes `postgres` and
+  `sqlite` workers shows a cluster task mismatch (the archive runs on the
+  `sqlite` side only), and its history is split between the files and the
+  table.
+- **Declare the connection.** `ui.recorder.postgres.connection` (default
+  `main`) must name an entry under `connections.postgres`, or the config does
+  not load.
+- **The role must own the events table.** The worker creates and drops its
+  partitions. With an operator-managed schema, add `--recorder` to the
+  `drakkar-schema` command and give the table to the worker role.
+- **The index set is fixed.** The table has three indexes and its primary
+  key. A later `CREATE INDEX` on a filled partitioned table builds on every
+  partition under a lock that blocks every writer. A later index change
+  needs a new `table_prefix`, or a manual `CREATE INDEX CONCURRENTLY` on each
+  partition.
+- **Contract v1.26.** With `history=1`, a `postgres` worker answers the rows
+  of its cluster from the table, or `503 {"detail": "history search
+  failed"}`. A UI of this release shows "(the history search failed)"; an
+  older UI shows the same note for a failed history search.

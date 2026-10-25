@@ -2,8 +2,8 @@
  * Config wizard of the calculator page (calculator/).
  *
  * The page asks for hardware and timing answers, whether each worker has a
- * local disk and, for a fleet, where the workers run and which services they
- * reach. It prints one YAML block, the
+ * local disk, where the long event history lives and, for a fleet, where the
+ * workers run and which services they reach. It prints one YAML block, the
  * environment variables that hold the secrets, and a link that carries every
  * answer in its query.
  *
@@ -16,7 +16,7 @@
 (function (root) {
   'use strict';
 
-  var STEPS = ['workload', 'disk', 'hosts', 'services', 'choose', 'result'];
+  var STEPS = ['workload', 'disk', 'history', 'hosts', 'services', 'choose', 'result'];
   var INTEGER_TEXT = /^[0-9]{1,7}$/;
   // A string is printed bare when it starts with a letter, '_' or '/', holds only these
   // characters and does not end with ':' (a plain scalar that ends with ':' starts a mapping).
@@ -189,6 +189,7 @@
     return {
       numbers: numbers,
       disk: hasRules(table) ? table.choices.disk['default'] : 'yes',
+      history: hasRules(table) ? table.choices.history['default'] : 'files',
       hosts: hasRules(table) ? table.choices.hosts['default'] : 'one',
       services: hasRules(table) ? table.choices.services['default'].slice() : [],
       reg: null,
@@ -203,6 +204,7 @@
     return {
       numbers: answers.numbers,
       disk: answers.disk,
+      history: answers.history,
       hosts: hosts,
       services: hosts === 'many' ? answers.services : [],
       reg: answers.reg,
@@ -217,6 +219,7 @@
       var options = asList(when[key]);
       if (key === 'workers') { return options.indexOf(answers.numbers.workers === 1 ? 'one' : 'many') >= 0; }
       if (key === 'disk') { return options.indexOf(answers.disk) >= 0; }
+      if (key === 'history') { return options.indexOf(answers.history) >= 0; }
       if (key === 'hosts') { return options.indexOf(answers.hosts) >= 0; }
       if (key === 'services_include') { return options.some(function (o) { return answers.services.indexOf(o) >= 0; }); }
       if (key === 'services_exclude') { return !options.some(function (o) { return answers.services.indexOf(o) >= 0; }); }
@@ -231,10 +234,9 @@
     });
   }
 
-  /** The fragment of the chosen disk value; an empty mapping when it has none. */
-  function diskFragment(table, disk) {
-    var value = table.choices.disk.values.filter(function (item) { return item.value === disk; })[0];
-    return value.fragment || {};
+  /** The table entry of the chosen value of one choice. */
+  function choiceValue(table, name, value) {
+    return table.choices[name].values.filter(function (item) { return item.value === value; })[0];
   }
 
   /** Deep-merge a fragment into the target; a leaf set twice is an error. An empty mapping is a leaf. */
@@ -272,11 +274,13 @@
     var election = electionAllowed.indexOf(answers.elect) >= 0 ? answers.elect : electionAllowed[0];
     var resolved = { registry: registry, election: election };
     var notes = table.notes.filter(function (note) { return whenMatches(note.when, answers, resolved); });
-    var needed = table.providers.registry[registry].needs.concat(table.providers.election[election].needs);
+    var history = choiceValue(table, 'history', answers.history);
+    var needed = table.providers.registry[registry].needs.concat(table.providers.election[election].needs, history.needs || []);
     var kinds = Object.keys(table.connections).filter(function (kind) { return needed.indexOf(kind) >= 0; });
 
     var fleet = {};
-    mergeFragment(fleet, diskFragment(table, answers.disk), '');
+    mergeFragment(fleet, choiceValue(table, 'disk', answers.disk).fragment || {}, '');
+    mergeFragment(fleet, history.fragment || {}, '');
     mergeFragment(fleet, table.shared[rule.shared].fragment, '');
     kinds.forEach(function (kind) { mergeFragment(fleet, table.connections[kind].fragment, ''); });
     mergeFragment(fleet, table.providers.registry[registry].fragment, '');
@@ -305,6 +309,7 @@
     var shown = {
       workload: true,
       disk: true,
+      history: true,
       hosts: answers.numbers.workers >= 2,
       services: answers.hosts === 'many',
       choose: resolution.registryAllowed.length > 1 || resolution.electionAllowed.length > 1,
@@ -373,7 +378,7 @@
   // ------------------------------------------------------------ URL
 
   function queryKeyOrder(table) {
-    return ['v', 'step'].concat(Object.keys(table.inputs), ['disk', 'hosts', 'svc', 'reg', 'elect']);
+    return ['v', 'step'].concat(Object.keys(table.inputs), ['disk', 'history', 'hosts', 'svc', 'reg', 'elect']);
   }
 
   /** Read the answers from a query string; return them with the keys whose values were refused. */
@@ -396,13 +401,17 @@
     });
 
     var answers = {
-      numbers: numbers, disk: defaults.disk, hosts: defaults.hosts, services: defaults.services,
+      numbers: numbers, disk: defaults.disk, history: defaults.history, hosts: defaults.hosts, services: defaults.services,
       reg: null, elect: null, step: 'workload'
     };
     if (hasRules(table)) {
       if (params.has('disk')) {
         if (choiceValues(table, 'disk').indexOf(params.get('disk')) >= 0) { answers.disk = params.get('disk'); }
         else { invalid.disk = true; }
+      }
+      if (params.has('history')) {
+        if (choiceValues(table, 'history').indexOf(params.get('history')) >= 0) { answers.history = params.get('history'); }
+        else { invalid.history = true; }
       }
       if (numbers.workers >= 2 && params.has('hosts')) {
         if (choiceValues(table, 'hosts').indexOf(params.get('hosts')) >= 0) { answers.hosts = params.get('hosts'); }
@@ -449,6 +458,7 @@
     });
     if (!hasRules(table)) { return parts.join('&'); }
     if (answers.disk !== defaults.disk) { parts.push('disk=' + answers.disk); }
+    if (answers.history !== defaults.history) { parts.push('history=' + answers.history); }
     if (answers.hosts !== defaults.hosts) { parts.push('hosts=' + answers.hosts); }
     if (answers.services.length) {
       parts.push('svc=' + choiceValues(table, 'services').filter(function (v) { return answers.services.indexOf(v) >= 0; }).join(','));
@@ -624,6 +634,12 @@
         function (value) { state.disk = value; changed(); });
     }
 
+    function buildHistory() {
+      var choice = table.choices.history;
+      radioGroup(byId('wizard-history'), 'wizard-history', choice.label, choice.help, choice.values, state.history,
+        function (value) { state.history = value; changed(); });
+    }
+
     function buildHosts() {
       var choice = table.choices.hosts;
       radioGroup(byId('wizard-hosts'), 'wizard-hosts', choice.label, choice.help, choice.values, state.hosts,
@@ -696,6 +712,8 @@
 
     function fleetExplanations(resolution) {
       var items = [];
+      var history = choiceValue(table, 'history', state.history);
+      if (history.fragment) { items.push({ term: 'ui.recorder.persistence: ' + history.value, text: history.help }); }
       var shared = table.shared[resolution.shared];
       if (shared.explain) { items.push({ term: 'shared.dir', text: shared.explain, docs: shared.docs }); }
       resolution.kinds.forEach(function (kind) {
@@ -744,7 +762,7 @@
       if (resolution) { addDefinitions(explain, 'Fleet', fleetExplanations(resolution)); }
     }
 
-    var builders = { disk: buildDisk, hosts: buildHosts, services: buildServices, choose: buildChoose, result: buildResult };
+    var builders = { disk: buildDisk, history: buildHistory, hosts: buildHosts, services: buildServices, choose: buildChoose, result: buildResult };
 
     function showStep(step, moveFocus) {
       if (step !== 'workload' && Object.keys(refused).length) { return; }

@@ -232,6 +232,25 @@ below applies to the entries you declare and to any provider that uses them.
   `task_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the lease of any cluster task, so protect the
   schema like the card folder of the `filesystem` provider.
+- **The recorder events table of `persistence: postgres` must be owned by
+  the worker role.** The worker creates and drops the hourly partitions of
+  that table itself, in both `manage_schema` modes, and Postgres lets only
+  the owner of a table do that. With `manage_schema: false`, an operator
+  creates the table with `drakkar-schema postgres --schema=<name> --recorder`
+  (add `--table-prefix=<p>` and `--retention-hours=<n>` as needed) and then
+  runs `ALTER TABLE <schema>.<table> OWNER TO <worker role>`. The worker role
+  also needs `USAGE` on the schema. An owner can drop the whole table, so use
+  a schema or a table prefix that holds nothing but this history. See
+  [Recorder History in Postgres](recorder-postgres.md#schema-management-and-ownership).
+- **The recorder rows hold what the recorder holds.** Every row carries the
+  cluster, the worker, the task `args`, the event `metadata` (with the stored
+  stdin of `ui.recorder.store_stdin` and the capped stdin of failed tasks) and
+  the labels. With `ui.recorder.postgres.store_output: true` it also carries
+  `stdout` and `stderr`. Every worker of every cluster on one database writes
+  to tables that any role with `SELECT` on them can read, so give read rights
+  only to the people who may see the task data of all those clusters. To keep
+  stdin out of Postgres, keep `store_stdin` off and lower
+  `ui.recorder.stdin_max_bytes`.
 - **Give the Consul providers a token of their own.** The `consul` providers
   send `GET /v1/status/leader`, the session requests (`create`, `renew`,
   `destroy` and `info`) and the key requests (a read of one key, a recursive

@@ -230,8 +230,11 @@ other unmatched route.
 recorder through the endpoints above. Those endpoints read their newest rows
 from the recorder's in-memory [memory store](recent-events.md) while it still
 holds them, and from the live file otherwise. With
-`ui.recorder.persistence: none` there is no file, so a widget shows only the
-rows of the memory window (two minutes by default). The Databases tab of the
+`ui.recorder.persistence: none` or `postgres` there is no file, so a widget
+shows only the rows of the memory window (two minutes by default). With
+`postgres`, only the trace with history (`trace?history=1`) reads the
+[Postgres table](recorder-postgres.md#the-history-search); with `sqlite` and
+`none` it reads the sealed files of the cluster. The Databases tab of the
 debug UI shows the memory store as its first row, "Recent events in memory;
 not a file", with a download button; see
 [The Databases page](local-databases.md#the-databases-page).

@@ -2,31 +2,36 @@
 
 Every worker with the UI on keeps its recent recorder events in an in-memory
 SQLite database, the **memory store**. The UI pages read their recent rows
-from it. A worker can also keep a recorder file on disk, or keep no file at
-all. This page tells you what the memory store holds, how to size it, how much
+from it. A worker can also keep a recorder file on disk, send its events to a
+table in Postgres, or keep nothing else at all. This page tells you what the
+memory store holds, how to size it, how much
 RAM to plan for it, and what each page shows in each mode.
 
 The memory store exists when `ui.enabled` and `ui.recorder.store_events` are
 both on (the defaults). With `store_events: false` there is no memory store
 and no event rows anywhere; the live WebSocket view still streams.
 
-## The two modes
+## The three modes
 
 `ui.recorder.persistence` selects where the recorder keeps events besides the
 memory store:
 
-| | `none` | `sqlite` |
-|---|---|---|
-| Memory store | yes | yes |
-| Recorder file in `storage.dir` | no | yes |
-| Rotation, sealing, publish into the history folder | no | yes |
-| `history.archive` cluster task | does not run | runs |
-| Reads of the shared history (trace with history, merge, downloads, archives) | yes, when a shared folder resolves | yes |
-| `worker_state` rows | not written | written to the file only |
-| `worker_config` row | in memory | in memory and in the file |
-| UI reads | memory | memory for recent rows, the file for the rest (see below) |
-| Last-breath flush at exit | nothing | into the file |
-| `storage.dir` | optional (cache file, crash marker, snapshot temp file) | required |
+| | `none` | `sqlite` | `postgres` |
+|---|---|---|---|
+| Memory store | yes | yes | yes |
+| Recorder file in `storage.dir` | no | yes | no |
+| Rotation, sealing, publish into the history folder | no | yes | no |
+| `history.archive` cluster task | does not run | runs | does not run |
+| Rows in a Postgres table, partition upkeep | no | no | yes |
+| Trace with history (`history=1`) | sealed files, when a shared folder resolves | sealed files | the Postgres table, rows of the own cluster |
+| Merge, file downloads, archives list | yes, when a shared folder resolves | yes | yes, when a shared folder resolves |
+| `worker_state` rows | not written | written to the file only | not written |
+| `worker_config` row | in memory | in memory and in the file | in memory |
+| UI reads | memory | memory for recent rows, the file for the rest (see below) | memory |
+| Last-breath flush at exit | nothing | into the file | nothing |
+| `storage.dir` | optional (cache file, crash marker, snapshot temp file) | required | optional |
+
+The `postgres` mode has its own page: [Recorder History in Postgres](recorder-postgres.md).
 
 When you do not set the key, the worker derives the mode from `storage.dir`:
 
@@ -37,8 +42,10 @@ When you do not set the key, the worker derives the mode from `storage.dir`:
 | `none` | anything | `none` |
 | `sqlite` | a folder | `sqlite` |
 | `sqlite` | `''` | the config does not load |
+| `postgres` | anything | `postgres` |
 
-So a config with `storage.dir: ''` runs in `none` mode with no change. An
+`postgres` is never derived; write it in the config. So a config with
+`storage.dir: ''` runs in `none` mode with no change. An
 explicit `sqlite` with an empty folder fails the load with this message:
 
 ```
@@ -62,7 +69,7 @@ the history folder.
 ```yaml
 ui:
   recorder:
-    persistence: none          # none | sqlite | unset (derived from storage.dir)
+    persistence: none          # none | sqlite | postgres | unset (derived from storage.dir)
     memory:
       window_seconds: 120      # keep events this many seconds
       rows_per_executor: 3000  # row cap = rows_per_executor x executor.max_executors
@@ -137,8 +144,9 @@ rollback pages and the Python objects of the buffered rows.
 
 ## What reads memory and what reads the file
 
-With `none`, every UI read uses the memory store. A page that asks for an older
-range gets a shorter answer.
+With `none` and `postgres`, every UI read uses the memory store. A page that
+asks for an older range gets a shorter answer. With `postgres`, only the trace
+with history reads the Postgres table.
 
 With `sqlite`, each read picks one source, memory or the live file. It never
 merges the two:
@@ -159,9 +167,9 @@ A page with two queries reads both from the same source. A memory read has a
 time limit of 2 seconds. A read stopped by the limit answers an empty page and
 logs `ui_read_memory_timed_out`.
 
-### What each page shows with `none`
+### What each page shows with `none` and `postgres`
 
-With `none`, the pages cover the memory window only. The UI does not label it.
+With `none` and `postgres`, the pages cover the memory window only. The UI does not label it.
 
 - The **timeline** shows the tasks of the window, not the last hour.
 - The **partition counts** count the rows of the window.
@@ -170,18 +178,20 @@ With `none`, the pages cover the memory window only. The UI does not label it.
   window. A task whose older rows left the window shows its newer rows only.
 - **Trace** finds the rows of the window, plus the sealed history of the
   cluster when you ask for it (`history=1`) and a shared folder resolves.
+  With `postgres`, `history=1` adds the rows of the cluster from the Postgres
+  table instead.
   **Trace by label** finds the rows of the window.
 
 Rare events leave with the window too. An event that happens once an hour is
-in the store for two minutes with the defaults. Use a `sqlite` worker, or the
-sealed history of other workers, to keep it longer.
+in the store for two minutes with the defaults. Use a `sqlite` or a `postgres`
+worker, or the sealed history of other workers, to keep it longer.
 
 ## Row ids
 
 The recorder gives each row its id. An id is unique and increases within one
 worker process. It continues across file rotations and starts again at 1
 after a restart. With `sqlite`, the row in the memory store and the row in the
-file have the same id.
+file have the same id. With `postgres`, the row in the table has the same id.
 
 ## The snapshot download
 
@@ -250,8 +260,8 @@ the number of lines left out since the last one.
 
 `recorder_started` carries `persistence`, `memory_window_seconds`,
 `memory_max_rows` and `memory_max_bytes` (the last three only with a memory
-store) and, with `none`, `ignored_keys`: the keys that load and do nothing
-without a file (`rotation_interval_hours`, and `store_state` when it is on).
+store) and, with `none` and `postgres`, `ignored_keys`: the keys that load
+and do nothing without a file (`rotation_interval_hours`, and `store_state` when it is on).
 
 See [Observability](observability.md#flight-recorder) for the recorder metrics
 and the write stages, and [Local Databases](local-databases.md) for the files.

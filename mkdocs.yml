@@ -85,6 +85,7 @@ nav:
   - Threads & Pools (which mechanism for which work): threads.md
   - Local Databases: local-databases.md
   - Recent Events in Memory (the recorder memory store): recent-events.md
+  - Recorder History in Postgres: recorder-postgres.md
   - Fleet Registry (how workers find each other): fleet.md
   - Performance: performance.md
   - Deployment: deployment.md

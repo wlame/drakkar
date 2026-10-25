@@ -33,7 +33,7 @@ URL_CASES_PATH = Path(__file__).parent / 'fixtures' / 'config_wizard_url_cases.j
 
 KNOWN_REGISTRY_PROVIDERS = {'filesystem', 'static', 'none', 'postgres', 'redis', 'consul'}
 KNOWN_ELECTION_PROVIDERS = {'filesystem', 'postgres', 'redis', 'consul'}
-STEPS = ('workload', 'disk', 'hosts', 'services', 'choose', 'result')
+STEPS = ('workload', 'disk', 'history', 'hosts', 'services', 'choose', 'result')
 ENV_PLACEHOLDERS = {
     'DK_CONNECTIONS__POSTGRES__MAIN__DSN': 'postgresql://u:p@placeholder/db',
     'DK_CONNECTIONS__REDIS__MAIN__URL': 'redis://placeholder:6379/0',
@@ -67,6 +67,7 @@ class ChoiceValue(Strict):
     label: str
     help: str
     fragment: dict[str, Any] = Field(default_factory=dict)
+    needs: list[str] = Field(default_factory=list)
 
 
 class Choice(Strict):
@@ -111,6 +112,7 @@ class SharedEntry(Strict):
 class RuleWhen(Strict):
     workers: Literal['one', 'many'] | None = None
     disk: Match | None = None
+    history: Match | None = None
     hosts: Match | None = None
     services_include: Match | None = None
     services_exclude: Match | None = None
@@ -146,7 +148,7 @@ class Example(Strict):
 class Table(Strict):
     schema_version: Literal[1]
     inputs: dict[str, NumberInput]
-    choices: dict[Literal['disk', 'hosts', 'services'], Choice]
+    choices: dict[Literal['disk', 'history', 'hosts', 'services'], Choice]
     features: dict[Literal['registry', 'election'], Feature]
     providers: dict[Literal['registry', 'election'], dict[str, Provider]]
     connections: dict[Literal['postgres', 'redis', 'consul'], Connection]
@@ -180,6 +182,7 @@ class Answers:
     elect: str | None = None
     step: str = 'workload'
     disk: str = 'yes'
+    history: str = 'files'
 
 
 @dataclass
@@ -202,6 +205,7 @@ def default_answers(table: dict[str, Any]) -> Answers:
         hosts=table['choices']['hosts']['default'],
         services=frozenset(table['choices']['services']['default']),
         disk=table['choices']['disk']['default'],
+        history=table['choices']['history']['default'],
     )
 
 
@@ -209,7 +213,9 @@ def effective(answers: Answers) -> Answers:
     """Reset the answers of skipped questions: one worker asks no hosts, one host asks no services."""
     hosts = answers.hosts if answers.numbers['workers'] >= 2 else 'one'
     services = answers.services if hosts == 'many' else frozenset()
-    return Answers(answers.numbers, hosts, services, answers.reg, answers.elect, answers.step, answers.disk)
+    return Answers(
+        answers.numbers, hosts, services, answers.reg, answers.elect, answers.step, answers.disk, answers.history
+    )
 
 
 def as_list(value: Match) -> list[str]:
@@ -226,6 +232,8 @@ def when_matches(when: dict[str, Match], answers: Answers, resolved: dict[str, s
             matched = actual in options
         elif key == 'disk':
             matched = answers.disk in options
+        elif key == 'history':
+            matched = answers.history in options
         elif key == 'hosts':
             matched = answers.hosts in options
         elif key == 'services_include':
@@ -285,13 +293,16 @@ def resolve(table: dict[str, Any], raw_answers: Answers) -> Resolution:
     resolved = {'registry': registry, 'election': election}
     notes = [note for note in table['notes'] if when_matches(note['when'], answers, resolved)]
 
-    needed = set(table['providers']['registry'][registry]['needs']) | set(
-        table['providers']['election'][election]['needs']
+    needed = (
+        set(table['providers']['registry'][registry]['needs'])
+        | set(table['providers']['election'][election]['needs'])
+        | set(choice_value(table, 'history', answers.history).get('needs', []))
     )
     kinds = [kind for kind in table['connections'] if kind in needed]
 
     fleet: dict[str, Any] = {}
-    merge_fragment(fleet, disk_fragment(table, answers.disk))
+    merge_fragment(fleet, choice_value(table, 'disk', answers.disk).get('fragment', {}))
+    merge_fragment(fleet, choice_value(table, 'history', answers.history).get('fragment', {}))
     merge_fragment(fleet, table['shared'][rule['shared']]['fragment'])
     for kind in kinds:
         merge_fragment(fleet, table['connections'][kind]['fragment'])
@@ -303,10 +314,9 @@ def resolve(table: dict[str, Any], raw_answers: Answers) -> Resolution:
     return Resolution(registry_allowed, election_allowed, registry, election, notes, fleet, env)
 
 
-def disk_fragment(table: dict[str, Any], disk: str) -> dict[str, Any]:
-    """The fragment of the chosen ``disk`` value; ``{}`` when it has none."""
-    value = next(item for item in table['choices']['disk']['values'] if item['value'] == disk)
-    return value.get('fragment', {})
+def choice_value(table: dict[str, Any], choice: str, value: str) -> dict[str, Any]:
+    """The table entry of the chosen value of one choice."""
+    return next(item for item in table['choices'][choice]['values'] if item['value'] == value)
 
 
 def document_for(table: dict[str, Any], resolution: Resolution) -> dict[str, Any]:
@@ -366,6 +376,7 @@ def shown_steps(table: dict[str, Any], raw_answers: Answers) -> list[str]:
     shown = {
         'workload': True,
         'disk': True,
+        'history': True,
         'hosts': answers.numbers['workers'] >= 2,
         'services': answers.hosts == 'many',
         'choose': len(resolution.registry_allowed) > 1 or len(resolution.election_allowed) > 1,
@@ -401,6 +412,13 @@ def parse_query(table: dict[str, Any], query: str) -> tuple[Answers, list[str]]:
         else:
             invalid.add('disk')
 
+    history = defaults.history
+    if 'history' in params:
+        if params['history'] in [item['value'] for item in table['choices']['history']['values']]:
+            history = params['history']
+        else:
+            invalid.add('history')
+
     hosts = defaults.hosts
     if numbers['workers'] >= 2 and 'hosts' in params:
         if params['hosts'] in [item['value'] for item in table['choices']['hosts']['values']]:
@@ -417,7 +435,7 @@ def parse_query(table: dict[str, Any], query: str) -> tuple[Answers, list[str]]:
         else:
             invalid.add('svc')
 
-    answers = Answers(numbers, hosts, services, disk=disk)
+    answers = Answers(numbers, hosts, services, disk=disk, history=history)
     resolution = resolve(table, answers)
     picks: dict[str, str | None] = {}
     for key, allowed in (('reg', resolution.registry_allowed), ('elect', resolution.election_allowed)):
@@ -440,13 +458,13 @@ def parse_query(table: dict[str, Any], query: str) -> tuple[Answers, list[str]]:
             invalid.add('step')
 
     order = query_key_order(table)
-    answers = Answers(numbers, hosts, services, picks['reg'], picks['elect'], step, disk)
+    answers = Answers(numbers, hosts, services, picks['reg'], picks['elect'], step, disk, history)
     return answers, [k for k in order if k in invalid]
 
 
 def query_key_order(table: dict[str, Any]) -> list[str]:
     """The keys of the query, in the order the canonical query writes them."""
-    return ['v', 'step', *table['inputs'], 'disk', 'hosts', 'svc', 'reg', 'elect']
+    return ['v', 'step', *table['inputs'], 'disk', 'history', 'hosts', 'svc', 'reg', 'elect']
 
 
 def canonical_query(table: dict[str, Any], raw_answers: Answers) -> str:
@@ -461,6 +479,8 @@ def canonical_query(table: dict[str, Any], raw_answers: Answers) -> str:
             parts.append(f'{name}={answers.numbers[name]}')
     if answers.disk != defaults.disk:
         parts.append(f'disk={answers.disk}')
+    if answers.history != defaults.history:
+        parts.append(f'history={answers.history}')
     if answers.hosts != defaults.hosts:
         parts.append(f'hosts={answers.hosts}')
     if answers.services:
@@ -482,28 +502,31 @@ def all_combinations(table: dict[str, Any]) -> dict[str, Answers]:
     defaults = default_answers(table)
     service_values = [item['value'] for item in table['choices']['services']['values']]
     disk_values = [item['value'] for item in table['choices']['disk']['values']]
+    history_values = [item['value'] for item in table['choices']['history']['values']]
     combinations: dict[str, Answers] = {}
-    for disk, workers, hosts in itertools.product(disk_values, (1, 2), ('one', 'many')):
+    for disk, history, workers, hosts in itertools.product(disk_values, history_values, (1, 2), ('one', 'many')):
         for size in range(len(service_values) + 1):
             for subset in itertools.combinations(service_values, size):
                 numbers = {**defaults.numbers, 'workers': workers}
-                answers = effective(Answers(numbers, hosts, frozenset(subset), disk=disk))
+                answers = effective(Answers(numbers, hosts, frozenset(subset), disk=disk, history=history))
                 resolution = resolve(table, answers)
                 for reg, elect in itertools.product(resolution.registry_allowed, resolution.election_allowed):
-                    picked = Answers(answers.numbers, answers.hosts, answers.services, reg, elect, disk=disk)
+                    picked = Answers(
+                        answers.numbers, answers.hosts, answers.services, reg, elect, disk=disk, history=history
+                    )
                     combinations.setdefault(combination_id(picked), picked)
     return combinations
 
 
 def combination_id(answers: Answers) -> str:
-    """An id such as ``disk=yes-w2-many-folder+redis-reg=redis-elect=filesystem``."""
+    """An id such as ``disk=yes-history=files-w2-many-folder+redis-reg=redis-elect=filesystem``."""
     if answers.numbers['workers'] == 1:
         head = 'w1'
     elif answers.hosts == 'one':
         head = 'w2-one'
     else:
         head = 'w2-many-' + ('+'.join(sorted(answers.services)) or 'none')
-    return f'disk={answers.disk}-{head}-reg={answers.reg}-elect={answers.elect}'
+    return f'disk={answers.disk}-history={answers.history}-{head}-reg={answers.reg}-elect={answers.elect}'
 
 
 COMBINATIONS = all_combinations(TABLE)
@@ -578,6 +601,7 @@ def test_every_when_value_and_every_need_is_a_known_value():
     known = {
         'workers': {'one', 'many'},
         'disk': {item['value'] for item in TABLE['choices']['disk']['values']},
+        'history': {item['value'] for item in TABLE['choices']['history']['values']},
         'hosts': hosts,
         'services_include': services,
         'services_exclude': services,
@@ -591,6 +615,9 @@ def test_every_when_value_and_every_need_is_a_known_value():
         for name, provider in TABLE['providers'][feature].items():
             assert set(provider['needs']) <= services, name
             assert set(provider['needs']) <= set(TABLE['connections']) | {'folder'}, name
+    for choice in TABLE['choices'].values():
+        for item in choice['values']:
+            assert set(item.get('needs', [])) <= set(TABLE['connections']), item['value']
 
 
 def choice_fragments() -> list[dict[str, Any]]:
@@ -677,7 +704,8 @@ def test_every_combination_prints_a_config_that_loads(answers, tmp_path, clean_e
     }
     for name in resolution.env:
         assert value_at(config, env_paths[name]) == ENV_PLACEHOLDERS[name], name
-    assert config.resolved_persistence == ('none' if answers.disk == 'no' else 'sqlite')
+    expected_mode = 'postgres' if answers.history == 'postgres' else 'none' if answers.disk == 'no' else 'sqlite'
+    assert config.resolved_persistence == expected_mode
     assert config.fleet.registry.provider == answers.reg
     assert config.periodic.election.provider == answers.elect
     summary = config.config_summary()
@@ -785,6 +813,7 @@ def test_there_are_golden_examples_for_the_main_cases():
         'several hosts with none',
         'several hosts without a folder',
         'no local disk',
+        'history in postgres',
     } <= names
 
 
@@ -796,10 +825,15 @@ def test_golden_example_matches_the_computed_fleet_part(example, tmp_path, clean
 
     assert invalid == []
     assert canonical_query(TABLE, answers) == example['query']
-    fleet_keys = {key: value for key, value in loaded.items() if key in resolution.fleet}
-    assert fleet_keys == resolution.fleet
+    for path, value in leaf_paths(resolution.fleet):
+        node = loaded
+        for segment in path.split('.'):
+            node = node[segment]
+        assert node == value, path
+    calculator_sections = {'sources', 'executor', 'ui'}
+    fleet_keys = {key: value for key, value in loaded.items() if key not in calculator_sections}
+    assert fleet_keys == {key: value for key, value in resolution.fleet.items() if key not in calculator_sections}
     assert loaded['sources']['kafka']['enabled'] is True
-    assert set(loaded) - set(resolution.fleet) <= {'sources', 'executor', 'ui'}
     assert serialize_yaml(loaded) == example['yaml']
     assert example['env'] == resolution.env
     for name in resolution.env:
@@ -868,3 +902,70 @@ def test_wizard_golden_disk_no():
     assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'fleet', 'periodic']
     assert loaded['storage'] == {'dir': ''}
     assert loaded['fleet'] == {'registry': {'provider': 'none'}}
+
+
+def test_history_choice_defaults_to_files_with_no_fragment():
+    choice = TABLE['choices']['history']
+    files = next(item for item in choice['values'] if item['value'] == 'files')
+    answers, invalid = parse_query(TABLE, 'v=1')
+    resolution = resolve(TABLE, answers)
+
+    assert choice['label'] == 'Where should the long event history live?'
+    assert choice['default'] == 'files'
+    assert [item['value'] for item in choice['values']] == ['files', 'postgres']
+    assert files.get('fragment', {}) == {}
+    assert invalid == []
+    assert answers.history == 'files'
+    assert 'ui' not in resolution.fleet
+    assert 'connections' not in resolution.fleet
+
+
+def test_history_postgres_prints_the_mode_the_connection_entry_and_the_dsn_env():
+    resolution = resolve(TABLE, parse_query(TABLE, 'v=1&history=postgres')[0])
+    printed = serialize_yaml(document_for(TABLE, resolution))
+
+    assert resolution.fleet['ui'] == {'recorder': {'persistence': 'postgres'}}
+    assert resolution.fleet['connections'] == {'postgres': {'main': {'schema': 'drakkar'}}}
+    assert resolution.env == ['DK_CONNECTIONS__POSTGRES__MAIN__DSN']
+    assert 'dsn' not in printed
+    assert 'postgresql://' not in printed
+
+
+def test_history_postgres_with_the_postgres_providers_merges_the_connection_once():
+    query = 'v=1&workers=3&hosts=many&svc=postgres&history=postgres'
+    resolution = resolve(TABLE, parse_query(TABLE, query)[0])
+
+    assert resolution.registry == 'postgres'
+    assert resolution.fleet['connections'] == {'postgres': {'main': {'schema': 'drakkar'}}}
+    assert resolution.env == ['DK_CONNECTIONS__POSTGRES__MAIN__DSN']
+
+
+HISTORY_POSTGRES_COMBINATIONS = {key: value for key, value in COMBINATIONS.items() if value.history == 'postgres'}
+
+
+@pytest.mark.parametrize(
+    'answers', list(HISTORY_POSTGRES_COMBINATIONS.values()), ids=list(HISTORY_POSTGRES_COMBINATIONS)
+)
+def test_every_answer_with_history_postgres_prints_a_config_that_loads(answers, tmp_path, clean_environment):
+    resolution = resolve(TABLE, answers)
+    clean_environment.setenv(
+        'DK_CONNECTIONS__POSTGRES__MAIN__DSN', ENV_PLACEHOLDERS['DK_CONNECTIONS__POSTGRES__MAIN__DSN']
+    )
+
+    config = write_and_load(tmp_path / 'drakkar.yaml', document_for(TABLE, resolution))
+
+    assert config.resolved_persistence == 'postgres'
+    assert config.ui.recorder.postgres.connection == 'main'
+    assert 'recorder=postgres' in config.config_summary()
+
+
+def test_recorder_postgres_note_links_the_page():
+    with_files = resolve(TABLE, parse_query(TABLE, 'v=1')[0])
+    with_postgres = resolve(TABLE, parse_query(TABLE, 'v=1&history=postgres')[0])
+    without_disk = resolve(TABLE, parse_query(TABLE, 'v=1&disk=no&history=postgres')[0])
+
+    assert 'recorder_postgres' not in [note['id'] for note in with_files.notes]
+    note = next(note for note in with_postgres.notes if note['id'] == 'recorder_postgres')
+    assert note['docs'].partition('#')[0] == 'recorder-postgres.md'
+    assert note.get('fragment', {}) == {}
+    assert 'recorder_memory_only' not in [note['id'] for note in without_disk.notes]

@@ -121,13 +121,14 @@ class UIRecorderConfig(BaseModel):
     With ``persistence: sqlite`` the recorder also writes SQLite files into
     ``storage.dir``; with ``none`` it keeps recent events in memory only and
     writes no file; with ``postgres`` it also writes the events to a table in
-    Postgres (``postgres.*``). Never derived: ``postgres`` is always explicit. Unset, the mode follows ``storage.dir`` (a folder means
+    Postgres (``postgres.*``). ``postgres`` is never derived: it is always
+    explicit. Unset, the mode follows ``storage.dir`` (a folder means
     ``sqlite``, an empty ``storage.dir`` means ``none``).
 
     Granular flags of what the recorder keeps:
     - ``store_events``: write processing events to the ``events`` table of
-      the memory store and, with ``sqlite``, of the file. Off, there is no
-      memory store.
+      the memory store and, with ``sqlite``, of the file (with ``postgres``,
+      the table gets the same rows). Off, there is no memory store.
     - ``store_config``: write worker config to ``worker_config`` (names the
       worker and cluster inside each file, for history and merges), in the
       memory store and, with ``sqlite``, in the file.
@@ -164,7 +165,8 @@ class UIRecorderConfig(BaseModel):
         default=True,
         description=(
             'Periodically snapshot worker counters (uptime, partitions, pool utilization, '
-            'queue depth) to the worker_state table. Used only with sqlite; with none the key loads and is ignored.'
+            'queue depth) to the worker_state table. Used only with sqlite; with none and postgres the key loads '
+            'and is ignored.'
         ),
     )
     state_sync_interval_seconds: int = Field(
@@ -178,7 +180,8 @@ class UIRecorderConfig(BaseModel):
         default=1,
         ge=1,
         description=(
-            'How often to roll over to a new SQLite file. Used only with sqlite; with none the key loads and is ignored.'
+            'How often to roll over to a new SQLite file. Used only with sqlite; with none and postgres the key '
+            'loads and is ignored.'
         ),
     )
     store_output: bool = Field(
@@ -234,8 +237,8 @@ class UIRecorderConfig(BaseModel):
         ge=1,
         description=(
             'Consecutive failed flush attempts tolerated per batch before it is dropped '
-            '(counted in drakkar_recorder_flush_batches_dropped_total). Used only with sqlite; with none the key loads '
-            'and is ignored.'
+            '(counted in drakkar_recorder_flush_batches_dropped_total). Used only with sqlite; with none and postgres '
+            'the key loads and is ignored.'
         ),
     )
     event_min_duration_ms: int = Field(

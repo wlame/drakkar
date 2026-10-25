@@ -171,6 +171,9 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_memory_oldest_age_seconds` | Gauge | -- | Age in seconds of the oldest event in the recorder memory store, 0 when it is empty. Shows how much time the store really covers when the row cap or the budget binds first. |
 | `drakkar_recorder_memory_evicted_rows_total` | Counter | `reason` | Rows removed from the recorder memory store, by reason: `window`, `rows`, `bytes`, `gap`. |
 | `drakkar_recorder_memory_write_failures_total` | Counter | -- | Event chunks that could not be written to the recorder memory store. Final errors only; a busy or locked store is retried and logs `recorder_memory_write_retry`. |
+| `drakkar_recorder_postgres_queue_rows` | Gauge | -- | Rows waiting to be written to the recorder Postgres table: the Postgres queue plus the chunk that stage P holds. Only with `persistence: postgres`. See [Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down). |
+| `drakkar_recorder_postgres_rows_written_total` | Counter | -- | Rows written to the recorder Postgres table. With the table size, it gives the real write volume. |
+| `drakkar_recorder_postgres_dropped_rows_total` | Counter | `reason` | Rows that never reached the recorder Postgres table, by reason: `queue_full` (the Postgres queue passed a bound), `rejected` (a chunk failed twice with a final error), `no_partition` (the same, and the last error was `23514`), `shutdown` (left over at stop). Any non-zero rate is a gap in the Postgres history. |
 | `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
 | `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in its history folder (`<shared.dir>/history/<cluster>/`), refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `history.archive.retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
 | `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in its history folder. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
@@ -180,7 +183,7 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
-The memory store logs `recorder_memory_write_retry`, `recorder_memory_write_failed`, `recorder_memory_eviction_failed` (with `rollback_error` when the rollback failed too), `recorder_memory_rollback_failed` and `recorder_memory_config_write_failed`, and a UI read stopped by the 2 second memory read limit logs `ui_read_memory_timed_out` (category `debug`). Each appears at most once per 60 seconds. See [Recent Events in Memory](recent-events.md#log-events). `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed` carry `stage` (`memory` or `file`); see [Buffer Mechanics](#buffer-mechanics).
+The memory store logs `recorder_memory_write_retry`, `recorder_memory_write_failed`, `recorder_memory_eviction_failed` (with `rollback_error` when the rollback failed too), `recorder_memory_rollback_failed` and `recorder_memory_config_write_failed`, and a UI read stopped by the 2 second memory read limit logs `ui_read_memory_timed_out` (category `debug`). Each appears at most once per 60 seconds. See [Recent Events in Memory](recent-events.md#log-events). `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed` carry `stage` (`memory`, `file` or `postgres`); see [Buffer Mechanics](#buffer-mechanics). The log events of `persistence: postgres` are in [Recorder history in Postgres](#recorder-history-in-postgres).
 
 #### Cache
 
@@ -222,11 +225,11 @@ hits its deadline.
 
 #### Fleet registry and provider operations
 
-Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [`persistence: postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_provider_calls_total` | Counter | `feature` (`registry`, `election`), `provider`, `op`, `outcome` | Provider operations by outcome: `ok`, `error`, `timeout`, `skipped_open` (the breaker was open, nothing was called) or `not_started` (the provider has not started). A retried operation counts once, with the outcome of its last attempt. |
+| `drakkar_provider_calls_total` | Counter | `feature` (`registry`, `election`, `recorder`), `provider`, `op`, `outcome` | Provider operations by outcome: `ok`, `error`, `timeout`, `skipped_open` (the breaker was open, nothing was called) or `not_started` (the provider has not started). A retried operation counts once, with the outcome of its last attempt. |
 | `drakkar_provider_call_duration_seconds` | Histogram | `feature`, `provider`, `op` | Duration of one operation with its retries and the waits between them. Skipped and not started operations have no sample. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30. |
 | `drakkar_provider_breaker_open` | Gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open. A breaker that stays open means the provider is down; the operations are skipped and the log carries `provider_breaker_opened`. Alert on it. |
 | `drakkar_fleet_registry_errors_total` | Counter | `op` | Registry operations that failed or timed out, and loop iterations that raised. An operation counts once, retries included, and an operation with no attempt (open breaker, not started) does not count. `op` is `start`, `publish`, `list`, `withdraw` or `stop`. |
@@ -1009,12 +1012,39 @@ only. With `store_events: false` there is no memory store and no loop, so
 events are streamed to the live WebSocket view and not buffered at all: the
 buffer gauge stays at 0 and the drop counter never moves.
 
-A loop iteration that raises logs `recorder_flush_loop_iteration_failed`
-with `stage` `memory` or `file`, and the loop goes on.
+With `persistence: postgres` there is no stage F either. Stage M hands every
+row it wrote to the Postgres queue, and stage P writes that queue to the
+table on a thread of its own (see
+[Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down)).
 
-On shutdown, stage M and then stage F run one final time before the
-database closes. A failure there logs `recorder_final_flush_failed` with
-`stage` `memory` or `file`. The memory store closes last.
+A loop iteration that raises logs `recorder_flush_loop_iteration_failed`
+with `stage` `memory`, `file` or `postgres`, and the loop goes on.
+
+On shutdown, stage M and then stage F (or the final stage P) run one final
+time before the database closes. A failure there logs
+`recorder_final_flush_failed` with `stage` `memory`, `file` or `postgres`.
+The memory store closes last.
+
+### Recorder history in Postgres
+
+With `persistence: postgres` the recorder also writes these log events
+(category `recorder` unless named). The metrics are in the
+[Recorder](#recorder) table above. See
+[Recorder History in Postgres](recorder-postgres.md) for the mode.
+
+| Event | Level | Fields | When |
+|---|---|---|---|
+| `recorder_postgres_rows_dropped` | warning | `reason` (`queue_full`, `rejected`, `no_partition`, `shutdown`), `rows`, `error` (empty for `queue_full` and `shutdown`), `suppressed` | Rows were dropped. At most one line per 60 seconds per reason; the rows of the lines left out are added to the next one. |
+| `recorder_postgres_copy_rejected` | warning | `sqlstate`, `error`, `rows`, `final_failures`, `suppressed` | A COPY failed with a final error. The chunk stays for one more try, and is dropped at its second final error. At most one line per 60 seconds. |
+| `recorder_postgres_partitions_changed` | info | `table` (schema-qualified), `created`, `dropped` (sorted partition names) | An upkeep created or dropped partitions. |
+| `recorder_postgres_retention_mismatch` | warning | `table`, `stored_retention_hours` (a number, or `null` when the table has no valid comment), `configured_retention_hours` | The table comment differs from `retention_hours`, or there is none. Once per process, at the first upkeep in which this worker holds the try-lock. |
+| `ui_read_postgres_failed` (category `debug`) | warning | `endpoint`, `reason`, `error`, `suppressed` | A history search failed. `reason` is `timeout` (the time limit passed), `error` (the connection or the statement failed), `busy` (two searches were already running; the search did not start) or `close` (the search completed and answered its rows, but the connection did not close cleanly). Every reason but `close` answers 503. At most one line per 60 seconds. |
+
+The recorder calls also log the provider events with `feature=recorder` and
+`category=recorder`: `provider_started` (stage P started), `provider_call_failed`,
+`provider_breaker_opened` and `provider_breaker_closed`. `recorder_started`
+carries `postgres_connection`, `postgres_table` (schema-qualified) and
+`ignored_keys`.
 
 ### Merging Databases
 
@@ -1249,6 +1279,11 @@ What each mode searches:
   `ui.trace.history_max_files` files (default 256) or
   `ui.trace.history_max_seconds` (default 10). Sealed files never change,
   so the search opens them with `immutable=1` and takes no locks.
+- **By partition:offset with `history=1` on a `persistence: postgres`
+  worker**: the rows of the worker's own cluster in the Postgres table of
+  its prefix, never the history folder. The answer is complete or a 503
+  `{"detail": "history search failed"}`; see
+  [Recorder History in Postgres](recorder-postgres.md#the-history-search).
 - **By label**: the current worker's live database only.
 
 No worker opens another worker's live database. Events of other workers

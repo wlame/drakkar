@@ -404,6 +404,35 @@ This keeps the recorder and UI useful (slow tasks, failures, and sink
 deliveries are still recorded) while eliminating per-task overhead for
 the fast majority.
 
+### Recorder history in Postgres
+
+With `ui.recorder.persistence: postgres`, stage P writes every row of the
+memory store to a table in Postgres. It runs on a thread of its own with one
+connection, so the main loop pays only for handing a chunk to the Postgres
+queue; a slow or absent database never stalls the pipeline, and only the
+bounds of that queue drop rows.
+
+The cost moves to the database. A busy worker at about 5000 rows per second
+writes about 2.5 MB per second, 9 GB per hour and 54 GB at the default
+retention of 6 hours, and the write-ahead log about doubles the disk writes.
+See [Write volume](recorder-postgres.md#write-volume) for the table.
+
+Two kinds of settings cut that volume:
+
+- The recorder filters `event_min_duration_ms` and `output_min_duration_ms`
+  act before the memory store. They cut every mode, and they also shorten
+  the live view and the memory store.
+- `ui.recorder.postgres.store_output: false` (the default) writes `stdout`
+  and `stderr` as `NULL` in Postgres only; the memory store keeps them.
+  With `true`, rows with output can be many KB each.
+
+Put a busy cluster on its own `table_prefix` with a short
+`retention_hours`, or keep it on `sqlite`. Watch
+`drakkar_recorder_postgres_rows_written_total`,
+`drakkar_recorder_postgres_queue_rows` and
+`drakkar_recorder_postgres_dropped_rows_total{reason="queue_full"}`: a queue
+that stays near `ui.recorder.max_buffer` means the database does not keep up.
+
 ---
 
 ## Bottleneck: Slot Bookkeeping

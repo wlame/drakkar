@@ -41,6 +41,12 @@
     {"name": "disk written before hosts", "query": "hosts=many&workers=3&disk=no", "canonical": "v=1&workers=3&disk=no&hosts=many", "invalid": []},
     {"name": "disk step kept", "query": "step=disk", "canonical": "v=1&step=disk", "invalid": []},
     {"name": "no registry choice without a disk on one host", "query": "disk=no&workers=3&reg=filesystem", "canonical": "v=1&workers=3&disk=no", "invalid": []},
+    {"name": "history in postgres kept", "query": "history=postgres", "canonical": "v=1&history=postgres", "invalid": []},
+    {"name": "default history dropped", "query": "history=files&cpu=4", "canonical": "v=1&cpu=4", "invalid": []},
+    {"name": "unknown history value", "query": "history=sqlite", "canonical": "v=1", "invalid": ["history"]},
+    {"name": "history written after disk and before hosts", "query": "hosts=many&history=postgres&workers=3&disk=no", "canonical": "v=1&workers=3&disk=no&history=postgres&hosts=many", "invalid": []},
+    {"name": "history kept with the postgres providers", "query": "workers=3&hosts=many&svc=postgres&history=postgres", "canonical": "v=1&workers=3&history=postgres&hosts=many&svc=postgres", "invalid": []},
+    {"name": "history step kept", "query": "step=history", "canonical": "v=1&step=history", "invalid": []},
     {"name": "step kept", "query": "step=result", "canonical": "v=1&step=result", "invalid": []},
     {"name": "default step dropped", "query": "step=workload&cpu=4", "canonical": "v=1&cpu=4", "invalid": []},
     {"name": "unknown step", "query": "step=moon", "canonical": "v=1", "invalid": ["step"]},
@@ -48,6 +54,7 @@
     {"name": "skipped choose step", "query": "step=choose&workers=3&hosts=many&svc=folder", "canonical": "v=1&step=result&workers=3&hosts=many&svc=folder", "invalid": []},
     {"name": "skipped services step on one host", "query": "step=services&workers=2", "canonical": "v=1&step=result&workers=2", "invalid": []},
     {"name": "shown services step", "query": "step=services&workers=3&hosts=many", "canonical": "v=1&step=services&workers=3&hosts=many", "invalid": []},
-    {"name": "invalid keys named in key order", "query": "svc=x&cpu=0&workers=3&hosts=many&step=moon", "canonical": "v=1&workers=3&hosts=many", "invalid": ["step", "cpu", "svc"]}
+    {"name": "invalid keys named in key order", "query": "svc=x&cpu=0&workers=3&hosts=many&step=moon", "canonical": "v=1&workers=3&hosts=many", "invalid": ["step", "cpu", "svc"]},
+    {"name": "invalid history named after disk", "query": "history=x&disk=x&hosts=x&workers=3", "canonical": "v=1&workers=3", "invalid": ["disk", "history", "hosts"]}
   ]
 }

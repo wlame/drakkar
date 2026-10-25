@@ -91,6 +91,9 @@ What to check:
   that finds a table missing fails the provider's start with a message that
   names this command and tries again at the next heartbeat (registry) or the
   next slot of a cluster task (election).
+  For the recorder table of `persistence: postgres`, add `--recorder` and,
+  as needed, `--table-prefix=<p>` and `--retention-hours=<n>`; see
+  [A worker with no disk and a central history](#a-worker-with-no-disk-and-a-central-history).
 - During a database outage the pipeline keeps running. The workers list
   keeps its last snapshot, cluster task slots are skipped as
   `election_failed`, an archive pass stops without publishing, and both
@@ -330,6 +333,56 @@ Points to check:
   it runs, because there is no folder for a temporary file.
 - `ui.recorder.persistence: sqlite` with an empty `storage.dir` fails the
   load.
+
+### A worker with no disk and a central history
+
+A worker with no writable disk can still keep a long history: set
+`ui.recorder.persistence: postgres`. Every worker then writes its events to
+one table in Postgres, and the trace with history reads the rows of its
+cluster from there. No `storage.dir` and no `shared.dir` are needed.
+
+```yaml
+storage:
+  dir: ''
+connections:
+  postgres:
+    main:
+      schema: drakkar                # DSN from DK_CONNECTIONS__POSTGRES__MAIN__DSN
+ui:
+  recorder:
+    persistence: postgres
+    postgres:
+      connection: main
+      retention_hours: 6
+fleet:
+  registry:
+    provider: postgres
+    connection: main
+periodic:
+  election:
+    provider: postgres
+    connection: main
+```
+
+Points to check:
+
+- Size the database first: one busy worker writes about 9 GB per hour, 54 GB
+  at the default 6 hours. See [Write volume](recorder-postgres.md#write-volume).
+- The role of the connection must own the events table. With an
+  operator-managed schema, run once as a role with the DDL rights, then give
+  the table to the worker role:
+
+  ```bash
+  drakkar-schema postgres --schema=drakkar --recorder --retention-hours=6 | psql "$ADMIN_DSN"
+  psql "$ADMIN_DSN" -c 'ALTER TABLE drakkar.recorder_events OWNER TO drakkar_worker'
+  ```
+
+- A worker uses up to 7 server connections with the defaults (1 for the
+  recorder writes, up to 2 history searches, the shared pool of 1 to 4).
+  Size `max_connections` for every worker.
+- While Postgres is down, the pipeline keeps running; rows wait in a bounded
+  queue, and only that bound drops rows. See
+  [While Postgres is down](recorder-postgres.md#while-postgres-is-down).
 
 ## Kubernetes probes
 

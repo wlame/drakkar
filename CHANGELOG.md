@@ -99,13 +99,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, one attempt, JIT off, and the time limit
   `ui.trace.history_max_seconds` on the client and on the server. A failed
   or timed-out search answers 503 `{"detail": "history search failed"}` and
-  logs `ui_read_postgres_failed` (at most once per minute). At most two
-  history searches run at once on one worker; a third answers the same 503
-  and logs `reason=busy`.
+  logs `ui_read_postgres_failed` (at most once per minute; `reason` is
+  `timeout`, `error` or `busy`). The answer is API contract v1.26. The
+  server time limit is at most 3600 s. At most two history searches run at
+  once on one worker; a third answers the same 503 and logs `reason=busy`.
+  A complete search whose connection does not close cleanly still answers
+  its rows and logs `reason=close`.
   New metrics:
   `drakkar_recorder_postgres_queue_rows`,
   `drakkar_recorder_postgres_rows_written_total` and
-  `drakkar_recorder_postgres_dropped_rows_total`.
+  `drakkar_recorder_postgres_dropped_rows_total`. The recorder calls use the
+  provider metrics and the `provider_*` log events with `feature=recorder`
+  and the operations `start`, `copy` and `partitions`.
+  `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
+  have the new `stage` value `postgres`. The new docs page
+  `recorder-postgres.md` describes the mode, and the config wizard has the
+  new question "Where should the long event history live?" (`files` or
+  `postgres`).
 - **Recorder memory store and the persistence choice.** When
   `ui.recorder.store_events` is on, the recorder keeps its recent events in
   an in-memory SQLite database, the memory store. New keys:

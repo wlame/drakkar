@@ -259,6 +259,24 @@ error (a wrong feature name, a missing or invalid `--schema`) exits with
 code 2, writes the reason and the usage to stderr and nothing to stdout.
 `drakkar-schema --help` prints the usage and exits with 0.
 
+Three more flags print the recorder events table of
+[`persistence: postgres`](recorder-postgres.md) after the provider
+statements, separated by one empty line:
+
+```bash
+drakkar-schema postgres --schema=drakkar --recorder --table-prefix=heavy --retention-hours=24 | psql "$ADMIN_DSN"
+```
+
+`--recorder` adds the table, its comment `retention_hours=<n>` and its three
+indexes. `--table-prefix=<p>` names the table `<p>_recorder_events`
+(default: `recorder_events`). `--retention-hours=<n>` sets the comment, 1 to
+168, default 6. The prefix and the retention flags need `--recorder`; a
+value that breaks its rule, a flag without `--recorder`, or
+`--recorder=<value>` is a usage error with exit code 2. The role of the
+worker must own the recorder table, because the worker creates and drops its
+partitions (see
+[Schema management and ownership](recorder-postgres.md#schema-management-and-ownership)).
+
 **The database role.**
 
 - With `manage_schema: true`, the worker runs the DDL at every first start,
@@ -781,8 +799,12 @@ Every row also has `cluster_tasks_hash` and `cluster_tasks_match`, which
 compare the worker's cluster periodic task definitions with this worker's
 (see [Definition hash](periodic-tasks.md#definition-hash)). The archive
 runs only on workers with `ui.recorder.persistence: sqlite`, so a cluster
-that mixes `none` and `sqlite` workers shows `cluster_tasks_match: false`.
-Give every worker of a cluster the same persistence.
+that mixes `none` or `postgres` workers with `sqlite` workers shows
+`cluster_tasks_match: false`. A cluster that mixes `none` and `postgres`
+workers shows no mismatch (neither runs a cluster task for the recorder), but
+its history is split: the trace with history on a `postgres` worker reads the
+Postgres table, on a `none` worker the sealed files. Give every worker of a
+cluster the same persistence.
 
 ## Connections {#connections}
 
