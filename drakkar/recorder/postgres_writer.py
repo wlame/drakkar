@@ -66,8 +66,14 @@ DROP_REASON_REJECTED = 'rejected'
 DROP_REASON_NO_PARTITION = 'no_partition'
 DROP_REASON_SHUTDOWN = 'shutdown'
 COPY_REJECTED_LOG_KEY = 'copy_rejected'
-# How long the thread's loop gets to finish the coroutines it cancels when it ends.
-LOOP_DRAIN_SECONDS = 1.0
+# How long the thread's loop gets to finish the coroutines it cancels when it
+# ends. Shorter than the least wait of a stop for the thread, so a thread that
+# only drains is never reported as one that did not end.
+LOOP_DRAIN_SECONDS = 0.05
+# What the client raises for a record value it cannot encode for its column:
+# a wrong type, a number out of range, or its data error (a ``ValueError``).
+# A broken connection is not one of them; it stays a transient error.
+CLIENT_ENCODE_ERRORS: tuple[type[Exception], ...] = (ValueError, TypeError, OverflowError)
 
 OpenPool = Callable[[PostgresConnectionConfig], Awaitable[Any]]
 CopyAnswer = tuple['CopyOutcome', str | None, str]
@@ -131,6 +137,18 @@ class PostgresLoopThread:
         on the thread.
         """
         return await asyncio.wait_for(asyncio.wrap_future(self.submit(factory)), timeout)
+
+    async def wait(self, factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float | None) -> Any:
+        """Run ``factory()`` on the thread and wait at most ``timeout`` seconds; the coroutine is never cancelled.
+
+        After a timeout the coroutine goes on to its end on the thread, for
+        work that must still count what it does, such as the final stage.
+        """
+        future = asyncio.wrap_future(self.submit(factory))
+        done, _ = await asyncio.wait({future}, timeout=timeout)
+        if not done:
+            raise TimeoutError
+        return future.result()
 
     async def stop(self, timeout: float) -> bool:
         """Stop the loop and wait at most ``timeout`` seconds for the thread; False when it did not end."""
@@ -295,6 +313,9 @@ class PostgresWriter:
         The error is caught outside the transaction block, after its rollback.
         A transient error leaves the block as ``TransientError`` and is not
         caught, so the caller retries it; a final one is no breaker failure.
+        A value the client cannot encode for its column (the client encodes
+        every record before it sends it) is a final error too, with no
+        SQLSTATE: the same records would fail the same way on every retry.
         """
         settings = self._settings
         try:
@@ -314,6 +335,8 @@ class PostgresWriter:
                 # An earlier attempt of this same record set landed and its answer was lost.
                 return CopyOutcome.ALREADY_WRITTEN, sqlstate, ''
             return CopyOutcome.REJECTED, sqlstate, describe_error(exc)
+        except CLIENT_ENCODE_ERRORS as exc:
+            return CopyOutcome.REJECTED, None, describe_error(exc)
         return CopyOutcome.WRITTEN, None, ''
 
     async def _reject(self, slot: PendingChunk, sqlstate: str | None, error: str) -> None:

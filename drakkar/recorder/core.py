@@ -171,12 +171,11 @@ _HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
 
 # The name of the thread whose event loop runs stage P with ``postgres``.
 POSTGRES_THREAD_NAME = 'drakkar-recorder-postgres'
-# The least time the stop gives the stage P thread to answer each step, even
-# with the shutdown time spent: the final stage then makes no COPY attempt,
-# but it still counts and logs the rows it drops.
+# The part of the reserve a stop gives the stage P thread to answer each step
+# after its COPYs used the time left minus the reserve.
 POSTGRES_STOP_ANSWER_SECONDS = 0.1
-# The bound of the wait for the stage P thread to end when the stop has no deadline.
-POSTGRES_THREAD_STOP_SECONDS = 5.0
+# The bound of the pool close and of the thread join when the stop has no deadline.
+POSTGRES_STOP_STEP_SECONDS = 5.0
 
 # The ``detail`` of ``recorder_archive_pass_abandoned``; the text is part of the log contract.
 ARCHIVE_PASS_ABANDONED_DETAIL = 'the pass is fenced at its next check and its lease expires on its own'
@@ -1321,43 +1320,49 @@ class EventRecorder(EventWriter):
         await logger.ainfo('recorder_stopped', category='recorder')
 
     async def _stop_postgres_stage(self, deadline: float | None, reserve_seconds: float) -> None:
-        """The final stage P, the write pool close and the thread stop, all within the shutdown time left.
+        """The final stage P, the write pool close and the thread stop, within the shutdown time left.
 
-        Each COPY of the final stage gets the time left minus
-        ``reserve_seconds`` and the answer time; each wait for the thread
-        gets the whole time left, but at least
-        ``POSTGRES_STOP_ANSWER_SECONDS``, so a thread that does not answer
-        never holds the stop. Each step is best-effort: a failure is logged
-        and the next step runs.
+        The COPYs of the final stage get the time left minus
+        ``reserve_seconds``. Each wait for the thread gets the same, plus at
+        most ``POSTGRES_STOP_ANSWER_SECONDS`` of the reserve for the thread
+        to answer, and never more than the time left; without a deadline the
+        close and the join wait at most ``POSTGRES_STOP_STEP_SECONDS``. The
+        final stage is never cancelled: after its wait it still counts and
+        logs the rows it drops on the thread. Each step is best-effort: a
+        failure is logged and the next step runs.
         """
-
-        def answer_seconds(no_deadline: float | None) -> float | None:
-            left = _time_left(deadline)
-            return no_deadline if left is None else max(left, POSTGRES_STOP_ANSWER_SECONDS)
-
         thread, writer = self._pg_thread, self._pg_writer
         if thread is None or writer is None:
             return
         self._pg_thread = self._pg_writer = None
-        left = _time_left(deadline)
-        # The thread answers after the last COPY attempt ends, so the attempts
-        # leave it the answer time inside the time left.
-        copy_seconds = None if left is None else max(left - reserve_seconds - POSTGRES_STOP_ANSWER_SECONDS, 0.0)
-        steps: tuple[Callable[[], Coroutine[Any, Any, None]], ...] = (lambda: writer.final(copy_seconds), writer.close)
-        for factory in steps:
-            try:
-                await thread.run(factory, answer_seconds(None))
-            except Exception as exc:
-                await logger.awarning(
-                    'recorder_final_flush_failed', category='recorder', stage='postgres', error=describe_error(exc)
-                )
-        if not await thread.stop(answer_seconds(POSTGRES_THREAD_STOP_SECONDS) or POSTGRES_THREAD_STOP_SECONDS):
-            await logger.awarning(
-                'recorder_final_flush_failed',
-                category='recorder',
-                stage='postgres',
-                error='the stage P thread did not end in the shutdown time left',
-            )
+
+        def available() -> float | None:
+            left = _time_left(deadline)
+            return None if left is None else max(left - reserve_seconds, 0.0)
+
+        def wait_seconds() -> float | None:
+            left, usable = _time_left(deadline), available()
+            return None if left is None or usable is None else min(left, usable + POSTGRES_STOP_ANSWER_SECONDS)
+
+        def step_seconds() -> float:
+            bound = wait_seconds()
+            return POSTGRES_STOP_STEP_SECONDS if bound is None else bound
+
+        copy_seconds = available()
+        try:
+            await thread.wait(lambda: writer.final(copy_seconds), wait_seconds())
+        except Exception as exc:
+            await self._log_postgres_stop_failure(describe_error(exc))
+        try:
+            await thread.run(writer.close, step_seconds())
+        except Exception as exc:
+            await self._log_postgres_stop_failure(describe_error(exc))
+        if not await thread.stop(step_seconds()):
+            await self._log_postgres_stop_failure('the stage P thread did not end in the shutdown time left')
+
+    @staticmethod
+    async def _log_postgres_stop_failure(error: str) -> None:
+        await logger.awarning('recorder_final_flush_failed', category='recorder', stage='postgres', error=error)
 
     async def _final_file_stage(self) -> None:
         """The last stage F, the state sync and the reader close at stop; ``_flush_lock`` is held by the caller.

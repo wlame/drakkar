@@ -30,6 +30,7 @@ from drakkar.providers.postgres import (
 )
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import EventRecorder
+from drakkar.recorder import core as core_mod
 from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings
 from drakkar.recorder.postgres_writer import CopyOutcome, PostgresLoopThread, PostgresWriter
@@ -42,6 +43,8 @@ CLUSTER = 'c'
 INSTANCE = 'inst-1'
 DSN = 'postgresql://drakkar:secret@db:5432/drakkar'
 BATCH_ROWS = 100
+# What a stop may take beyond the time left minus its reserve: the thread's answer and the joins.
+STOP_MARGIN_SECONDS = 0.25
 DROP_REASONS = ('queue_full', 'rejected', 'no_partition', 'shutdown')
 
 
@@ -269,20 +272,26 @@ async def test_retried_chunk_is_the_same_record_set_after_the_queue_head_changed
     assert fake.copied_ids() == [1, 2, 3, 4, 5, 6]
 
 
-@pytest.mark.parametrize('failure', ['transient', 'skipped_open', 'not_started'])
+@pytest.mark.parametrize('failure', ['transient_after_retries', 'connection_lost', 'skipped_open', 'not_started'])
 async def test_kept_chunk_is_never_dropped_or_counted(failure):
     fake = RecorderFakePostgres()
-    writer = _writer(fake, resilience=_resilience(retries=0, breaker={'failure_threshold': 1}))
+    retries = 1 if failure == 'transient_after_retries' else 0
+    writer = _writer(fake, resilience=_resilience(retries=retries, breaker={'failure_threshold': 1}))
     writer._queue.append(_pairs(1, 4))
     if failure == 'not_started':
         fake.open_error = OSError('connection refused')
+    elif failure == 'transient_after_retries':
+        # An OS error is transient for the caller: one attempt and one retry, both failing.
+        fake.fail_copies(OSError('connection reset'), OSError('connection reset'))
     else:
+        # A Postgres connection error (SQLSTATE 08003) leaves the pool helpers as a transient error.
         fake.fail_copies(asyncpg.exceptions.ConnectionDoesNotExistError('connection lost'))
     if failure == 'skipped_open':
         await writer.run_once()
     written_before = _counter(recorder_postgres_rows_written)
     dropped_before = _dropped()
     copies_before = len(fake.copy_calls())
+    errors_before = _calls('copy', 'error')
 
     await writer.run_once()
 
@@ -292,11 +301,40 @@ async def test_kept_chunk_is_never_dropped_or_counted(failure):
         assert writer._slot is None
         assert len(writer._queue) == 4
         assert fake.copy_calls() == []
-    else:
-        assert [pair[0] for pair in writer._slot.pairs] == [1, 2, 3, 4]
-        assert writer._slot.final_failures == 0
-    if failure == 'skipped_open':
-        assert len(fake.copy_calls()) == copies_before
+        return
+    assert [pair[0] for pair in writer._slot.pairs] == [1, 2, 3, 4]
+    assert writer._slot.final_failures == 0
+    expected_attempts = {'transient_after_retries': 2, 'connection_lost': 1, 'skipped_open': 0}[failure]
+    assert len(fake.copy_calls()) - copies_before == expected_attempts
+    assert _calls('copy', 'error') == errors_before + (0 if failure == 'skipped_open' else 1)
+
+
+async def test_a_value_the_client_cannot_encode_is_a_final_error_and_drops_with_rejected():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake)
+    writer._queue.append(_pairs(1, 2))
+    # What the client raises while it encodes an int above 2**31 - 1 for an integer column: its own
+    # data error (an interface error and a ValueError, not the server's SQLSTATE class 22), then an overflow.
+    fake.fail_copies(
+        asyncpg.exceptions._base.DataError(
+            'invalid input for query argument $5: 4294967296 (value out of int32 range)'
+        ),
+        OverflowError('int too big to convert'),
+    )
+    dropped_before = _dropped()
+    errors_before = _calls('copy', 'error')
+
+    with capture_logs() as captured:
+        await writer.run_once()
+    assert writer._slot.final_failures == 1
+    await writer.run_once()
+
+    rejected = _logs(captured, 'recorder_postgres_copy_rejected')
+    assert [(line['sqlstate'], line['final_failures'], line['rows']) for line in rejected] == [(None, 1, 2)]
+    assert _dropped()['rejected'] == dropped_before['rejected'] + 2
+    assert _calls('copy', 'error') == errors_before
+    assert not writer._caller.breaker_open
+    assert writer._slot is None
 
 
 async def test_two_final_errors_drop_with_rejected_and_log():
@@ -553,10 +591,46 @@ async def test_stop_while_a_copy_attempt_hangs_returns_within_the_time_left():
     await rec.stop(timeout=1.0, reserve_seconds=0.5)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 1.5
+    # The COPY gets the time left minus the reserve; the stop keeps the rest of the reserve.
+    assert elapsed < 0.5 + STOP_MARGIN_SECONDS
     assert fake.calls.count(('terminate',)) == 2
     assert _dropped()['shutdown'] == dropped_before['shutdown'] + 4
     assert not stage_p_thread.is_alive()
+
+
+async def test_stop_while_the_pool_close_hangs_returns_within_the_time_left():
+    fake = RecorderFakePostgres()
+    rec = _recorder(fake)
+    await rec.start()
+    await _start_stage_p(rec)
+    fake.hang_close = True
+    _record(rec, 3)
+
+    started = time.monotonic()
+    with capture_logs() as captured:
+        await rec.stop(timeout=1.0, reserve_seconds=0.5)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5 + STOP_MARGIN_SECONDS
+    assert fake.copied_ids() == [1, 2, 3]
+    assert fake.calls[-1] == ('pool_terminate',)
+    lines = _logs(captured, 'recorder_final_flush_failed')
+    assert [(line['stage'], line['error']) for line in lines] == [('postgres', 'timed out')]
+
+
+async def test_stop_without_a_deadline_bounds_a_hanging_pool_close(monkeypatch):
+    fake = RecorderFakePostgres()
+    rec = _recorder(fake)
+    monkeypatch.setattr(core_mod, 'POSTGRES_STOP_STEP_SECONDS', 0.2)
+    await rec.start()
+    await _start_stage_p(rec)
+    fake.hang_close = True
+
+    started = time.monotonic()
+    await rec.stop()
+
+    assert time.monotonic() - started < 0.2 + STOP_MARGIN_SECONDS
+    assert fake.calls[-1] == ('pool_terminate',)
 
 
 async def test_stop_runs_no_upkeep_and_closes_the_pool_last():

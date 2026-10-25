@@ -9,8 +9,9 @@ sent and in which order. A COPY lands in ``copied`` only when its transaction
 commits.
 
 A test makes the next COPYs fail with ``fail_copies`` (one error per COPY,
-in order), makes every COPY hang with ``hang_copies``, and makes the pool
-open fail with ``open_error``. The fake is driven from the stage P thread's
+in order; an error the client raises while it encodes a record is raised the
+same way), makes every COPY hang with ``hang_copies``, makes the pool close
+hang with ``hang_close``, and makes the pool open fail with ``open_error``. The fake is driven from the stage P thread's
 loop and read from the test's loop; each access is one plain list or
 attribute operation.
 """
@@ -37,6 +38,7 @@ class RecorderFakePostgres:
         self.open_error: BaseException | None = None
         self.copy_failures: list[BaseException] = []
         self.hang = False
+        self.hang_close = False
         self.copies_started = 0
 
     async def open_pool(self, settings: PostgresConnectionConfig) -> 'FakePool':
@@ -75,6 +77,8 @@ class FakePool:
 
     async def close(self) -> None:
         self._server.calls.append(('close',))
+        if self._server.hang_close:
+            await asyncio.sleep(HANG_SECONDS)
 
     def terminate(self) -> None:
         self._server.calls.append(('pool_terminate',))
