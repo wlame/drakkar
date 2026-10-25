@@ -36,6 +36,8 @@ MAX_SEARCH_SECONDS = 3600.0
 
 HistoryFailureReason = Literal['timeout', 'error']
 Connect = Callable[..., Awaitable[Any]]
+# Told the error text of a close that failed after a complete search.
+CloseFailed = Callable[[str], Awaitable[None]]
 
 
 class PostgresHistoryError(Exception):
@@ -73,6 +75,7 @@ async def search_postgres_history(
     offset: int,
     *,
     max_seconds: float,
+    on_close_failed: CloseFailed,
     connect: Connect | None = None,
 ) -> list[dict]:
     """Trace ``(partition, offset)`` through the events table rows of ``cluster``; rows in time order.
@@ -81,6 +84,10 @@ async def search_postgres_history(
     connection is opened for the search and closed after it. The
     transaction sets ``statement_timeout`` (the same limit in whole
     milliseconds) and turns JIT off before the trace statement.
+
+    A close that fails or runs out of time after the rows are committed
+    does not fail the search: the connection is terminated and
+    ``on_close_failed`` is awaited with the error text (no credentials).
 
     ``connect`` defaults to :func:`asyncpg.connect`, looked up at call time.
     Raises :class:`PostgresHistoryError` when the search fails or does not
@@ -94,6 +101,7 @@ async def search_postgres_history(
     stored_cluster = replace_nul(cluster)
     deadline = asyncio.get_running_loop().time() + search_limit_seconds(max_seconds)
     conn: Any = None
+    close_error: str | None = None
     try:
         async with asyncio.timeout_at(deadline):
             conn = await connect(dsn=settings.connection.dsn)
@@ -106,7 +114,7 @@ async def search_postgres_history(
             await conn.execute(set_local, SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT])
             rows = await conn.fetch(statement, stored_cluster, partition, offset)
             await transaction.commit()
-        await _close_after_search(conn, deadline)
+        close_error = await _close_after_search(conn, deadline)
     except TimeoutError as exc:
         raise PostgresHistoryError('timeout', describe_error(exc)) from exc
     except Exception as exc:
@@ -116,20 +124,23 @@ async def search_postgres_history(
         # cancel or a close that did not end is closed at once.
         if conn is not None and not conn.is_closed():
             conn.terminate()
+    if close_error is not None:
+        await on_close_failed(close_error)
     return [dict(row) for row in rows]
 
 
-async def _close_after_search(conn: Any, deadline: float) -> None:
+async def _close_after_search(conn: Any, deadline: float) -> str | None:
     """Close the connection of a search that already has its rows, within the search's time limit.
 
-    The rows are committed and complete, so a close that fails or runs out
-    of time does not fail the search: the caller terminates the connection,
-    which ends it on the server anyway. The close error is dropped on
-    purpose; a cancel still leaves as a cancel.
+    Returns ``None`` after a clean close, else the error text of the close
+    that failed or ran out of time. The rows are committed and complete, so
+    such a close does not fail the search: the caller terminates the
+    connection, which ends it on the server anyway, and reports the text. A
+    cancel still leaves as a cancel.
     """
     try:
         async with asyncio.timeout_at(deadline):
             await conn.close()
-    except Exception:
-        # The caller terminates the connection right after; nothing is lost.
-        return
+    except Exception as exc:
+        return describe_error(exc)
+    return None

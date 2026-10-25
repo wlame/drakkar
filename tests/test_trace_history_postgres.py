@@ -81,6 +81,10 @@ def _statement(table_prefix: str = '') -> str:
     return render_recorder(RECORDER_STATEMENT_TEMPLATES['trace'], schema=settings.schema, table=settings.table)
 
 
+async def _no_close_failure(error: str) -> None:
+    raise AssertionError(f'unexpected close failure: {error}')
+
+
 def _logs(captured: list[dict], event: str) -> list[dict]:
     return [entry for entry in captured if entry['event'] == event]
 
@@ -92,7 +96,9 @@ async def test_trace_history_postgres_rows_have_event_columns_plus_worker_name_o
     fake = RecorderFakePostgres()
     fake.trace_rows = [_trace_row(1), _trace_row(2)]
 
-    rows = await search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=5.0, connect=fake.connect)
+    rows = await search_postgres_history(
+        _settings(), CLUSTER, 3, 42, max_seconds=5.0, connect=fake.connect, on_close_failed=_no_close_failure
+    )
 
     # The statement projects the event columns plus worker_name and nothing else.
     statement = _statement()
@@ -106,7 +112,15 @@ async def test_trace_history_postgres_rows_have_event_columns_plus_worker_name_o
 async def test_trace_history_postgres_sends_the_own_cluster_to_the_prefixed_table():
     fake = RecorderFakePostgres()
 
-    await search_postgres_history(_settings(table_prefix='fast'), CLUSTER, 3, 42, max_seconds=5.0, connect=fake.connect)
+    await search_postgres_history(
+        _settings(table_prefix='fast'),
+        CLUSTER,
+        3,
+        42,
+        max_seconds=5.0,
+        connect=fake.connect,
+        on_close_failed=_no_close_failure,
+    )
 
     (fetch,) = [call for call in fake.calls if call[0] == 'fetch']
     assert fetch == ('fetch', _statement('fast'), (CLUSTER, 3, 42))
@@ -119,7 +133,9 @@ async def test_trace_history_postgres_sends_the_own_cluster_to_the_prefixed_tabl
 async def test_trace_history_postgres_sets_statement_timeout_in_whole_milliseconds(max_seconds, expected):
     fake = RecorderFakePostgres()
 
-    await search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=max_seconds, connect=fake.connect)
+    await search_postgres_history(
+        _settings(), CLUSTER, 3, 42, max_seconds=max_seconds, connect=fake.connect, on_close_failed=_no_close_failure
+    )
 
     assert [call[0] if call[0] != 'execute' else call for call in fake.calls] == [
         'connect',
@@ -135,7 +151,9 @@ async def test_trace_history_postgres_sets_statement_timeout_in_whole_millisecon
 async def test_trace_history_postgres_opens_one_connection_and_closes_it():
     fake = RecorderFakePostgres()
 
-    await search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=5.0, connect=fake.connect)
+    await search_postgres_history(
+        _settings(), CLUSTER, 3, 42, max_seconds=5.0, connect=fake.connect, on_close_failed=_no_close_failure
+    )
 
     (conn,) = fake.connections
     assert (conn.closed, conn.terminated) == (True, False)
@@ -148,7 +166,9 @@ async def test_trace_history_postgres_opens_one_connection_and_closes_it():
 async def test_trace_history_postgres_caps_the_time_limit_at_one_hour(max_seconds, expected):
     fake = RecorderFakePostgres()
 
-    rows = await search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=max_seconds, connect=fake.connect)
+    rows = await search_postgres_history(
+        _settings(), CLUSTER, 3, 42, max_seconds=max_seconds, connect=fake.connect, on_close_failed=_no_close_failure
+    )
 
     assert rows == []
     assert ('execute', SET_LOCAL, ('statement_timeout', expected)) in fake.calls
@@ -158,7 +178,9 @@ async def test_trace_history_postgres_sends_the_cluster_with_nul_replaced_as_the
     fake = RecorderFakePostgres()
     cluster = 'fast\x00cluster'
 
-    await search_postgres_history(_settings(), cluster, 3, 42, max_seconds=5.0, connect=fake.connect)
+    await search_postgres_history(
+        _settings(), cluster, 3, 42, max_seconds=5.0, connect=fake.connect, on_close_failed=_no_close_failure
+    )
 
     (fetch,) = [call for call in fake.calls if call[0] == 'fetch']
     stored = build_record(_event_row(), cluster=cluster, worker=WORKER, instance='i', store_output=False)[0]
@@ -174,13 +196,19 @@ async def test_trace_history_postgres_keeps_its_rows_when_the_close_fails_and_te
     else:
         fake.hang_conn_close = True
 
+    close_errors: list[str] = []
+
+    async def close_failed(error: str) -> None:
+        close_errors.append(error)
+
     started_at = time.monotonic()
     rows = await search_postgres_history(
-        _settings(), CLUSTER, 3, 42, max_seconds=SHORT_LIMIT_SECONDS, connect=fake.connect
+        _settings(), CLUSTER, 3, 42, max_seconds=SHORT_LIMIT_SECONDS, connect=fake.connect, on_close_failed=close_failed
     )
 
     assert time.monotonic() - started_at < ANSWER_BOUND_SECONDS
     assert [row['id'] for row in rows] == [1]
+    assert close_errors == (['connection reset'] if knob == 'conn_close_error' else ['timed out'])
     (conn,) = fake.connections
     assert conn.terminated
     assert [call[0] for call in fake.calls][-3:] == ['COMMIT', 'conn_close', 'terminate']
@@ -199,7 +227,13 @@ async def test_trace_history_postgres_closes_the_connection_on_error_and_on_time
 
     with pytest.raises(PostgresHistoryError) as raised:
         await search_postgres_history(
-            _settings(), CLUSTER, 3, 42, max_seconds=SHORT_LIMIT_SECONDS, connect=fake.connect
+            _settings(),
+            CLUSTER,
+            3,
+            42,
+            max_seconds=SHORT_LIMIT_SECONDS,
+            connect=fake.connect,
+            on_close_failed=_no_close_failure,
         )
 
     assert raised.value.reason == reason
@@ -220,7 +254,13 @@ async def test_trace_history_postgres_connect_failure_leaves_no_connection(knob,
 
     with pytest.raises(PostgresHistoryError) as raised:
         await search_postgres_history(
-            _settings(), CLUSTER, 3, 42, max_seconds=SHORT_LIMIT_SECONDS, connect=fake.connect
+            _settings(),
+            CLUSTER,
+            3,
+            42,
+            max_seconds=SHORT_LIMIT_SECONDS,
+            connect=fake.connect,
+            on_close_failed=_no_close_failure,
         )
 
     assert raised.value.reason == reason
@@ -231,7 +271,9 @@ async def test_trace_history_postgres_cancel_closes_the_connection_and_leaves_as
     fake = RecorderFakePostgres()
     fake.hang_trace = True
     search = asyncio.create_task(
-        search_postgres_history(_settings(), CLUSTER, 3, 42, max_seconds=60.0, connect=fake.connect)
+        search_postgres_history(
+            _settings(), CLUSTER, 3, 42, max_seconds=60.0, connect=fake.connect, on_close_failed=_no_close_failure
+        )
     )
     while not any(call[0] == 'fetch' for call in fake.calls):
         await asyncio.sleep(0)
@@ -363,6 +405,37 @@ async def test_trace_history_postgres_timeout_answers_503_within_the_limit_and_l
         'error': 'timed out',
         'suppressed': 0,
     }
+    assert all(conn.terminated for conn in history_fake.connections)
+
+
+async def test_trace_history_postgres_close_failure_answers_the_rows_and_logs_under_the_same_rate_limit(
+    started, history_fake
+):
+    rec = await started('postgres')
+    history_fake.trace_rows = [_trace_row(1)]
+    history_fake.conn_close_error = OSError(f'connection to {DSN} reset')
+    clock = FakeClock()
+    params = {'partition': 3, 'offset': 42, 'history': 1}
+
+    with capture_logs() as captured:
+        async with _client(rec, clock) as client:
+            first = await client.get(TRACE_ENDPOINT, params=params)
+            history_fake.trace_error = asyncpg.exceptions.UndefinedTableError('relation does not exist')
+            held_back = await client.get(TRACE_ENDPOINT, params=params)
+            history_fake.trace_error = None
+            clock.now += 61
+            third = await client.get(TRACE_ENDPOINT, params=params)
+
+    assert [(resp.status_code, resp.json()) for resp in (first, held_back, third)] == [
+        (200, history_fake.trace_rows),
+        (503, FAILED_BODY),
+        (200, history_fake.trace_rows),
+    ]
+    lines = _logs(captured, 'ui_read_postgres_failed')
+    assert [(line['reason'], line['suppressed']) for line in lines] == [('close', 0), ('close', 1)]
+    assert lines[0]['endpoint'] == TRACE_ENDPOINT
+    assert lines[0]['category'] == 'debug'
+    assert lines[0]['error'] == 'connection to postgresql://***:***@db:5432/drakkar reset'
     assert all(conn.terminated for conn in history_fake.connections)
 
 

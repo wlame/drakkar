@@ -764,7 +764,11 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         return JSONResponse(events)
 
     async def _trace_postgres_history(settings: RecorderPostgresSettings, partition: int, offset: int) -> JSONResponse:
-        """The Postgres history search, or 503 ``history search failed`` with a rate-limited log line."""
+        """The Postgres history search, or 503 ``history search failed`` with a rate-limited log line.
+
+        A close that fails after a complete search is logged the same way
+        (``reason`` ``close``) and the rows are still answered.
+        """
         try:
             events = await search_postgres_history(
                 settings,
@@ -772,19 +776,24 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                 partition,
                 offset,
                 max_seconds=config.trace.history_max_seconds,
+                on_close_failed=functools.partial(_log_postgres_read_failed, 'close'),
             )
         except PostgresHistoryError as exc:
-            await deps.postgres_read_log.emit(
-                TRACE_ENDPOINT,
-                logger.awarning,
-                'ui_read_postgres_failed',
-                category='debug',
-                endpoint=TRACE_ENDPOINT,
-                reason=exc.reason,
-                error=exc.error,
-            )
+            await _log_postgres_read_failed(exc.reason, exc.error)
             return JSONResponse({'detail': HISTORY_SEARCH_FAILED_DETAIL}, status_code=503)
         return JSONResponse(events)
+
+    async def _log_postgres_read_failed(reason: str, error: str) -> None:
+        """``ui_read_postgres_failed`` of the trace endpoint, at most one line per minute for every reason together."""
+        await deps.postgres_read_log.emit(
+            TRACE_ENDPOINT,
+            logger.awarning,
+            'ui_read_postgres_failed',
+            category='debug',
+            endpoint=TRACE_ENDPOINT,
+            reason=reason,
+            error=error,
+        )
 
     @router.get('/api/v1/debug/label-keys')
     async def api_debug_label_keys():
