@@ -991,7 +991,7 @@ Budget of one Message Trace request with `history=1`, which searches the sealed 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `history_max_files` | `int` | `256` | >= 1 | Most sealed history files one trace request with `history=1` opens, newest first. |
-| `history_max_seconds` | `float` | `10.0` | > 0 | Time limit for one trace request with `history=1`; the search stops and returns what it found. |
+| `history_max_seconds` | `float` | `10.0` | > 0 | Time limit for one trace request with `history=1`; the file history search stops and returns what it found. With `ui.recorder.persistence: postgres` a search past the limit answers 503 and returns no rows (the limit is capped at 3600 s). |
 
 ### Flight Recorder (`ui.recorder:`)
 

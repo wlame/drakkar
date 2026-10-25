@@ -87,7 +87,7 @@ class UIRecorderPostgresConfig(BaseModel):
     )
     store_output: bool = Field(
         default=False,
-        description='Send the stdout and stderr columns to Postgres. Off, both columns are written empty.',
+        description='Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL.',
     )
     batch_rows: int = Field(
         default=5000,
@@ -99,7 +99,7 @@ class UIRecorderPostgresConfig(BaseModel):
         default=128,
         ge=16,
         le=1024,
-        description='Most text data, in MiB, waiting for Postgres. When full, the oldest rows are dropped and counted.',
+        description='Most text, in MiB, waiting for Postgres, counted in characters of text. When full, the oldest rows are dropped and counted.',
     )
     resilience: ResilienceConfig = Field(
         default_factory=ResilienceConfig,
@@ -784,8 +784,9 @@ class UITraceConfig(BaseModel):
         default=10.0,
         gt=0,
         description=(
-            'Time limit for one trace request with history=1; the search stops and returns what it found. '
-            'With postgres it is also the time limit of the Postgres history search.'
+            'Time limit for one trace request with history=1; the file history search stops and returns what it found. '
+            'With ui.recorder.persistence: postgres it is also the time limit of the Postgres history search '
+            '(capped at 3600 s); a search past the limit answers 503 and returns no rows.'
         ),
     )
 

@@ -16,7 +16,7 @@ The mode does this:
 
 - The worker keeps its recent events in the memory store, exactly as with
   `none`. Every UI read except the history search uses the memory store.
-- Stage P, a third write stage next to the memory stage, sends every row that
+- Stage P, a write stage next to the memory stage, sends every row that
   the memory store takes to the table, with the same `id`, `ts`, `event` and
   worker name. So the UI joins memory rows and table rows without duplicates.
 - Stage P keeps one partition per UTC hour, creates the next ones and drops
@@ -67,7 +67,7 @@ ui:
       retention_hours: 6          # written into the table when this worker creates it
       store_output: false         # send the stdout and stderr columns to Postgres
       batch_rows: 5000            # most rows in one COPY
-      queue_max_mib: 128          # most text data waiting for Postgres
+      queue_max_mib: 128          # most text waiting for Postgres, counted in characters
       resilience: {}              # timeout, retries, backoff and breaker of the recorder calls
 ```
 
@@ -387,7 +387,7 @@ number of workers.
 
 Rows wait in the **Postgres queue** between the memory store and stage P. The
 queue has two bounds: `ui.recorder.max_buffer` rows (default 50000) and
-`queue_max_mib` MiB of text (default 128). When a new row passes either bound,
+`queue_max_mib` MiB of text (default 128), counted in characters of text. When a new row passes either bound,
 the oldest rows are dropped. The memory stage never waits for stage P.
 
 Stage P runs on a thread of its own with its own event loop and one
@@ -396,7 +396,7 @@ memory store or the pipeline. It runs on every memory tick, on the
 `flush_interval_seconds` tick, and when the queue passes half of either
 bound. One run starts stage P when it has not started, runs the upkeep when
 it is due, then writes chunks until the queue is empty. A chunk is at most
-`batch_rows` rows and at most 4 MiB of text, and one COPY in one transaction.
+`batch_rows` rows and at most 4 MiB of text (counted in characters of text), and one COPY in one transaction.
 
 A chunk stays in one slot outside the queue until it is written or dropped,
 so a retry sends exactly the same rows. When an earlier attempt landed and
