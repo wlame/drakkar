@@ -25,8 +25,9 @@ or a value the client cannot encode). Any other failure keeps it: a transient
 failure, any other server error (counted as a failed operation, so the breaker
 opens as in an outage), an open breaker or a writer that has not started. A
 missing table (42P01) on a COPY or in the upkeep makes the next run start the
-writer again, which creates the table when the schema is managed. At stop, :meth:`PostgresWriter.final` makes one attempt per
-chunk within the time left and drops what is left with ``shutdown``.
+writer again, which creates the table when the schema is managed. At stop,
+:meth:`PostgresWriter.final` makes one attempt per chunk within the time left
+and drops what is left with ``shutdown``.
 """
 
 from __future__ import annotations
@@ -357,6 +358,7 @@ class PostgresWriter:
             raise
 
     async def _upkeep_statements(self) -> UpkeepActions | None:
+        """The statements of one upkeep transaction; see :meth:`_upkeep_attempt`."""
         settings = self._settings
         qualified = settings.qualified_table
         async with borrow_transaction(self._pool) as conn:
