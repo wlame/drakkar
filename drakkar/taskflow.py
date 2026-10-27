@@ -48,9 +48,9 @@ class TaskOutcome(StrEnum):
         Re-execute the same task; the retry inherits the original's slot
         in whatever the runner is tracking.
     ``FAIL``
-        Terminal failure. Either the handler said so (SKIP, or anything
-        it returned that is not RETRY or a list), or it asked for a retry
-        the budget can no longer pay for.
+        Terminal failure. Either the handler said so (SKIP, DLQ, or
+        anything it returned that is not RETRY or a list), or it asked for
+        a retry the budget can no longer pay for.
     """
 
     REPLACE = 'replace'
@@ -68,6 +68,9 @@ class ErrorDecision:
     #: this is what production logs as ``max_retries_exceeded``. A plain
     #: SKIP is a terminal failure but not an exhausted one.
     retries_exhausted: bool = False
+    #: True when the handler answered DLQ: a terminal failure whose source
+    #: messages production writes to the DLQ before the task settles.
+    sends_to_dlq: bool = False
 
 
 def decide_after_on_error(action: Any, *, retry_count: int, max_retries: int) -> ErrorDecision:
@@ -89,6 +92,8 @@ def decide_after_on_error(action: Any, *, retry_count: int, max_retries: int) ->
         if retry_count < max_retries:
             return ErrorDecision(outcome=TaskOutcome.RETRY)
         return ErrorDecision(outcome=TaskOutcome.FAIL, retries_exhausted=True)
+    if action == ErrorAction.DLQ:
+        return ErrorDecision(outcome=TaskOutcome.FAIL, sends_to_dlq=True)
     return ErrorDecision(outcome=TaskOutcome.FAIL)
 
 

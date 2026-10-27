@@ -5,7 +5,7 @@ CollectResult payloads target existing sinks, and delivers one result's
 payload groups by each sink's declared policy: its retry budget, its
 ``on_failure`` and its ``depends_on``. It is also the one place that writes
 the DLQ record of a sink failure (the circuit-open, hook and spent-budget
-paths all end there).
+paths all end there) and of a task that ``on_error`` sent to the DLQ.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import structlog
 from pydantic import BaseModel
@@ -34,6 +34,8 @@ from drakkar.models import (
     CollectResult,
     DeliveryAction,
     DeliveryError,
+    ExecutorError,
+    ExecutorTask,
     SinkDeliveryFailedError,
     SinkNotStartedReason,
     SourceMessage,
@@ -187,7 +189,8 @@ class CollectCallback(Protocol):
 
     ``partition_id`` is -1 for an HTTP request. ``message_context`` names
     the source messages of a task or message result and their DLQ state;
-    ``None`` is a window result, which has no source message.
+    ``MessageContext.window()`` marks a window result, which has no source
+    message; ``None`` is no context (see ``SinkManager.deliver_all``).
     """
 
     def __call__(
@@ -1234,6 +1237,97 @@ class SinkManager:
             self._lose_messages(key, message_count=1, partition_id=partition_id, reason='no message context')
             return DeliveryOutcome.FAILED
 
+        written, lost = await self._write_records(
+            message_context,
+            partition_id=partition_id,
+            build=lambda message, state: _message_record(
+                message,
+                request_id=message_context.request_id,
+                stage='sink',
+                error=error_text,
+                attempts=attempts,
+                delivered_sinks=state.delivered_sinks,
+                sink=sink_ref(key),
+            ),
+        )
+        if lost:
+            self._lose_messages(key, message_count=lost, partition_id=partition_id, reason=self._lost_reason())
+        if written or not lost:
+            if not written:
+                # Every message of the result was already on the DLQ: a group
+                # that was in flight when an earlier failure wrote the record.
+                logger.info(
+                    'message_already_dlq',
+                    category='sink',
+                    stage='sink',
+                    sink=sink_ref(key),
+                    partition=partition_id,
+                )
+            return DeliveryOutcome.DLQ
+        return DeliveryOutcome.FAILED
+
+    async def send_execute_dlq(
+        self,
+        message_context: MessageContext | None,
+        *,
+        task: ExecutorTask,
+        error: ExecutorError,
+        attempts: int,
+        partition_id: int,
+    ) -> None:
+        """Write the ``execute`` record of each source message of a task that ``on_error`` sent to the DLQ.
+
+        ``attempts`` is the number of runs the task had. A message already on
+        the DLQ gets no second record; that is only logged. Raises
+        ``SinkDeliveryFailedError`` when a record could not be written and
+        ``dlq.on_send_failure`` is ``stall``.
+        """
+        # Not a sink: the label of the lost-record line and of the stall error.
+        subject = ('executor', task.task_id)
+        if self._dlq_sink is None and not self._dlq_enabled:
+            message_count = len(message_context.source_messages) if message_context is not None else 1
+            await self.drop_unconfigured_dlq_send(partition_id, message_count)
+            return
+        if message_context is None:
+            self._lose_messages(subject, message_count=1, partition_id=partition_id, reason='no message context')
+            return
+        error_text = execute_error_text(error)
+        written, lost = await self._write_records(
+            message_context,
+            partition_id=partition_id,
+            build=lambda message, state: _message_record(
+                message,
+                request_id=message_context.request_id,
+                stage='execute',
+                error=error_text,
+                attempts=attempts,
+                delivered_sinks=state.delivered_sinks,
+                task_id=task.task_id,
+            ),
+        )
+        if lost:
+            self._lose_messages(subject, message_count=lost, partition_id=partition_id, reason=self._lost_reason())
+        if not written and not lost:
+            # A sink failure or an earlier task of the message wrote its record.
+            logger.info(
+                'message_already_dlq',
+                category='sink',
+                stage='execute',
+                task_id=task.task_id,
+                partition=partition_id,
+            )
+
+    async def _write_records(
+        self,
+        message_context: MessageContext,
+        *,
+        partition_id: int,
+        build: Callable[[SourceMessage, MessageDLQState], DLQRecord],
+    ) -> tuple[int, int]:
+        """Write the record ``build`` makes for each source message not yet on the DLQ.
+
+        Returns how many records were written and how many could not be.
+        """
         written = 0
         lost = 0
         for message, state in message_context.pairs():
@@ -1246,31 +1340,18 @@ class SinkManager:
             async with state.lock:
                 if state.dlq_written:
                     continue
-                record = _sink_record(
-                    message,
-                    request_id=message_context.request_id,
-                    sink=sink_ref(key),
-                    error=error_text,
-                    attempts=attempts,
-                    delivered_sinks=state.delivered_sinks,
-                )
+                record = build(message, state)
                 if self._dlq_sink is not None and await self._dlq_sink.send(record, partition_id=partition_id):
                     state.dlq_written = True
                     written += 1
                     self._note_message_dlq(record)
                 else:
                     lost += 1
+        return written, lost
 
-        if lost:
-            reason = 'DLQ send failed' if self._dlq_sink is not None else 'no DLQ sink is configured'
-            self._lose_messages(key, message_count=lost, partition_id=partition_id, reason=reason)
-        if written or not lost:
-            if not written:
-                # Every message of the result was already on the DLQ: a group
-                # that was in flight when an earlier failure wrote the record.
-                logger.info('message_already_dlq', category='sink', sink=sink_ref(key), partition=partition_id)
-            return DeliveryOutcome.DLQ
-        return DeliveryOutcome.FAILED
+    def _lost_reason(self) -> str:
+        """Why a record could not be written."""
+        return 'DLQ send failed' if self._dlq_sink is not None else 'no DLQ sink is configured'
 
     def _note_message_dlq(self, record: DLQRecord) -> None:
         """Log and record one source message written to the DLQ."""
@@ -1336,24 +1417,35 @@ class SinkManager:
         )
 
 
-def _sink_record(
+def execute_error_text(error: ExecutorError) -> str:
+    """The ``dk-error`` text of a failed task: its exit code, when it has one, then stderr or the exception."""
+    detail = error.stderr or error.exception or error.kind
+    if error.exit_code is None:
+        return detail
+    return f'exit code {error.exit_code}: {detail}'
+
+
+def _message_record(
     message: SourceMessage,
     *,
     request_id: str | None,
-    sink: str,
+    stage: Literal['execute', 'sink'],
     error: str,
     attempts: int,
     delivered_sinks: set[str],
+    sink: str | None = None,
+    task_id: str | None = None,
 ) -> DLQRecord:
-    """The ``sink``-stage record of one source message; an HTTP request (``request_id`` set) has no key or source."""
+    """The record of one source message; an HTTP request (``request_id`` set) has no key or source."""
     is_request = request_id is not None
     return DLQRecord(
         key=None if is_request else message.key,
         value=message.value,
         source_headers=[] if is_request else list(message.headers),
-        stage='sink',
+        stage=stage,
         error=error,
         sink=sink,
+        task_id=task_id,
         attempts=attempts,
         delivered_sinks=sorted(delivered_sinks),
         source_topic=None if is_request else message.topic,

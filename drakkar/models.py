@@ -1226,10 +1226,18 @@ class CollectResult(BaseModel):
 
 
 class ErrorAction(StrEnum):
-    """Actions the on_error hook can return for processing failures."""
+    """Actions the on_error hook can return for processing failures.
+
+    RETRY: Run the task again, within ``executor.max_retries``.
+    SKIP: Drop the task; it counts as failed.
+    DLQ: Write the task's source messages to the dead letter queue and end
+        them: no later delivery of those messages starts. The task counts
+        as failed.
+    """
 
     RETRY = 'retry'
     SKIP = 'skip'
+    DLQ = 'dlq'
 
 
 class DeliveryAction(StrEnum):

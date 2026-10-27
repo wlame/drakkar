@@ -416,6 +416,7 @@ class KafkaSource:
                     on_dlq_failure=config.dlq.on_send_failure,
                     on_stall=self.pause_stalled_partition,
                     throughput=ctx.throughput,
+                    execute_dlq=ctx.sink_manager.send_execute_dlq,
                 )
                 self.processors[pid] = processor
                 processor.start()

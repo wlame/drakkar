@@ -2,9 +2,9 @@
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -46,7 +46,7 @@ from drakkar.models import (
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq_record import DLQRecord
-from drakkar.sinks.manager import CollectCallback, MessageContext
+from drakkar.sinks.manager import CollectCallback, MessageContext, MessageDLQState
 from drakkar.throughput import ThroughputTracker
 
 logger = structlog.get_logger()
@@ -57,6 +57,21 @@ DLQSendCallback = Callable[[DLQRecord, int], Awaitable[bool]]
 # Invoked once (per processor lifetime) when the first offset stalls under
 # dlq.on_send_failure=stall — the lifecycle pauses the partition in Kafka.
 StallCallback = Callable[[int], Awaitable[None]]
+
+
+class ExecuteDLQCallback(Protocol):
+    """Write the ``execute`` record of a task's source messages (``SinkManager.send_execute_dlq``)."""
+
+    def __call__(
+        self,
+        message_context: MessageContext | None,
+        *,
+        task: ExecutorTask,
+        error: ExecutorError,
+        attempts: int,
+        partition_id: int,
+    ) -> Awaitable[None]: ...
+
 
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
@@ -225,6 +240,9 @@ class MessageTracker:
     # _finalize_message_tracker skip offset completion — the watermark
     # stalls and the message is redelivered after restart/rebalance.
     delivery_failed: bool = False
+    # Shared by every task result and the message result of this message:
+    # once its DLQ record is written, no later delivery of it starts.
+    dlq: MessageDLQState = field(default_factory=MessageDLQState)
 
 
 class PartitionProcessor:
@@ -251,6 +269,7 @@ class PartitionProcessor:
         on_dlq_failure: str = 'drop',
         on_stall: StallCallback | None = None,
         throughput: ThroughputTracker | None = None,
+        execute_dlq: ExecuteDLQCallback | None = None,
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
@@ -268,6 +287,8 @@ class PartitionProcessor:
         self._on_dlq_failure = on_dlq_failure
         self._on_stall = on_stall
         self._stall_signaled = False
+        # Writes the record of a task that on_error sent to the DLQ.
+        self._execute_dlq = execute_dlq
 
         # Whether anything will ever read the outcomes the window and the
         # message trackers would collect. Both lists cost the payload of
@@ -872,6 +893,79 @@ class PartitionProcessor:
             if affected is not None:
                 affected.delivery_failed = True
 
+    def _message_context(self, source_offsets: Iterable[int]) -> MessageContext | None:
+        """The source messages of a task result with the DLQ state of each, from their trackers.
+
+        ``None`` when none of the offsets has a tracker: an empty context
+        would take a ``dlq`` outcome for a written record, while no context
+        makes it follow ``dlq.on_send_failure``.
+        """
+        trackers = [
+            tracker
+            for offset in dict.fromkeys(source_offsets)
+            if (tracker := self._message_trackers.get(offset)) is not None
+        ]
+        if not trackers:
+            return None
+        return MessageContext(
+            source_messages=[tracker.source_message for tracker in trackers],
+            states=[tracker.dlq for tracker in trackers],
+        )
+
+    async def _send_execute_dlq(self, task: ExecutorTask, error: ExecutorError, *, attempts: int) -> None:
+        """Write the ``execute`` record of each source message of ``task``.
+
+        Runs inside the task's failure handling, before the task settles, so
+        nothing may escape: a raise would skip the tracker settle and leave
+        the offset pending for ever. A record that could not be written
+        follows ``dlq.on_send_failure``: ``stall`` holds the offsets.
+        """
+        if self._execute_dlq is None:
+            self._lose_execute_records(task)
+            return
+        try:
+            await self._execute_dlq(
+                self._message_context(task.source_offsets),
+                task=task,
+                error=error,
+                attempts=attempts,
+                partition_id=self._partition_id,
+            )
+        except Exception as exc:
+            # SinkDeliveryFailedError is the counted ``stall`` answer; any
+            # other error leaves the write unknown, so ``stall`` treats it
+            # as lost and ``drop`` lets the offset commit.
+            is_stall = isinstance(exc, SinkDeliveryFailedError) or self._on_dlq_failure == 'stall'
+            if is_stall:
+                self._mark_offsets_delivery_failed(task.source_offsets)
+            logger.error(
+                'execute_dlq_failed',
+                category='partition',
+                partition=self._partition_id,
+                task_id=task.task_id,
+                source_offsets=task.source_offsets,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                offset_action='stall' if is_stall else 'commit',
+            )
+
+    def _lose_execute_records(self, task: ExecutorTask) -> None:
+        """Apply ``dlq.on_send_failure`` to a task sent to the DLQ with no writer wired."""
+        if self._on_dlq_failure == 'stall':
+            self._mark_offsets_delivery_failed(task.source_offsets)
+            return
+        message_count = len(dict.fromkeys(task.source_offsets))
+        dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc(message_count)
+        logger.critical(
+            'dlq_failure_payloads_dropped',
+            category='partition',
+            partition=self._partition_id,
+            task_id=task.task_id,
+            message_count=message_count,
+            reason='on_error answered dlq but no DLQ writer is wired',
+            action='ALERT: source messages lost (dlq.on_send_failure=drop)',
+        )
+
     async def _handle_parse_failure(self, msg: SourceMessage) -> None:
         """Apply the 'dlq' / 'raise' parse-error policy to one message.
 
@@ -1006,7 +1100,11 @@ class PartitionProcessor:
                 self._note_suppressed_delivery('on_task_complete')
             elif collect_result and self._on_collect:
                 try:
-                    await self._on_collect(collect_result, self._partition_id)
+                    await self._on_collect(
+                        collect_result,
+                        self._partition_id,
+                        message_context=self._message_context(task.source_offsets),
+                    )
                 except SinkDeliveryFailedError as e:
                     # Delivery (including the DLQ fallback) could not be
                     # confirmed. Mark every affected message tracker so
@@ -1164,6 +1262,11 @@ class PartitionProcessor:
                         task_id=task.task_id,
                         retries=retry_count,
                     )
+                if decision.sends_to_dlq:
+                    # Written now, before the task settles: from here on no
+                    # delivery of its messages starts, and the message
+                    # result of on_message_complete is not delivered.
+                    await self._send_execute_dlq(task, e.error, attempts=retry_count + 1)
                 if self._keep_window_results:
                     window.results.append(e.result)
                 task_error = e.error
@@ -1396,7 +1499,14 @@ class PartitionProcessor:
             self._note_suppressed_delivery('on_message_complete')
         elif on_complete_result and self._on_collect:
             try:
-                await self._on_collect(on_complete_result, self._partition_id)
+                await self._on_collect(
+                    on_complete_result,
+                    self._partition_id,
+                    message_context=MessageContext(
+                        source_messages=[tracker.source_message],
+                        states=[tracker.dlq],
+                    ),
+                )
             except SinkDeliveryFailedError as e:
                 # Delivery (including the DLQ fallback) could not be
                 # confirmed for the per-message aggregate payload. Only

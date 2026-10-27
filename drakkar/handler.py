@@ -232,6 +232,11 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # framework sets the loaded instance per-instance at startup.
     _app_config: BaseModel | None = None
 
+    # What the default ``on_error`` answers: ``executor.on_failure``, set by
+    # the framework at startup. Class-level for the same reason as
+    # ``_app_config``.
+    _executor_on_failure: ErrorAction = ErrorAction.SKIP
+
     # Handler-facing cache attribute. The framework reassigns this to either
     # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the
     # class-level NoOpCache default in place. Kept as a class attribute (not
@@ -507,10 +512,12 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """Handle an executor task failure.
 
         Return ErrorAction.RETRY to retry, ErrorAction.SKIP to drop,
-        or a list of new ExecutorTasks to spawn replacement work.
-        Default: SKIP.
+        ErrorAction.DLQ to write the task's source messages to the DLQ
+        (no later delivery of them starts), or a list of new ExecutorTasks
+        to spawn replacement work.
+        Default: ``executor.on_failure`` (SKIP unless configured).
         """
-        return ErrorAction.SKIP
+        return self._executor_on_failure
 
     async def on_delivery_error(
         self,

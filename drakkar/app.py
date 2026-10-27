@@ -39,7 +39,7 @@ from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
-from drakkar.models import CollectResult, DeliveryAction, DeliveryError
+from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
 from drakkar.periodic_roster import PeriodicRoster
 from drakkar.probe import build_layout, referenced_bases
@@ -279,6 +279,7 @@ class DrakkarApp:
         # fail-fast startup error and ``self.app_config`` is usable inside
         # every hook, on_startup included.
         self._wire_app_config()
+        self._wire_executor_on_failure()
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:
@@ -616,6 +617,14 @@ class DrakkarApp:
                         f'renders — fix the name in ui.docs.anchors or declare it in {source}'
                     ),
                 )
+
+    def _wire_executor_on_failure(self) -> None:
+        """Give the handler's default ``on_error`` the answer ``executor.on_failure`` names.
+
+        Called at construction and again after ``on_startup``, which may
+        return a config with another value.
+        """
+        self._handler._executor_on_failure = ErrorAction(self._config.executor.on_failure)
 
     def _wire_app_config(self) -> None:
         """Load the handler-declared application config and attach it.

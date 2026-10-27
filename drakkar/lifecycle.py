@@ -279,6 +279,7 @@ class AppLifecycle:
             app._config = await app._handler.on_startup(app._config)
         finally:
             unbind_contextvars('hook')
+        app._wire_executor_on_failure()
 
         ignored = changed_consumed_settings(before, app._config)
         if ignored:

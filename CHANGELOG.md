@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning. New metrics `drakkar_dlq_records_total{stage}` and
   `drakkar_sink_deliveries_not_started_total`, new recorder events
   `message_dlq` and `sink_not_started`, and `sink_error` gains `action`.
+- **A failed task can send its message to the DLQ.** `on_error` can return
+  `ErrorAction.DLQ`: the source messages of the task are written to the DLQ
+  at once (`dk-stage: execute`), the task counts as failed, and no later
+  delivery of those messages starts. All results of one message (its task
+  results and the result of `on_message_complete`) share one DLQ state, so
+  the message gets one record. The message probe treats `DLQ` as a failure and writes
+  nothing.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys

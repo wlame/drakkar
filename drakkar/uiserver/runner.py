@@ -1472,6 +1472,8 @@ class DebugRunner:
                 error=self._build_probe_error(state=state, stage=stage, exc=call.exception),
             )
             return taskflow.ErrorDecision(outcome=taskflow.TaskOutcome.FAIL)
+        # ErrorAction.DLQ is a terminal failure here, as in production, but
+        # its ``sends_to_dlq`` is ignored: a probe writes no DLQ record.
         return taskflow.decide_after_on_error(
             call.action,
             retry_count=retry_count,

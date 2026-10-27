@@ -20,6 +20,7 @@ from drakkar.app import (
     snapshot_consumed_settings,
 )
 from drakkar.config import ExecutorConfig, KafkaConfig, LoggingConfig, MetricsConfig
+from drakkar.models import ErrorAction, ExecutorError, ExecutorTask
 
 
 class NoopHandler(BaseDrakkarHandler):
@@ -159,6 +160,20 @@ class TestLifecycleWarning:
         await app._lifecycle._run_on_startup()
 
         assert app._config.executor.max_executors == 17
+
+    async def test_executor_on_failure_set_in_the_hook_is_what_on_error_answers(self):
+        class SendsFailuresToTheDLQ(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.executor.on_failure = 'dlq'
+                return config
+
+        handler = SendsFailuresToTheDLQ()
+        app = DrakkarApp(handler=handler, config=make_config())
+        task = ExecutorTask(task_id='t-1', args=['x'], source_offsets=[0])
+
+        await app._lifecycle._run_on_startup()
+
+        assert await handler.on_error(task, ExecutorError(task=task)) is ErrorAction.DLQ
 
 
 class TestSinkSettingsAreHonoured:

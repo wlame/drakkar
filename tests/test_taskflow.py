@@ -76,6 +76,15 @@ class TestDecideAfterOnError:
 
         assert decision.outcome is TaskOutcome.FAIL
         assert decision.retries_exhausted is False, 'only a spent RETRY budget is "exhausted"'
+        assert decision.sends_to_dlq is False
+
+    @pytest.mark.parametrize('action', [ErrorAction.DLQ, 'dlq'])
+    def test_dlq_is_a_terminal_failure_that_sends_the_messages_to_the_dlq(self, action):
+        decision = decide_after_on_error(action, retry_count=0, max_retries=3)
+
+        assert decision.outcome is TaskOutcome.FAIL
+        assert decision.sends_to_dlq is True
+        assert decision.retries_exhausted is False
 
 
 class TestLinkReplacements:
