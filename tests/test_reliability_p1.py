@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel as BM
+from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
 from drakkar.cache.engine import FLUSH_FAILURE_ESCALATION_THRESHOLD, CacheEngine
@@ -49,6 +50,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.kafka import KafkaSink
 from tests.conftest import wait_for, wire_kafka_source
+from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
 
@@ -329,7 +331,9 @@ async def test_kafka_sink_collects_futures_when_flush_raises():
 # --- circuit breaker sees on_delivery_error raising ----------------------------
 
 
-async def test_on_delivery_error_raise_records_breaker_failure(app_config):
+async def test_on_delivery_error_raise_applies_the_declared_policy_and_records_breaker_failure(app_config):
+    """A raising hook does not propagate: the declared policy (dlq) applies, and the breaker counts the failure."""
+
     class RaisingHandler(SimpleHandler):
         async def on_delivery_error(self, error):
             raise RuntimeError('handler bug')
@@ -340,10 +344,11 @@ async def test_on_delivery_error_raise_records_breaker_failure(app_config):
     kafka_sink.deliver.side_effect = RuntimeError('broker down')
 
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
-    with pytest.raises(RuntimeError, match='handler bug'):
-        await app._handle_collect(result, partition_id=0)
+    with capture_logs() as logs:
+        await app._handle_collect(result, partition_id=0, message_context=make_message_context())
 
     kafka_sink.record_failure.assert_called_once()
+    assert [entry['event'] for entry in logs].count('delivery_error_hook_failed') == 1
 
 
 # --- consumer lag query error accounting ---------------------------------------

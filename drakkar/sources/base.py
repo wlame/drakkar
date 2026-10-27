@@ -22,7 +22,23 @@ if TYPE_CHECKING:
     from drakkar.models import CollectResult
     from drakkar.recorder import EventRecorder
     from drakkar.sinks.dlq import DLQSink
-    from drakkar.sinks.manager import SinkManager
+    from drakkar.sinks.manager import MessageContext, SinkManager
+
+
+class CollectCallback(Protocol):
+    """Deliver a CollectResult to the sinks.
+
+    ``partition_id`` is -1 for an HTTP request. ``message_context`` names
+    the source messages of a task or message result and their DLQ state;
+    ``None`` is a window result, which has no source message.
+    """
+
+    def __call__(
+        self,
+        result: CollectResult,
+        partition_id: int,
+        message_context: MessageContext | None = None,
+    ) -> Awaitable[None]: ...
 
 
 @dataclass
@@ -38,8 +54,7 @@ class SourceContext:
     throughput: Any
     worker_id: str
     cluster_name: str
-    # Deliver a CollectResult to the sinks for the given partition (-1 for HTTP).
-    on_collect: Callable[[CollectResult, int], Awaitable[None]]
+    on_collect: CollectCallback
     # Composed worker readiness (all sources ready, not stopping); the HTTP gate reads it.
     is_worker_ready: Callable[[], bool]
 

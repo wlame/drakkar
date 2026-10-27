@@ -2857,14 +2857,16 @@ async def test_dlq_sink_send_stamps_worker_instance_and_failed_at():
 
 
 async def test_dlq_sink_send_increments_metric():
-    from drakkar.metrics import sink_dlq_messages
+    from drakkar.metrics import dlq_records, sink_dlq_messages
 
     sink, _ = _make_dlq_sink()
     before = sink_dlq_messages._value.get()
+    before_stage = dlq_records.labels(stage='sink')._value.get()
 
     await sink.send(_sample_record(), partition_id=0)
 
     assert sink_dlq_messages._value.get() == before + 1
+    assert dlq_records.labels(stage='sink')._value.get() == before_stage + 1
 
 
 async def test_dlq_sink_send_not_connected():

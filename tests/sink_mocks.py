@@ -19,9 +19,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import create_autospec
 
+from drakkar.models import SourceMessage
+from drakkar.sinks.manager import MessageContext, MessageDLQState
+
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
     from drakkar.sinks.base import BaseSink
+
+
+def make_message_context(offset: int = 1) -> MessageContext:
+    """The context of a one-message task result, as the partition builds it, with a fresh DLQ state."""
+    message = SourceMessage(topic='src', partition=0, offset=offset, key=b'k', value=b'source value', timestamp=0)
+    return MessageContext(source_messages=[message], states=[MessageDLQState()])
 
 
 def make_sink_mock(sink: BaseSink):

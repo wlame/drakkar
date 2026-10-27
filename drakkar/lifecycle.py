@@ -993,6 +993,7 @@ class AppLifecycle:
             recorder=app._recorder,
             dlq_sink=app._dlq_sink,
             dlq_on_send_failure=app._config.dlq.on_send_failure,
+            dlq_enabled=app._config.dlq_enabled,
         )
 
         # log sink topology

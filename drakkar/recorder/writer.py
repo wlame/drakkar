@@ -773,7 +773,12 @@ class EventWriter:
         sink_name: str,
         error: str,
         attempt: int,
+        action: str,
     ) -> None:
+        """A failed delivery attempt and what came of it: ``retry``, ``skip`` or ``dlq``.
+
+        ``attempt`` is 0 for an open circuit, where no attempt was made.
+        """
         self._record(
             {
                 'ts': time.time(),
@@ -784,8 +789,50 @@ class EventWriter:
                         'sink_name': sink_name,
                         'error': error,
                         'attempt': attempt,
+                        'action': action,
                     }
                 ),
+            }
+        )
+
+    def record_message_dlq(
+        self,
+        *,
+        partition: int | None,
+        offset: int | None,
+        stage: str,
+        sink: str | None,
+        error: str,
+        delivered_sinks: list[str],
+        attempts: int | None,
+    ) -> None:
+        """One source message written to the DLQ; ``partition`` and ``offset`` are None for an HTTP request."""
+        self._record(
+            {
+                'ts': time.time(),
+                'event': EventType.MESSAGE_DLQ,
+                'partition': partition,
+                'offset': offset,
+                'metadata': encode_json_str(
+                    {
+                        'stage': stage,
+                        'sink': sink,
+                        'error': error,
+                        'delivered_sinks': delivered_sinks,
+                        'attempts': attempts,
+                    }
+                ),
+            }
+        )
+
+    def record_sink_not_started(self, *, sink: str, reason: str, partition: int | None) -> None:
+        """A result's delivery to ``sink`` (``<type>/<name>``) that did not start, and why."""
+        self._record(
+            {
+                'ts': time.time(),
+                'event': EventType.SINK_NOT_STARTED,
+                'partition': partition,
+                'metadata': encode_json_str({'sink': sink, 'reason': reason}),
             }
         )
 

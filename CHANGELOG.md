@@ -75,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses a sink that depends on itself or a cycle. In a plugin sink's config
   the three keys are reserved. `executor.on_failure` (`skip` or `dlq`,
   default `skip`) is what the default `on_error` returns.
+- **Sinks deliver by their policy and dependencies.** A sink starts after
+  the sinks in its `depends_on` delivered or skipped; the others run in
+  parallel. `on_delivery_error` sees `attempt`, `retries_left` and
+  `declared_policy`, and by default returns the declared policy. A delivery
+  that ends in `dlq` writes one record per source message and ends the
+  message: no later delivery of it starts. A window result cannot go to the
+  DLQ, so there `dlq` drops the payloads with a `window_delivery_not_dlq`
+  warning. New metrics `drakkar_dlq_records_total{stage}` and
+  `drakkar_sink_deliveries_not_started_total`, new recorder events
+  `message_dlq` and `sink_not_started`, and `sink_error` gains `action`.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys

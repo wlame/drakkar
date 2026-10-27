@@ -20,7 +20,7 @@ from confluent_kafka.aio import AIOConsumer
 from pydantic import BaseModel, ConfigDict, Field
 
 from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
-from drakkar.metrics import dlq_send_failures, sink_dlq_messages
+from drakkar.metrics import dlq_records, dlq_send_failures, sink_dlq_messages
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import DLQRecord, Header, render_headers
 from drakkar.sinks.kafka_delivery import settle_budget
@@ -212,6 +212,7 @@ class DLQSink(BaseSink[BaseModel]):
                 dlq_send_failures.inc()
                 return False
             sink_dlq_messages.inc()
+            dlq_records.labels(stage=stamped.stage).inc()
             logger.info(
                 'dlq_message_sent',
                 category='sink',

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from drakkar.app import _TYPED_SINK_SECTIONS, DrakkarApp
+from drakkar.app import DrakkarApp
 from drakkar.config import (
     DocsAnchor,
     DrakkarConfig,
@@ -21,6 +21,7 @@ from drakkar.config import (
     UIDocsConfig,
     UITimelineConfig,
 )
+from drakkar.config.sinks import BUILTIN_SINK_TYPES
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.probe import Column
 from drakkar.uipages import Page, TasksSource, Widget
@@ -186,7 +187,7 @@ def test_startup_silent_when_docs_anchor_names_a_configured_sink():
     )
 
 
-def test_typed_sink_sections_are_derived_from_the_sinks_model():
+def test_builtin_sink_types_are_derived_from_the_sinks_model():
     """The enumerated sections must track SinksConfig, and must exclude its non-mapping settings.
 
     Restating the six built-in names would go stale the day a seventh sink
@@ -194,9 +195,9 @@ def test_typed_sink_sections_are_derived_from_the_sinks_model():
     ``delivery_timeout_seconds`` (a float) and blow up instead.
     """
     mapping_fields = {name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict}
-    assert set(_TYPED_SINK_SECTIONS) == mapping_fields - {'custom'}
-    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(_TYPED_SINK_SECTIONS)
-    assert all(isinstance(getattr(SinksConfig(), section), dict) for section in _TYPED_SINK_SECTIONS)
+    assert set(BUILTIN_SINK_TYPES) == mapping_fields - {'custom'}
+    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(BUILTIN_SINK_TYPES)
+    assert all(isinstance(getattr(SinksConfig(), section), dict) for section in BUILTIN_SINK_TYPES)
 
 
 def test_startup_still_warns_on_a_bad_anchor_when_no_docs_site_is_configured():

@@ -1,8 +1,11 @@
 """Sink manager — orchestrates routing, delivery, and error handling.
 
 The SinkManager holds all configured sink instances, validates that
-CollectResult payloads target existing sinks, and delivers payloads
-with error handling via the on_delivery_error handler hook.
+CollectResult payloads target existing sinks, and delivers one result's
+payload groups by each sink's declared policy: its retry budget, its
+``on_failure`` and its ``depends_on``. It is also the one place that writes
+the DLQ record of a sink failure (the circuit-open, hook and spent-budget
+paths all end there).
 """
 
 from __future__ import annotations
@@ -10,33 +13,37 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import CircuitBreakerConfig, SinksConfig
-from drakkar.metrics import dlq_dropped_payloads, sink_deliveries_skipped, sink_delivery_retries
-from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
+from drakkar.config import CircuitBreakerConfig, SinkPolicy, SinksConfig
+from drakkar.config.sinks import BUILTIN_SINK_TYPES, DEFAULT_SINK_POLICY
+from drakkar.metrics import (
+    dlq_dropped_payloads,
+    dlq_unconfigured_drops,
+    sink_deliveries_not_started,
+    sink_deliveries_skipped,
+    sink_delivery_retries,
+)
+from drakkar.models import (
+    CollectResult,
+    DeliveryAction,
+    DeliveryError,
+    SinkDeliveryFailedError,
+    SinkNotStartedReason,
+    SourceMessage,
+)
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
-from drakkar.sinks.dlq_record import DLQRecord
+from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
 
-# Exception types that we treat as "transient" and retry for an idempotent
-# sink before surfacing through ``on_delivery_error``. Kept narrow on
-# purpose — over-classifying (e.g., treating every ``Exception`` as
-# transient) would paper over real bugs and delay DLQ routing for
-# genuinely broken downstreams. asyncio-native timeouts and OS-level
-# connection errors cover the common "flaky network" case; sink-library
-# specific errors (aiokafka, asyncpg, etc.) usually subclass
-# ``ConnectionError`` or ``TimeoutError`` in practice, or raise a
-# library-specific exception that the sink implementation can remap
-# before re-raising. Users who need a broader classification can
-# subclass ``BaseSink`` and catch + re-raise as a ``ConnectionError``
-# inside their own ``deliver()`` method.
 _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
     ConnectionError,
     TimeoutError,
@@ -86,14 +93,83 @@ _FIELD_TO_SINK_TYPE: dict[str, str] = {
     'files': 'filesystem',
 }
 
-# Sink types Drakkar ships with. Any sink registered with a ``sink_type``
-# NOT in this set is considered a plugin sink — payloads in
-# ``CollectResult.custom`` route to those by instance name. We keep this
-# in sync manually with ``_FIELD_TO_SINK_TYPE.values()`` rather than
-# deriving it dynamically: the static set documents the framework
-# contract for plugin authors and any future built-in addition is a
-# breaking change that needs explicit acknowledgement here.
-_BUILTIN_SINK_TYPES: frozenset[str] = frozenset({'kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem'})
+# A sink instance, keyed by its sink type and its name.
+SinkKey = tuple[str, str]
+
+
+def sink_ref(key: SinkKey) -> str:
+    """The ``<type>/<name>`` reference of a sink, as ``depends_on`` and the DLQ record write it."""
+    return f'{key[0]}/{key[1]}'
+
+
+class DeliveryOutcome(StrEnum):
+    """How the delivery of one result to one sink ended."""
+
+    DELIVERED = 'delivered'
+    # The payloads were dropped: the hook answered SKIP or the declared policy is skip.
+    SKIPPED = 'skipped'
+    # The source message is on the DLQ (this delivery wrote its record, or an earlier one did).
+    DLQ = 'dlq'
+    # The delivery failed and no record was written (a window result, or the DLQ write failed).
+    FAILED = 'failed'
+    NOT_STARTED = 'not_started'
+
+
+# Outcomes of a dependency that let its dependents start: a sink the handler
+# skipped is not "undelivered".
+_SATISFIED = frozenset({DeliveryOutcome.DELIVERED, DeliveryOutcome.SKIPPED})
+
+
+@dataclass
+class MessageDLQState:
+    """The DLQ state of one source message, shared by every result of that message.
+
+    ``dlq_written`` ends the message: no later delivery of it starts.
+    ``delivered_sinks`` collects the ``<type>/<name>`` of every sink that
+    delivered a result of it, for the record's ``dk-delivered-sinks``.
+    ``lock`` guards the check and the set of ``dlq_written`` together with
+    the record write, so one message gets one record.
+    """
+
+    dlq_written: bool = False
+    delivered_sinks: set[str] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass(frozen=True)
+class MessageContext:
+    """The source messages a task or message result belongs to, each with its DLQ state.
+
+    A task with several ``source_offsets`` has several messages. A window
+    result has no context at all: ``deliver_all`` gets ``None``.
+
+    The HTTP form (``for_request``) holds one message whose value is the raw
+    request body; ``request_id`` marks it, and its record carries no key,
+    no source headers and no topic, partition or offset.
+    """
+
+    source_messages: Sequence[SourceMessage]
+    states: Sequence[MessageDLQState]
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.source_messages) != len(self.states):
+            raise ValueError('MessageContext needs one DLQ state per source message')
+
+    @classmethod
+    def for_request(cls, *, body: bytes, request_id: str, received_ms: int) -> MessageContext:
+        """The context of one HTTP request: its raw body, its id and the time it was received in ms."""
+        message = SourceMessage(topic='', partition=-1, offset=-1, value=body, timestamp=received_ms)
+        return cls(source_messages=[message], states=[MessageDLQState()], request_id=request_id)
+
+    @property
+    def is_on_dlq(self) -> bool:
+        """True once a source message of this result is on the DLQ: no delivery of the result starts."""
+        return any(state.dlq_written for state in self.states)
+
+    def pairs(self) -> Iterator[tuple[SourceMessage, MessageDLQState]]:
+        """Each source message with its DLQ state."""
+        return zip(self.source_messages, self.states, strict=True)
 
 
 @dataclass
@@ -151,6 +227,11 @@ class SinkManager:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
+        # The declared policy of each sink and its dependencies as keys,
+        # fixed when the sink is registered so a delivery reads two dicts
+        # instead of walking the config section.
+        self._policies: dict[SinkKey, SinkPolicy] = {}
+        self._dependencies: dict[SinkKey, tuple[SinkKey, ...]] = {}
         # Reads the live ``sinks:`` section, when the app has one.
         #
         # A callable rather than the section itself, for two reasons that
@@ -181,6 +262,13 @@ class SinkManager:
         # Strategy for circuit-open deliveries whose DLQ write fails.
         # Overridden via attach_runtime from DLQConfig.on_send_failure.
         self._dlq_on_send_failure: str = 'drop'
+        # False when the config switches the DLQ off (no topic, no Kafka
+        # source): a missing DLQ sink is then a counted drop, never a stall.
+        self._dlq_enabled: bool = True
+        self._dlq_drop_warned: bool = False
+        # One warning line per sink and event per minute for the failure
+        # paths that can fire on every result of a failing sink.
+        self._rate_limited_log = RateLimitedLog(time.monotonic)
         # Budget for one delivery and for one close. Without it a sink whose
         # server stopped answering on a still-open TCP connection blocks its
         # partition indefinitely: the breaker only counts a failure when a
@@ -224,6 +312,7 @@ class SinkManager:
         recorder: EventRecorder | None,
         dlq_sink: DLQSink | None,
         dlq_on_send_failure: str = 'drop',
+        dlq_enabled: bool = True,
     ) -> None:
         """Inject recorder + DLQ sink after construction.
 
@@ -243,10 +332,16 @@ class SinkManager:
         governs the circuit-open DLQ path: 'drop' logs + counts and lets
         the offset commit; 'stall' raises ``SinkDeliveryFailedError`` so
         the partition pipeline stalls the affected offsets.
+
+        ``dlq_enabled`` mirrors ``DrakkarConfig.dlq_enabled``: with the DLQ
+        off by configuration a record that has nowhere to go is a counted
+        drop (``drakkar_dlq_unconfigured_drops_total``), whatever
+        ``dlq_on_send_failure`` says.
         """
         self._recorder = recorder
         self._dlq_sink = dlq_sink
         self._dlq_on_send_failure = dlq_on_send_failure
+        self._dlq_enabled = dlq_enabled
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
@@ -258,8 +353,8 @@ class SinkManager:
         """Total number of registered sinks."""
         return len(self._sinks)
 
-    def register(self, sink: BaseSink[Any]) -> None:
-        """Register a sink instance.
+    def register(self, sink: BaseSink[Any], policy: SinkPolicy = DEFAULT_SINK_POLICY) -> None:
+        """Register a sink instance with its declared failure policy, retry budget and dependencies.
 
         Raises ValueError if a sink with the same (type, name) already exists.
         Also installs the manager's circuit breaker config on the sink so the
@@ -271,6 +366,13 @@ class SinkManager:
         self._sinks[key] = sink
         self._by_type[sink.sink_type].append(sink)
         self._stats[key] = SinkStats()
+        self._policies[key] = policy
+        dependencies: list[SinkKey] = []
+        for ref in policy.depends_on:
+            # The config load checked every reference; a plugin type name has no '/'.
+            dependency_type, _, dependency_name = ref.partition('/')
+            dependencies.append((dependency_type, dependency_name))
+        self._dependencies[key] = tuple(dependencies)
         # Route circuit-breaker config through the public setter so the sink
         # keeps a single documented API for thresholds — the manager never
         # reaches into BaseSink's private attributes.
@@ -463,16 +565,16 @@ class SinkManager:
             raise SinkNotConfiguredError(
                 'CustomPayload.sink is empty — plugin sink payloads must name '
                 'the configured sink instance explicitly (one of: '
-                f'{[name for (st, name), _ in self._sinks.items() if st not in _BUILTIN_SINK_TYPES]!r}).'
+                f'{[name for (st, name), _ in self._sinks.items() if st not in BUILTIN_SINK_TYPES]!r}).'
             )
 
         candidates = [
             (sink_type, sink)
             for (sink_type, name), sink in self._sinks.items()
-            if name == sink_name and sink_type not in _BUILTIN_SINK_TYPES
+            if name == sink_name and sink_type not in BUILTIN_SINK_TYPES
         ]
         if not candidates:
-            plugin_names = sorted({name for (st, name), _ in self._sinks.items() if st not in _BUILTIN_SINK_TYPES})
+            plugin_names = sorted({name for (st, name), _ in self._sinks.items() if st not in BUILTIN_SINK_TYPES})
             raise SinkNotConfiguredError(
                 f'No plugin sink instance named {sink_name!r} configured under sinks.custom — '
                 f'known plugin sink instances: {plugin_names!r}'
@@ -536,41 +638,9 @@ class SinkManager:
         for payload in result.custom:
             self.resolve_custom_sink(payload.sink)
 
-    async def deliver_all(
-        self,
-        result: CollectResult,
-        on_delivery_error: DeliveryErrorCallback,
-        partition_id: int,
-        max_retries: int = 3,
-    ) -> None:
-        """Route and deliver all payloads in a CollectResult to their sinks.
-
-        Groups payloads by (sink_type, resolved_sink_name) for both
-        built-in payload fields (``kafka``, ``postgres``, …) AND the
-        plugin-sink ``custom`` field, then delivers each group
-        concurrently via asyncio.gather. Total wall-clock time becomes
-        ~max(sink_latency) instead of the sum. On delivery failure,
-        calls on_delivery_error and handles the returned action
-        (DLQ, RETRY, SKIP) PER SINK — each sink retries independently.
-
-        Recorder + DLQ sink are read from instance state
-        (``self._recorder`` / ``self._dlq_sink``) — both are set via
-        ``__init__`` kwargs or the later :meth:`attach_runtime` setter.
-        Holding them as instance state keeps the hot path signature
-        minimal and avoids threading the same two objects through every
-        delivery call.
-
-        Args:
-            result: The CollectResult from on_task_complete(),
-                on_message_complete(), or on_window_complete().
-            on_delivery_error: Handler callback for delivery failures.
-            partition_id: Source partition (for DLQ metadata).
-            max_retries: Max delivery retry attempts before falling through to DLQ. Callers
-                do not pass it, so the delivery limit is this default (3); it is not
-                ``executor.max_retries``, which governs task retries.
-        """
-        groups: dict[tuple[str, str], list[BaseModel]] = defaultdict(list)
-
+    def _group_payloads(self, result: CollectResult) -> dict[SinkKey, list[BaseModel]]:
+        """The result's payloads grouped by sink, each group in payload order."""
+        groups: dict[SinkKey, list[BaseModel]] = defaultdict(list)
         for field_name, sink_type in _FIELD_TO_SINK_TYPE.items():
             payloads = getattr(result, field_name)
             if not payloads:
@@ -578,42 +648,150 @@ class SinkManager:
             for payload in payloads:
                 sink = self.resolve_sink(sink_type, payload.sink)
                 groups[(sink.sink_type, sink.name)].append(payload)
-
         # Plugin sink payloads. Resolution is by instance name across the
-        # non-built-in sink set; the validate_collect step above has
-        # already rejected unknown / ambiguous names so resolve_custom_sink
-        # is guaranteed to succeed at this point.
+        # non-built-in sink set; the validate_collect step has already
+        # rejected unknown / ambiguous names so resolve_custom_sink is
+        # guaranteed to succeed at this point.
         for payload in result.custom:
             sink = self.resolve_custom_sink(payload.sink)
             groups[(sink.sink_type, sink.name)].append(payload)
+        return groups
 
+    async def deliver_all(
+        self,
+        result: CollectResult,
+        on_delivery_error: DeliveryErrorCallback,
+        partition_id: int,
+        *,
+        message_context: MessageContext | None = None,
+    ) -> dict[SinkKey, DeliveryOutcome]:
+        """Deliver every payload group of one result by its sink's declared policy and dependencies.
+
+        Groups payloads by (sink_type, resolved_sink_name), for the built-in
+        payload fields and the plugin-sink ``custom`` field. A group whose
+        sink has no dependency in this result starts at once, in parallel
+        with the others; a group with dependencies starts when each of them
+        settled with success (delivered or skipped). A dependency with no
+        payloads in this result counts as satisfied. A dependency that ended
+        the message on the DLQ stops its dependents with reason
+        ``message_dlq``; one that failed without a record stops them with
+        ``dependency_failed``.
+
+        Args:
+            result: The CollectResult from on_task_complete(),
+                on_message_complete(), or on_window_complete().
+            on_delivery_error: Handler callback for delivery failures.
+            partition_id: Source partition (-1 for an HTTP request).
+            message_context: The source messages of a task or message result
+                and their DLQ state. ``None`` for a window result, which has
+                no source message: ``on_failure: dlq`` then acts as ``skip``.
+
+        Returns:
+            The outcome of every group, keyed by (sink_type, sink_name).
+
+        Raises:
+            SinkDeliveryFailedError: a record could not be written and
+                ``dlq.on_send_failure`` is ``stall``. Every other group still
+                settles first.
+        """
+        groups = self._group_payloads(result)
         if not groups:
-            return
+            return {}
 
-        # Dispatch per-sink delivery coroutines concurrently. Each coroutine
-        # owns its own retry/DLQ/stats logic, so concurrent execution is safe
-        # — stats are scoped per (sink_type, name), no cross-sink contention.
-        # ``return_exceptions=True`` lets every sibling delivery settle — a
-        # bare gather would abandon in-flight groups on the first raise and
-        # swallow any later failures entirely. After all groups finish we
-        # re-raise the FIRST exception (iteration order), mirroring
-        # ``connect_all``: an exception leaking out of ``_deliver_to_sink``
-        # still propagates loudly, it just no longer cancels its siblings.
-        coros = [
-            self._deliver_to_sink(
-                sink_type=sink_type,
-                sink_name=sink_name,
-                payloads=groups[(sink_type, sink_name)],
-                on_delivery_error=on_delivery_error,
-                max_retries=max_retries,
-                partition_id=partition_id,
-            )
-            for (sink_type, sink_name) in groups
-        ]
-        results = await asyncio.gather(*coros, return_exceptions=True)
+        if message_context is not None and message_context.is_on_dlq:
+            # An earlier result of this message wrote its DLQ record: the
+            # message is done, so none of its deliveries start.
+            for key in groups:
+                self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id)
+            return dict.fromkeys(groups, DeliveryOutcome.NOT_STARTED)
+
+        # One settle signal per group of this result. A dependent awaits the
+        # signals of its dependencies; the config load refuses a cycle, so
+        # the awaits always end.
+        loop = asyncio.get_running_loop()
+        settled: dict[SinkKey, asyncio.Future[DeliveryOutcome]] = {key: loop.create_future() for key in groups}
+
+        async def settle(key: SinkKey) -> None:
+            outcome = DeliveryOutcome.FAILED
+            try:
+                outcome = await self._deliver_group(
+                    key,
+                    payloads=groups[key],
+                    settled=settled,
+                    on_delivery_error=on_delivery_error,
+                    partition_id=partition_id,
+                    message_context=message_context,
+                )
+            finally:
+                # Set on every exit, a raise and a cancellation included:
+                # a dependent waiting on this group must never wait for ever.
+                # Waiters shield the signal, so nothing else can settle it.
+                settled[key].set_result(outcome)
+
+        # ``return_exceptions=True`` lets every group settle — a bare gather
+        # would abandon in-flight groups on the first raise. After all groups
+        # finish we re-raise the FIRST exception (iteration order), mirroring
+        # ``connect_all``.
+        results = await asyncio.gather(*(settle(key) for key in groups), return_exceptions=True)
         for result_or_exc in results:
             if isinstance(result_or_exc, BaseException):
                 raise result_or_exc
+        return {key: future.result() for key, future in settled.items()}
+
+    async def _deliver_group(
+        self,
+        key: SinkKey,
+        *,
+        payloads: list[BaseModel],
+        settled: dict[SinkKey, asyncio.Future[DeliveryOutcome]],
+        on_delivery_error: DeliveryErrorCallback,
+        partition_id: int,
+        message_context: MessageContext | None,
+    ) -> DeliveryOutcome:
+        """Wait for the group's dependencies in this result, then deliver it, or say why it did not start."""
+        for dependency in self._dependencies.get(key, ()):
+            dependency_settled = settled.get(dependency)
+            if dependency_settled is None:
+                # No payloads for the dependency in this result: satisfied.
+                continue
+            # Shielded: a waiter that is cancelled must not cancel the shared
+            # signal that the other dependents of the same sink await.
+            outcome = await asyncio.shield(dependency_settled)
+            if outcome in _SATISFIED:
+                continue
+            # A dependency that wrote the record, or did not start because the
+            # message is on the DLQ, ends the message; anything else (a window
+            # failure, a lost record) is a failed dependency. The message's
+            # state answers both, so a chain passes its reason down unchanged.
+            reason = (
+                SinkNotStartedReason.MESSAGE_DLQ
+                if message_context is not None and message_context.is_on_dlq
+                else SinkNotStartedReason.DEPENDENCY_FAILED
+            )
+            self._note_not_started(key, reason, partition_id)
+            return DeliveryOutcome.NOT_STARTED
+        if message_context is not None and message_context.is_on_dlq:
+            # Another group of this result wrote the record while this one
+            # waited for its dependencies.
+            self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id)
+            return DeliveryOutcome.NOT_STARTED
+        return await self._deliver_to_sink(
+            key,
+            payloads=payloads,
+            on_delivery_error=on_delivery_error,
+            partition_id=partition_id,
+            message_context=message_context,
+        )
+
+    def _note_not_started(self, key: SinkKey, reason: SinkNotStartedReason, partition_id: int) -> None:
+        """Count, log and record one group that did not start."""
+        sink_deliveries_not_started.labels(sink_type=key[0], sink_name=key[1], reason=reason.value).inc()
+        # Sync, not ``await logger.adebug``: the async variants pay for a
+        # thread-pool hop before the level filter, and a message on the DLQ
+        # makes this fire for every group of every later result.
+        logger.debug('sink_not_started', category='sink', sink=sink_ref(key), reason=reason.value)
+        if self._recorder is not None:
+            self._recorder.record_sink_not_started(sink=sink_ref(key), reason=reason.value, partition=partition_id)
 
     async def _deliver_with_transient_retry(
         self,
@@ -697,288 +875,155 @@ class SinkManager:
                 )
                 await asyncio.sleep(backoff)
 
+    async def _attempt_delivery(self, sink: BaseSink[Any], key: SinkKey, payloads: list[BaseModel]) -> None:
+        """One hook-level attempt: ``sink.deliver`` with the quick transient retry, bounded by the delivery timeout.
+
+        One budget for the whole attempt, transient retries included, so a
+        partition's wait on a wedged sink is predictable rather than a
+        multiple of the retry count. A timeout cancels the sink coroutine:
+        ``CancelledError`` is a ``BaseException``, so a sink's own ``except
+        Exception`` fallback (the Postgres per-row retry) does not fire on it
+        and the "failed batch wrote nothing" premise is preserved.
+        """
+        sink_type, sink_name = key
+        try:
+            await asyncio.wait_for(
+                self._deliver_with_transient_retry(
+                    sink=sink,
+                    sink_type=sink_type,
+                    sink_name=sink_name,
+                    payloads=payloads,
+                ),
+                timeout=self._delivery_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            # ``str(TimeoutError())`` is the empty string, and this error is
+            # what reaches the handler, the DLQ record and the log — say what
+            # actually happened. Same class, so it stays classified transient.
+            raise TimeoutError(
+                f'{sink_type} sink {sink_name!r} did not finish delivering '
+                f'{len(payloads)} payload(s) within {self._delivery_timeout_seconds}s'
+            ) from exc
+
     async def _deliver_to_sink(
         self,
-        sink_type: str,
-        sink_name: str,
+        key: SinkKey,
+        *,
         payloads: list[BaseModel],
         on_delivery_error: DeliveryErrorCallback,
-        max_retries: int,
         partition_id: int,
-    ) -> None:
-        """Deliver a single sink's payload group with retry + DLQ + circuit-breaker semantics.
+        message_context: MessageContext | None,
+    ) -> DeliveryOutcome:
+        """Deliver one sink's payload group with its retry budget, its declared policy and the circuit breaker.
 
-        Extracted so sink groups can run under asyncio.gather; the retry loop,
-        per-sink stats updates, and DLQ routing all run inside one coroutine
-        so concurrent gather does not interleave a single sink's retries.
+        Retry budget:
+            The hook is asked after every failed hook-level attempt, with the
+            attempt (from 1) and the retries left of the sink's
+            ``max_retries``. ``RETRY`` spends one; ``RETRY`` with none left
+            is the declared ``on_failure``, logged
+            ``sink_retry_budget_spent``. A hook that raises is logged
+            ``delivery_error_hook_failed`` and the declared policy applies.
+
+            The quick transient retry of an idempotent batch
+            (``_deliver_with_transient_retry``) stays inside one hook-level
+            attempt and outside this budget: it smooths a blipped packet
+            before the handler is bothered, so it neither calls the hook nor
+            counts as an attempt, and the breaker sees one failure for it.
 
         Circuit breaker:
-            Before the first delivery attempt we check the sink's breaker via
-            ``should_skip_delivery``. When the breaker is open (and cooldown
-            hasn't elapsed), we skip the sink entirely and route the payloads
-            directly to the DLQ — no retry loop, no connection burn. The
-            breaker's own state machine handles the cooldown-to-half-open
-            transition on subsequent invocations.
-
-            On terminal outcomes (success or retries-exhausted) we call the
-            matching ``record_*`` method so the breaker can accumulate
-            consecutive failures and trip when the threshold is hit.
-
-        Circuit-open DLQ routing is intentionally separate from the normal
-        delivery-error path: when a ``dlq_sink`` is provided we call
-        ``dlq_sink.send`` directly and DO NOT invoke ``on_delivery_error``.
-        The rationale is that a tripped breaker is an infrastructure signal
-        outside the handler's SKIP/RETRY/DLQ contract — SKIP would drop
-        data while the downstream is recovering, RETRY would hammer it, and
-        DLQ via the handler could double-route if the handler itself ships
-        DLQ-action results back to the same DLQ sink. We still invoke the
-        handler for observability when no DLQ is wired (pre-breaker
-        deployments). The trade-off is a dual-path DLQ plumbing that the
-        app.py ``_on_delivery_error`` wrapper does NOT observe for circuit
-        skips — deliberate, documented here so the inconsistency is
-        explicit rather than accidental.
+            When the breaker is open the declared ``on_failure`` decides
+            without the hook — an open breaker is an infrastructure signal,
+            not a per-message decision: ``skip`` drops and counts, ``dlq``
+            writes the record with ``dk-attempts: 0``. On terminal outcomes
+            (success, or a failure that is not a skip) the matching
+            ``record_*`` method lets the breaker count consecutive failures.
         """
-        sink = self._sinks[(sink_type, sink_name)]
-        stats = self._stats[(sink_type, sink_name)]
+        sink = self._sinks[key]
+        stats = self._stats[key]
+        policy = self._policies[key]
+        declared = DeliveryAction(policy.on_failure)
+        sink_type, sink_name = key
 
-        # Circuit breaker gate. When the circuit is open and still cooling
-        # down, bypass the retry loop entirely and route the payloads to the
-        # DLQ. The breaker check itself is cheap (a time.monotonic + integer
-        # compare) so running it before every batch is fine. We surface the
-        # skip as an error_count tick + sentinel last_error so the debug UI
-        # and stats endpoints can explain why the sink received nothing.
+        # Circuit breaker gate. The breaker check itself is cheap (a
+        # time.monotonic + integer compare) so running it before every batch
+        # is fine. We surface the skip as an error_count tick + sentinel
+        # last_error so the debug UI and stats endpoints can explain why the
+        # sink received nothing.
         if sink.should_skip_delivery():
             stats.error_count += 1
             stats.last_error = CIRCUIT_OPEN_ERROR
             stats.last_error_ts = time.time()
-            if self._recorder is not None:
-                self._recorder.record_sink_error(
-                    sink_type=sink_type,
-                    sink_name=sink_name,
-                    error=CIRCUIT_OPEN_ERROR,
-                    attempt=0,
-                )
-            error = DeliveryError(
-                sink_name=sink_name,
-                sink_type=sink_type,
-                error=CIRCUIT_OPEN_ERROR,
-                payloads=payloads,
-            )
-            # With a DLQ sink, routing is forced and the handler is NOT
-            # invoked: the breaker has already decided the sink is
-            # unhealthy, the handler's job is to classify failures against
-            # a live sink, and calling it here would risk a double-DLQ
-            # (app handlers typically route a DLQ action back into this
-            # same sink). Without one there is nothing to force the
-            # payloads into, so the handler IS asked — and its answer is
-            # honoured; see the else-branch below.
-            if self._dlq_sink is not None:
-                # The delivery path does not carry the source message yet,
-                # so the record holds the failed payloads' JSON. No hook
-                # attempt was made against an open circuit.
-                if not await self._dlq_sink.send(
-                    DLQRecord.from_delivery_error(error, attempts=0), partition_id=partition_id
-                ):
-                    # The breaker is open AND the DLQ write failed — the
-                    # payloads have nowhere safe to go. Apply the
-                    # dlq.on_send_failure strategy.
-                    if self._dlq_on_send_failure == 'stall':
-                        raise SinkDeliveryFailedError(
-                            sink_name=sink_name,
-                            sink_type=sink_type,
-                            reason='circuit open and DLQ send failed',
-                        )
-                    dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-                    logger.critical(
-                        'dlq_failure_payloads_dropped',
-                        category='sink',
-                        sink_name=sink_name,
-                        sink_type=sink_type,
-                        partition=partition_id,
-                        payload_count=len(payloads),
-                        reason='circuit open and DLQ send failed',
-                        action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
-                        'set dlq.on_send_failure=stall to prefer replay over loss',
-                    )
-            else:
-                # No DLQ sink wired. The handler is asked, and its answer is
-                # honoured — discarding it would make SKIP, RETRY and DLQ
-                # all end the same way: payloads dropped, offset committed,
-                # nothing counted beyond the generic circuit-open warning in
-                # the log. That would be silent loss on the one path where
-                # the operator explicitly asked what to do.
-                action = await on_delivery_error(error)
-                if action == DeliveryAction.SKIP:
-                    # Operator intent: drop, but a counted and named drop —
-                    # same accounting as a SKIP against a live sink.
-                    sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                    logger.warning(
-                        'sink_delivery_skipped',
-                        category='sink',
-                        sink_type=sink_type,
-                        sink_name=sink_name,
-                        payload_count=len(payloads),
-                        reason='circuit open, no DLQ configured',
-                    )
-                else:
-                    # DLQ: the handler wants these payloads kept and there is
-                    # no DLQ to keep them in.
-                    # RETRY: cannot be honoured — re-entering an open circuit
-                    # is what the breaker exists to prevent.
-                    # Both mean "do not drop this quietly", so both take the
-                    # configured dlq.on_send_failure route, exactly like the
-                    # DLQ-wired branch above when the DLQ write fails.
-                    reason = f'circuit open, no DLQ configured (handler returned {action.value})'
-                    if self._dlq_on_send_failure == 'stall':
-                        raise SinkDeliveryFailedError(
-                            sink_name=sink_name,
-                            sink_type=sink_type,
-                            reason=reason,
-                        )
-                    dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-                    logger.critical(
-                        'dlq_failure_payloads_dropped',
-                        category='sink',
-                        sink_name=sink_name,
-                        sink_type=sink_type,
-                        partition=partition_id,
-                        payload_count=len(payloads),
-                        reason=reason,
-                        action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
-                        'configure a DLQ, or set dlq.on_send_failure=stall to prefer replay over loss',
-                    )
+            self._record_sink_error(key, CIRCUIT_OPEN_ERROR, attempt=0, action=declared)
             logger.warning(
                 'sink_delivery_circuit_open',
                 category='sink',
                 sink_type=sink_type,
                 sink_name=sink_name,
                 payload_count=len(payloads),
+                on_failure=policy.on_failure,
             )
-            return
+            return await self._end_delivery(
+                key,
+                action=declared,
+                error_text=CIRCUIT_OPEN_ERROR,
+                attempts=0,
+                payload_count=len(payloads),
+                partition_id=partition_id,
+                message_context=message_context,
+            )
 
         # Track whether THIS invocation claimed the half-open probe slot.
         # ``should_skip_delivery`` above returned False, so if the sink is
         # now in ``half_open`` state with ``probe_inflight=True``, it was
-        # this caller that claimed the probe slot (either by promoting
-        # ``open → half_open`` after cooldown or by being first to enter
-        # half_open with no probe in flight). We MUST release that slot
-        # before returning, via either:
-        #   - ``record_success`` / ``record_failure`` (terminal outcomes
-        #     that also drive circuit-state transitions), or
-        #   - ``release_probe_inflight`` (neutral release for SKIP and
-        #     handler-raising paths that do neither of the above).
-        # Without the try/finally below, a SKIP action or a raise inside
-        # ``on_delivery_error`` would leak the probe flag and permanently
-        # wedge the circuit in ``half_open + inflight=True``.
+        # this caller that claimed the probe slot. We MUST release that slot
+        # before returning, via either ``record_success`` /
+        # ``record_failure`` (terminal outcomes that also drive
+        # circuit-state transitions), or ``release_probe_inflight`` (neutral
+        # release for SKIP, which does neither). Without the try/finally
+        # below, a SKIP or a raise on the DLQ path would leak the probe flag
+        # and permanently wedge the circuit in ``half_open + inflight=True``.
         probe_claimed = sink.circuit_state == 'half_open' and sink.probe_inflight
         try:
             attempt = 0
             while True:
+                start = time.monotonic()
                 try:
-                    start = time.monotonic()
-                    # Idempotent sinks get a small fast-retry on transient
-                    # errors before the failure surfaces through
-                    # ``on_delivery_error``. Non-idempotent sinks take a
-                    # single shot (current behavior preserved).
-                    # Both paths count as ONE delivery attempt from the
-                    # circuit breaker's perspective — the transient-retry
-                    # loop is purely internal to this ``deliver`` call.
-                    # One budget for the whole attempt, transient retries
-                    # included, so a partition's wait on a wedged sink is
-                    # predictable rather than a multiple of the retry count.
-                    # A timeout cancels the sink coroutine: ``CancelledError``
-                    # is a ``BaseException``, so a sink's own ``except
-                    # Exception`` fallback (the Postgres per-row retry) does
-                    # not fire on it and the "failed batch wrote nothing"
-                    # premise is preserved.
-                    try:
-                        await asyncio.wait_for(
-                            self._deliver_with_transient_retry(
-                                sink=sink,
-                                sink_type=sink_type,
-                                sink_name=sink_name,
-                                payloads=payloads,
-                            ),
-                            timeout=self._delivery_timeout_seconds,
-                        )
-                    except TimeoutError as exc:
-                        # ``str(TimeoutError())`` is the empty string, and this
-                        # error is what reaches the handler, the DLQ entry and
-                        # the log — say what actually happened. Same class, so
-                        # it stays classified transient.
-                        raise TimeoutError(
-                            f'{sink_type} sink {sink_name!r} did not finish delivering '
-                            f'{len(payloads)} payload(s) within {self._delivery_timeout_seconds}s'
-                        ) from exc
-                    duration = time.monotonic() - start
-                    stats.delivered_count += 1
-                    stats.delivered_payloads += len(payloads)
-                    stats.last_delivery_ts = time.time()
-                    stats.last_delivery_duration = round(duration, 4)
-                    # Terminal success — let the breaker close if it was probing
-                    # (half_open), or simply reset the consecutive-failure count
-                    # when the circuit was already closed.
-                    sink.record_success()
-                    if self._recorder is not None:
-                        self._recorder.record_sink_delivery(
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
-                            duration=duration,
-                        )
-                    return
+                    await self._attempt_delivery(sink, key, payloads)
                 except Exception as e:
                     attempt += 1
                     stats.error_count += 1
                     # Sink exceptions can carry secrets (DSNs with passwords),
                     # so every string that lands in last_error / recorder /
-                    # DeliveryError goes through ``redact_url`` first. Parallel
-                    # delivery amplifies the blast radius of any leak, so
-                    # redact at the source rather than hoping downstream logs
-                    # filter it.
+                    # DeliveryError goes through ``redact_url`` first.
                     safe_error = redact_url(str(e))
                     stats.last_error = safe_error
                     stats.last_error_ts = time.time()
-                    if self._recorder is not None:
-                        self._recorder.record_sink_error(
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            error=safe_error,
-                            attempt=attempt,
-                        )
+                    retries_left = policy.max_retries + 1 - attempt
                     error = DeliveryError(
                         sink_name=sink_name,
                         sink_type=sink_type,
                         error=safe_error,
                         payloads=payloads,
+                        attempt=attempt,
+                        retries_left=retries_left,
+                        declared_policy=declared,
                     )
-                    try:
-                        action = await on_delivery_error(error)
-                    except Exception:
-                        # The hook raising (handler bug, or a stall-mode
-                        # SinkDeliveryFailedError from the DLQ fallback) is
-                        # a terminal failure for this delivery — tell the
-                        # breaker before propagating so consecutive
-                        # failures still accumulate toward the trip
-                        # threshold instead of leaving it blind.
-                        sink.record_failure()
-                        raise
-
-                    if action == DeliveryAction.RETRY and attempt < max_retries:
+                    action = await self._ask_hook(on_delivery_error, error, key)
+                    if action == DeliveryAction.RETRY and retries_left > 0:
                         # The retry re-delivers the WHOLE original group, not
                         # the unapplied tail. Partial application before the
                         # raise is normal — the HTTP sink POSTs sequentially,
                         # the Kafka sink has acks for some messages, Postgres
                         # and Mongo commit earlier adjacent runs in autocommit
-                        # — so payloads that already landed land again.
-                        #
-                        # That is deliberate: the framework is at-least-once
-                        # end to end (a revoke or a crash replays the whole
-                        # window and re-delivers everything), so a RETRY that
-                        # tried to be exactly-once would promise something the
-                        # layer above cannot keep. See docs/sinks.md. The log
-                        # says it explicitly so an operator choosing RETRY for
-                        # a non-idempotent sink can see the cost.
+                        # — so payloads that already landed land again. That
+                        # is deliberate: the framework is at-least-once end to
+                        # end (a revoke or a crash replays the whole window),
+                        # so a RETRY that tried to be exactly-once would
+                        # promise something the layer above cannot keep. See
+                        # docs/sinks.md. The log says it explicitly so an
+                        # operator choosing RETRY for a non-idempotent sink can
+                        # see the cost.
+                        self._record_sink_error(key, safe_error, attempt=attempt, action=DeliveryAction.RETRY)
                         stats.retry_count += 1
                         sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
                         logger.warning(
@@ -987,109 +1032,297 @@ class SinkManager:
                             sink_type=sink_type,
                             sink_name=sink_name,
                             attempt=attempt,
+                            retries_left=retries_left,
                             payload_count=len(payloads),
                             note='whole group re-delivered; payloads already applied are applied again',
                         )
                         continue
-                    elif action == DeliveryAction.SKIP:
-                        # SKIP is operator intent (handler returned SKIP) — treat
-                        # as "this delivery is not a true failure" from the breaker's
-                        # perspective, so we do NOT record a failure. The circuit
-                        # should only trip on infrastructure failure, not on user
-                        # code deciding to drop a batch. The try/finally around
-                        # this loop releases the probe slot if we were the probe,
-                        # so SKIP cannot wedge a half-open circuit.
-                        sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                        logger.warning(
-                            'sink_delivery_skipped',
+                    if action == DeliveryAction.RETRY:
+                        await self._rate_limited_log.emit(
+                            f'sink_retry_budget_spent:{sink_ref(key)}',
+                            logger.awarning,
+                            'sink_retry_budget_spent',
                             category='sink',
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
-                        )
-                        return
-                    elif action == DeliveryAction.DLQ:
-                        # The DLQ write already happened inside the
-                        # on_delivery_error callback (app.py's wrapper handles
-                        # the DLQ action, including dlq.on_send_failure).
-                        # Terminal failure for the sink — tell the breaker so
-                        # consecutive failures accumulate toward the trip
-                        # threshold.
-                        sink.record_failure()
-                        logger.warning(
-                            'sink_delivery_failed_to_dlq',
-                            category='sink',
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
+                            sink=sink_ref(key),
                             attempts=attempt,
+                            max_retries=policy.max_retries,
+                            on_failure=policy.on_failure,
                         )
-                        return
-                    else:
-                        # RETRY with the budget exhausted. The handler never
-                        # returned DLQ, so the app-level wrapper (which DLQs
-                        # only on a DLQ action) never shipped these payloads
-                        # — route them to the DLQ here instead of dropping
-                        # them silently (docs/sinks.md promises this
-                        # fallthrough).
+                        action = declared
+                    self._record_sink_error(key, safe_error, attempt=attempt, action=action)
+                    if action != DeliveryAction.SKIP:
+                        # A terminal failure — tell the breaker so consecutive
+                        # failures accumulate toward the trip threshold. SKIP
+                        # is operator intent, not an infrastructure failure,
+                        # so it does not count; the finally below releases
+                        # the probe slot instead.
                         sink.record_failure()
-                        await self._dlq_exhausted_retry(error=error, partition_id=partition_id, attempts=attempt)
-                        return
+                    return await self._end_delivery(
+                        key,
+                        action=action,
+                        error_text=safe_error,
+                        attempts=attempt,
+                        payload_count=len(payloads),
+                        partition_id=partition_id,
+                        message_context=message_context,
+                    )
+                duration = time.monotonic() - start
+                stats.delivered_count += 1
+                stats.delivered_payloads += len(payloads)
+                stats.last_delivery_ts = time.time()
+                stats.last_delivery_duration = round(duration, 4)
+                # Terminal success — let the breaker close if it was probing
+                # (half_open), or simply reset the consecutive-failure count
+                # when the circuit was already closed.
+                sink.record_success()
+                if self._recorder is not None:
+                    self._recorder.record_sink_delivery(
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payload_count=len(payloads),
+                        duration=duration,
+                    )
+                if message_context is not None:
+                    for state in message_context.states:
+                        state.delivered_sinks.add(sink_ref(key))
+                return DeliveryOutcome.DELIVERED
         finally:
             # Probe-slot leak guard. ``record_success`` / ``record_failure``
             # clear ``probe_inflight`` on terminal outcomes, so this is a
-            # no-op for the normal paths. It only fires when we exit via
-            # SKIP, an uncaught exception from ``on_delivery_error``, or any
-            # other path that skips both recorder helpers — without it those
-            # paths would leave ``probe_inflight=True`` and every future
-            # ``should_skip_delivery`` would return True, wedging the
-            # circuit in half_open forever.
+            # no-op for the normal paths. It only fires when we exit via SKIP
+            # or a raise that skipped both recorder helpers.
             if probe_claimed and sink.probe_inflight:
                 sink.release_probe_inflight()
 
-    async def _dlq_exhausted_retry(
-        self,
-        error: DeliveryError,
-        partition_id: int,
-        attempts: int,
-    ) -> None:
-        """Ship a retries-exhausted batch to the DLQ, honoring ``dlq.on_send_failure``.
-
-        The handler kept answering RETRY, so the app-level wrapper — which
-        DLQs only when the handler returns the DLQ action — never shipped
-        these payloads. Without this fallthrough the batch would vanish
-        once the retry budget ran out.
-        """
-        if self._dlq_sink is not None and await self._dlq_sink.send(
-            DLQRecord.from_delivery_error(error, attempts=attempts), partition_id=partition_id
-        ):
-            logger.warning(
-                'sink_delivery_retries_exhausted_to_dlq',
+    async def _ask_hook(
+        self, on_delivery_error: DeliveryErrorCallback, error: DeliveryError, key: SinkKey
+    ) -> DeliveryAction:
+        """The hook's answer for one failed attempt; the declared policy when the hook raises."""
+        try:
+            return await on_delivery_error(error)
+        except Exception as exc:
+            await logger.aerror(
+                'delivery_error_hook_failed',
                 category='sink',
-                sink_type=error.sink_type,
-                sink_name=error.sink_name,
-                payload_count=len(error.payloads),
+                sink=sink_ref(key),
+                attempt=error.attempt,
+                on_failure=error.declared_policy.value,
+                error=redact_url(str(exc)),
+                exc_info=exc,
+            )
+            return error.declared_policy
+
+    def _record_sink_error(self, key: SinkKey, error: str, *, attempt: int, action: DeliveryAction) -> None:
+        if self._recorder is not None:
+            self._recorder.record_sink_error(
+                sink_type=key[0],
+                sink_name=key[1],
+                error=error,
+                attempt=attempt,
+                action=action.value,
+            )
+
+    async def _end_delivery(
+        self,
+        key: SinkKey,
+        *,
+        action: DeliveryAction,
+        error_text: str,
+        attempts: int,
+        payload_count: int,
+        partition_id: int,
+        message_context: MessageContext | None,
+    ) -> DeliveryOutcome:
+        """Apply the final ``SKIP`` or ``DLQ`` of a failed delivery."""
+        sink_type, sink_name = key
+        if action == DeliveryAction.SKIP:
+            sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
+            await self._rate_limited_log.emit(
+                f'sink_delivery_skipped:{sink_ref(key)}',
+                logger.awarning,
+                'sink_delivery_skipped',
+                category='sink',
+                sink_type=sink_type,
+                sink_name=sink_name,
+                payload_count=payload_count,
                 attempts=attempts,
+                error=error_text,
             )
-            return
-        # No DLQ sink wired, or the DLQ write failed — the payloads have
-        # nowhere safe to go. Apply the dlq.on_send_failure strategy, the
-        # same way the circuit-open path above does.
+            return DeliveryOutcome.SKIPPED
+        if message_context is None:
+            # A window result is delivered after its messages completed their
+            # offsets: there is no source message to send to the DLQ. The
+            # payloads are dropped as a skip would drop them, but the outcome
+            # is a failure, so the sinks that depend on this one do not start.
+            sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
+            await self._rate_limited_log.emit(
+                f'window_delivery_not_dlq:{sink_ref(key)}',
+                logger.awarning,
+                'window_delivery_not_dlq',
+                category='sink',
+                sink=sink_ref(key),
+                payload_count=payload_count,
+                error=error_text,
+                note='a window result has no source message to send to the DLQ',
+            )
+            return DeliveryOutcome.FAILED
+        return await self._send_message_to_dlq(
+            key,
+            error_text=error_text,
+            attempts=attempts,
+            payload_count=payload_count,
+            partition_id=partition_id,
+            message_context=message_context,
+        )
+
+    async def _send_message_to_dlq(
+        self,
+        key: SinkKey,
+        *,
+        error_text: str,
+        attempts: int,
+        payload_count: int,
+        partition_id: int,
+        message_context: MessageContext,
+    ) -> DeliveryOutcome:
+        """Write one DLQ record per source message of the result, unless the message already has one.
+
+        The only place a sink failure writes the DLQ. Raises
+        ``SinkDeliveryFailedError`` when a record could not be written and
+        ``dlq.on_send_failure`` is ``stall``.
+        """
+        if self._dlq_sink is None and not self._dlq_enabled:
+            # The DLQ is off by configuration, not broken: stalling a partition
+            # over it would wedge a worker that never asked for a DLQ. A live
+            # Kafka source always implies a DLQ, so this guards the HTTP-only
+            # worker.
+            await self.drop_unconfigured_dlq_send(partition_id, payload_count)
+            return DeliveryOutcome.FAILED
+
+        written = 0
+        lost = 0
+        for message, state in message_context.pairs():
+            # The flag is read and set under the message's own lock, with the
+            # write in between: two results of one message (or two groups of
+            # one result) can fail at the same moment, and only the first to
+            # take the lock writes the record; the other then sees
+            # ``dlq_written`` and writes none. A write that fails leaves the
+            # flag clear, so the next failure of the message tries again.
+            async with state.lock:
+                if state.dlq_written:
+                    continue
+                record = _sink_record(
+                    message,
+                    request_id=message_context.request_id,
+                    sink=sink_ref(key),
+                    error=error_text,
+                    attempts=attempts,
+                    delivered_sinks=state.delivered_sinks,
+                )
+                if self._dlq_sink is not None and await self._dlq_sink.send(record, partition_id=partition_id):
+                    state.dlq_written = True
+                    written += 1
+                    self._note_message_dlq(record)
+                else:
+                    lost += 1
+
+        if lost:
+            self._lose_messages(key, message_count=lost, partition_id=partition_id)
+        if written or not lost:
+            if not written:
+                # Every message of the result was already on the DLQ: a group
+                # that was in flight when an earlier failure wrote the record.
+                logger.info('message_already_dlq', category='sink', sink=sink_ref(key), partition=partition_id)
+            return DeliveryOutcome.DLQ
+        return DeliveryOutcome.FAILED
+
+    def _note_message_dlq(self, record: DLQRecord) -> None:
+        """Log and record one source message written to the DLQ."""
+        error = cut_error(record.error)
+        logger.warning(
+            'message_dlq',
+            category='sink',
+            stage=record.stage,
+            sink=record.sink,
+            error=error,
+            source_topic=record.source_topic,
+            partition=record.source_partition,
+            offset=record.source_offset,
+            request_id=record.request_id,
+            delivered_sinks=record.delivered_sinks,
+        )
+        if self._recorder is not None:
+            self._recorder.record_message_dlq(
+                partition=record.source_partition,
+                offset=record.source_offset,
+                stage=record.stage,
+                sink=record.sink,
+                error=error,
+                delivered_sinks=record.delivered_sinks,
+                attempts=record.attempts,
+            )
+
+    def _lose_messages(self, key: SinkKey, *, message_count: int, partition_id: int) -> None:
+        """Apply ``dlq.on_send_failure`` to source messages whose record could not be written."""
+        sink_type, sink_name = key
+        reason = 'DLQ send failed' if self._dlq_sink is not None else 'no DLQ sink is configured'
         if self._dlq_on_send_failure == 'stall':
-            raise SinkDeliveryFailedError(
-                sink_name=error.sink_name,
-                sink_type=error.sink_type,
-                reason='delivery retries exhausted and DLQ unavailable',
-            )
-        dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
+            raise SinkDeliveryFailedError(sink_name=sink_name, sink_type=sink_type, reason=reason)
+        dlq_dropped_payloads.labels(partition=str(partition_id)).inc(message_count)
         logger.critical(
             'dlq_failure_payloads_dropped',
             category='sink',
-            sink_name=error.sink_name,
-            sink_type=error.sink_type,
+            sink_name=sink_name,
+            sink_type=sink_type,
             partition=partition_id,
-            payload_count=len(error.payloads),
-            reason='delivery retries exhausted and DLQ unavailable',
-            action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
+            message_count=message_count,
+            reason=reason,
+            action='ALERT: source messages lost (dlq.on_send_failure=drop) — '
             'set dlq.on_send_failure=stall to prefer replay over loss',
         )
+
+    async def drop_unconfigured_dlq_send(self, partition_id: int, payload_count: int) -> None:
+        """Count and log a DLQ send that has nowhere to go because the DLQ is off by configuration.
+
+        Only the first drop warns: a worker running without a DLQ on purpose
+        would otherwise repeat the warning for every failed delivery, and the
+        counter already carries the volume.
+        """
+        dlq_unconfigured_drops.inc(payload_count)
+        log = logger.adebug if self._dlq_drop_warned else logger.awarning
+        self._dlq_drop_warned = True
+        await log(
+            'dlq_send_dropped_unconfigured',
+            category='sink',
+            partition=partition_id,
+            payload_count=payload_count,
+            hint='set dlq.topic to enable the DLQ on a worker without the Kafka source',
+        )
+
+
+def _sink_record(
+    message: SourceMessage,
+    *,
+    request_id: str | None,
+    sink: str,
+    error: str,
+    attempts: int,
+    delivered_sinks: set[str],
+) -> DLQRecord:
+    """The ``sink``-stage record of one source message; an HTTP request (``request_id`` set) has no key or source."""
+    is_request = request_id is not None
+    return DLQRecord(
+        key=None if is_request else message.key,
+        value=message.value,
+        source_headers=[] if is_request else list(message.headers),
+        stage='sink',
+        error=error,
+        sink=sink,
+        attempts=attempts,
+        delivered_sinks=sorted(delivered_sinks),
+        source_topic=None if is_request else message.topic,
+        source_partition=None if is_request else message.partition,
+        source_offset=None if is_request else message.offset,
+        source_timestamp_ms=message.timestamp,
+        request_id=request_id,
+    )

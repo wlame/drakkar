@@ -66,13 +66,10 @@ cache_flush_failures = Counter(
     ),
 )
 
+# The offset of a lost message is committed; alert on this.
 dlq_dropped_payloads = Counter(
     'drakkar_dlq_dropped_payloads_total',
-    (
-        'Total payloads dropped because the sink delivery failed AND the DLQ '
-        'fallback failed, under dlq.on_send_failure=drop. The offset was '
-        'committed and the payloads are lost. ALERT on this.'
-    ),
+    'Source messages lost because no DLQ record could be written and dlq.on_send_failure is drop',
     ['partition'],
 )
 
@@ -407,7 +404,21 @@ sink_deliveries_skipped = Counter(
 
 sink_dlq_messages = Counter(
     'drakkar_sink_dlq_messages_total',
-    'Total messages sent to the dead letter queue',
+    'DLQ records written, one per source message, all stages',
+)
+
+dlq_records = Counter(
+    'drakkar_dlq_records_total',
+    'DLQ records written by the stage that failed',
+    ['stage'],
+)
+
+# A result's delivery to a sink that never started: the message was already
+# on the DLQ, or a dependency in depends_on failed.
+sink_deliveries_not_started = Counter(
+    'drakkar_sink_deliveries_not_started_total',
+    'Sink deliveries not started, by reason',
+    ['sink_type', 'sink_name', 'reason'],
 )
 
 dlq_send_failures = Counter(

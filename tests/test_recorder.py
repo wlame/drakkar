@@ -1788,7 +1788,7 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_assigned([1, 2])
     recorder.record_revoked([2])
     recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
-    recorder.record_sink_error(sink_type='http', sink_name='wh', error='timeout', attempt=1)
+    recorder.record_sink_error(sink_type='http', sink_name='wh', error='timeout', attempt=1, action='retry')
 
     await recorder.flush()
 
@@ -2004,7 +2004,9 @@ async def test_record_sink_delivery(recorder):
 
 
 async def test_record_sink_error(recorder):
-    recorder.record_sink_error(sink_type='postgres', sink_name='main-db', error='connection refused', attempt=2)
+    recorder.record_sink_error(
+        sink_type='postgres', sink_name='main-db', error='connection refused', attempt=2, action='skip'
+    )
     await recorder.flush()
 
     events = await recorder.get_events(event_type='sink_error')
@@ -2015,12 +2017,13 @@ async def test_record_sink_error(recorder):
     assert meta['sink_name'] == 'main-db'
     assert meta['error'] == 'connection refused'
     assert meta['attempt'] == 2
+    assert meta['action'] == 'skip'
 
 
 async def test_sink_events_in_all_event_types(recorder):
     """sink_delivered and sink_error survive the buffer → flush → SQLite round-trip."""
     recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
-    recorder.record_sink_error(sink_type='http', sink_name='webhook', error='timeout', attempt=1)
+    recorder.record_sink_error(sink_type='http', sink_name='webhook', error='timeout', attempt=1, action='retry')
     await recorder.flush()
 
     all_events = await recorder.get_events(limit=50)

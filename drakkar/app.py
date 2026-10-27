@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast, get_origin
+from typing import Any, cast
 
 import structlog
 from pydantic import BaseModel
@@ -29,7 +29,8 @@ from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
-from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinksConfig, load_config
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, load_config
+from drakkar.config.sinks import BUILTIN_SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -38,8 +39,7 @@ from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
-from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
-from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
+from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.partition import PartitionProcessor
 from drakkar.periodic_roster import PeriodicRoster
 from drakkar.probe import build_layout, referenced_bases
@@ -49,11 +49,10 @@ from drakkar.recorder.helpers import detect_worker_ip
 from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
-from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.filesystem import FileSink
 from drakkar.sinks.http import HttpSink
 from drakkar.sinks.kafka import KafkaSink
-from drakkar.sinks.manager import SinkManager
+from drakkar.sinks.manager import DeliveryOutcome, MessageContext, SinkManager
 from drakkar.sinks.mongo import MongoSink
 from drakkar.sinks.postgres import PostgresSink
 from drakkar.sinks.redis import RedisSink
@@ -65,19 +64,6 @@ from drakkar.timeline_events import referenced_link_bases
 from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
 logger = structlog.get_logger()
-
-
-# SinksConfig sections whose keys are sink instance names, derived from the
-# model rather than restated here so a newly added built-in sink type takes
-# part without a second edit. Two exclusions: the non-mapping settings on
-# SinksConfig (delivery_timeout_seconds, circuit_breaker), which the dict
-# check drops, and ``custom``, whose plugin instances nest one level deeper
-# (type name → instance name) and are collected separately.
-_TYPED_SINK_SECTIONS: tuple[str, ...] = tuple(
-    name
-    for name, field in SinksConfig.model_fields.items()
-    if name != 'custom' and get_origin(field.annotation) is dict
-)
 
 
 # Re-exported for backward compatibility — moved into
@@ -375,9 +361,6 @@ class DrakkarApp:
         # that failed earlier leaves them holding nothing, so shutdown skips
         # their drain and stop instead of driving an unbound source.
         self._sources_bound = False
-        # One warning per worker for DLQ sends with nowhere to go; the rest
-        # go to debug. See _drop_dlq_send_unconfigured.
-        self._dlq_drop_warned = False
         self._periodic_tasks: list[asyncio.Task] = []
         self._config_summary: str = ''
         # Main event loop — captured at the top of lifecycle._async_run.
@@ -596,7 +579,7 @@ class DrakkarApp:
         anchors = self._config.ui.docs.anchors
         if not anchors:
             return
-        sink_names = {name for section in _TYPED_SINK_SECTIONS for name in getattr(self._config.sinks, section)}
+        sink_names = {name for section in BUILTIN_SINK_TYPES for name in getattr(self._config.sinks, section)}
         sink_names |= {name for instances in self._config.sinks.custom.values() for name in instances}
         # One row per checkable selector: the match field, the warning it
         # raises, the declared names it must be one of, what such a name is,
@@ -693,6 +676,10 @@ class DrakkarApp:
         from drakkar.sinks.registry import SinkRegistry
 
         kafka_brokers = self._config.kafka.brokers
+        # Each instance is registered with the policy its config declares,
+        # read once here: a delivery reads the manager's copy, never the
+        # config section.
+        sinks = self._config.sinks
 
         for name, cfg in self._config.sinks.kafka.items():
             self._sink_manager.register(
@@ -702,23 +689,24 @@ class DrakkarApp:
                     brokers_fallback=kafka_brokers,
                     security_fallback=self._config.kafka.security,
                     client_config_fallback=self._config.kafka.client_config,
-                )
+                ),
+                policy=sinks.policy_of('kafka', name),
             )
 
         for name, cfg in self._config.sinks.postgres.items():
-            self._sink_manager.register(PostgresSink(name, cfg))
+            self._sink_manager.register(PostgresSink(name, cfg), policy=sinks.policy_of('postgres', name))
 
         for name, cfg in self._config.sinks.mongo.items():
-            self._sink_manager.register(MongoSink(name, cfg))
+            self._sink_manager.register(MongoSink(name, cfg), policy=sinks.policy_of('mongo', name))
 
         for name, cfg in self._config.sinks.http.items():
-            self._sink_manager.register(HttpSink(name, cfg))
+            self._sink_manager.register(HttpSink(name, cfg), policy=sinks.policy_of('http', name))
 
         for name, cfg in self._config.sinks.redis.items():
-            self._sink_manager.register(RedisSink(name, cfg))
+            self._sink_manager.register(RedisSink(name, cfg), policy=sinks.policy_of('redis', name))
 
         for name, cfg in self._config.sinks.filesystem.items():
-            self._sink_manager.register(FileSink(name, cfg))
+            self._sink_manager.register(FileSink(name, cfg), policy=sinks.policy_of('filesystem', name))
 
         # Plugin-discovered sinks. Each top-level key in ``sinks.custom``
         # is a sink type name (matches the entry-point key in the plugin's
@@ -745,7 +733,15 @@ class DrakkarApp:
             # for the constructor signature, not the local type-check view.
             sink_factory = cast(Callable[[str, Any], BaseSink[Any]], sink_cls)
             for instance_name, instance_cfg in instances.items():
-                self._sink_manager.register(sink_factory(instance_name, instance_cfg))
+                sink = sink_factory(instance_name, instance_cfg)
+                # The manager keys a sink by the class's ``sink_type`` while
+                # ``depends_on`` and the policy are keyed by the config key;
+                # they must agree, or a dependency would never be found.
+                if sink.sink_type != sink_type:
+                    raise ValueError(
+                        f"sinks.custom.{sink_type}.{instance_name}: the plugin reports sink_type '{sink.sink_type}'"
+                    )
+                self._sink_manager.register(sink, policy=sinks.policy_of(sink_type, instance_name))
 
     def _build_dlq(self) -> None:
         """Create the DLQ sink, or leave it None when the config disables the DLQ (see DrakkarConfig.dlq_enabled)."""
@@ -800,101 +796,46 @@ class DrakkarApp:
         return state
 
     async def _drop_dlq_send_unconfigured(self, partition_id: int, payload_count: int) -> None:
-        """Count and log a DLQ send that has nowhere to go because the DLQ is off."""
-        dlq_unconfigured_drops.inc(payload_count)
-        log = logger.adebug if self._dlq_drop_warned else logger.awarning
-        self._dlq_drop_warned = True
-        await log(
-            'dlq_send_dropped_unconfigured',
-            category='sink',
-            partition=partition_id,
-            payload_count=payload_count,
-            hint='set dlq.topic to enable the DLQ on a worker without the Kafka source',
-        )
+        """Count and log a DLQ send that has nowhere to go because the DLQ is off (see the sink manager)."""
+        await self._sink_manager.drop_unconfigured_dlq_send(partition_id, payload_count)
 
-    async def _handle_dlq_failure(self, error: 'DeliveryError', partition_id: int, reason: str) -> None:
-        """Apply the ``dlq.on_send_failure`` strategy when the DLQ fallback failed.
-
-        'drop' (default): log CRITICAL, tick ``dlq_dropped_payloads``, and
-        return — the delivery counts as handled, the offset commits, and the
-        payloads are lost. 'stall': raise :class:`SinkDeliveryFailedError`
-        so the partition pipeline leaves the affected offsets uncommitted
-        and pauses the partition (redelivery after restart/rebalance).
-        """
-        if self._config.dlq.on_send_failure == 'stall':
-            raise SinkDeliveryFailedError(
-                sink_name=error.sink_name,
-                sink_type=error.sink_type,
-                reason=reason,
-            )
-        dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-        await logger.acritical(
-            'dlq_failure_payloads_dropped',
-            category='sink',
-            sink_name=error.sink_name,
-            sink_type=error.sink_type,
-            partition=partition_id,
-            payload_count=len(error.payloads),
-            reason=reason,
-            action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
-            'set dlq.on_send_failure=stall to prefer replay over loss',
-        )
-
-    async def _handle_collect(self, result: CollectResult, partition_id: int) -> None:
+    async def _handle_collect(
+        self,
+        result: CollectResult,
+        partition_id: int,
+        message_context: MessageContext | None = None,
+    ) -> None:
         """Deliver CollectResult payloads to configured sinks.
 
         Validates that all payload sink types are configured, then delivers
-        via SinkManager. On delivery error, calls the handler's
-        on_delivery_error hook and handles DLQ/RETRY/SKIP.
+        via SinkManager, which asks the handler's on_delivery_error hook
+        after a failed attempt and writes the DLQ record when a delivery
+        ends in ``dlq``. ``message_context`` names the source messages of a
+        task or message result; ``None`` is a window result.
         """
         if not result.has_outputs:
             return
 
         self._sink_manager.validate_collect(result)
 
-        async def _on_delivery_error(error: 'DeliveryError') -> DeliveryAction:
+        async def _on_delivery_error(error: DeliveryError) -> DeliveryAction:
             bind_contextvars(hook='on_delivery_error', sink_type=error.sink_type, sink_name=error.sink_name)
             try:
-                action = await self._handler.on_delivery_error(error)
+                return await self._handler.on_delivery_error(error)
             finally:
                 unbind_contextvars('hook', 'sink_type', 'sink_name')
-            if action == DeliveryAction.DLQ:
-                # DLQ is the last resort. If it is missing or the write
-                # fails, the payloads have nowhere safe to go — apply the
-                # dlq.on_send_failure strategy.
-                if self._dlq_sink is None and not self._config.dlq_enabled:
-                    # The DLQ is off by configuration, not broken: stalling
-                    # a partition over it would wedge a worker that never
-                    # asked for a DLQ. Count the loss and carry on.
-                    # A live Kafka source always implies ``dlq_enabled``, so
-                    # this branch guards the HTTP-only path — the webapp
-                    # runner and direct callers of ``_handle_collect``.
-                    await self._drop_dlq_send_unconfigured(partition_id, len(error.payloads))
-                elif self._dlq_sink is None:
-                    await self._handle_dlq_failure(
-                        error,
-                        partition_id=partition_id,
-                        reason='handler returned DLQ but no DLQ sink is configured',
-                    )
-                elif not await self._dlq_sink.send(
-                    # The delivery path does not carry the source message
-                    # yet, so the record holds the failed payloads' JSON.
-                    DLQRecord.from_delivery_error(error),
-                    partition_id=partition_id,
-                ):
-                    await self._handle_dlq_failure(
-                        error,
-                        partition_id=partition_id,
-                        reason='DLQ send failed',
-                    )
-            return action
 
-        await self._sink_manager.deliver_all(
+        outcomes = await self._sink_manager.deliver_all(
             result,
             on_delivery_error=_on_delivery_error,
             partition_id=partition_id,
+            message_context=message_context,
         )
 
         if self._recorder:
             for payload in result.kafka:
-                self._recorder.record_produced(payload, source_partition=partition_id)
+                # Only a group that was delivered produced anything; a group
+                # that failed, was skipped or never started did not.
+                kafka_sink = self._sink_manager.resolve_sink('kafka', payload.sink)
+                if outcomes.get((kafka_sink.sink_type, kafka_sink.name)) == DeliveryOutcome.DELIVERED:
+                    self._recorder.record_produced(payload, source_partition=partition_id)

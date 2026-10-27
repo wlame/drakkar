@@ -1,7 +1,6 @@
 """Tests for SinkManager — routing, validation, delivery, error handling."""
 
 import asyncio
-import json
 import time
 from unittest.mock import AsyncMock
 
@@ -9,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from drakkar.config import CircuitBreakerConfig
+from drakkar.config import CircuitBreakerConfig, SinkPolicy
 from drakkar.models import (
     CollectResult,
     CustomPayload,
@@ -22,12 +21,16 @@ from drakkar.models import (
     PostgresPayload,
     RedisPayload,
     SinkDeliveryFailedError,
+    SourceMessage,
 )
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.manager import (
     CIRCUIT_OPEN_ERROR,
     AmbiguousSinkError,
+    DeliveryOutcome,
+    MessageContext,
+    MessageDLQState,
     SinkManager,
     SinkNotConfiguredError,
 )
@@ -84,6 +87,16 @@ class FailCloseSink(FakeSink):
         # a fail-close sink would see False even though close() ran.
         self.closed = True
         raise RuntimeError('close failed')
+
+
+def _ctx() -> MessageContext:
+    """A fresh one-message context; a message already on the DLQ would start no delivery."""
+    message = SourceMessage(topic='src', partition=0, offset=1, key=b'k', value=b'source value', timestamp=0)
+    return MessageContext(source_messages=[message], states=[MessageDLQState()])
+
+
+def _policy(on_failure: str = 'dlq', max_retries: int = 2) -> SinkPolicy:
+    return SinkPolicy(on_failure=on_failure, max_retries=max_retries, depends_on=())
 
 
 # --- Registration ---
@@ -801,12 +814,12 @@ async def test_deliver_error_retry_exhausted_falls_to_dlq():
     mgr = SinkManager()
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=1))
 
     on_error = AsyncMock(return_value=DeliveryAction.RETRY)
 
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=2)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, message_context=_ctx())
 
     assert on_error.call_count == 2  # called on each failed attempt
 
@@ -830,17 +843,18 @@ async def test_deliver_error_retry_exhausted_lands_in_dlq():
     mgr.attach_runtime(recorder=None, dlq_sink=dlq, dlq_on_send_failure='drop')
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=1))
 
     on_error = AsyncMock(return_value=DeliveryAction.RETRY)
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=5, max_retries=2)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=5, message_context=_ctx())
 
     assert on_error.call_count == 2
     assert len(dlq.sent) == 1
     record, partition_id = dlq.sent[0]
     assert record.sink == 'kafka/out'
-    assert len(json.loads(record.value)) == 1
+    # The record is the source message, not the sink's payloads.
+    assert record.value == b'source value'
     assert partition_id == 5
     assert record.attempts == 2
 
@@ -851,12 +865,12 @@ async def test_deliver_error_retry_exhausted_dlq_send_failure_stall_raises():
     mgr.attach_runtime(recorder=None, dlq_sink=_RecordingDLQ(ok=False), dlq_on_send_failure='stall')
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=0))
 
     on_error = AsyncMock(return_value=DeliveryAction.RETRY)
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
     with pytest.raises(SinkDeliveryFailedError):
-        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=1)
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, message_context=_ctx())
 
 
 async def test_deliver_error_retry_exhausted_without_dlq_drop_mode_counts():
@@ -867,18 +881,17 @@ async def test_deliver_error_retry_exhausted_without_dlq_drop_mode_counts():
     mgr = SinkManager()  # no DLQ sink, default on_send_failure='drop'
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=0))
 
     on_error = AsyncMock(return_value=DeliveryAction.RETRY)
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=6, max_retries=1)  # must not raise
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=6, message_context=_ctx())  # must not raise
 
     assert dlq_dropped_payloads.labels(partition='6')._value.get() == before + 1
 
 
-async def test_deliver_error_dlq_action_does_not_use_manager_dlq():
-    """The DLQ action is shipped by the on_delivery_error wrapper (app.py) —
-    the manager must not send it a second time."""
+async def test_deliver_error_dlq_action_writes_the_record_once():
+    """The manager writes the record of a DLQ action; the hook does not write it."""
     mgr = SinkManager()
     dlq = _RecordingDLQ()
     mgr.attach_runtime(recorder=None, dlq_sink=dlq, dlq_on_send_failure='drop')
@@ -888,9 +901,11 @@ async def test_deliver_error_dlq_action_does_not_use_manager_dlq():
 
     on_error = AsyncMock(return_value=DeliveryAction.DLQ)
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    outcomes = await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, message_context=_ctx())
 
-    assert dlq.sent == []
+    assert outcomes == {('kafka', 'out'): DeliveryOutcome.DLQ}
+    assert len(dlq.sent) == 1
+    on_error.assert_awaited_once()
 
 
 async def test_deliver_error_dlq_action():
@@ -942,24 +957,26 @@ async def test_deliver_all_settles_all_groups_before_raising_first_exception():
             raise RuntimeError('slow sink down')
 
     mgr = SinkManager()
+    # No record can be written and the strategy is stall: each failing group raises.
+    mgr.attach_runtime(recorder=None, dlq_sink=_RecordingDLQ(ok=False), dlq_on_send_failure='stall')
     fast = FakeSink('fast', sink_type='kafka')
     fast.fail_on_deliver = True
     slow = SlowFailSink('slow', sink_type='postgres')
-    mgr.register(fast)
-    mgr.register(slow)
+    mgr.register(fast, policy=_policy(max_retries=0))
+    mgr.register(slow, policy=_policy(max_retries=0))
 
     handled: list[str] = []
 
-    async def raising_handler(error: DeliveryError) -> DeliveryAction:
+    async def dlq_handler(error: DeliveryError) -> DeliveryAction:
         handled.append(error.sink_name)
-        raise RuntimeError(f'handler exploded for {error.sink_name}')
+        return DeliveryAction.DLQ
 
     result = CollectResult(
         kafka=[KafkaPayload(sink='fast', data=SampleData())],
         postgres=[PostgresPayload(sink='slow', table='t', data=SampleData())],
     )
-    with pytest.raises(RuntimeError, match='handler exploded'):
-        await mgr.deliver_all(result, on_delivery_error=raising_handler, partition_id=0)
+    with pytest.raises(SinkDeliveryFailedError, match='kafka/fast'):
+        await mgr.deliver_all(result, on_delivery_error=dlq_handler, partition_id=0, message_context=_ctx())
 
     # Both groups reached their (failing) terminal state before the raise.
     assert slow_settled.is_set()
@@ -1183,7 +1200,7 @@ async def test_prometheus_skip_not_incremented_on_dlq():
 
     before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, message_context=_ctx())
 
     after = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
     assert after == before  # no change
@@ -1429,7 +1446,7 @@ async def test_deliver_all_per_sink_retries_still_work():
     flaky = FakeSink('flaky', sink_type='kafka')
     ok_a = FakeSink('ok_a', sink_type='postgres')
     ok_b = FakeSink('ok_b', sink_type='mongo')
-    mgr.register(flaky)
+    mgr.register(flaky, policy=_policy(max_retries=5))
     mgr.register(ok_a)
     mgr.register(ok_b)
 
@@ -1451,7 +1468,7 @@ async def test_deliver_all_per_sink_retries_still_work():
         postgres=[PostgresPayload(sink='ok_a', table='t', data=SampleData())],
         mongo=[MongoPayload(sink='ok_b', collection='c', data=SampleData())],
     )
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=5)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
 
     # All three sinks eventually succeed.
     assert len(flaky.delivered) == 1
@@ -1558,22 +1575,17 @@ async def test_circuit_trips_after_threshold_consecutive_failures():
     assert gauge_value == 1.0
 
     # The 4th delivery must skip the sink — sink.deliver is not called because
-    # the breaker bypasses it. We detect this by checking the sink never
-    # appended anything and the on_error handler got a "circuit open" error.
-    skipped_errors: list[DeliveryError] = []
+    # the breaker bypasses it, and the hook is not asked: the declared
+    # policy (dlq) writes the record with the circuit-open error.
+    dlq = _RecordingDLQ()
+    mgr.attach_runtime(recorder=None, dlq_sink=dlq)
+    on_error.reset_mock()
 
-    async def capture(error: DeliveryError) -> DeliveryAction:
-        skipped_errors.append(error)
-        return DeliveryAction.DLQ
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, message_context=_ctx())
 
-    await mgr.deliver_all(result, on_delivery_error=capture, partition_id=0)
-
-    assert len(skipped_errors) == 1
-    assert skipped_errors[0].error == CIRCUIT_OPEN_ERROR
-    assert skipped_errors[0].sink_name == 'out'
-    # Sink was never touched for the skipped delivery — fail_on_deliver
-    # would have raised if it had been called. The only source of errors
-    # is the breaker gate reporting via on_delivery_error.
+    on_error.assert_not_awaited()
+    [(record, _)] = dlq.sent
+    assert (record.error, record.sink, record.attempts) == (CIRCUIT_OPEN_ERROR, 'kafka/out', 0)
 
 
 async def test_circuit_skipped_delivery_routes_to_dlq():
@@ -1590,19 +1602,19 @@ async def test_circuit_skipped_delivery_routes_to_dlq():
         await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
     assert sink.circuit_state == 'open'
 
-    # Circuit is open — next delivery routes to DLQ directly.
-    dlq_payloads: list[list] = []
-
-    async def dlq_handler(error: DeliveryError) -> DeliveryAction:
-        dlq_payloads.append(error.payloads)
-        return DeliveryAction.DLQ
+    # Circuit is open — next delivery routes to DLQ directly, without the hook.
+    dlq = _RecordingDLQ()
+    mgr.attach_runtime(recorder=None, dlq_sink=dlq)
+    hook = AsyncMock(return_value=DeliveryAction.SKIP)
 
     skip_result = CollectResult(kafka=[KafkaPayload(data=SampleData(value=99))])
-    await mgr.deliver_all(skip_result, on_delivery_error=dlq_handler, partition_id=0)
+    outcomes = await mgr.deliver_all(skip_result, on_delivery_error=hook, partition_id=0, message_context=_ctx())
 
-    # DLQ received the payloads without the sink being touched.
-    assert len(dlq_payloads) == 1
-    assert len(dlq_payloads[0]) == 1
+    # The DLQ received the source message without the sink being touched.
+    hook.assert_not_awaited()
+    assert outcomes == {('kafka', 'out'): DeliveryOutcome.DLQ}
+    [(record, _)] = dlq.sent
+    assert record.value == b'source value'
 
 
 async def test_circuit_intermittent_failures_do_not_trip():
@@ -1763,7 +1775,7 @@ async def test_circuit_preserves_stats_on_skip():
 async def test_circuit_retries_with_in_run_failures_do_not_double_count():
     """A single failing delivery with N retries counts as ONE consecutive failure.
 
-    With max_retries=3 and RETRY action, a failing sink makes up to 3 attempts
+    With max_retries=2 and RETRY action, a failing sink makes 3 attempts
     — but the breaker only sees the terminal outcome, not each retry. That
     means failure_threshold=3 should not trip after a single batch; it needs
     three independent batches with retries exhausted.
@@ -1771,19 +1783,20 @@ async def test_circuit_retries_with_in_run_failures_do_not_double_count():
     mgr = _make_breaker_manager(failure_threshold=3, cooldown_seconds=30.0)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=2))
 
     on_error = AsyncMock(return_value=DeliveryAction.RETRY)
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
 
     # One batch — retries exhausted → breaker sees ONE failure.
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert on_error.await_count == 3
     assert sink.circuit_state == 'closed'
     assert sink._consecutive_failures == 1
 
     # Two more batches — now at 3, should trip.
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
     assert sink.circuit_state == 'open'
 
 
@@ -1888,18 +1901,20 @@ async def test_circuit_concurrent_probes_respect_single_flight():
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
 
     # Two concurrent deliver_all invocations — both target the same sink.
-    await asyncio.gather(
+    outcomes = await asyncio.gather(
         mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0),
         mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0),
     )
 
     # Exactly ONE delivery reached the sink. The other caller saw
-    # half_open + probe_inflight=True and skipped, routing its batch to
-    # the handler (on_error invoked with circuit-open error).
+    # half_open + probe_inflight=True and was turned away by the breaker
+    # gate, which applies the declared policy without asking the hook.
     assert len(delivered_calls) == 1, f'exactly one probe should have reached the sink, got {len(delivered_calls)}'
-    assert on_error.await_count == 1, (
-        f'the skipped caller should have invoked on_delivery_error exactly once, got {on_error.await_count}'
-    )
+    on_error.assert_not_awaited()
+    assert sorted(outcome[('kafka', 'out')] for outcome in outcomes) == [
+        DeliveryOutcome.DELIVERED,
+        DeliveryOutcome.FAILED,
+    ]
 
 
 async def test_circuit_half_open_skip_clears_probe_inflight():
@@ -1980,7 +1995,9 @@ async def test_circuit_half_open_handler_raises_clears_probe_inflight():
     mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
-    mgr.register(sink)
+    # Declared skip: the raise becomes a skip, which records neither success
+    # nor failure, so only the guard can release the slot.
+    mgr.register(sink, policy=_policy(on_failure='skip'))
 
     # Synthetic half_open state, probe slot free.
     sink._circuit_state = 'half_open'
@@ -1992,8 +2009,9 @@ async def test_circuit_half_open_handler_raises_clears_probe_inflight():
         raise RuntimeError('handler crashed')
 
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
-    with pytest.raises(RuntimeError, match='handler crashed'):
-        await mgr.deliver_all(result, on_delivery_error=raising_handler, partition_id=0)
+    outcomes = await mgr.deliver_all(result, on_delivery_error=raising_handler, partition_id=0)
+
+    assert outcomes == {('kafka', 'out'): DeliveryOutcome.SKIPPED}
 
     # Even though the handler raised, the probe flag must have been
     # released by the try/finally guard. Without it, every future
@@ -2380,13 +2398,12 @@ async def test_hung_deliver_times_out_and_counts_as_a_failure():
 
     mgr = SinkManager(delivery_timeout_seconds=0.05)
     sink = HangingSink('results')
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=0))
 
     started = time.monotonic()
     await mgr.deliver_all(
         CollectResult(kafka=[KafkaPayload(data=SampleData())]),
         on_delivery_error=on_error,
-        max_retries=0,
         partition_id=0,
     )
     elapsed = time.monotonic() - started
@@ -2411,14 +2428,13 @@ async def test_hung_deliver_opens_the_circuit_breaker():
 
     mgr = SinkManager(delivery_timeout_seconds=0.02)
     sink = HangingSink('results')
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(max_retries=0))
     sink.configure_circuit_breaker(CircuitBreakerConfig(failure_threshold=2, cooldown_seconds=60))
 
     for _ in range(2):
         await mgr.deliver_all(
             CollectResult(kafka=[KafkaPayload(data=SampleData())]),
             on_delivery_error=on_error,
-            max_retries=0,
             partition_id=0,
         )
 
@@ -2486,7 +2502,6 @@ async def test_retry_redelivers_the_whole_group_and_says_so():
         await mgr.deliver_all(
             CollectResult(kafka=payloads),
             on_delivery_error=on_error,
-            max_retries=2,
             partition_id=0,
         )
 
@@ -2500,7 +2515,7 @@ async def test_retry_redelivers_the_whole_group_and_says_so():
     assert 'already applied' in retries[0]['note']
 
 
-# --- Circuit open with no DLQ wired ---
+# --- Circuit open: the declared policy decides ---
 
 
 def _trip_breaker(sink: BaseSink) -> None:
@@ -2514,32 +2529,28 @@ async def _deliver_once(mgr: SinkManager, on_error, partition_id: int = 0) -> No
         CollectResult(kafka=[KafkaPayload(data=SampleData())]),
         on_delivery_error=on_error,
         partition_id=partition_id,
+        message_context=_ctx(),
     )
 
 
-async def test_circuit_open_without_dlq_honours_a_skip():
-    """The handler's answer used to be discarded on this path — SKIP and
-    RETRY behaved the same as no answer at all: payloads dropped, offset
-    committed, nothing counted. A SKIP is operator intent, so it stays a
-    drop, but a counted and logged one.
-    """
+async def test_circuit_open_with_declared_skip_counts_a_skip():
+    """A declared skip stays a drop on an open circuit, but a counted one."""
     from drakkar.metrics import sink_deliveries_skipped
 
     mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
     sink = FakeSink('out', sink_type='kafka')
-    mgr.register(sink)
+    mgr.register(sink, policy=_policy(on_failure='skip'))
     _trip_breaker(sink)
     before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
 
-    await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.SKIP))
+    await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.DLQ))
 
     assert sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get() == before + 1
 
 
-async def test_circuit_open_without_dlq_counts_a_dlq_action_as_lost():
-    """The handler asked for the DLQ and there is no DLQ. Under
-    ``dlq.on_send_failure=drop`` the payloads are lost — that must be
-    counted and CRITICAL-logged, not silent.
+async def test_circuit_open_without_dlq_counts_the_message_as_lost():
+    """A declared dlq with no DLQ sink: under ``dlq.on_send_failure=drop`` the
+    source message is lost — that must be counted and CRITICAL-logged, not silent.
     """
     from drakkar.metrics import dlq_dropped_payloads
 
@@ -2550,7 +2561,7 @@ async def test_circuit_open_without_dlq_counts_a_dlq_action_as_lost():
     before = dlq_dropped_payloads.labels(partition='0')._value.get()
 
     with capture_logs() as cap:
-        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.DLQ))
+        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.SKIP))
 
     assert dlq_dropped_payloads.labels(partition='0')._value.get() == before + 1
     dropped = [e for e in cap if e['event'] == 'dlq_failure_payloads_dropped']
@@ -2559,9 +2570,7 @@ async def test_circuit_open_without_dlq_counts_a_dlq_action_as_lost():
 
 
 async def test_circuit_open_without_dlq_stalls_when_configured():
-    """``dlq.on_send_failure=stall`` must hold the offsets rather than lose
-    the payloads — the same rule the DLQ-wired branch already applied.
-    """
+    """``dlq.on_send_failure=stall`` must hold the offsets rather than lose the message."""
     mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
     mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall')
     sink = FakeSink('out', sink_type='kafka')
@@ -2572,18 +2581,17 @@ async def test_circuit_open_without_dlq_stalls_when_configured():
         await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.DLQ))
 
 
-async def test_circuit_open_without_dlq_does_not_retry_into_an_open_circuit():
-    """RETRY cannot be honoured while the breaker is open — hammering a
-    recovering downstream is exactly what the breaker exists to prevent — so
-    it is treated as "do not drop silently" and follows on_send_failure.
-    """
+async def test_circuit_open_does_not_ask_the_hook_or_retry_into_the_circuit():
+    """A RETRY cannot re-enter an open circuit: the hook is not asked at all."""
     mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
     mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall')
     sink = FakeSink('out', sink_type='kafka')
     mgr.register(sink)
     _trip_breaker(sink)
+    hook = AsyncMock(return_value=DeliveryAction.RETRY)
 
     with pytest.raises(SinkDeliveryFailedError):
-        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.RETRY))
+        await _deliver_once(mgr, hook)
 
+    hook.assert_not_awaited()
     assert sink.delivered == [], 'the open circuit must not be re-entered'

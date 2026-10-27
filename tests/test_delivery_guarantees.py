@@ -44,6 +44,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.dlq_record import DLQRecord, render_headers
 from tests.conftest import make_ui_config, wait_for, wire_kafka_source
+from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
 
@@ -342,6 +343,12 @@ def _make_failing_kafka_app(app_config, dlq_sink) -> DrakkarApp:
     kafka_sink = app._sink_manager._sinks[('kafka', 'results')]
     kafka_sink.deliver.side_effect = RuntimeError('broker down')
     app._dlq_sink = dlq_sink
+    # The one-time wiring the lifecycle does after the DLQ sink connects.
+    app._sink_manager.attach_runtime(
+        recorder=None,
+        dlq_sink=dlq_sink,
+        dlq_on_send_failure=app_config.dlq.on_send_failure,
+    )
     return app
 
 
@@ -355,7 +362,7 @@ async def test_handle_collect_raises_when_dlq_send_fails_in_stall_mode(app_confi
     app = _make_failing_kafka_app(app_config, _FailingDLQ())
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
     with pytest.raises(SinkDeliveryFailedError):
-        await app._handle_collect(result, partition_id=0)
+        await app._handle_collect(result, partition_id=0, message_context=make_message_context())
 
 
 async def test_handle_collect_raises_when_dlq_missing_in_stall_mode(app_config):
@@ -363,7 +370,7 @@ async def test_handle_collect_raises_when_dlq_missing_in_stall_mode(app_config):
     app = _make_failing_kafka_app(app_config, None)
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
     with pytest.raises(SinkDeliveryFailedError):
-        await app._handle_collect(result, partition_id=0)
+        await app._handle_collect(result, partition_id=0, message_context=make_message_context())
 
 
 async def test_handle_collect_drop_mode_swallows_dlq_failure_and_counts(app_config):
@@ -372,14 +379,14 @@ async def test_handle_collect_drop_mode_swallows_dlq_failure_and_counts(app_conf
     before = dlq_dropped_payloads.labels(partition='7')._value.get()
     app = _make_failing_kafka_app(app_config, _FailingDLQ())
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
-    await app._handle_collect(result, partition_id=7)  # must not raise
+    await app._handle_collect(result, partition_id=7, message_context=make_message_context())  # must not raise
     assert dlq_dropped_payloads.labels(partition='7')._value.get() == before + 1
 
 
 async def test_handle_collect_drop_mode_swallows_missing_dlq(app_config):
     app = _make_failing_kafka_app(app_config, None)
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
-    await app._handle_collect(result, partition_id=0)  # must not raise
+    await app._handle_collect(result, partition_id=0, message_context=make_message_context())  # must not raise
 
 
 async def test_handle_collect_succeeds_when_dlq_confirms(app_config):
@@ -392,7 +399,7 @@ async def test_handle_collect_succeeds_when_dlq_confirms(app_config):
 
     app = _make_failing_kafka_app(app_config, OkDLQ())
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
-    await app._handle_collect(result, partition_id=3)
+    await app._handle_collect(result, partition_id=3, message_context=make_message_context())
     assert sent == [3]
 
 
@@ -418,14 +425,14 @@ async def test_circuit_open_dlq_failure_stall_mode_raises(app_config):
     app = _make_circuit_open_app(app_config, _FailingDLQ())
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
     with pytest.raises(SinkDeliveryFailedError):
-        await app._handle_collect(result, partition_id=0)
+        await app._handle_collect(result, partition_id=0, message_context=make_message_context())
 
 
 async def test_circuit_open_dlq_failure_drop_mode_counts(app_config):
     before = dlq_dropped_payloads.labels(partition='9')._value.get()
     app = _make_circuit_open_app(app_config, _FailingDLQ())
     result = CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
-    await app._handle_collect(result, partition_id=9)  # must not raise
+    await app._handle_collect(result, partition_id=9, message_context=make_message_context())  # must not raise
     assert dlq_dropped_payloads.labels(partition='9')._value.get() == before + 1
 
 

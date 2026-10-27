@@ -79,6 +79,8 @@ class EventType(StrEnum):
     PRODUCED = 'produced'
     SINK_DELIVERED = 'sink_delivered'
     SINK_ERROR = 'sink_error'
+    MESSAGE_DLQ = 'message_dlq'
+    SINK_NOT_STARTED = 'sink_not_started'
 
     # --- Worker health, sampling and throughput ---
     RUNTIME_HEALTH = 'runtime_health'

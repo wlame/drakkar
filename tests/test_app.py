@@ -1,6 +1,7 @@
 """Tests for Drakkar main application."""
 
 import asyncio
+import re
 import stat
 import sys
 from pathlib import Path
@@ -35,6 +36,7 @@ from drakkar.models import (
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
 from tests.archive_helpers import idle_archive_task
 from tests.conftest import make_ui_config, wait_for, wire_kafka_source
+from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
@@ -318,18 +320,90 @@ async def test_app_handle_collect_unconfigured_sink_raises(test_config):
         await app._handle_collect(result, partition_id=0)
 
 
+async def test_app_handle_collect_records_produced_only_for_delivered_kafka_groups(test_config):
+    """A Kafka group that never started produced nothing, so the recorder gets no ``produced`` row for it."""
+    from unittest.mock import MagicMock
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    _setup_app_sinks(app)
+    app._recorder = MagicMock()
+    result = CollectResult(kafka=[KafkaPayload(data=_D())])
+
+    await app._handle_collect(result, partition_id=0, message_context=make_message_context())
+    assert app._recorder.record_produced.call_count == 1
+
+    done = make_message_context()
+    done.states[0].dlq_written = True
+    await app._handle_collect(result, partition_id=0, message_context=done)
+    assert app._recorder.record_produced.call_count == 1
+
+
+def test_build_sinks_registers_each_declared_policy(test_config):
+    """The policy is read from the config once, at build time, keyed like the manager's groups."""
+    cfg = DrakkarConfig.model_validate(
+        {
+            **test_config.model_dump(),
+            'sinks': {
+                'kafka': {'results': {'topic': 'test-out', 'depends_on': ['postgres/main']}},
+                'postgres': {'main': {'dsn': 'postgresql://localhost/test', 'on_failure': 'skip', 'max_retries': 5}},
+            },
+        }
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    app._build_sinks()
+
+    policies = app._sink_manager._policies
+    assert (policies[('postgres', 'main')].on_failure, policies[('postgres', 'main')].max_retries) == ('skip', 5)
+    assert app._sink_manager._dependencies[('kafka', 'results')] == (('postgres', 'main'),)
+
+
+def test_build_sinks_refuses_a_plugin_whose_sink_type_differs_from_its_key(test_config):
+    """A plugin class reporting another sink_type would make its depends_on references unreachable."""
+    from drakkar.sinks.base import BaseSink
+    from drakkar.sinks.registry import SinkRegistry
+
+    class MislabelledSink(BaseSink):
+        sink_type = 'other'
+
+        def __init__(self, name: str, config: dict) -> None:
+            super().__init__(name)
+
+        async def connect(self) -> None:  # pragma: no cover - never connected
+            pass
+
+        async def deliver(self, payloads: list) -> None:  # pragma: no cover - never delivered
+            pass
+
+        async def close(self) -> None:  # pragma: no cover - never closed
+            pass
+
+    cfg = DrakkarConfig.model_validate(
+        {**test_config.model_dump(), 'sinks': {'custom': {'webhookx': {'main': {'url': 'http://x'}}}}}
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+    snapshot = dict(SinkRegistry._registered)
+    SinkRegistry.register('webhookx', MislabelledSink)
+    try:
+        with pytest.raises(
+            ValueError, match=re.escape("sinks.custom.webhookx.main: the plugin reports sink_type 'other'")
+        ):
+            app._build_sinks()
+    finally:
+        SinkRegistry._registered = snapshot
+
+
 async def test_app_routes_circuit_open_to_dlq_sink(test_config):
-    """HIGH-3 integration: when a sink's circuit breaker is open, the app-level
-    ``_handle_collect`` must route skipped payloads straight to the DLQ sink
-    rather than consult ``on_delivery_error``. The breaker already decided the
-    sink is unhealthy — SKIP would silently drop data, RETRY would hammer the
-    recovering downstream, and neither belongs in the handler's control loop.
+    """When a sink's circuit breaker is open, ``_handle_collect`` applies the
+    declared policy (dlq) without consulting ``on_delivery_error``: the
+    breaker already decided the sink is unhealthy, so RETRY would hammer the
+    recovering downstream.
 
     This is the end-to-end counterpart of
     ``tests/test_sink_manager.py::test_circuit_skipped_delivery_routes_to_dlq``
-    — it verifies the ``dlq_sink`` argument is actually threaded through
+    — it verifies the message context is threaded through
     ``DrakkarApp._handle_collect`` into ``SinkManager.deliver_all`` and that
-    the DLQ sink's ``send`` is invoked without handler approval.
+    one record of the source message is written for the two open sinks.
     """
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     _setup_app_sinks(app)
@@ -359,25 +433,25 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
         postgres=[PostgresPayload(table='t', data=_D())],
     )
 
-    # Deliver — both sinks skip, both force-DLQ.
-    await app._handle_collect(result, partition_id=0)
+    # Deliver — both sinks are open, both apply the declared dlq.
+    context = make_message_context(offset=42)
+    await app._handle_collect(result, partition_id=0, message_context=context)
 
     # Neither sink was touched.
     kafka_sink.deliver.assert_not_called()
     pg_sink.deliver.assert_not_called()
 
-    # DLQ received BOTH skipped batches (exactly one call per sink group).
-    # HIGH-3 intent: the breaker's open state triggers direct DLQ routing
-    # from SinkManager — the app's on_delivery_error handler is NOT invoked,
-    # so there's no second call fan-out through the handler path.
-    assert dlq_sink.send.await_count == 2
-    sent_records = [call.args[0] for call in dlq_sink.send.await_args_list]
-    assert {r.sink.split('/')[0] for r in sent_records} == {'kafka', 'postgres'}
-    # Every record must carry the "circuit open" sentinel so dashboards can
+    # One source message, so one record, whichever open sink got there
+    # first; the other finds the message already on the DLQ.
+    assert dlq_sink.send.await_count == 1
+    [record] = [call.args[0] for call in dlq_sink.send.await_args_list]
+    assert record.sink.split('/')[0] in {'kafka', 'postgres'}
+    assert record.source_offset == 42
+    # The record carries the "circuit open" sentinel so dashboards can
     # filter DLQ records routed by the breaker vs by terminal delivery failure.
-    for record in sent_records:
-        assert record.error == CIRCUIT_OPEN_ERROR
-        assert record.attempts == 0
+    assert record.error == CIRCUIT_OPEN_ERROR
+    assert record.attempts == 0
+    assert context.states[0].dlq_written is True
 
 
 # --- Commit ---
@@ -2438,6 +2512,12 @@ async def test_handle_collect_dlq_action_drops_when_dlq_is_off(test_config):
     _setup_app_sinks(app)
     app._build_dlq()
     assert app._dlq_sink is None
+    app._sink_manager.attach_runtime(
+        recorder=None,
+        dlq_sink=None,
+        dlq_on_send_failure='stall',
+        dlq_enabled=cfg.dlq_enabled,
+    )
 
     kafka_sink = app._sink_manager._sinks[('kafka', 'results')]
     kafka_sink.deliver.side_effect = RuntimeError('broker down')
@@ -2447,9 +2527,12 @@ async def test_handle_collect_dlq_action_drops_when_dlq_is_off(test_config):
     async def _drop(partition_id, payload_count):
         drops.append((partition_id, payload_count))
 
-    app._drop_dlq_send_unconfigured = _drop
+    app._sink_manager.drop_unconfigured_dlq_send = _drop
 
-    await app._handle_collect(CollectResult(kafka=[KafkaPayload(data=_D())]), partition_id=-1)
+    # Even under stall: a DLQ that is off by configuration is a counted drop.
+    await app._handle_collect(
+        CollectResult(kafka=[KafkaPayload(data=_D())]), partition_id=-1, message_context=make_message_context()
+    )
 
     assert drops == [(-1, 1)]
 

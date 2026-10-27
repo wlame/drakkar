@@ -518,16 +518,21 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     ) -> DeliveryAction:
         """Handle a sink delivery failure.
 
-        Called when a sink's deliver() raises an exception. The error
-        contains the sink name/type, error message, and the payloads
-        that failed to deliver.
+        Called after every failed attempt of a sink's delivery (not for an
+        open circuit, where the declared policy decides alone). The error
+        carries the sink name and type, the error text, the payloads, the
+        attempt (from 1), the retries left of the sink's ``max_retries``
+        and the sink's declared ``on_failure``.
 
         Return:
-            DeliveryAction.DLQ (default) — write to dead letter queue
-            DeliveryAction.RETRY — retry delivery (up to 3 attempts)
-            DeliveryAction.SKIP — drop the payloads, continue
+            DeliveryAction.DLQ — write the source message to the DLQ; the message is done
+            DeliveryAction.RETRY — deliver again; with no retries left the declared policy applies
+            DeliveryAction.SKIP — drop this sink's payloads, continue
+
+        Default: the sink's declared ``on_failure`` (``error.declared_policy``).
+        A hook that raises is logged and the declared policy applies.
         """
-        return DeliveryAction.DLQ
+        return error.declared_policy
 
     async def on_assign(self, partitions: list[int]) -> None:
         """Called when new partitions are assigned to this worker."""

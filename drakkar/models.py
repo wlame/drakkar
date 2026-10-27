@@ -1235,14 +1235,25 @@ class ErrorAction(StrEnum):
 class DeliveryAction(StrEnum):
     """Actions the on_delivery_error hook can return for sink delivery failures.
 
-    DLQ: Write the failed payloads to the dead letter queue (default).
-    RETRY: Retry delivery (up to 3 attempts; not configurable).
-    SKIP: Drop the payloads and continue processing.
+    DLQ: Write the source message to the dead letter queue and end the
+        message: no later delivery of it starts.
+    RETRY: Deliver the group again; spends one of the sink's
+        ``max_retries``. With none left, the declared ``on_failure`` applies.
+    SKIP: Drop this sink's payloads and continue processing.
     """
 
     DLQ = 'dlq'
     RETRY = 'retry'
     SKIP = 'skip'
+
+
+class SinkNotStartedReason(StrEnum):
+    """Why a sink delivery of a result did not start."""
+
+    # The source message of the result is already on the DLQ.
+    MESSAGE_DLQ = 'message_dlq'
+    # A dependency in ``depends_on`` failed and wrote no DLQ record (a window result).
+    DEPENDENCY_FAILED = 'dependency_failed'
 
 
 class DeliveryError(BaseModel):
@@ -1258,4 +1269,16 @@ class DeliveryError(BaseModel):
     payloads: list[BaseModel] = Field(
         default_factory=list,
         description='The payloads that could not be delivered to this sink.',
+    )
+    attempt: int = Field(
+        default=1,
+        description='The failed attempt, from 1; the quick internal retries of an idempotent write are not counted.',
+    )
+    retries_left: int = Field(
+        default=0,
+        description="Retries left of the sink's max_retries; RETRY with none left applies declared_policy.",
+    )
+    declared_policy: DeliveryAction = Field(
+        default=DeliveryAction.DLQ,
+        description="The sink's declared on_failure (DLQ or SKIP); the default on_delivery_error returns it.",
     )

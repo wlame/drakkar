@@ -220,7 +220,13 @@ def _record_calls() -> dict:
         'record_runtime_probe': lambda w: w.record_runtime_probe(lag_ms=1.0, unit_count=1, stacks=[]),
         'record_produced': lambda w: w.record_produced(_Payload(), 0, 10),
         'record_sink_delivery': lambda w: w.record_sink_delivery('kafka', 'out', 1, 0.1),
-        'record_sink_error': lambda w: w.record_sink_error('kafka', 'out', 'boom', 1),
+        'record_sink_error': lambda w: w.record_sink_error('kafka', 'out', 'boom', 1, 'dlq'),
+        'record_message_dlq': lambda w: w.record_message_dlq(
+            partition=0, offset=10, stage='sink', sink='kafka/out', error='boom', delivered_sinks=[], attempts=1
+        ),
+        'record_sink_not_started': lambda w: w.record_sink_not_started(
+            sink='kafka/out', reason='message_dlq', partition=0
+        ),
         'record_committed': lambda w: w.record_committed(0, 10),
         'record_assigned': lambda w: w.record_assigned([0]),
         'record_revoked': lambda w: w.record_revoked([0]),
