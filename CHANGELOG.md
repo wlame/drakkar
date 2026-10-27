@@ -120,6 +120,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `window_delivery_not_dlq`, `execute_dlq_failed`), new recorder events
   `message_dlq` and `sink_not_started`, and `sink_error` gains `action`
   (`retry`, `skip`, `dlq` or `failed`). See `docs/sinks.md`.
+- **DLQ record scenario in the integration harness.** The main cluster
+  runs with `sources.kafka.on_parse_error: dlq`.
+  `integration/scenario-dlq-record.sh` produces one message that cannot be
+  parsed and checks its DLQ record: the key and value unchanged, `dk-stage`
+  `parse`, `dk-record-version` `1`, the source offset, and the headers in
+  the fixed order. `just integration-scenarios` and
+  `just integration-matrix` run it with every provider.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys

@@ -301,7 +301,7 @@ chaos:
 # Needs the harness up with the same provider. Stops at the first failing
 # scenario; each script prints one verdict line.
 #
-# Wait for the workers, then run the seven harness scenarios (just integration-scenarios provider=postgres)
+# Wait for the workers, then run the eight harness scenarios (just integration-scenarios provider=postgres)
 integration-scenarios provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -313,7 +313,7 @@ integration-scenarios provider='filesystem':
     esac
     export HARNESS_PROVIDER="$provider"
     integration/wait-ready.sh
-    for scenario in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres; do
+    for scenario in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record; do
         integration/scenario-${scenario}.sh
     done
 
@@ -328,7 +328,7 @@ integration-matrix profile='quick':
         *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
     esac
     providers=(filesystem postgres redis consul)
-    steps=(service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres drain-delivery)
+    steps=(service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record drain-delivery)
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     any_failed=false
@@ -367,7 +367,7 @@ integration-matrix profile='quick':
             continue
         fi
         if integration/wait-ready.sh; then
-            for step in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres; do
+            for step in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record; do
                 run_step "$provider" "$step" "integration/scenario-${step}.sh"
             done
             run_step "$provider" drain-delivery integration/verify-after-drain.sh

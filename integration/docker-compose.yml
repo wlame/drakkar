@@ -280,6 +280,11 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+      # A message whose value the input model cannot parse goes to the DLQ
+      # topic as a record with dk-stage: parse (scenario-dlq-record.sh checks
+      # it). Set on all three workers of the main cluster, because any of
+      # them may own the partition of that message.
+      DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the
@@ -365,6 +370,8 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+      # Same parse-error policy as worker-1 (see there).
+      DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
       # App-config demo (docs/app-config.md): override one field of the
       # handler-declared AppConfig via the handler's OWN env prefix —
       # never DK_APP__* (the framework rejects that). Only worker-2, so
@@ -413,6 +420,8 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+      # Same parse-error policy as worker-1 (see there).
+      DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
     ports:
       - "9093:9093"
       - "8083:8083"
