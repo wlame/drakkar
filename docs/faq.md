@@ -124,7 +124,7 @@ Declare it with `@periodic(..., scope='cluster')`, for example `@periodic(cron='
 
 ### When does a message's offset get committed to Kafka?
 
-After **all** tasks generated from that message terminate (success or failure after retries exhausted) AND `on_message_complete` has run. Failures go through `on_error` → DLQ, not a "skipped commit". See [Offset Commit Semantics](fan-out.md#offset-commit-semantics).
+After **all** tasks generated from that message terminate (success or failure after retries exhausted) AND `on_message_complete` has run. A failed task goes through `on_error` (`SKIP`, `RETRY`, replacement tasks, or `DLQ`), and a message written to the DLQ completes its offset like any other; there is no "skipped commit". See [Offset Commit Semantics](fan-out.md#offset-commit-semantics).
 
 ### Can I build per-message aggregates from multiple tasks?
 
@@ -178,7 +178,7 @@ Kafka, Postgres, Mongo, HTTP, Redis, Filesystem, and a dedicated DLQ (Kafka topi
 
 ### What delivery guarantee does Drakkar provide?
 
-**At-least-once.** A failed sink write triggers DLQ + `on_delivery_error`; a failed task triggers `on_error` + offset commit only after a final outcome. Duplicates after crash/retry are possible — design your sinks to be idempotent or tolerate duplicates. See [Delivery and error handling](sinks.md#delivery-and-error-handling).
+**At-least-once.** A failed sink write calls `on_delivery_error`, and the sink's declared `on_failure` (`dlq` or `skip`) ends it; a failed task triggers `on_error` + offset commit only after a final outcome. Duplicates after crash/retry are possible — design your sinks to be idempotent or tolerate duplicates. See [Delivery and error handling](sinks.md#delivery-and-error-handling).
 
 ### Does Drakkar support exactly-once?
 
@@ -186,7 +186,7 @@ No. Kafka EOS transactions aren't wired in; workloads that require exactly-once 
 
 ### What happens when a sink is unreachable?
 
-The sink's internal retry policy kicks in; exhausted retries call `on_delivery_error` on your handler and route the record to the DLQ topic. See [Dead letter queue](sinks.md#dead-letter-queue).
+Each failed attempt calls `on_delivery_error` on your handler; `RETRY` delivers again up to the sink's `max_retries` (default 2). When the budget is spent, the sink's `on_failure` decides: `dlq` writes the original message to the DLQ topic, `skip` drops the payloads. See [Failure policy](sinks.md#failure-policy) and [Dead letter queue](sinks.md#dead-letter-queue).
 
 ### How do I add multiple sinks of the same type?
 
@@ -373,11 +373,11 @@ librdkafka (the underlying client) handles reconnects transparently — the cons
 
 ### What if a sink is unreachable for a long time?
 
-Per-batch retries kick in first; exhausted retries fire `on_delivery_error` and route the record to the DLQ. After `failure_threshold` consecutive terminal failures (default `5`), the sink's [circuit breaker](sinks.md#circuit-breaker) trips and subsequent batches route **directly** to the DLQ without even attempting the sink — so you stop paying the retry-timeout cost on every batch while the downstream is down. After `cooldown_seconds` (default `30s`) the breaker promotes to half-open and sends a single probe; success closes it, failure reopens with a fresh cooldown. Watch `drakkar_sink_circuit_open` and `drakkar_sink_circuit_trips_total` to alert on the condition. See also [Dead letter queue](sinks.md#dead-letter-queue).
+Retries up to the sink's `max_retries` come first; then the sink's `on_failure` decides (`dlq` writes the message to the DLQ, `skip` drops the payloads). After `failure_threshold` consecutive terminal failures (default `5`), the sink's [circuit breaker](sinks.md#circuit-breaker) trips and the declared `on_failure` decides **at once** for later batches, without the hook and without attempting the sink — so you stop paying the retry-timeout cost on every batch while the downstream is down. After `cooldown_seconds` (default `30s`) the breaker promotes to half-open and sends a single probe; success closes it, failure reopens with a fresh cooldown. Watch `drakkar_sink_circuit_open` and `drakkar_sink_circuit_trips_total` to alert on the condition. See also [Dead letter queue](sinks.md#dead-letter-queue).
 
 ### How do I replay messages from the DLQ?
 
-Drakkar does not run a built-in replay worker — replays are operator-driven. Use [`scripts/replay_dlq.py`](sinks.md#dlq-replay) as the reference tool: it reads DLQ entries and republishes their preserved `original_payloads` to a target Kafka topic (defaults to your source topic), with `--dry-run`, `--filter`, `--limit` for inspection and a consumer group that is unique per invocation so each run drains from the beginning. The script preserves the serialized payload bytes; it does NOT currently preserve original partition / key / headers — if downstream routing depends on those, point `--target-topic` at a retry topic whose producer re-derives them. See the [DLQ payload schema](sinks.md#dead-letter-queue) for the fields the script reads.
+Drakkar does not run a built-in replay worker — replays are operator-driven. Use [`scripts/replay_dlq.py`](sinks.md#dlq-replay) (`just replay-dlq`) as the reference tool: it reads DLQ records and republishes each original message as it was — the same key, the same value and the source headers, without the `dk-` headers — to a target Kafka topic (usually your source topic). It has `--dry-run`, `--filter` (text of the value), `--stage` (`parse`, `execute` or `sink`) and `--limit` for inspection, and a consumer group that is unique per invocation, so each run drains from the beginning. The target producer picks the partition from the key; the source partition and offset stay in the record's `dk-source-*` headers. See [The DLQ record](sinks.md#the-dlq-record) for the headers the script reads.
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
@@ -458,13 +458,13 @@ If you put the UI on a non-loopback host outside a private network, set a strong
 
 ### Why doesn't Drakkar validate Kafka message payloads?
 
-Parse failures are policy-driven via `sources.kafka.on_parse_error`. The default (`skip`) sets `msg.payload=None` and stamps `msg.parse_error`, logging a `message_parse_failed` warning and ticking `drakkar_message_parse_failures_total`; the handler decides what to do with the message in `arrange()`. Set `dlq` to exclude unparseable messages from `arrange()` and route them to the DLQ topic as `ParseFailurePayload` records (a failed DLQ write then follows the `dlq.on_send_failure` strategy — see the next question), or `raise` to fail fast on schema-broken deployments. A malicious producer can trigger parse failures but cannot execute code in the worker.
+Parse failures are policy-driven via `sources.kafka.on_parse_error`. The default (`skip`) sets `msg.payload=None` and stamps `msg.parse_error`, logging a `message_parse_failed` warning and ticking `drakkar_message_parse_failures_total`; the handler decides what to do with the message in `arrange()`. Set `dlq` to exclude unparseable messages from `arrange()` and write them to the DLQ topic as [DLQ records](sinks.md#the-dlq-record) with `dk-stage: parse` — the original key, value and headers (a failed DLQ write then follows the `dlq.on_send_failure` strategy — see the next question), or `raise` to fail fast on schema-broken deployments. A malicious producer can trigger parse failures but cannot execute code in the worker.
 
 ### What happens when the DLQ itself fails?
 
-The error-handling philosophy is: never wedge the pipeline silently — let the handler decide via hooks, default to log + DLQ. When the DLQ write *also* fails, the payloads have nowhere safe to go and the `dlq.on_send_failure` strategy applies:
+The error-handling philosophy is: never wedge the pipeline silently — let the handler decide via hooks, default to the declared policy. When a DLQ record cannot be written, the message has nowhere safe to go and the `dlq.on_send_failure` strategy applies:
 
-- **`drop` (default)** — the loss is logged at CRITICAL and counted in `drakkar_dlq_dropped_payloads_total`; the message counts as processed, its offset commits, and the pipeline keeps moving.
+- **`drop` (default)** — the loss is logged at CRITICAL and counted in `drakkar_dlq_dropped_payloads_total` (one per source message); the message counts as processed, its offset commits, and the pipeline keeps moving.
 - **`stall`** — the offset is left uncommitted (`drakkar_delivery_stalled_offsets_total`) and the partition is paused so no new messages are fetched. Note that *not committing alone would not stop consumption* — Kafka consumers fetch from their in-memory position, so the explicit pause is what bounds duplicate processing and tracker memory. The partition resumes after a worker restart or reassignment, replaying from the last committed offset.
 
 Both strategies tick `drakkar_dlq_send_failures_total` and emit a CRITICAL `dlq_send_failed` log. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails).

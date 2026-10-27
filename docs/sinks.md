@@ -12,10 +12,10 @@ supports multiple named instances (e.g., two separate Kafka topics or three Post
 | Event | When | What happens |
 |-------|------|--------------|
 | `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Every configured sink's `connect()` runs concurrently (`asyncio.gather`), so cold-start latency is bounded by the slowest sink, not the sum. If any fails, the worker crashes immediately. |
-| `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)`, then dispatches one `deliver()` call per group **in parallel** via `asyncio.gather`. One slow or failing sink does not block others. Each group owns its own retry / DLQ / circuit-breaker state. |
-| [Circuit breaker](#circuit-breaker) | Before each `deliver()` call | If the sink's breaker is open, `deliver()` is skipped and the batch routes straight to the DLQ. |
-| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to 3 times (a fixed limit, not configurable). |
-| Offset commit | After **all** sinks confirm delivery for a window | Kafka offsets are committed only when every payload from the window has been successfully delivered (or routed to DLQ/skipped). No partial commits. |
+| `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)`, then dispatches one `deliver()` call per group **in parallel** via `asyncio.gather`. A group whose sink declares [`depends_on`](#sink-dependencies-depends_on) waits for those sinks first. One slow or failing sink does not block the others. Each group owns its own retry budget and circuit-breaker state. |
+| [Circuit breaker](#circuit-breaker) | Before each `deliver()` call | If the sink's breaker is open, `deliver()` is skipped and the sink's declared [`on_failure`](#failure-policy) decides at once: `dlq` writes the message's [DLQ record](#the-dlq-record), `skip` drops the payloads. |
+| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ`, `RETRY`, or `SKIP`. The default answer is the sink's declared `on_failure`. `RETRY` re-calls `deliver()` up to the sink's `max_retries` (default 2, so 3 attempts in all). |
+| Offset commit | After **all** sinks settled for the message | Kafka offsets are committed only when every payload of the message was delivered, skipped, or the message was written to the DLQ. No partial commits. |
 | `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
 
 **Delivery frequency.** For each successful task, [on_task_complete()](handler.md#on_task_complete) is called once. If it returns
@@ -310,31 +310,172 @@ surfaces immediately.
 
 The `SinkManager` groups all payloads from a `CollectResult` by `(sink_type, sink_name)`,
 then calls `deliver()` on each group. A single `on_task_complete()` call can route payloads to
-any number of sinks in one shot.
+any number of sinks in one shot. Groups run in parallel unless a sink declares
+[`depends_on`](#sink-dependencies-depends_on).
+
+### Failure policy
+
+Every sink instance, of every type and plugin sinks included, declares what
+happens when its delivery fails for good:
+
+```yaml
+sinks:
+  postgres:
+    main_db:
+      dsn: "postgresql://user:pass@db:5432/app"
+      on_failure: dlq        # dlq (default) | skip
+      max_retries: 2         # 0 to 10: retries after the first attempt (default 2 = 3 attempts)
+      depends_on: []         # sinks to deliver first, as '<type>/<name>'
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `on_failure` | `dlq` | What happens when the retry budget is spent. `dlq`: the message goes to the [DLQ](#dead-letter-queue) and is done. `skip`: the payloads of this sink are dropped and the message goes on. |
+| `max_retries` | `2` | Retries after the first attempt, spent by the handler's `RETRY` (0 to 10). The budget belongs to one sink for one result. |
+| `depends_on` | `[]` | Sinks that must deliver first, written `<type>/<name>` (a plugin sink too, without `custom/`). See [Sink dependencies](#sink-dependencies-depends_on). |
+
+Environment overrides follow the usual rule:
+`DK_SINKS__POSTGRES__MAIN_DB__ON_FAILURE=skip`, and
+`DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE` for a plugin sink. For a plugin
+sink the three keys are reserved: the framework reads them and removes them
+from the leaf before the plugin receives its config.
+
+The quick transient retry of an idempotent batch (see
+[Retry contract](#retry-contract)) is a separate internal budget. It runs
+inside one attempt, does not call the hook, and does not spend `max_retries`.
+
+The config load refuses a bad policy with one of these messages
+(`<path>` is `sinks.<type>.<name>`, or `sinks.custom.<type>.<name>` for a
+plugin sink):
+
+```text
+<path>.on_failure must be dlq or skip, got '<v>'
+<path>.max_retries must be a whole number from 0 to 10
+<path>.depends_on: '<ref>' is not a configured sink; write '<type>/<name>'
+<path>.depends_on: a sink cannot depend on itself
+sinks: depends_on forms a cycle: <a> -> <b> -> <a>
+```
+
+#### `on_failure: dlq` — the message is done
+
+When a sink's delivery of a task result or a message result ends in `dlq`:
+
+1. The [DLQ record](#the-dlq-record) of each source message of the result is
+   written once. Two results of one message that fail at the same moment
+   write one record, not two.
+2. From then on no delivery of that message starts. Later task results and
+   the message result are not delivered; each sink group is counted on
+   `drakkar_sink_deliveries_not_started_total{reason="message_dlq"}`. Tasks
+   that already run are not cancelled, and
+   [on_message_complete()](handler.md#on_message_complete) still fires, but
+   its result is not delivered.
+3. Groups of the same result that are already in flight finish. If one of
+   them fails later, no second record is written: the worker logs
+   `message_already_dlq`.
+4. The offset completes as usual, when every task of the message settled.
+
+The record's `dk-delivered-sinks` header lists the sinks that delivered a
+result of the message before the record was written. A message can reach the
+DLQ with some of its sinks already delivered. Drakkar is at-least-once, so a
+replay of that message delivers those sinks again; make them idempotent if
+that matters.
+
+#### `on_failure: skip`
+
+The payloads of this sink are dropped. The worker counts them on
+`drakkar_sink_deliveries_skipped_total`, logs `sink_delivery_skipped`
+(a warning, at most one line per sink per minute) and records a `sink_error`
+event with `action: skip`. The other sinks of the result deliver as usual,
+and a sink that depends on a skipped sink still starts.
+
+### Sink dependencies (`depends_on`)
+
+By default every sink group of a result is delivered at the same time.
+`depends_on` orders them inside one result. In this example sinks 1 and 3
+are written first, in parallel, and sink 2 only after both delivered, so a
+consumer of the event never reads before the row and the cache entry exist:
+
+```yaml
+sinks:
+  postgres:
+    main_db:                 # sink 1
+      dsn: "postgresql://user:pass@db:5432/app"
+  kafka:
+    order_events:            # sink 2: announces what sinks 1 and 3 wrote
+      topic: "order-events"
+      depends_on: [postgres/main_db, redis/order_cache]
+  redis:
+    order_cache:             # sink 3
+      url: "redis://cache:6379/0"
+```
+
+The rules for one result:
+
+1. A sink with no dependencies starts at once; all such sinks run in parallel.
+2. A sink starts when every dependency **that has payloads in this result**
+   settled with success: delivered, or skipped (by the hook or by
+   `on_failure: skip`). A dependency with no payloads in this result counts
+   as satisfied.
+3. If a dependency ends in `dlq`, the message is done (see above): its
+   dependents do not start, reason `message_dlq`.
+4. If a dependency fails without a DLQ record (a window result, or a record
+   that could not be written), its dependents do not start, reason
+   `dependency_failed`.
+
+A sink that does not start is logged `sink_not_started` (debug), counted on
+`drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}` and
+recorded as a `sink_not_started` event.
+
+`depends_on` does not pass data between sinks, does not wait for a sink of
+another result, and does not retry a dependent when a dependency recovers
+later. Inside one group the payload order is the delivery order, as always.
+The load checks every reference, refuses a sink that depends on itself, and
+refuses a cycle (the messages are listed under [Failure policy](#failure-policy)).
+
+### Window results
+
+An [on_window_complete()](handler.md#on_window_complete) result is delivered
+after the messages of its window completed their offsets. It has no source
+message, so it cannot send a message to the DLQ. For a window result
+`on_failure: dlq` acts as `skip` with a warning: the worker logs
+`window_delivery_not_dlq` (at most one line per sink per minute), counts the
+payloads on `drakkar_sink_deliveries_skipped_total`, and the sinks that depend
+on this one do not start (reason `dependency_failed`). `depends_on` orders the
+groups of a window result as it does for any other result.
 
 ### Error handling
 
 When a sink's `deliver()` raises an exception, the framework calls your
-[on_delivery_error()](handler.md#on_delivery_error) hook with a `DeliveryError` containing the sink name, type,
-error message, and the failed payloads:
+[on_delivery_error()](handler.md#on_delivery_error) hook with a `DeliveryError`
+after every failed attempt:
 
 ```python
 class DeliveryError(BaseModel):
-    sink_name: str    # e.g. "results"
-    sink_type: str    # e.g. "kafka", "postgres", "http"
-    error: str        # human-readable error message
-    payloads: list[BaseModel]  # the payloads that failed
+    sink_name: str            # e.g. "results"
+    sink_type: str            # e.g. "kafka", "postgres", "http"
+    error: str                # human-readable error message, URL credentials redacted
+    payloads: list[BaseModel] # the payloads that failed
+    attempt: int              # the failed attempt, from 1
+    retries_left: int         # retries left of the sink's max_retries
+    declared_policy: DeliveryAction  # the sink's on_failure: DLQ or SKIP
 ```
 
 Your hook returns a `DeliveryAction`:
 
 | Action | Behavior |
 |--------|----------|
-| `DeliveryAction.DLQ` | Write the failed payloads to the dead letter queue (default) |
-| `DeliveryAction.RETRY` | Re-deliver **the whole group**, up to 3 attempts (a fixed limit; `executor.max_retries` applies only to task retries) — at-least-once, see below |
-| `DeliveryAction.SKIP` | Drop the payloads and continue processing |
+| `DeliveryAction.DLQ` | Send the message to the dead letter queue: [the message is done](#on_failure-dlq-the-message-is-done) |
+| `DeliveryAction.RETRY` | Re-deliver **the whole group** while `retries_left > 0` — at-least-once, see below |
+| `DeliveryAction.SKIP` | Drop this sink's payloads and continue |
 
-If `RETRY` is returned but retries are exhausted, the framework falls through to DLQ.
+- The default `on_delivery_error` returns `error.declared_policy`, so a handler
+  that does not override the hook gets the configured `on_failure`.
+- `RETRY` with `retries_left == 0` is treated as the declared `on_failure` and
+  logged `sink_retry_budget_spent` (a warning, at most one line per sink per
+  minute). A hook that answers `RETRY` for ever still ends.
+- A hook that raises is logged `delivery_error_hook_failed` (error, with the
+  exception) and the declared `on_failure` applies. The exception does not
+  leave the delivery.
 
 #### `RETRY` is at-least-once over the whole group
 
@@ -360,8 +501,9 @@ promise an exactness that a rebalance would break a moment later.
 **What that means for your handler.** Return `RETRY` when re-applying a
 payload is harmless — an idempotent upsert, a keyed Kafka topic a consumer
 dedups, a `SET` in Redis. For an operation that counts (`INCRBY`, `LPUSH`,
-an append, a webhook that charges a card), prefer `DLQ`: the payloads are
-preserved for a deliberate replay instead of being re-applied blindly. See
+an append, a webhook that charges a card), prefer `DLQ`: the original
+message is kept in the DLQ for a deliberate replay instead of being re-applied
+blindly. See
 [Retry contract](#retry-contract) for the related per-sink `idempotent` flag,
 which governs the framework's own internal fast-retry.
 
@@ -370,14 +512,16 @@ which governs the framework's own internal fast-retry.
 Every sink has a per-instance circuit breaker that protects the
 worker from hammering a persistently-failing downstream. The breaker
 operates at the **terminal-outcome** level (retries already
-exhausted, operator returned `DLQ`), so transient blips don't trip it.
+spent, or the handler returned `DLQ`), so transient blips don't trip it.
+A `SKIP` is the handler's choice, not an infrastructure failure, and does
+not count.
 
 **States and transitions:**
 
 | State | Behavior | Transition |
 |-------|----------|------------|
 | `closed` | Every `deliver()` call goes through. Terminal failures increment `_consecutive_failures`; any success resets it to zero. | After `failure_threshold` consecutive failures → `open`. |
-| `open` | `deliver()` is skipped for the cooldown window. With a DLQ configured the batch routes **directly** to it and `on_delivery_error` is bypassed (SKIP would silently drop data, RETRY would hammer the recovering downstream, neither is appropriate). With **no** DLQ configured the handler is asked and its answer is honoured — see below. | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
+| `open` | `deliver()` is skipped for the cooldown window. The sink's declared `on_failure` decides without calling `on_delivery_error`: `skip` drops and counts the payloads, `dlq` writes the [DLQ record](#the-dlq-record) with `dk-error: circuit open` and `dk-attempts: 0`. An open breaker is an infrastructure signal, not a per-message decision. | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
 | `half_open` | A **single probe** delivery is allowed through. Parallel delivery attempts against the same sink observe the in-flight probe and skip — the `_probe_inflight` gate enforces single-flight semantics. | Probe success → `closed` with counters reset. Probe failure → `open` with a fresh cooldown. |
 
 **Operator-visible signals:**
@@ -393,7 +537,7 @@ exhausted, operator returned `DLQ`), so transient blips don't trip it.
   reopens.
 - `SinkStats.last_error == 'circuit open'` — the operator UI renders
   this sentinel so operators can distinguish breaker-routed DLQ
-  entries from actual delivery failures.
+  records from actual delivery failures.
 
 The breaker defaults (`failure_threshold=5`, `cooldown_seconds=30.0`)
 are tuned for typical throughput. Pipelines with stricter latency
@@ -404,18 +548,13 @@ for the full knobs.
 
 #### Circuit open with no DLQ configured
 
-When no DLQ is wired there is nothing to force the payloads into, so
-`on_delivery_error` **is** called and its answer decides:
-
-| Handler returns | Outcome |
-|-----------------|---------|
-| `SKIP` | Payloads dropped. Counted on `drakkar_sink_deliveries_skipped_total` and logged — operator intent, so it stays a drop. |
-| `DLQ` | There is no DLQ to write to, so `dlq.on_send_failure` applies: `stall` raises `SinkDeliveryFailedError` and holds the offsets for replay; `drop` counts `drakkar_dlq_dropped_payloads_total` and logs CRITICAL. |
-| `RETRY` | Cannot be honoured — re-entering an open circuit is what the breaker exists to prevent. Treated as "do not drop this quietly" and follows `dlq.on_send_failure` exactly like `DLQ`. |
-
-Configure a DLQ, or set `dlq.on_send_failure: stall`, if losing a batch while
-a sink is down is not acceptable. With neither, a batch that arrives during
-an open circuit is lost — loudly and counted, but lost.
+When a sink with `on_failure: dlq` meets an open circuit and no record can be
+written, the rules of [When the DLQ itself fails](#when-the-dlq-itself-fails)
+apply. A worker whose DLQ is off by configuration (no Kafka source and no
+`dlq.topic`) counts the message on `drakkar_dlq_unconfigured_drops_total` and
+goes on; it never stalls. A worker with a DLQ that cannot write follows
+`dlq.on_send_failure`. Declare `on_failure: skip` for a sink whose losses
+you accept, so a down sink does not reach that path at all.
 
 ### Retry contract
 
@@ -530,9 +669,20 @@ async def on_delivery_error(self, error: dk.DeliveryError) -> dk.DeliveryAction:
 
 ## Dead letter queue
 
-When delivery fails and your `on_delivery_error` hook returns `DeliveryAction.DLQ`
-(or retries are exhausted), the framework writes the failed payloads to a Kafka-based
-dead letter queue.
+The dead letter queue is a Kafka topic that keeps the **original messages**
+that the worker could not process. The framework writes one record there for
+each failed source message:
+
+- a message whose value fails `input_model` parsing, with
+  `sources.kafka.on_parse_error: dlq` (stage `parse`);
+- a task whose [on_error()](handler.md#on_error) returns `ErrorAction.DLQ`
+  (stage `execute`);
+- a sink delivery that ends in `dlq`: the sink's `on_failure`, the handler's
+  `DeliveryAction.DLQ`, a spent retry budget, or an open circuit
+  (stage `sink`).
+
+A record is written once per message: after it, [the message is
+done](#on_failure-dlq-the-message-is-done).
 
 ### Topic derivation
 
@@ -554,53 +704,99 @@ the DLQ topic as `{sources.kafka.topic}_dlq`. For example, if
 empty `topic` means no DLQ producer is built at all: a DLQ send is dropped,
 logged once per worker run as `dlq_send_dropped_unconfigured`, and counted in
 `drakkar_dlq_unconfigured_drops_total`. Set `dlq.topic` explicitly on an
-HTTP-only worker that must not lose failed payloads — see
+HTTP-only worker that must not lose failed requests — see
 [the DLQ rule](sources.md#the-dlq-without-the-kafka-source).
 
-### Message format
+### The DLQ record
 
-Each DLQ message is a JSON document containing:
+A DLQ record is the failed source message itself. Its **key and value are the
+source message's key and value, byte for byte**; a value that is not valid
+UTF-8 or JSON is copied unchanged. The record's Kafka timestamp is the time
+the DLQ producer wrote it.
 
-| Field | Description |
-|-------|-------------|
-| `original_payloads` | The failed payloads, each serialized as a JSON string |
-| `sink_name` | Name of the sink that failed |
-| `sink_type` | Type of the sink that failed |
-| `error` | Error message from the failed delivery |
-| `timestamp` | Unix epoch timestamp of the failure |
-| `partition` | Source Kafka partition the message came from |
-| `attempt_count` | Number of delivery attempts before writing to DLQ |
+The headers come in a fixed order. First the source message's own headers, in
+their original order, without any header whose name starts with `dk-` (a
+replayed message that fails again gets fresh facts, never two sets). Then the
+`dk-` headers, all UTF-8 text, in this order:
 
-**Byte format is contractual.** The envelope is emitted with Python's
-`json.dumps` default separators — `", "` between members and `": "` after each
-key — in the field order listed above, with `timestamp` always carrying a
-decimal point (`1700000000.0`, never `1700000000`). Tooling may byte-compare
-entries across releases; `tests/test_sinks.py` pins the golden literal.
+| Header | Value |
+|--------|-------|
+| `dk-record-version` | `1` |
+| `dk-stage` | `parse`, `execute` or `sink` |
+| `dk-error` | The error text with URL credentials redacted, cut to 2000 bytes at a UTF-8 character boundary. The full text is in the log line. |
+| `dk-sink` | `<sink_type>/<sink_name>` of the failed sink; `sink` stage only |
+| `dk-task-id` | The failed task's id; `execute` stage only |
+| `dk-attempts` | Attempts made, in decimal. `sink`: the hook-level attempts of that sink for this message (`0` for an open circuit). `execute`: the task's attempts. Absent for `parse`. |
+| `dk-delivered-sinks` | The sinks that delivered a result of this message before the record was written, as sorted, comma-joined `<sink_type>/<sink_name>`; absent when none |
+| `dk-source-topic` | The source topic |
+| `dk-source-partition` | The source partition, in decimal |
+| `dk-source-offset` | The source offset, in decimal |
+| `dk-source-timestamp` | The source message's Kafka timestamp in milliseconds |
+| `dk-request-id` | The request id; HTTP source only |
+| `dk-worker` | The worker name |
+| `dk-instance` | The worker instance id |
+| `dk-failed-at` | The time of the write, RFC 3339 UTC with six fraction digits (`2026-11-05T10:15:30.123456Z`) |
 
-Two deliberate asymmetries, both easy to "tidy up" by mistake:
+A header whose value is absent is not written; `0` is a value. For the
+`execute` stage `dk-error` reads `exit code <n>: <detail>`, where the detail is
+the task's stderr, else the exception text, else the failure kind; without an
+exit code it is the detail alone.
 
-- The **embedded** payload strings inside `original_payloads` are *compact*
-  (no spaces) — they come from `model_dump_json()`. Only the outer envelope
-  is spaced.
-- The **flight recorder** encodes compact, to stay byte-identical with
-  orjson. The DLQ is a wire format read by external
-  tooling; the recorder is an internal store. Do not unify them.
+A failed request of the [HTTP source](webapp.md) has its own form: the value
+is the raw request body as the client sent it, the key is absent, and
+`dk-source-topic`, `dk-source-partition` and `dk-source-offset` are absent.
+`dk-source-timestamp` is the time the request was received, and
+`dk-request-id` names the request.
+
+An example, a Postgres sink failure of a message from partition 1 of `orders`
+(the source message had one header of its own, `x-trace`):
+
+```text
+key:    order-18
+value:  {"id": 18}
+headers:
+  x-trace              1
+  dk-record-version    1
+  dk-stage             sink
+  dk-error             connection to postgresql://***:***@db:5432/main refused
+  dk-sink              postgres/main_db
+  dk-attempts          3
+  dk-delivered-sinks   kafka/results,redis/cache
+  dk-source-topic      orders
+  dk-source-partition  1
+  dk-source-offset     77
+  dk-source-timestamp  1793000000789
+  dk-worker            worker-a
+  dk-instance          0123456789abcdef
+  dk-failed-at         2026-11-05T10:15:30.123456Z
+```
+
+**The record is a wire format.** The header names, their order and the value
+rules are a contract (pinned by `tests/fixtures/dlq_contract.json`). Tooling
+reads the failure facts by header name and replays the key, the value and the
+source headers as they are. The [Kafka read API](kafka-read.md) returns the
+headers of each record it reads from the DLQ topic.
+
+Because the record holds the original message, give the DLQ topic the same
+access rules as the source topic ([Security](security.md)).
 
 ### Broker inheritance
 
 When `dlq.brokers` is empty, the DLQ producer connects to the same brokers as the
 main Kafka consumer (`kafka.brokers`). Set `dlq.brokers` explicitly to write DLQ
-messages to a different Kafka cluster.
+records to a different Kafka cluster.
 
 ### When the DLQ itself fails
 
-The DLQ is the last resort — if the DLQ write also fails (broker down, topic
-missing, auth error), the payloads have nowhere safe to go. The
+The DLQ is the last resort. If a record cannot be written, the message has
+nowhere safe to go. That happens when the DLQ write fails (broker down, topic
+missing, auth error) or is not confirmed in time, and when a payload names a
+sink that is not configured (the result is rejected before any delivery). The
 `dlq.on_send_failure` setting decides what happens next:
 
 | Strategy | Behavior | Trade-off |
 |----------|----------|-----------|
-| `drop` (default) | The failure is logged at CRITICAL (`dlq_failure_payloads_dropped`) and counted in `drakkar_dlq_dropped_payloads_total`; the message counts as processed and its offset commits. The pipeline keeps moving. | The payloads are **lost**. Alert on the counter. |
+| `drop` (default) | The loss is logged at CRITICAL (`dlq_failure_payloads_dropped`, with `message_count`) and counted in `drakkar_dlq_dropped_payloads_total` (source messages); the message counts as processed and its offset commits. The pipeline keeps moving. | The message is **lost**. Alert on the counter. |
 | `stall` | The affected offset is left uncommitted (counted in `drakkar_delivery_stalled_offsets_total`) and the partition is **paused** — no new messages are fetched from it until the worker restarts or the partition is reassigned. On restart, processing resumes from the last committed offset, so the messages are redelivered. | No data loss, but the partition accrues consumer lag until the downstream is fixed and the worker restarted. |
 
 Both strategies are loud: `drakkar_dlq_send_failures_total` ticks on every failed
@@ -614,42 +810,44 @@ pause/resume cycle — backpressure recovery never silently un-pauses it. Choose
 `stall` when downstream data must never be dropped (audit, billing); keep `drop`
 when pipeline liveness matters more than occasional loss during a double outage.
 
-The same strategy also governs **unexpected** delivery errors — anything that is
-not a confirmed DLQ failure, such as a payload naming a sink that is not
-configured (or whose name is ambiguous across plugin sinks), or a
-`on_delivery_error` hook that itself raises. In those cases the delivery state is
-genuinely unknown, so `stall` treats it as undelivered and leaves the offset for
-redelivery, while `drop` commits and logs. This applies uniformly at all three
-delivery points — after `on_task_complete`, after `on_message_complete`, and
-after `on_window_complete`. The task is still
-reported as a terminal failure to the handler in every case; only the offset
-decision changes.
+This is the only `stall` in the product: a sink's own `on_failure` is `dlq` or
+`skip`. A message that is lost under `drop` is counted once, however many of
+its sinks fail later. The strategy applies at all three delivery points —
+after `on_task_complete`, after `on_message_complete`, and after
+`on_window_complete` — and the task is still reported as a terminal failure
+to the handler in every case; only the offset decision changes. A raising
+`on_delivery_error` hook does not reach this path: the sink's declared
+`on_failure` applies (see [Error handling](#error-handling)). With the DLQ off
+by configuration the loss is the counted unconfigured drop above, never a
+stall.
 
 ### DLQ replay
 
-`scripts/replay_dlq.py` is a reference operator tool that reads DLQ entries
-and republishes their preserved `original_payloads` to a target Kafka topic.
-Use it after fixing a bug that caused messages to land in the DLQ — the script
-drives those messages back through Kafka so the normal consumer picks them up
-again.
+`scripts/replay_dlq.py` (also `just replay-dlq`) is a reference operator tool
+that reads DLQ records and republishes the original messages to a target
+Kafka topic. Each message is written as it was: the same key, the same value,
+and the source headers, without any `dk-` header. Use it after fixing the
+cause of the failures: the script drives those messages back through Kafka so
+the normal consumer picks them up again.
 
 #### When to use it
 
 - A downstream sink regressed, the bug has been fixed, and you want to
-  reprocess the dead-lettered batch without editing offsets by hand.
+  reprocess the dead-lettered messages without editing offsets by hand.
 - You want to inspect and filter the DLQ contents before replaying (pair
-  `--dry-run` with `--filter` to count matches).
+  `--dry-run` with `--filter` or `--stage` to count matches).
 - You want to divert DLQ content to a shadow topic for offline analysis
   (set `--target-topic` to a scratch topic).
 
 #### Usage
 
 ```bash
-# Dry run, count matches only
+# Dry run, count the sink failures of one customer
 uv run python scripts/replay_dlq.py \
     --dlq-config=config.yaml \
     --target-topic=search-requests \
     --dry-run \
+    --stage=sink \
     --filter='customer_id:42'
 
 # Real replay, bounded
@@ -665,48 +863,49 @@ uv run python scripts/replay_dlq.py \
     --target-brokers=prod-kafka:9092
 ```
 
-The script prints `replayed N/M` to stderr every 1000 records and a final
-summary line (`summary: read=… published=… would_publish=… filtered_out=… skipped_invalid=… errors=…`) when it
-finishes. Ctrl+C is handled gracefully — the in-flight produce completes and
-the producer is flushed before exit.
+| Flag | Meaning |
+|------|---------|
+| `--dlq-config` | The worker's YAML config; the DLQ topic and brokers come from it, with the worker's own fallback rules. |
+| `--target-topic` | The topic to republish to. Required unless `--dry-run`. |
+| `--target-brokers` | Brokers for the producer. Defaults to `dlq.brokers`, else `kafka.brokers`. |
+| `--dry-run` | Read and count, publish nothing. |
+| `--limit` | Stop after N records have been **read** (filtered records count too). |
+| `--filter` | Publish only records whose value contains this text. The value is read as UTF-8; bytes that are not UTF-8 become U+FFFD and the rest still matches. |
+| `--stage` | Publish only records of one failing stage: `parse`, `execute` or `sink` (the `dk-stage` header). A record without `dk-stage` matches no stage. |
+
+Each record is flushed and confirmed by the broker before the next one is
+read. The script prints `replayed N/M` to stderr every 1000 records and a
+final summary line (`summary: read=… published=… would_publish=… filtered_out=… errors=…`)
+when it finishes. Ctrl+C is handled gracefully — the record in flight
+completes and the producer is flushed before exit.
 
 #### Caveats
 
 - **Duplicate processing**: the script does NOT deduplicate against the
-  source topic. If your sink is not idempotent (see
-  [`BaseSink.idempotent`](#retry-contract)) and your pipeline has
-  already partially processed the DLQ contents, replaying will cause
-  duplicate work. Verify the sink's idempotency contract before replaying.
-- **Filter is substring-only**: `--filter='customer_id:42'` is a plain `in`
-  check against each payload's JSON string. It does not parse JSON or
-  support path expressions. For structural filtering, pipe the DLQ topic
-  through `kcat | jq` in advance and feed a pre-filtered topic to the
-  script.
-- **`--limit` does not resume**: `--limit=1000` stops after 1000 entries
-  have been READ (filter-rejected entries still count). Running with
-  `--limit` twice replays the first N entries both times — the consumer
+  source topic. A message that reached the DLQ after some of its sinks
+  delivered (`dk-delivered-sinks`) delivers to those sinks again when it is
+  replayed. If those sinks are not idempotent (see
+  [`BaseSink.idempotent`](#retry-contract)), check them before replaying.
+- **Filter is substring-only**: `--filter='customer_id:42'` is a plain
+  substring check on the value text. It does not parse JSON or support
+  path expressions. For structural filtering, pipe the DLQ topic through
+  `kcat | jq` in advance and feed a pre-filtered topic to the script.
+- **`--limit` does not resume**: `--limit=1000` stops after 1000 records
+  have been READ (filter-rejected records still count). Running with
+  `--limit` twice replays the first N records both times — the consumer
   group is throwaway (unique per invocation), so offsets are not preserved
   between runs.
-- **Original Kafka envelope is NOT fully preserved**: the replay script
-  publishes only the `original_payloads` bytes to the target topic. The
-  original message's `key`, `partition`, and `headers` are NOT currently
-  captured by `DLQMessage.serialize()` and therefore cannot be restored
-  by the replay script. If downstream consumers depend on those fields
-  (e.g. the source partition for a keyed-routing consumer, or headers
-  for tracing), point `--target-topic` at a retry topic whose producer
-  re-derives them from the payload body. Operators who need a lossless
-  replay should post-process the DLQ output before publishing.
-- **Partial-entry failure is per-record**: each DLQ entry may expand to
-  multiple target-topic messages (one per preserved payload). If a
-  produce fails midway through a multi-payload entry, earlier sub-
-  payloads from that entry have already been sent. The stderr summary
-  reports the last successful DLQ offset so operators can resume, but
-  inspection of the specific entry may be necessary to avoid duplicates.
-- **Exit code 1 with partial success**: if the producer fails mid-run after
-  some records were published, the script exits 1 and logs the last
-  successful DLQ offset to stderr. Operators can re-run with an adjusted
-  filter (e.g. filtering for records newer than that offset's timestamp)
-  to resume.
+- **The partition is the target's**: the target producer picks the partition
+  from the key, as any producer does. The source partition and offset stay in
+  the DLQ record (`dk-source-partition`, `dk-source-offset`) for reference.
+- **An HTTP request is not replayed into Kafka by itself**: its record has no
+  key and its value is the raw request body. Replaying it into a source topic
+  works only when the Kafka source parses the same body.
+- **Exit code 1 with partial success**: if a publish fails mid-run, the script
+  exits 1 and prints to stderr the DLQ partition and offset of the failed
+  record (`publish failed at dlq_partition=… dlq_offset=…`) and of the last
+  record it published (`last successful dlq_partition=… dlq_offset=…`).
+  Re-run with an adjusted filter to resume.
 
 ---
 
@@ -814,9 +1013,20 @@ The same registry holds the built-in sinks, as a table of import paths
 that resolve to classes on first lookup rather than at import time.
 `SinkRegistry.get(name)` returns the class registered under that name,
 whether it shipped with Drakkar or arrived through a plugin. An explicit
-registration always wins over the built-in table, so a plugin may override
-a built-in by re-registering the same name (for example, a custom `kafka`
-sink with extra metrics).
+registration wins over the built-in table, so `SinkRegistry.get('kafka')`
+returns a plugin class that registers the name `kafka`. The worker still
+builds the built-in sections (`sinks.kafka`, `sinks.postgres`, ...) with the
+built-in classes and their config models, and a plugin type is declared only
+under `sinks.custom.<type>`. The config load refuses a `sinks.custom.<type>`
+whose type is the name of a built-in sink type:
+
+```text
+sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name
+```
+
+So a Kafka sink with extra metrics is a plugin type of its own name (for
+example `kafka_metrics`, a `KafkaSink` subclass) declared under
+`sinks.custom.kafka_metrics.<name>`.
 
 ### BaseSink contract
 
@@ -883,7 +1093,12 @@ the worker config. The `<type>` segment must match the entry-point
 key; `<instance>` is whatever name your handler uses to route
 payloads. The leaf dict is passed verbatim as the second argument to
 your sink's constructor (`MyCustomSink(name, config)`), so you can
-shape it however your sink expects:
+shape it however your sink expects. The three [failure policy](#failure-policy)
+keys `on_failure`, `max_retries` and `depends_on` are reserved: the framework
+reads them and removes them from the leaf before your constructor sees it.
+The plugin class's `sink_type` must equal the `<type>` key; startup fails
+with `sinks.custom.<type>.<name>: the plugin reports sink_type '<t>'`
+otherwise.
 
 ```yaml
 sinks:

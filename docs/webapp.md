@@ -429,12 +429,58 @@ Successful response body (HTTP 200) -- the `sinks` field is now populated:
 ```
 
 The `sinks.by_type` map is keyed by sink type (`kafka`, `postgres`,
-`mongo`, ...) and emits one entry per type that the request actually
-touched. Each entry carries `attempted`, `delivered`, `dlq`, and an
-`errors` list for delivery failures routed through
-[`on_delivery_error`](handler.md#on_delivery_error). Sinks that the
-request did not touch are omitted -- the response mirrors what was
-attempted, not the full configured sink set.
+`mongo`, ..., and `custom` for every plugin sink) and emits one entry per
+type that the request actually touched. Sinks that the request did not touch
+are omitted -- the response mirrors what was attempted, not the full
+configured sink set. Each entry carries:
+
+| Field | Meaning |
+|-------|---------|
+| `attempted` | Payloads of this type in the request's result |
+| `delivered` | Payloads of the sinks of this type that delivered |
+| `dlq` | Payloads of the sinks of this type whose delivery ended in the request's DLQ record. It stays `0` when no record was written. |
+| `errors` | One `<type>/<name>: <error>` entry per failed attempt (the text the [`on_delivery_error`](handler.md#on_delivery_error) hook saw), then a marker for a sink that did not deliver: `<type>/<name>: not started` (its message was already on the DLQ, or a dependency failed) or `<type>/<name>: failed, no DLQ record` |
+
+A payload skipped by the hook or by `on_failure: skip` is in `attempted` and
+in no other count. Two other markers can appear: `validation_error: ...` when
+a payload of the type names no configured sink (that type is left out of the
+delivery), and `deliver_all_raised: ...` on every type when the delivery
+stopped as a whole (see below).
+
+#### How the request's sinks are delivered
+
+A request's result is delivered in one pass, with the same rules as a Kafka
+message (see [Failure policy](sinks.md#failure-policy)):
+
+- Each sink's declared `on_failure`, `max_retries` and
+  [`depends_on`](sinks.md#sink-dependencies-depends_on) apply. A sink that
+  depends on another starts only after that sink delivered or skipped.
+- A raising `on_delivery_error` is logged `delivery_error_hook_failed` and the
+  sink's declared `on_failure` applies.
+- When a sink's delivery ends in `dlq`, one [DLQ record](sinks.md#the-dlq-record)
+  is written for the request: the value is the **raw request body** as the
+  client sent it, the key is absent, `dk-request-id` names the request and
+  `dk-source-timestamp` is the time the request was received. There are no
+  topic, partition or offset headers. The sinks of the request that have not
+  started do not start.
+- A sink type whose payloads fail validation is left out of the delivery, so
+  a sink that depends on a sink of that type sees no payloads for it and
+  delivers (a dependency with no payloads counts as satisfied).
+- With the DLQ off (no Kafka source and no `dlq.topic`), a `dlq` outcome is
+  counted on `drakkar_dlq_unconfigured_drops_total` and reported as
+  `failed, no DLQ record`.
+- Under `dlq.on_send_failure: stall`, a record that cannot be written stops
+  the delivery: every type of the summary shows `deliver_all_raised: ...` and
+  `delivered: 0`, even for sinks that delivered, and the worker logs
+  `webapp_sink_deliver_all_failed`. A request has no offset to hold, so the
+  response (HTTP 200) is the only signal; prefer `drop` on an HTTP-only
+  worker.
+- When the request's timeout passes during delivery, the sinks in flight
+  finish and the rest do not start; the worker logs
+  `webapp_request_dropped_after_timeout` with `stage=during_sinks`.
+
+A failed task of an HTTP request stays an error of the request: the HTTP
+path does not call `on_error`, so it writes no `execute` record.
 
 ---
 

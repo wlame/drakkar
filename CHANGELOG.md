@@ -57,45 +57,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart. Old lock files are not read; delete them. `EventRecorder` takes no
   election arguments, `run_archive_pass` takes a `fence`, and
   `EventRecorder.stop` takes `reserve_seconds=`. See `docs/upgrading.md`.
-- **The DLQ record changed shape.** A DLQ record is now the original source
-  message: its key and value unchanged, its headers, and `dk-` headers with
-  the failure facts (`dk-record-version`, `dk-stage`, `dk-error` and more).
-  The old JSON body and `ParseFailurePayload` are gone. `DLQSink.send` takes
-  a `DLQRecord`, and `read_dlq_entries` yields `DLQEntry` (key, value,
-  headers, partition, offset). `SourceMessage` has `headers`.
-  `sinks.http.<name>.max_retries` now defaults to 2 (it was 3), and a value
-  above 10 fails the load.
+- **The DLQ record is the original message, and every sink declares a
+  failure policy.** A DLQ record is now the failed source message: its key
+  and value unchanged, its own headers (minus any `dk-` header), then `dk-`
+  headers with the failure facts (`dk-record-version`, `dk-stage`,
+  `dk-error`, `dk-sink`, `dk-attempts`, `dk-source-*`, `dk-worker` and more).
+  The JSON body with `original_payloads` is gone, so every consumer of the
+  DLQ topic must change; records written before the upgrade are not read by
+  the new tools. `DLQMessage` and `ParseFailurePayload` are removed,
+  `DLQSink.send` takes a `DLQRecord`, `read_dlq_entries` yields `DLQEntry`
+  (key, value, headers, partition, offset) instead of decoded JSON, and
+  `SourceMessage` has `headers`. `sinks.http.<name>.max_retries` is now the
+  shared retry budget: the default is 2 (it was 3), and a value above 10
+  fails the load. `RETRY` is honoured up to the sink's `max_retries` (it was
+  a fixed 3 attempts). A raising `on_delivery_error` no longer propagates or
+  reaches `dlq.on_send_failure`: the worker logs `delivery_error_hook_failed`
+  and applies the sink's declared `on_failure`, on the HTTP source too. With
+  the circuit open the hook is never called; the declared `on_failure`
+  decides. After a message's first DLQ record no later result of that message
+  is delivered. `drakkar_dlq_dropped_payloads_total` counts source messages,
+  not payloads. The keys `on_failure`, `max_retries` and `depends_on` in a
+  plugin sink's leaf are now reserved. The HTTP response's per-type sink
+  summary lost the markers `dlq_unconfigured` and `dlq_send_failed: ...`; it
+  now reports `<type>/<name>: not started` and
+  `<type>/<name>: failed, no DLQ record`, and `dlq` counts only when the
+  request's DLQ record was written. The log events `dlq_message_sent` and
+  `dlq_send_failed` carry `stage`, `sink` and `value_bytes` instead of payload
+  fields; `dlq_payload_serialization_fallback`,
+  `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
+  gone. `scripts/replay_dlq.py` republishes each record's key, value and
+  source headers, takes `--stage`, and its summary has no `skipped_invalid`.
+  See `docs/upgrading.md` ("The DLQ record").
 
 ### Added
 
 - **Failure policy, retry budget and dependencies per sink.** Every sink
   instance, a plugin sink too, takes `on_failure` (`dlq` or `skip`, default
   `dlq`), `max_retries` (0 to 10, default 2) and `depends_on` (a list of
-  `<type>/<name>`). The load checks every value and every reference, and
-  refuses a sink that depends on itself or a cycle. In a plugin sink's config
-  the three keys are reserved. `executor.on_failure` (`skip` or `dlq`,
-  default `skip`) is what the default `on_error` returns.
-- **Sinks deliver by their policy and dependencies.** A sink starts after
-  the sinks in its `depends_on` delivered or skipped; the others run in
-  parallel. `on_delivery_error` sees `attempt`, `retries_left` and
+  `<type>/<name>`). A sink starts after the sinks in its `depends_on`
+  delivered or skipped; the others run in parallel. The load checks every
+  value and every reference, refuses a sink that depends on itself or a
+  cycle, and refuses a plugin type under `sinks.custom` named like a built-in
+  type. `on_delivery_error` sees `attempt`, `retries_left` and
   `declared_policy`, and by default returns the declared policy. A delivery
   that ends in `dlq` writes one record per source message and ends the
-  message: no later delivery of it starts. A window result cannot go to the
-  DLQ, so there `dlq` drops the payloads with a `window_delivery_not_dlq`
-  warning. New metrics `drakkar_dlq_records_total{stage}` and
-  `drakkar_sink_deliveries_not_started_total`, new recorder events
-  `message_dlq` and `sink_not_started`, and `sink_error` gains `action`.
-- **A failed task can send its message to the DLQ.** `on_error` can return
-  `ErrorAction.DLQ`: the source messages of the task are written to the DLQ
-  at once (`dk-stage: execute`), the task counts as failed, and no later
-  delivery of those messages starts. All results of one message (its task
-  results and the result of `on_message_complete`) share one DLQ state, so
-  the message gets one record. The message probe treats `DLQ` as a failure and writes
-  nothing.
-- **The HTTP source delivers a request's sinks in one pass.** The sinks follow
-  the same policy and `depends_on` order as for a Kafka message. A request that
-  ends in `dlq` writes one record with the raw request body as its value and
-  `dk-request-id`, and its sinks that have not started do not start.
+  message. A window result cannot go to the DLQ, so there `dlq` drops the
+  payloads with a `window_delivery_not_dlq` warning. `on_error` can return
+  `ErrorAction.DLQ` (`dk-stage: execute`), and `executor.on_failure` (`skip`
+  or `dlq`, default `skip`) is what the default `on_error` returns; the
+  message probe treats `DLQ` as a failure and writes nothing. The HTTP
+  source delivers a request's sinks in one pass with the same rules; its
+  record holds the raw request body and `dk-request-id`. New metrics
+  `drakkar_dlq_records_total{stage}` and
+  `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`,
+  new log events (`message_dlq`, `message_already_dlq`, `sink_not_started`,
+  `sink_retry_budget_spent`, `delivery_error_hook_failed`,
+  `window_delivery_not_dlq`, `execute_dlq_failed`), new recorder events
+  `message_dlq` and `sink_not_started`, and `sink_error` gains `action`
+  (`retry`, `skip`, `dlq` or `failed`). See `docs/sinks.md`.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys
@@ -437,9 +456,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The help text of `drakkar_sink_deliveries_skipped_total` names every
-  cause of a skip:** the handler, the declared policy, an open circuit, and a
-  window result that cannot reach the DLQ.
+- **New help texts for three DLQ and sink metrics.**
+  `drakkar_sink_deliveries_skipped_total` names every cause of a skip (the
+  handler, the declared policy, an open circuit, and a window result that
+  cannot reach the DLQ); `drakkar_sink_dlq_messages_total` says it counts
+  records, one per source message, of all stages; and
+  `drakkar_dlq_dropped_payloads_total` says it counts lost source messages.
 
 ### Fixed
 

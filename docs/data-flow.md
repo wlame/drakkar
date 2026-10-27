@@ -434,7 +434,7 @@ The framework calls `handler.on_error(task, error)`:
   - `exception` (str | None): exception message for timeout/launch failures, None for normal non-zero exits
   - `pid` (int | None): process ID, None if never started
 
-The hook must return one of three types of responses:
+The hook must return one of four types of responses:
 
 **Response A -- `ErrorAction.RETRY`** (retry the same task):
 - If `retry_count < executor.max_retries` (default: `3`, meaning up to 3 retries = 4 total attempts):
@@ -448,9 +448,15 @@ The hook must return one of three types of responses:
   - Falls through to the finally block (task counted as completed).
 
 **Response B -- `ErrorAction.SKIP`** (skip and continue):
-- The default behavior from `BaseDrakkarHandler.on_error()`.
+- The default answer of `BaseDrakkarHandler.on_error()` while `executor.on_failure` is `skip` (its default).
 - The failed result is appended to the window's results list (kept only when `on_window_complete` is implemented).
 - Falls through to the finally block.
+
+**Response D -- `ErrorAction.DLQ`** (send the message to the DLQ):
+- The default answer of `BaseDrakkarHandler.on_error()` when `executor.on_failure` is `dlq`.
+- The [DLQ record](sinks.md#the-dlq-record) of each source message of the task is written at once (`dk-stage: execute`, `dk-task-id`, `dk-attempts` = the task's attempts). A message that already has a record gets no second one (`message_already_dlq`).
+- The task counts as failed; the message is done, so no later result of it is delivered. Tasks already running finish.
+- A record that cannot be written follows `dlq.on_send_failure` and logs `execute_dlq_failed`.
 
 **Response C -- `list[ExecutorTask]`** (replacement tasks):
 - The handler returns new tasks to run instead of retrying the original.
@@ -563,9 +569,19 @@ The `SinkManager.deliver_all()` method handles delivery to all sinks:
 - `result.redis` -> `'redis'` sinks
 - `result.files` -> `'filesystem'` sinks
 
+**Order of the groups.** Groups start in parallel. A group whose sink declares
+[`depends_on`](sinks.md#sink-dependencies-depends_on) waits until each of its
+dependencies with payloads in this result settled with success (delivered or
+skipped); a dependency that ended the message on the DLQ, or failed without a
+record, stops it (`sink_not_started`, reason `message_dlq` or
+`dependency_failed`). A message that is already on the DLQ starts no group at
+all.
+
 **Per-sink delivery** (for each group):
 
-A retry loop with `attempt` starting at 0:
+If the sink's circuit is open, the sink's declared `on_failure` decides at
+once, without the hook (`dlq` writes the record with `dk-attempts: 0`).
+Otherwise a loop of hook-level attempts runs, with `attempt` starting at 1:
 
 1. **Call `sink.deliver(payloads)`**. The serialization is sink-specific:
 
@@ -583,46 +599,44 @@ A retry loop with `attempt` starting at 0:
    - Break from the retry loop.
 
 3. **On failure** (exception from `deliver()`):
-   - Stats updated: `error_count += 1`, `last_error` set.
+   - Stats updated: `error_count += 1`, `last_error` set (URL credentials redacted).
    - `sink_deliver_errors` Prometheus counter incremented.
-   - Flight recorder records a `sink_error` event.
-   - A `DeliveryError` is created with `sink_name`, `sink_type`, `error` message, and the failed `payloads`.
-   - The handler's `on_delivery_error(error)` hook is called.
+   - A `DeliveryError` is created with `sink_name`, `sink_type`, `error`, the failed
+     `payloads`, `attempt`, `retries_left` (the sink's `max_retries + 1 - attempt`) and
+     `declared_policy` (the sink's `on_failure`).
+   - The handler's `on_delivery_error(error)` hook is called. If it raises, the worker
+     logs `delivery_error_hook_failed` and uses `declared_policy`.
 
-**on_delivery_error returns one of three actions**:
+**on_delivery_error returns one of three actions** (the default hook returns
+`error.declared_policy`):
 
-   - **`DeliveryAction.RETRY`** (and `attempt < 3`; the delivery retry limit is fixed at 3 and is not `executor.max_retries`):
-     - `sink_delivery_retries` counter incremented.
-     - Logs a warning.
-     - Continues the retry loop (immediate retry, no backoff).
+   - **`DeliveryAction.RETRY`** with `retries_left > 0`:
+     - Flight recorder records a `sink_error` event with `action: retry`.
+     - `sink_delivery_retries` counter incremented; `sink_delivery_retry` warning logged.
+     - The whole group is delivered again (immediate retry, no backoff).
+
+   - **`DeliveryAction.RETRY`** with `retries_left == 0`:
+     - `sink_retry_budget_spent` warning (at most one line per sink per minute).
+     - Treated as the declared `on_failure`.
 
    - **`DeliveryAction.SKIP`**:
-     - `sink_deliveries_skipped` counter incremented.
-     - Logs a warning.
-     - Breaks from the retry loop. Payloads are dropped.
+     - `sink_deliveries_skipped` counter incremented; `sink_delivery_skipped` warning.
+     - The payloads are dropped; `sink_error` recorded with `action: skip`.
 
-   - **`DeliveryAction.DLQ`** (default from `BaseDrakkarHandler.on_delivery_error()`):
-     - The framework calls `dlq_sink.send(error, partition_id)`.
-     - The DLQ sink serializes the failed payloads into a JSON envelope:
-       ```json
-       {
-         "original_payloads": ["<json_string_1>", "<json_string_2>"],
-         "sink_name": "results",
-         "sink_type": "kafka",
-         "error": "Connection refused",
-         "timestamp": 1743580800.123,
-         "partition": 5,
-         "attempt_count": 1
-       }
-       ```
-       Each payload is serialized via `model_dump_json()`; if that fails (e.g., non-serializable model), falls back to `str()`.
-     - The envelope is produced to the DLQ Kafka topic.
-     - `sink_dlq_messages` Prometheus counter incremented.
-     - Breaks from the retry loop.
-
-   - **Retries exhausted** (RETRY action but `attempt >= 3`):
-     - Falls through to the DLQ/break path. Logs a warning.
-     - Breaks from the retry loop.
+   - **`DeliveryAction.DLQ`**:
+     - For a task or message result, the [DLQ record](sinks.md#the-dlq-record) of each
+       source message is written once, under the message's own lock: the original key,
+       value and headers, then the `dk-` headers (`dk-stage: sink`, `dk-sink`,
+       `dk-attempts`, `dk-delivered-sinks`, the source coordinates, the worker).
+     - `sink_dlq_messages` and `dlq_records{stage="sink"}` counters incremented; a
+       `message_dlq` warning logged and a `message_dlq` event recorded.
+     - The message is done: groups of this result that have not started do not start,
+       and no later result of the message is delivered.
+     - For a window result there is no source message: the payloads are dropped as a
+       skip, with a `window_delivery_not_dlq` warning.
+     - If no record can be written, `dlq.on_send_failure` applies
+       (see [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails)).
+     - `sink_error` recorded with `action: dlq`, or `failed` when no record was written.
 
 After successful delivery, the framework also records `produced` events in the flight recorder for Kafka payloads (counting output messages for observability).
 

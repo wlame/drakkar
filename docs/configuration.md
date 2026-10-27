@@ -306,7 +306,7 @@ connects to comes from [`kafka:`](#kafka-connection-kafka).
 | `max_poll_interval_ms` | `int` | `300000` | Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
 | `session_timeout_ms` | `int` | `45000` | Session timeout (ms) for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
 | `heartbeat_interval_ms` | `int` | `3000` | Interval (ms) between heartbeats sent to the broker. Should be less than `session_timeout_ms / 3`. |
-| `on_parse_error` | `'skip'` \| `'dlq'` \| `'raise'` | `'skip'` | What to do when a message value fails `input_model` parsing. `skip`: the message reaches `arrange()` with `payload=None` and `msg.parse_error` set. `dlq`: the message is excluded from `arrange()` and written to the DLQ topic as a `ParseFailurePayload`; the offset commits once the DLQ write is confirmed (a failed write follows `dlq.on_send_failure`). `raise`: fail fast — a `MessageParseError` stops the partition processor. |
+| `on_parse_error` | `'skip'` \| `'dlq'` \| `'raise'` | `'skip'` | What to do when a message value fails `input_model` parsing. `skip`: the message reaches `arrange()` with `payload=None` and `msg.parse_error` set. `dlq`: the message is excluded from `arrange()` and written to the DLQ topic as a [DLQ record](sinks.md#the-dlq-record) (`dk-stage: parse`: the original key, value and headers, no `dk-attempts`); the offset commits once the DLQ write is confirmed (a failed write follows `dlq.on_send_failure`). `raise`: fail fast — a `MessageParseError` stops the partition processor. |
 | `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
 | `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
 | `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
@@ -432,6 +432,7 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | `max_stderr_bytes` | `int` | `0` | >= 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
+| `on_failure` | `'skip'` \| `'dlq'` | `'skip'` | | What the default [on_error()](handler.md#on_error) returns for a failed task. `dlq` writes the task's source messages to the DLQ (`dk-stage: execute`), and no later delivery of those messages starts. Any other value fails the load with `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `drain_timeout_seconds` | `int` | `30` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. When drain times out, the still-running tasks are cancelled (their subprocess process group is killed) and their offsets are **not** committed — those messages replay on restart (at-least-once). Tune together with `task_timeout_seconds`. |
 | `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
 | `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
@@ -469,6 +470,21 @@ executor:
 ## Sinks (`sinks:`)
 
 Sinks define where processed results are delivered. See [Sinks](sinks.md) for payload models, [routing](sinks.md#routing), and the [delivery lifecycle](sinks.md#delivery-lifecycle). Each sink type is a dictionary mapping instance names to their configuration. You can configure multiple instances of the same type (e.g., two Kafka sinks writing to different topics).
+
+### Keys of every sink instance
+
+Every instance of every type, plugin sinks included, also takes the
+[failure policy](sinks.md#failure-policy) keys:
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `on_failure` | `'dlq'` \| `'skip'` | `'dlq'` | | What happens when the retry budget is spent. `dlq`: the source message goes to the DLQ and the message is done. `skip`: this sink's payloads are dropped. |
+| `max_retries` | `int` | `2` | whole number, 0 to 10 | Retries after the first attempt, spent by the handler's `RETRY` (default 2 = 3 attempts). The quick internal retry of an idempotent write does not count. |
+| `depends_on` | `list[str]` | `[]` | each entry `<type>/<name>` of a configured sink; no self-reference, no cycle | Sinks that must deliver first inside one result. A plugin sink is written `<type>/<name>` too, without `custom/`. See [Sink dependencies](sinks.md#sink-dependencies-depends_on). |
+
+Environment overrides: `DK_SINKS__<TYPE>__<NAME>__ON_FAILURE`, and
+`DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE` for a plugin sink. The load
+messages are listed under [Failure policy](sinks.md#failure-policy).
 
 ### Kafka Sink (`sinks.kafka.<name>`)
 
@@ -534,7 +550,7 @@ Sends payloads to an HTTP endpoint (JSON by default).
 | `timeout_seconds` | `int` | `30` | >= 1 | Request timeout in seconds. |
 | `headers` | `dict[str, str]` | `{}` | | Additional HTTP headers sent with each request. |
 | `encoding` | `Literal['json', 'form', 'multipart']` | `'json'` | one of `json`, `form`, `multipart`; `headers` must not set `Content-Type` | Request body format. See [Body encoding](#body-encoding-sinkshttpnameencoding). |
-| `max_retries` | `int` | `3` | >= 0 | Maximum retry attempts for failed HTTP requests. |
+| `max_retries` | `int` | `2` | 0 to 10 | The shared key of [every sink instance](#keys-of-every-sink-instance): retries of a failed delivery, spent by `RETRY`. |
 | `ui_url` | `str` | `''` | | URL to a related web UI. |
 
 !!! warning "Cloud metadata endpoints are rejected"
@@ -601,7 +617,7 @@ Appends JSONL lines to files on disk.
 
 ### Custom Sinks (`sinks.custom.<type>.<name>`)
 
-Plugin-discovered sink instances. Top-level keys under `sinks.custom` are sink type names registered via `[project.entry-points."drakkar.sinks"]`; second-level keys are instance names; the leaf dict is plugin-defined config passed verbatim to the sink class constructor (Drakkar cannot validate its shape — the plugin can wrap it in its own Pydantic model). An unregistered type name fails at startup rather than silently dropping the sink. See [Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api).
+Plugin-discovered sink instances. Top-level keys under `sinks.custom` are sink type names registered via `[project.entry-points."drakkar.sinks"]`; second-level keys are instance names; the leaf dict is plugin-defined config passed to the sink class constructor (Drakkar cannot validate its shape — the plugin can wrap it in its own Pydantic model). The three [shared keys](#keys-of-every-sink-instance) `on_failure`, `max_retries` and `depends_on` are reserved: the framework reads them and removes them from the leaf first. A type named like a built-in type fails the load: `sinks.custom.<type>: '<type>' is the name of a built-in sink type; give the plugin type another name`. An unregistered type name fails at startup rather than silently dropping the sink. See [Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api).
 
 ```yaml
 sinks:
@@ -643,6 +659,8 @@ sinks:
       headers:
         Authorization: "Bearer ${API_TOKEN}"
       max_retries: 5
+      on_failure: skip               # a lost notification is acceptable
+      depends_on: [postgres/main-db] # notify only after the row is written
 
   redis:
     cache:
@@ -718,7 +736,7 @@ probing a recovering downstream is itself expensive.
 
 ## Dead Letter Queue (`dlq:`)
 
-Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafka topic. The DLQ captures the original payloads, error details, and metadata for later inspection or reprocessing.
+Messages that fail to parse, to execute or to deliver can be written to a [DLQ](sinks.md#dead-letter-queue) Kafka topic. Each [DLQ record](sinks.md#the-dlq-record) is the original source message (key, value and headers unchanged) with `dk-` headers that say where and why it failed, for later inspection or replay.
 
 **Whether a DLQ producer is built depends on the Kafka source.** The DLQ derives its default topic from the source topic, so a worker without a Kafka source has nothing to derive from and needs an explicit `dlq.topic`:
 
@@ -737,8 +755,8 @@ The startup log `sinks_configured` reports `dlq_topic: ""` when the DLQ is off. 
 | `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers` — and with them `kafka.security` and `kafka.client_config`, on the same same-cluster-means-same-credentials rule the Kafka sinks follow. |
 | `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for the DLQ producer. Only consulted when `brokers` is set. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
 | `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for the DLQ producer, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
-| `flush_timeout_seconds` | `float` | `30.0` | Bound on the producer flush that ends every DLQ write. Same rationale as [the Kafka sink's](#kafka-sink-sinkskafkaname), and it matters more here: the DLQ is the last resort, so a write that blocks for `message.timeout.ms` stalls the partition it was meant to rescue. On expiry the write is reported as unconfirmed and the affected offsets stall. |
-| `on_send_failure` | `'drop'` \| `'stall'` | `'drop'` | Strategy when the DLQ write itself fails. `drop`: log + count the loss, commit the offset, keep the pipeline moving. `stall`: leave the offset uncommitted and pause the partition until restart — no loss, at the cost of consumer lag. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails). |
+| `flush_timeout_seconds` | `float` | `30.0` | Bound on the producer flush that ends every DLQ write. Same rationale as [the Kafka sink's](#kafka-sink-sinkskafkaname), and it matters more here: the DLQ is the last resort, so a write that blocks for `message.timeout.ms` stalls the partition it was meant to rescue. On expiry the write is reported as unconfirmed and `on_send_failure` applies. |
+| `on_send_failure` | `'drop'` \| `'stall'` | `'drop'` | Strategy when no DLQ record can be written (the write fails, or a payload names a sink that is not configured). `drop`: log + count the loss, commit the offset, keep the pipeline moving. `stall`: leave the offset uncommitted and pause the partition until restart — no loss, at the cost of consumer lag. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails). |
 
 ```yaml
 dlq:

@@ -97,8 +97,9 @@ sources:
 
     # Policy for messages whose value fails input_model parsing. env: DK_SOURCES__KAFKA__ON_PARSE_ERROR
     #   skip  — message reaches arrange() with payload=None and msg.parse_error set (default)
-    #   dlq   — message is excluded from arrange() and written to the DLQ topic as a
-    #           ParseFailurePayload; the offset commits only after the DLQ write is confirmed
+    #   dlq   — message is excluded from arrange() and written to the DLQ topic as a DLQ
+    #           record (the original message, dk-stage: parse); the offset commits only
+    #           after the DLQ write is confirmed
     #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
     on_parse_error: skip
 
@@ -147,6 +148,8 @@ executor:
   max_stderr_bytes: 0              # stderr bytes retained per task (0 = unlimited). env: DK_EXECUTOR__MAX_STDERR_BYTES
   window_size: 100                 # max messages collected per arrange() window. env: DK_EXECUTOR__WINDOW_SIZE
   max_retries: 3                   # retries per failed task (0 = no retries). env: DK_EXECUTOR__MAX_RETRIES
+  on_failure: skip                 # what the default on_error returns: skip | dlq (dlq = the source
+                                   #   messages of a failed task go to the DLQ). env: DK_EXECUTOR__ON_FAILURE
   drain_timeout_seconds: 30        # graceful-shutdown wait for in-flight tasks. env: DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS
 
   # Backpressure: pause Kafka consumption when in-flight messages reach
@@ -176,6 +179,23 @@ executor:
 📚 [Deep details](configuration.md#sinks-sinks) · [Sinks page](sinks.md)
 
 Where processed results are delivered. Each sink type maps **instance names → config**, so you can have multiple instances of the same type writing to different destinations. All instance keys (e.g. `results`, `analytics`) are user-chosen.
+
+### Keys of every sink instance
+
+📚 [Deep details](configuration.md#keys-of-every-sink-instance) · [Failure policy](sinks.md#failure-policy)
+
+Every instance of every type, plugin sinks included, takes these three keys
+next to its own:
+
+```yaml
+sinks:
+  kafka:
+    results:
+      topic: search-results
+      on_failure: dlq              # dlq | skip: when the retry budget is spent. env: DK_SINKS__KAFKA__RESULTS__ON_FAILURE
+      max_retries: 2               # 0-10: retries after the first attempt, spent by RETRY. env: DK_SINKS__KAFKA__RESULTS__MAX_RETRIES
+      depends_on: []               # sinks to deliver first, as '<type>/<name>' (set it in YAML)
+```
 
 ### Kafka sink
 
@@ -258,7 +278,7 @@ sinks:
       url: https://api.example.com/webhook  # required, http(s) scheme. env: DK_SINKS__HTTP__WEBHOOK__URL
       method: POST                 # env: DK_SINKS__HTTP__WEBHOOK__METHOD
       timeout_seconds: 30          # request timeout. env: DK_SINKS__HTTP__WEBHOOK__TIMEOUT_SECONDS
-      max_retries: 3               # retries per failed request. env: DK_SINKS__HTTP__WEBHOOK__MAX_RETRIES
+      max_retries: 2               # the shared key: retries of a failed delivery (0-10). env: DK_SINKS__HTTP__WEBHOOK__MAX_RETRIES
       headers: {}                  # extra request headers. env: DK_SINKS__HTTP__WEBHOOK__HEADERS (JSON)
       encoding: json               # body format: json | form | multipart. env: DK_SINKS__HTTP__WEBHOOK__ENCODING
       ui_url: ''                   # env: DK_SINKS__HTTP__WEBHOOK__UI_URL
@@ -302,7 +322,7 @@ sinks:
 
 📚 [Deep details](configuration.md#custom-sinks-sinkscustomtypename) · [Plugin API](sinks.md#custom-sinks-plugin-api)
 
-Instances of sink types registered by plugin packages via `[project.entry-points."drakkar.sinks"]`. The leaf config dict is plugin-defined and passed verbatim to the sink class constructor; an unregistered type name fails at startup.
+Instances of sink types registered by plugin packages via `[project.entry-points."drakkar.sinks"]`. The leaf config dict is plugin-defined and passed to the sink class constructor; an unregistered type name fails at startup, and a type named like a built-in type fails the load. The shared keys `on_failure`, `max_retries` and `depends_on` are reserved: the framework reads them and removes them from the leaf (env `DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE`).
 
 ```yaml
 sinks:
@@ -341,7 +361,7 @@ sinks:
 
 📚 [Deep details](configuration.md#dead-letter-queue-dlq) · [DLQ behavior](sinks.md#dead-letter-queue)
 
-Failed sink deliveries (after retries are exhausted, or when a circuit breaker is open) are written to this Kafka topic.
+Messages that fail to parse, to execute or to deliver are written to this Kafka topic as [DLQ records](sinks.md#the-dlq-record): the original message (key, value and headers unchanged) plus `dk-` headers.
 
 ```yaml
 dlq:
@@ -355,9 +375,9 @@ dlq:
   client_config: {}                # raw librdkafka overrides for the DLQ producer, merged after
                                    #   security; only consulted when `brokers` is set
 
-  # Strategy when the DLQ write itself fails (payloads have nowhere safe to go):
-  #   drop  — log CRITICAL + tick drakkar_dlq_dropped_payloads_total, commit the offset,
-  #           keep the pipeline moving; the payloads are lost (default)
+  # Strategy when no DLQ record can be written (the message has nowhere safe to go):
+  #   drop  — log CRITICAL + tick drakkar_dlq_dropped_payloads_total (source messages), commit
+  #           the offset, keep the pipeline moving; the message is lost (default)
   #   stall — leave the offset uncommitted and pause the partition; messages are
   #           redelivered after restart/rebalance (no loss, at the cost of lag)
   flush_timeout_seconds: 30.0      # bound on the per-write producer flush. env: DK_DLQ__FLUSH_TIMEOUT_SECONDS

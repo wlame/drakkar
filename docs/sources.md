@@ -159,6 +159,24 @@ counts every drop in `drakkar_dlq_unconfigured_drops_total`. Alert on that
 counter if your HTTP-only workers must not lose failed payloads — set
 `dlq.topic` and they will not.
 
+### What each source writes to the DLQ
+
+A [DLQ record](sinks.md#the-dlq-record) is the failed source message itself,
+with `dk-` headers that say where and why it failed.
+
+- **Kafka source.** The key, value and headers of the consumed message, byte
+  for byte, plus `dk-source-topic`, `dk-source-partition`, `dk-source-offset`
+  and `dk-source-timestamp`. A message whose value fails `input_model`
+  parsing, with `sources.kafka.on_parse_error: dlq`, is written with
+  `dk-stage: parse` and no `dk-attempts`; it never reaches `arrange()`.
+  `skip` (the default) and `raise` write nothing.
+- **HTTP source.** The value is the raw request body as the client sent it,
+  the key is absent, and there are no topic, partition or offset headers.
+  `dk-source-timestamp` is the time the request was received and
+  `dk-request-id` names the request. The response is unchanged: the
+  per-type sink summary shows the failure (see
+  [HTTP source](webapp.md)).
+
 ## What changes in observability
 
 The config-summary line names the enabled sources:

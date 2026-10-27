@@ -15,7 +15,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_window_complete(results, source_messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[`[`ExecutorTask`](executor.md#executortask)`]` |
-| `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed sink delivery batch | `DeliveryAction` |
+| `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed attempt of a sink's delivery (not for an open circuit) | `DeliveryAction` |
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
@@ -547,9 +547,30 @@ partition. Return one of:
 
 | Return value            | Behavior                                      |
 |-------------------------|-----------------------------------------------|
-| `ErrorAction.RETRY`     | Re-run the same task (up to `max_retries`)    |
-| `ErrorAction.SKIP`      | Drop the task, continue processing (default)  |
+| `ErrorAction.RETRY`     | Re-run the same task (up to `executor.max_retries`) |
+| `ErrorAction.SKIP`      | Drop the task, continue processing            |
+| `ErrorAction.DLQ`       | Write the task's source messages to the [DLQ](sinks.md#dead-letter-queue); no later delivery of those messages starts |
 | `list[ExecutorTask]`    | Spawn replacement tasks instead               |
+
+The default `on_error` returns `executor.on_failure`: `SKIP` unless the config
+sets `executor.on_failure: dlq`. A handler that does not override the hook
+gets the configured answer.
+
+`ErrorAction.DLQ` writes the record at once, while the other tasks of the
+message may still run. The record carries `dk-stage: execute`, the task id in
+`dk-task-id` and the task's attempts in `dk-attempts` (see
+[The DLQ record](sinks.md#the-dlq-record)). The task counts as failed, and the
+message is done: tasks already running finish, but no later result of the
+message is delivered, and the offset completes when every task settled. A task
+of a message that is already on the DLQ adds no second record; the worker
+logs `message_already_dlq`. If the record cannot be written,
+`dlq.on_send_failure` applies (see
+[When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails)) and the worker
+logs `execute_dlq_failed`.
+
+The [message probe](faq.md#what-is-the-message-probe-tab) runs the same hook. There
+`ErrorAction.DLQ` is a terminal failure of the task, and nothing is written
+to the DLQ.
 
 If `on_error` **itself raises**, the framework contains the exception and
 treats the task as a terminal `SKIP`, logging `on_error_hook_failed` and
@@ -588,15 +609,36 @@ async def on_error(self, task, error):
 async def on_delivery_error(self, error: DeliveryError) -> DeliveryAction
 ```
 
-Called when a sink's `deliver()` raises an exception. See [Delivery Lifecycle](sinks.md#delivery-lifecycle) for the full delivery flow. The `DeliveryError`
-contains the sink name, sink type, error message, and the payloads that
-failed.
+Called after every failed attempt of a sink's `deliver()`. See [Delivery Lifecycle](sinks.md#delivery-lifecycle) for the full delivery flow and
+[Failure policy](sinks.md#failure-policy) for the per-sink settings. The
+`DeliveryError` fields:
+
+| Field             | Type              | Description |
+|-------------------|-------------------|-------------|
+| `sink_name`       | `str`             | The configured name of the sink |
+| `sink_type`       | `str`             | The sink type (`kafka`, `postgres`, ..., or the plugin type) |
+| `error`           | `str`             | The error text, URL credentials redacted |
+| `payloads`        | `list[BaseModel]` | The payloads of the failed group |
+| `attempt`         | `int`             | The failed attempt, from 1. The quick internal retries of an idempotent write are not counted. |
+| `retries_left`    | `int`             | Retries left of the sink's `max_retries` |
+| `declared_policy` | `DeliveryAction`  | The sink's `on_failure`: `DLQ` or `SKIP` |
 
 | Return value           | Behavior                                           |
 |------------------------|----------------------------------------------------|
-| `DeliveryAction.DLQ`   | Write to [dead letter queue](sinks.md#dead-letter-queue) (default) |
-| `DeliveryAction.RETRY` | Re-deliver the whole group (up to 3 attempts; fixed, not `executor.max_retries`) |
-| `DeliveryAction.SKIP`  | Drop the payloads, continue                        |
+| `DeliveryAction.DLQ`   | Write the source message to the [dead letter queue](sinks.md#dead-letter-queue); the message is done |
+| `DeliveryAction.RETRY` | Re-deliver the whole group while `retries_left > 0` |
+| `DeliveryAction.SKIP`  | Drop this sink's payloads, continue                |
+
+- The default `on_delivery_error` returns `error.declared_policy`, so a
+  handler that does not override it gets the sink's configured `on_failure`
+  (`dlq` unless the sink says `skip`).
+- `RETRY` with `retries_left == 0` is the declared `on_failure`; the worker
+  logs `sink_retry_budget_spent`.
+- A hook that raises is logged `delivery_error_hook_failed` and the declared
+  `on_failure` applies. The exception does not stop the delivery or the
+  partition. The HTTP source follows the same rule.
+- The hook is not called while the sink's circuit is open: the declared
+  `on_failure` decides alone (see [Circuit Breaker](sinks.md#circuit-breaker)).
 
 `RETRY` re-delivers the **entire** payload group, including any payload the
 failed attempt already applied — see
@@ -608,7 +650,7 @@ count.
 async def on_delivery_error(self, error):
     if error.sink_type == 'redis':  # SETs are safe to re-apply
         return dk.DeliveryAction.RETRY
-    return dk.DeliveryAction.DLQ
+    return error.declared_policy    # the sink's on_failure for everything else
 ```
 
 ### on_assign

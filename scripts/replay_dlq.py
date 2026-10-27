@@ -1,16 +1,20 @@
-"""DLQ replay tool — reads dead-lettered messages and republishes to a target topic.
+"""DLQ replay tool — reads DLQ records and republishes the original messages to a target topic.
 
-Reads records from the configured DLQ Kafka topic (the same topic the worker
-writes via ``DLQSink``), then republishes each record's value (the original
-source message) to a target Kafka topic. Intended as a reference /
-operator tool after a bug in the downstream sink has been fixed and a batch
-of previously dead-lettered messages should be re-driven through the pipeline.
+A DLQ record is the failed source message itself: its key, its value and its
+own headers, followed by ``dk-`` headers that say where and why it failed
+(``drakkar/sinks/dlq_record.py``). The tool reads the records from the DLQ
+topic the worker writes and republishes each one as an ordinary message: the
+same key, the same value, and the source headers without any ``dk-`` header.
+Intended as a reference operator tool after the cause of the failures has been
+fixed and the dead-lettered messages should be driven through the pipeline
+again.
 
 Usage:
     uv run python scripts/replay_dlq.py \\
         --dlq-config=config.yaml \\
-        --target-topic=search-results \\
+        --target-topic=search-requests \\
         --limit=1000 \\
+        --stage=sink \\
         --filter='customer_id:123' \\
         --dry-run
 
@@ -23,48 +27,53 @@ Args:
         unless --dry-run.
     --target-brokers: override the brokers used for producing. Defaults to
         ``dlq.brokers`` → ``kafka.brokers`` (same as the reader).
-    --dry-run: iterate and log but never call ``producer.produce`` — useful
-        for estimating volume and confirming filters before committing.
+    --dry-run: iterate and log but never produce — useful for estimating
+        volume and confirming filters before committing.
     --limit: stop after N records have been READ (not published — a
-        filter-rejected entry still counts toward the limit, matching the
+        filter-rejected record still counts toward the limit, matching the
         semantics of ``head -n N``).
-    --filter: simple substring match applied to each record value. A record
-        whose value contains the substring (anywhere) is published;
-        non-matching records are skipped. Empty string disables filtering.
+    --filter: substring match on each record value, read as UTF-8 text
+        (bytes that are not UTF-8 become U+FFFD). Empty disables it.
+    --stage: replay only the records of one failing stage (``parse``,
+        ``execute`` or ``sink``), read from the ``dk-stage`` header.
 
 Exit codes:
     0 — drained successfully or --limit reached without errors.
-    1 — producer.produce raised after having already published some records;
-        stderr carries the last successful offset so the operator can resume
-        with an updated config / filter.
+    1 — a publish failed; stderr names the DLQ partition and offset of the
+        failed record and of the last one published, so the operator can resume.
     2 — unrecoverable setup error (missing config, can't reach brokers, etc.).
     130 — Ctrl+C after flushing the producer (standard SIGINT convention).
-
-Notes:
-    - This script uses ``confluent_kafka.aio.AIOProducer``, matching the
-      Kafka client the rest of the project standardized on.
-    - The DLQ record format is defined in ``drakkar/sinks/dlq_record.py``: the
-      record value is the original source message value, which we republish
-      verbatim as the target-topic message value.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import signal
 import sys
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import structlog
-from confluent_kafka.aio import AIOProducer
+from confluent_kafka import KafkaError, Message, Producer
 
 from drakkar.config import load_config
-from drakkar.sinks.dlq import DLQEntry, read_dlq_entries
+from drakkar.sinks.dlq import DEFAULT_FLUSH_TIMEOUT_SECONDS, DLQEntry, read_dlq_entries
+from drakkar.sinks.dlq_record import Header
+from drakkar.sinks.kafka_delivery import settle_budget
 
 logger = structlog.get_logger()
 
 PROGRESS_EVERY = 1000
+DLQ_HEADER_PREFIX = 'dk-'
+STAGE_HEADER = 'dk-stage'
+STAGES = ('parse', 'execute', 'sink')
+REPLAY_THREAD_NAME_PREFIX = 'replay'
+
+DeliveryReport = tuple[KafkaError | None, Message | None]
 
 
 @dataclass
@@ -74,15 +83,15 @@ class ReplayStats:
     ``published`` tracks the number of messages ACTUALLY produced to the
     target topic. ``would_publish`` tracks the same count for ``--dry-run``
     so operators can estimate volume without the summary line making it
-    look like real work happened.
+    look like real work happened. ``last_successful`` is the DLQ
+    ``(partition, offset)`` of the last record published.
     """
 
     read: int = 0
     published: int = 0
     would_publish: int = 0
     filtered_out: int = 0
-    skipped_invalid: int = 0
-    last_successful_offset: int | None = None
+    last_successful: tuple[int, int] | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -94,7 +103,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog='replay_dlq',
-        description='Replay messages from a Drakkar DLQ topic to a target Kafka topic.',
+        description='Replay the original messages of a Drakkar DLQ topic to a target Kafka topic.',
     )
     parser.add_argument(
         '--dlq-config',
@@ -120,31 +129,53 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         '--limit',
         type=int,
         default=None,
-        help='Stop after reading N entries (filter-rejected entries count toward the limit).',
+        help='Stop after reading N records (filter-rejected records count toward the limit).',
     )
     parser.add_argument(
         '--filter',
         default='',
-        help='Substring match on each record value (empty disables filtering).',
+        help='Substring match on each record value, read as UTF-8 text (empty disables filtering).',
+    )
+    parser.add_argument(
+        '--stage',
+        choices=STAGES,
+        default=None,
+        help='Replay only the records of this failing stage (the dk-stage header).',
     )
     return parser
 
 
-def _entry_matches_filter(entry: DLQEntry, pattern: str) -> bool:
-    """Return True if the record value contains ``pattern``.
+def source_headers(entry: DLQEntry) -> list[Header]:
+    """The record's own source headers: every header whose name does not start with ``dk-``, in order."""
+    return [(name, value) for name, value in entry.headers if not name.startswith(DLQ_HEADER_PREFIX)]
 
-    Empty ``pattern`` matches every entry (the default). The check is a plain
-    ``in`` substring test on the value's bytes — no regex, no JSON-path
-    syntax — to keep the script dependency-free and predictable.
+
+def _stage_of(entry: DLQEntry) -> str | None:
+    """The ``dk-stage`` header value of a record, or None when it has none."""
+    for name, value in entry.headers:
+        if name == STAGE_HEADER and value is not None:
+            return value.decode('utf-8', errors='replace')
+    return None
+
+
+def _entry_matches_filter(entry: DLQEntry, pattern: str) -> bool:
+    """Return True if the record value, read as UTF-8 text, contains ``pattern``.
+
+    Empty ``pattern`` matches every record (the default). The check is a plain
+    substring test — no regex, no JSON-path syntax — to keep the script
+    dependency-free and predictable. A value that is not UTF-8 is still read:
+    its bad bytes become U+FFFD and the rest of the text can match.
     """
     if not pattern:
         return True
-    return pattern.encode() in entry.value
+    return pattern in entry.value.decode('utf-8', errors='replace')
 
 
-def _extract_payload_values(entry: DLQEntry) -> list[bytes]:
-    """The values to republish for one DLQ record: its value, the original source message."""
-    return [entry.value]
+def _entry_selected(entry: DLQEntry, *, pattern: str, stage: str | None) -> bool:
+    """True when the record passes the stage filter and the text filter."""
+    if stage is not None and _stage_of(entry) != stage:
+        return False
+    return _entry_matches_filter(entry, pattern)
 
 
 def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
@@ -164,34 +195,109 @@ def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
     return topic, brokers
 
 
-async def _maybe_publish(
-    producer: AIOProducer | None,
-    target_topic: str,
-    values: list[bytes],
-) -> None:
-    """Publish each value to ``target_topic`` and await its delivery future.
+class ReplayPublisher:
+    """Writes records to the target topic with a sync producer on a thread of its own.
 
-    ``producer`` is ``None`` only when running under ``--dry-run`` — the
-    caller still invokes this helper so the iteration shape (and stats)
-    matches between modes, but we short-circuit before touching the network.
+    The asyncio producer of the Kafka client cannot send headers, so the
+    replay uses the plain ``Producer``. Its ``produce`` and ``flush`` block,
+    so they run on one thread of the publisher's own, never on the event
+    loop; one worker also keeps the writes in order. Each record is flushed
+    and judged by its own delivery report.
     """
-    if producer is None:
-        return
-    futures = []
-    for value in values:
-        fut = await producer.produce(topic=target_topic, value=value)
-        futures.append(fut)
-    # ``flush()`` nudges the internal queue, matching ``KafkaSink.deliver``'s
-    # pattern. A small batch + flush gives us prompt feedback on broker errors.
-    remaining = await producer.flush()
-    if remaining and remaining > 0:
-        raise RuntimeError(f'Kafka flush incomplete: {remaining} message(s) still queued.')
-    for i, fut in enumerate(futures):
-        result = await fut
-        if result is None:
-            raise RuntimeError(f'Kafka delivery future resolved to None for message {i}.')
-        if hasattr(result, 'error') and result.error() is not None:
-            raise RuntimeError(f'Kafka delivery error for message {i}: {result.error()}')
+
+    def __init__(self, producer: Producer, *, flush_timeout_seconds: float) -> None:
+        self._producer = producer
+        self._flush_timeout_seconds = flush_timeout_seconds
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=REPLAY_THREAD_NAME_PREFIX)
+
+    async def publish(self, topic: str, entry: DLQEntry) -> None:
+        """Republish one record's key, value and source headers; raise when the broker does not confirm it."""
+        loop = asyncio.get_running_loop()
+        report: asyncio.Future[DeliveryReport] = loop.create_future()
+        deadline = time.monotonic() + self._flush_timeout_seconds
+        await loop.run_in_executor(
+            self._executor,
+            functools.partial(
+                _produce_and_flush,
+                producer=self._producer,
+                topic=topic,
+                entry=entry,
+                on_delivery=_delivery_callback(loop, report),
+                flush_timeout_seconds=self._flush_timeout_seconds,
+            ),
+        )
+        _settled, pending = await asyncio.wait([report], timeout=settle_budget(deadline))
+        if pending:
+            raise RuntimeError(f'Kafka delivery not confirmed within {self._flush_timeout_seconds}s.')
+        failure = _delivery_failure(*report.result())
+        if failure is not None:
+            raise RuntimeError(f'Kafka delivery error: {failure}')
+
+    async def close(self) -> None:
+        """Flush what is still queued on the publisher's thread, then shut the thread down."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self._executor, self._producer.flush, self._flush_timeout_seconds
+            )
+        finally:
+            self._executor.shutdown(wait=True)
+
+
+def _delivery_callback(
+    loop: asyncio.AbstractEventLoop, report: asyncio.Future[DeliveryReport]
+) -> Callable[[KafkaError | None, Message | None], None]:
+    """Build the producer's delivery callback for one record.
+
+    librdkafka calls it from inside ``flush()``, so on the publisher's thread,
+    never on the loop: it may only hand the report over with
+    ``call_soon_threadsafe``.
+    """
+
+    def settle(error: KafkaError | None, message: Message | None) -> None:
+        # A late report (after the wait gave up) finds the future pending and
+        # settles it harmlessly; a second report is ignored.
+        if not report.done():
+            report.set_result((error, message))
+
+    def on_delivery(error: KafkaError | None, message: Message | None) -> None:
+        try:
+            loop.call_soon_threadsafe(settle, error, message)
+        except RuntimeError:
+            # The loop is closed: nothing is left waiting for this report.
+            pass
+
+    return on_delivery
+
+
+def _produce_and_flush(
+    *,
+    producer: Producer,
+    topic: str,
+    entry: DLQEntry,
+    on_delivery: Callable[[KafkaError | None, Message | None], None],
+    flush_timeout_seconds: float,
+) -> int:
+    """Enqueue one record and flush the producer; blocking, so run on the publisher's thread."""
+    # The client also takes text header values; a record only ever holds bytes or None.
+    wire_headers: list[tuple[str, str | bytes | None]] = [*source_headers(entry)]
+    producer.produce(topic=topic, key=entry.key, value=entry.value, headers=wire_headers, on_delivery=on_delivery)
+    return producer.flush(flush_timeout_seconds)
+
+
+def _delivery_failure(error: KafkaError | None, message: Message | None) -> str | None:
+    """The reason a delivery report is not a confirmation, or None when it is one."""
+    if error is not None:
+        return str(error)
+    if message is None:
+        return 'no delivery report'
+    if message.error() is not None:
+        return str(message.error())
+    return None
+
+
+def _coordinates(partition: int, offset: int) -> str:
+    """The DLQ position of a record as the report lines print it."""
+    return f'dlq_partition={partition} dlq_offset={offset}'
 
 
 async def run(
@@ -202,16 +308,18 @@ async def run(
     target_brokers: str,
     limit: int | None,
     filter_pattern: str,
+    stage: str | None,
     dry_run: bool,
     stats: ReplayStats | None = None,
-    producer: AIOProducer | None = None,
+    producer: Producer | None = None,
+    flush_timeout_seconds: float = DEFAULT_FLUSH_TIMEOUT_SECONDS,
 ) -> ReplayStats:
     """Drive the actual read-and-republish loop.
 
     Kept separate from ``main`` so tests can feed a pre-built async
-    iterator and a mock producer without going through argparse / config
-    loading. The ``producer`` parameter is injected by tests; in the real
-    CLI path ``main`` constructs one and passes it in.
+    iterator and a fake producer without going through argparse / config
+    loading. Tests inject ``producer``; in the real CLI path it is built
+    here from ``target_brokers``.
     """
     stats = stats or ReplayStats()
     stop_requested = False
@@ -232,54 +340,46 @@ async def run(
         # ``main`` still catches the raw signal.
         pass
 
-    owns_producer = False
-    if producer is None and not dry_run:
+    publisher: ReplayPublisher | None = None
+    if not dry_run:
         if not target_topic:
             raise ValueError('--target-topic is required unless --dry-run is set.')
-        producer = AIOProducer({'bootstrap.servers': target_brokers})
-        owns_producer = True
+        if producer is None:
+            producer = Producer({'bootstrap.servers': target_brokers})
+        publisher = ReplayPublisher(producer, flush_timeout_seconds=flush_timeout_seconds)
 
     try:
         async for entry in read_dlq_entries(topic=dlq_topic, brokers=dlq_brokers, limit=limit):
             if stop_requested:
                 break
             stats.read += 1
-            if not _entry_matches_filter(entry, filter_pattern):
+            if not _entry_selected(entry, pattern=filter_pattern, stage=stage):
                 stats.filtered_out += 1
                 if stats.read % PROGRESS_EVERY == 0:
                     _emit_progress(stats)
                 continue
 
-            values = _extract_payload_values(entry)
-            if not values:
-                stats.skipped_invalid += 1
-                if stats.read % PROGRESS_EVERY == 0:
-                    _emit_progress(stats)
-                continue
-
-            try:
-                if not dry_run:
-                    await _maybe_publish(producer, target_topic or '', values)
-                    stats.published += len(values)
-                    stats.last_successful_offset = entry.offset
-                else:
-                    # Dry-run: track the would-be count separately so the
-                    # summary line can show operators "this many messages
-                    # would have been published" without lying about the
-                    # ``published`` counter (which means "actually written to
-                    # the target topic").
-                    stats.would_publish += len(values)
-                    stats.last_successful_offset = entry.offset
-            except Exception as exc:
-                err = f'publish failed at dlq_offset={entry.offset!r}: {exc}'
-                stats.errors.append(err)
-                print(err, file=sys.stderr)
-                if stats.last_successful_offset is not None:
-                    print(
-                        f'last successful dlq_offset={stats.last_successful_offset}; resume by skipping past it.',
-                        file=sys.stderr,
-                    )
-                raise
+            if publisher is None:
+                # Dry-run: track the would-be count separately so the summary
+                # line shows "this many messages would have been published"
+                # without lying about ``published`` (actually written).
+                stats.would_publish += 1
+                stats.last_successful = (entry.partition, entry.offset)
+            else:
+                try:
+                    await publisher.publish(target_topic or '', entry)
+                except Exception as exc:
+                    err = f'publish failed at {_coordinates(entry.partition, entry.offset)}: {exc}'
+                    stats.errors.append(err)
+                    print(err, file=sys.stderr)
+                    if stats.last_successful is not None:
+                        print(
+                            f'last successful {_coordinates(*stats.last_successful)}; resume by skipping past it.',
+                            file=sys.stderr,
+                        )
+                    raise
+                stats.published += 1
+                stats.last_successful = (entry.partition, entry.offset)
 
             # Progress emission ONLY on the success path — don't print a
             # confusing "replayed N/M" line immediately before the exception
@@ -287,9 +387,9 @@ async def run(
             if stats.read % PROGRESS_EVERY == 0:
                 _emit_progress(stats)
     finally:
-        if owns_producer and producer is not None:
+        if publisher is not None:
             try:
-                await producer.close()
+                await publisher.close()
             except Exception as e:
                 print(f'warning: producer close failed: {e}', file=sys.stderr)
 
@@ -307,7 +407,7 @@ def _emit_progress(stats: ReplayStats) -> None:
     # In dry-run mode nothing gets published, but ``would_publish`` is
     # incremented so operators still see progress. Otherwise fall back to
     # the real ``published`` counter (zero is fine for early-iteration
-    # progress before any batches have been delivered).
+    # progress before any record has been delivered).
     if stats.would_publish and not stats.published:
         print(f'would-replay {stats.would_publish}/{stats.read}', file=sys.stderr)
     else:
@@ -323,7 +423,7 @@ def _emit_summary(stats: ReplayStats) -> None:
     print(
         f'summary: read={stats.read} published={stats.published} '
         f'would_publish={stats.would_publish} '
-        f'filtered_out={stats.filtered_out} skipped_invalid={stats.skipped_invalid} '
+        f'filtered_out={stats.filtered_out} '
         f'errors={len(stats.errors)}',
         file=sys.stderr,
     )
@@ -353,7 +453,7 @@ async def main(argv: list[str] | None = None) -> int:
     print(
         f'reading dlq topic={dlq_topic!r} brokers={dlq_brokers!r} '
         f'target={args.target_topic!r} dry_run={args.dry_run} '
-        f'limit={args.limit} filter={args.filter!r}',
+        f'limit={args.limit} stage={args.stage!r} filter={args.filter!r}',
         file=sys.stderr,
     )
 
@@ -366,6 +466,7 @@ async def main(argv: list[str] | None = None) -> int:
             target_brokers=target_brokers,
             limit=args.limit,
             filter_pattern=args.filter,
+            stage=args.stage,
             dry_run=args.dry_run,
             stats=stats,
         )

@@ -19,7 +19,9 @@ This page has two guides, one for each move:
   persistence choice; see
   [The recorder memory store](#recorder-memory-store). A new recorder mode
   keeps the history in Postgres; see
-  [The recorder history in Postgres](#recorder-history-in-postgres).
+  [The recorder history in Postgres](#recorder-history-in-postgres). The
+  DLQ now holds the original messages, and every sink declares a failure
+  policy; see [The DLQ record](#dlq-record).
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.
@@ -494,3 +496,81 @@ that table. Nothing changes until you set it; it is never derived. See
   of its cluster from the table, or `503 {"detail": "history search
   failed"}`. A UI of this release shows "(the history search failed)"; an
   older UI shows the same note for a failed history search.
+
+### 9. The DLQ record {#dlq-record}
+
+A DLQ record is now the failed source message itself: the original key and
+value, byte for byte, its own headers, then `dk-` headers that say where and
+why it failed (see [The DLQ record](sinks.md#the-dlq-record)). The JSON
+document with `original_payloads` is gone. Every sink also declares what
+happens when its delivery fails (see [Failure policy](sinks.md#failure-policy)).
+Do these steps in order.
+
+1. **Drain or archive the old DLQ topic first.** Records written by an older
+   worker are JSON documents; records written by this release are the
+   original messages. Nothing reads both. Replay or copy away the old records
+   with the tool of the older release before you upgrade, or move the new
+   workers to a new `dlq.topic`.
+2. **Change every consumer of the DLQ topic.** A tool that parsed the JSON
+   document must read the record instead: the value is the original message
+   value (it may not be JSON or UTF-8), the failure facts are headers
+   (`dk-stage`, `dk-error`, `dk-sink`, `dk-attempts`, `dk-source-topic`,
+   `dk-source-partition`, `dk-source-offset`, ...). One record is one source
+   message, not a list of payloads.
+3. **Code that calls `read_dlq_entries`** now gets `DLQEntry(key, value,
+   headers, partition, offset)` records, not decoded JSON objects.
+   `DLQMessage` and `ParseFailurePayload` are removed; a parse failure is a
+   record with `dk-stage: parse`.
+4. **Use the new replay tool.** `scripts/replay_dlq.py` republishes the key,
+   the value and the source headers of each record, and takes `--stage`. Its
+   summary line has no `skipped_invalid` field any more, and its report lines
+   name `dlq_partition=` and `dlq_offset=`.
+5. **Check `sinks.http.<name>.max_retries`.** It is now the shared retry
+   budget of every sink: the default is 2 (it was 3, and unused), and a value
+   above 10 fails the load with
+   `sinks.http.<name>.max_retries must be a whole number from 0 to 10`.
+6. **Review your `on_delivery_error` hook.**
+    - The hook is called after every failed attempt, with `attempt`,
+      `retries_left` and `declared_policy`. `RETRY` is honoured up to the
+      sink's `max_retries` (it was a fixed 3 attempts); then the declared
+      `on_failure` applies.
+    - The default hook returns the sink's declared `on_failure` (`dlq` unless
+      you set `skip`), as before for a sink you did not configure.
+    - A hook that raises no longer stops the delivery: the worker logs
+      `delivery_error_hook_failed` and applies the declared `on_failure`. It
+      no longer reaches `dlq.on_send_failure`. The HTTP source follows the
+      same rule (it sent such a request to the DLQ before).
+    - With the circuit open, the hook is not called even when the worker has
+      no DLQ; the declared `on_failure` decides.
+7. **Know what "the message is done" means.** After the first DLQ record of
+   a message, no later result of that message is delivered, also to sinks that
+   did not fail, and `on_message_complete` still runs but its result is not
+   delivered. A sink that may lose its payloads without stopping the message
+   should declare `on_failure: skip`.
+8. **Plugin sinks.** The keys `on_failure`, `max_retries` and `depends_on` in a
+   `sinks.custom.<type>.<name>` leaf are now read by the framework and removed
+   before the plugin receives the leaf; rename a plugin option that used one
+   of these names. A plugin type named like a built-in type (`kafka`,
+   `postgres`, ...) under `sinks.custom` fails the load, and a plugin class
+   whose `sink_type` differs from its config key fails startup.
+9. **The HTTP response summary.** In the per-type `sinks` summary of an HTTP
+   request, the error markers `dlq_unconfigured` and `dlq_send_failed: ...`
+   are gone. A sink that did not start reports `<type>/<name>: not started`,
+   and a sink that failed with no DLQ record reports
+   `<type>/<name>: failed, no DLQ record`. `dlq` counts only when the
+   request's DLQ record was written.
+10. **Update dashboards and alerts.** `drakkar_dlq_dropped_payloads_total` now
+    counts source messages, once each, not payloads. New:
+    `drakkar_dlq_records_total{stage}` and
+    `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`.
+    The help texts of `drakkar_sink_dlq_messages_total`,
+    `drakkar_dlq_dropped_payloads_total` and
+    `drakkar_sink_deliveries_skipped_total` changed. The log events
+    `dlq_message_sent` and `dlq_send_failed` carry `stage`, `sink` and
+    `value_bytes` instead of payload fields. `dlq_payload_serialization_fallback`
+    is gone (nothing is serialized any more). The HTTP source's
+    `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
+    gone: the shared `delivery_error_hook_failed`, `message_dlq`,
+    `dlq_send_failed` and `dlq_failure_payloads_dropped` cover those cases.
+11. **Protect the DLQ topic like the source topic.** It now holds the original
+    messages; see [Security](security.md#the-dlq-topic-holds-original-messages).

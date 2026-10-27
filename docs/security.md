@@ -184,6 +184,25 @@ it. The read itself still needs the token when one is set. A refused
 preflight answers `403`; a refused read gets no CORS header, so the browser
 hides the answer from the page. No other path sends CORS headers.
 
+### The DLQ topic holds original messages
+
+A [DLQ record](sinks.md#the-dlq-record) is the failed source message itself:
+its key, its value and its own headers, byte for byte, plus `dk-` headers
+with the error text, the sink, the worker and the source coordinates. For the
+HTTP source the value is the raw request body. So the DLQ topic holds the same
+data as the source topic (or the same data your HTTP clients send), and it
+can hold it for longer, because nothing consumes it in normal operation.
+
+Give the DLQ topic the same access rules as the source topic: the same ACLs
+for read and write, the same retention policy for personal data, and the same
+encryption. Whoever can read the DLQ topic can read the failed messages, and
+whoever can write it can plant messages that a replay sends into the source
+topic. `dk-error` has URL credentials removed (`user:pass@` becomes
+`***:***@`) and is cut to 2000 bytes; any other secret in an error text
+reaches the header as it is, so a sink or a handler must not put one in an
+exception message. The same applies to the
+[Kafka read API](kafka-read.md), which reads the DLQ topic behind the UI token.
+
 ### Provider credentials
 
 The `connections` section holds the address and the credentials of the
