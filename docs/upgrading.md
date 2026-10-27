@@ -343,6 +343,15 @@ provider that you need must be one of the built-in ones: sinks `kafka`,
 `postgres`, `mongo`, `http`, `redis` and `filesystem`; providers `filesystem`,
 `postgres`, `redis` and `consul`.
 
+### 6a. Task cost, speed and throughput
+
+The `throughput` section (`cost_label`, `min_cost`) is not a config key; delete
+it and any `DK_THROUGHPUT__*` variable. The `cost` and `speed` keys of
+`task_completed` metadata and of `recent-tasks` rows, the `throughput` frame on
+`/ws` and the `worker_state.throughput` column do not exist. Remove
+dashboards and alerts on `drakkar_task_speed`, `drakkar_throughput` and
+`drakkar_task_rate`.
+
 ### 6. Periodic tasks and the archive {#periodic-tasks-and-the-archive}
 
 **The decorator.** `@periodic` takes `interval` instead of `seconds`. Write
