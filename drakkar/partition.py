@@ -33,7 +33,6 @@ from drakkar.metrics import (
     task_retries,
 )
 from drakkar.models import (
-    CollectResult,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
@@ -47,11 +46,11 @@ from drakkar.models import (
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq_record import DLQRecord
+from drakkar.sinks.manager import CollectCallback, MessageContext
 from drakkar.throughput import ThroughputTracker
 
 logger = structlog.get_logger()
 
-CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
 # Matches DLQSink.send(record, partition_id) -> bool (True = confirmed write).
 DLQSendCallback = Callable[[DLQRecord, int], Awaitable[bool]]
@@ -1271,7 +1270,13 @@ class PartitionProcessor:
                 self._note_suppressed_delivery('on_window_complete')
             elif on_complete_result and self._on_collect:
                 try:
-                    await self._on_collect(on_complete_result, self._partition_id)
+                    # The explicit window context: this result has no source
+                    # message left, so a ``dlq`` outcome acts as ``skip``.
+                    await self._on_collect(
+                        on_complete_result,
+                        self._partition_id,
+                        message_context=MessageContext.window(),
+                    )
                 except SinkDeliveryFailedError as e:
                     # The window's per-message offsets were already completed
                     # individually as each message finished, so there is

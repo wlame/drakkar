@@ -297,7 +297,7 @@ async def test_task_delivery_failure_stalls_offset(echo_pool):
         async def on_task_complete(self, result):
             return CollectResult(kafka=[KafkaPayload(data=_Out(v='x'))])
 
-    async def failing_collect(result: CollectResult, partition_id: int) -> None:
+    async def failing_collect(result: CollectResult, partition_id: int, message_context=None) -> None:
         raise SinkDeliveryFailedError(sink_name='k', sink_type='kafka', reason='dlq down')
 
     async def on_commit(pid, off):

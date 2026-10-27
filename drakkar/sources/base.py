@@ -11,7 +11,7 @@ custom sources are not a public API yet (see docs/sources.md).
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -19,26 +19,9 @@ if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
     from drakkar.executor import ExecutorPool
     from drakkar.handler import BaseDrakkarHandler
-    from drakkar.models import CollectResult
     from drakkar.recorder import EventRecorder
     from drakkar.sinks.dlq import DLQSink
-    from drakkar.sinks.manager import MessageContext, SinkManager
-
-
-class CollectCallback(Protocol):
-    """Deliver a CollectResult to the sinks.
-
-    ``partition_id`` is -1 for an HTTP request. ``message_context`` names
-    the source messages of a task or message result and their DLQ state;
-    ``None`` is a window result, which has no source message.
-    """
-
-    def __call__(
-        self,
-        result: CollectResult,
-        partition_id: int,
-        message_context: MessageContext | None = None,
-    ) -> Awaitable[None]: ...
+    from drakkar.sinks.manager import CollectCallback, SinkManager
 
 
 @dataclass

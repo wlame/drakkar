@@ -98,7 +98,7 @@ async def test_suppressed_processor_neither_delivers_nor_commits(echo_pool):
     committed: list[tuple[int, int]] = []
     before = suppressed_zombie_deliveries.labels(partition='0')._value.get()
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     async def on_commit(pid, off):

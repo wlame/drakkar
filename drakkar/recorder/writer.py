@@ -805,14 +805,25 @@ class EventWriter:
         error: str,
         delivered_sinks: list[str],
         attempts: int | None,
+        request_id: str | None = None,
     ) -> None:
-        """One source message written to the DLQ; ``partition`` and ``offset`` are None for an HTTP request."""
+        """One source message written to the DLQ.
+
+        An HTTP request (``request_id`` set) gets the HTTP row markers:
+        ``origin='http'``, the ``request_id`` column and the synthetic
+        partition -1, so a walk of one request's rows finds it.
+        """
+        event: dict[str, Any] = {
+            'ts': time.time(),
+            'event': EventType.MESSAGE_DLQ,
+            'partition': partition,
+            'offset': offset,
+        }
+        if request_id is not None:
+            event.update({'partition': -1, 'origin': 'http', 'request_id': request_id})
         self._record(
             {
-                'ts': time.time(),
-                'event': EventType.MESSAGE_DLQ,
-                'partition': partition,
-                'offset': offset,
+                **event,
                 'metadata': encode_json_str(
                     {
                         'stage': stage,

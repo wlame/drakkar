@@ -142,7 +142,7 @@ async def test_partition_processor_processes_messages(echo_pool):
     collected: list[CollectResult] = []
     committed: list[tuple[int, int]] = []
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     async def on_commit(partition_id, offset):
@@ -965,7 +965,7 @@ async def test_on_window_complete_returns_collect_result(echo_pool):
                 kafka=[KafkaPayload(data=_Out(v='from_window_complete'))],
             )
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         window_complete_collected.append(result)
 
     proc = PartitionProcessor(
@@ -1640,7 +1640,7 @@ class _AggHandler(BaseDrakkarHandler):
 def _failing_collect_fixture():
     calls: list[int] = []
 
-    async def failing_on_collect(result: CollectResult, partition_id: int) -> None:
+    async def failing_on_collect(result: CollectResult, partition_id: int, message_context=None) -> None:
         calls.append(partition_id)
         raise RuntimeError('sink down')
 
@@ -2729,7 +2729,7 @@ async def test_run_loop_restarts_once_after_an_unexpected_error(echo_pool):
     handler = _CrashingHandler(crashes=1)
     collected: list[CollectResult] = []
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     proc = PartitionProcessor(
@@ -2771,7 +2771,7 @@ async def test_restart_leaves_the_crashed_window_uncommitted(echo_pool):
     collected: list[CollectResult] = []
     committed: list[tuple[int, int]] = []
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     async def on_commit(partition_id, offset):
@@ -3932,7 +3932,7 @@ async def test_suppressed_processor_does_not_deliver_on_message_complete_payload
             fired.set()
             return CollectResult(kafka=[KafkaPayload(data={'offset': group.source_message.offset})])
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     proc = PartitionProcessor(
@@ -3963,7 +3963,7 @@ async def test_suppressed_processor_does_not_deliver_on_window_complete_payloads
             fired.set()
             return CollectResult(kafka=[KafkaPayload(data={'windowed': len(results)})])
 
-    async def on_collect(result, partition_id):
+    async def on_collect(result, partition_id, message_context=None):
         collected.append(result)
 
     proc = PartitionProcessor(

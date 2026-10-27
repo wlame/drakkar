@@ -235,7 +235,7 @@ async def test_window_dependency_failure_stops_dependents_with_reason_dependency
     dlq = RecordingDLQ()
     mgr = manager_with((kafka, policy(depends_on=('postgres/main',))), (postgres, policy()), dlq=dlq)
 
-    outcomes = await mgr.deliver_all(both_results(), declared, 0)
+    outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=MessageContext.window())
 
     assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.FAILED}
     assert kafka.delivered == []
@@ -262,7 +262,7 @@ async def test_not_started_dependency_passes_its_reason_down_the_chain():
         redis=[RedisPayload(key='k', data=Data())],
     )
     with capture_logs() as logs:
-        outcomes = await mgr.deliver_all(result, declared, 0)
+        outcomes = await mgr.deliver_all(result, declared, 0, message_context=MessageContext.window())
 
     assert outcomes[('redis', 'cache')] == DeliveryOutcome.NOT_STARTED
     reasons = {entry['sink']: entry['reason'] for entry in logs if entry['event'] == 'sink_not_started'}
@@ -452,7 +452,9 @@ async def test_window_result_dlq_acts_as_skip_with_warning():
     before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
 
     with capture_logs() as logs:
-        outcomes = await mgr.deliver_all(CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 0)
+        outcomes = await mgr.deliver_all(
+            CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 0, message_context=MessageContext.window()
+        )
 
     assert outcomes == {KAFKA: DeliveryOutcome.FAILED}
     assert dlq.sent == []
@@ -544,6 +546,35 @@ async def test_no_record_in_drop_mode_counts_source_messages():
     assert dropped['message_count'] == 2
 
 
+@pytest.mark.parametrize('on_send_failure', ['stall', 'drop'])
+async def test_missing_context_on_a_dlq_outcome_follows_on_send_failure(on_send_failure):
+    """No context is not a window: a dlq outcome with no source message to write fails closed."""
+    from drakkar.metrics import dlq_dropped_payloads
+    from drakkar.models import SinkDeliveryFailedError
+
+    sink = FakeSink('out', 'kafka')
+    sink.fail = True
+    dlq = RecordingDLQ()
+    mgr = manager_with((sink, policy(max_retries=0)))
+    mgr.attach_runtime(recorder=None, dlq_sink=dlq, dlq_on_send_failure=on_send_failure)  # ty: ignore[invalid-argument-type]
+    result = CollectResult(kafka=[KafkaPayload(data=Data())])
+    before = dlq_dropped_payloads.labels(partition='8')._value.get()
+
+    with capture_logs() as logs:
+        if on_send_failure == 'stall':
+            with pytest.raises(SinkDeliveryFailedError, match='no message context'):
+                await mgr.deliver_all(result, declared, 8)
+        else:
+            assert await mgr.deliver_all(result, declared, 8) == {KAFKA: DeliveryOutcome.FAILED}
+
+    assert dlq.sent == []
+    assert not [entry for entry in logs if entry['event'] in ('window_delivery_not_dlq', 'sink_delivery_skipped')]
+    if on_send_failure == 'drop':
+        assert dlq_dropped_payloads.labels(partition='8')._value.get() == before + 1
+        [dropped] = [entry for entry in logs if entry['event'] == 'dlq_failure_payloads_dropped']
+        assert dropped['reason'] == 'no message context'
+
+
 async def test_dlq_off_by_config_counts_an_unconfigured_drop():
     from drakkar.metrics import dlq_unconfigured_drops
 
@@ -601,10 +632,26 @@ def test_recorder_events_message_dlq_and_sink_not_started():
         delivered_sinks=['postgres/main'],
         attempts=3,
     )
+    recorder.record_message_dlq(
+        partition=None,
+        offset=None,
+        stage='sink',
+        sink='kafka/out',
+        error='boom',
+        delivered_sinks=[],
+        attempts=1,
+        request_id='req-7',
+    )
     recorder.record_sink_not_started(sink='redis/cache', reason='message_dlq', partition=3)
     recorder.record_sink_error(sink_type='kafka', sink_name='out', error='boom', attempt=3, action='dlq')
 
-    dlq_row, not_started_row, error_row = recorder.rows
+    dlq_row, http_row, not_started_row, error_row = recorder.rows
+    assert (http_row['partition'], http_row['offset'], http_row['origin'], http_row['request_id']) == (
+        -1,
+        None,
+        'http',
+        'req-7',
+    )
     assert (dlq_row['event'], dlq_row['partition'], dlq_row['offset']) == ('message_dlq', 3, 10)
     assert json.loads(dlq_row['metadata']) == {
         'stage': 'sink',

@@ -819,7 +819,7 @@ class TestProcessorCallbackModes:
         handler = CollectHandler()
         pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
-        async def on_collect(result, partition_id):
+        async def on_collect(result, partition_id, message_context=None):
             collected.append(result)
 
         proc = PartitionProcessor(

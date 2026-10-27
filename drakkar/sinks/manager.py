@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 from pydantic import BaseModel
@@ -140,8 +140,12 @@ class MessageDLQState:
 class MessageContext:
     """The source messages a task or message result belongs to, each with its DLQ state.
 
-    A task with several ``source_offsets`` has several messages. A window
-    result has no context at all: ``deliver_all`` gets ``None``.
+    A task with several ``source_offsets`` has several messages.
+
+    The window form (``window``) has no source message: an
+    ``on_window_complete`` result is delivered after its messages completed
+    their offsets, so it cannot send one to the DLQ. Only this explicit form
+    makes ``on_failure: dlq`` act as ``skip``.
 
     The HTTP form (``for_request``) holds one message whose value is the raw
     request body; ``request_id`` marks it, and its record carries no key,
@@ -151,10 +155,16 @@ class MessageContext:
     source_messages: Sequence[SourceMessage]
     states: Sequence[MessageDLQState]
     request_id: str | None = None
+    is_window: bool = False
 
     def __post_init__(self) -> None:
         if len(self.source_messages) != len(self.states):
             raise ValueError('MessageContext needs one DLQ state per source message')
+
+    @classmethod
+    def window(cls) -> MessageContext:
+        """The context of an ``on_window_complete`` result: no source message, so no DLQ record."""
+        return cls(source_messages=(), states=(), is_window=True)
 
     @classmethod
     def for_request(cls, *, body: bytes, request_id: str, received_ms: int) -> MessageContext:
@@ -170,6 +180,22 @@ class MessageContext:
     def pairs(self) -> Iterator[tuple[SourceMessage, MessageDLQState]]:
         """Each source message with its DLQ state."""
         return zip(self.source_messages, self.states, strict=True)
+
+
+class CollectCallback(Protocol):
+    """Deliver a CollectResult to the sinks.
+
+    ``partition_id`` is -1 for an HTTP request. ``message_context`` names
+    the source messages of a task or message result and their DLQ state;
+    ``None`` is a window result, which has no source message.
+    """
+
+    def __call__(
+        self,
+        result: CollectResult,
+        partition_id: int,
+        message_context: MessageContext | None = None,
+    ) -> Awaitable[None]: ...
 
 
 @dataclass
@@ -683,8 +709,11 @@ class SinkManager:
             on_delivery_error: Handler callback for delivery failures.
             partition_id: Source partition (-1 for an HTTP request).
             message_context: The source messages of a task or message result
-                and their DLQ state. ``None`` for a window result, which has
-                no source message: ``on_failure: dlq`` then acts as ``skip``.
+                and their DLQ state, or ``MessageContext.window()`` for a
+                window result, where ``on_failure: dlq`` acts as ``skip``.
+                ``None`` means no context: a ``dlq`` outcome then has no
+                record to write and follows ``dlq.on_send_failure``, so a
+                caller that forgets the context loses nothing silently.
 
         Returns:
             The outcome of every group, keyed by (sink_type, sink_name).
@@ -1149,7 +1178,7 @@ class SinkManager:
                 error=error_text,
             )
             return DeliveryOutcome.SKIPPED
-        if message_context is None:
+        if message_context is not None and message_context.is_window:
             # A window result is delivered after its messages completed their
             # offsets: there is no source message to send to the DLQ. The
             # payloads are dropped as a skip would drop them, but the outcome
@@ -1183,7 +1212,7 @@ class SinkManager:
         attempts: int,
         payload_count: int,
         partition_id: int,
-        message_context: MessageContext,
+        message_context: MessageContext | None,
     ) -> DeliveryOutcome:
         """Write one DLQ record per source message of the result, unless the message already has one.
 
@@ -1197,6 +1226,12 @@ class SinkManager:
             # Kafka source always implies a DLQ, so this guards the HTTP-only
             # worker.
             await self.drop_unconfigured_dlq_send(partition_id, payload_count)
+            return DeliveryOutcome.FAILED
+        if message_context is None:
+            # The caller named no source message, so there is nothing to
+            # write. Failing closed: the strategy for a lost record applies,
+            # never a silent skip.
+            self._lose_messages(key, message_count=1, partition_id=partition_id, reason='no message context')
             return DeliveryOutcome.FAILED
 
         written = 0
@@ -1227,7 +1262,8 @@ class SinkManager:
                     lost += 1
 
         if lost:
-            self._lose_messages(key, message_count=lost, partition_id=partition_id)
+            reason = 'DLQ send failed' if self._dlq_sink is not None else 'no DLQ sink is configured'
+            self._lose_messages(key, message_count=lost, partition_id=partition_id, reason=reason)
         if written or not lost:
             if not written:
                 # Every message of the result was already on the DLQ: a group
@@ -1255,6 +1291,7 @@ class SinkManager:
             self._recorder.record_message_dlq(
                 partition=record.source_partition,
                 offset=record.source_offset,
+                request_id=record.request_id,
                 stage=record.stage,
                 sink=record.sink,
                 error=error,
@@ -1262,10 +1299,9 @@ class SinkManager:
                 attempts=record.attempts,
             )
 
-    def _lose_messages(self, key: SinkKey, *, message_count: int, partition_id: int) -> None:
+    def _lose_messages(self, key: SinkKey, *, message_count: int, partition_id: int, reason: str) -> None:
         """Apply ``dlq.on_send_failure`` to source messages whose record could not be written."""
         sink_type, sink_name = key
-        reason = 'DLQ send failed' if self._dlq_sink is not None else 'no DLQ sink is configured'
         if self._dlq_on_send_failure == 'stall':
             raise SinkDeliveryFailedError(sink_name=sink_name, sink_type=sink_type, reason=reason)
         dlq_dropped_payloads.labels(partition=str(partition_id)).inc(message_count)
