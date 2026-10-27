@@ -33,7 +33,7 @@ class TestDecideAfterOnError:
     def test_a_list_return_replaces_the_task(self):
         replacements = [make_task('r1'), make_task('r2')]
 
-        decision = decide_after_on_error(replacements, retry_count=0, max_retries=3)
+        decision = decide_after_on_error(replacements, retry_count=0, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.REPLACE
         assert list(decision.replacements) == replacements
@@ -41,7 +41,7 @@ class TestDecideAfterOnError:
 
     def test_an_empty_list_still_replaces_rather_than_failing(self):
         """A handler that returns [] said "drop this task", not "fail it"."""
-        decision = decide_after_on_error([], retry_count=0, max_retries=3)
+        decision = decide_after_on_error([], retry_count=0, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.REPLACE
         assert decision.replacements == ()
@@ -49,30 +49,56 @@ class TestDecideAfterOnError:
     @pytest.mark.parametrize('action', [ErrorAction.RETRY, 'retry'])
     def test_retry_within_budget_retries(self, action):
         """A raw string is as valid as the enum member — ErrorAction is a StrEnum."""
-        decision = decide_after_on_error(action, retry_count=0, max_retries=3)
+        decision = decide_after_on_error(action, retry_count=0, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.RETRY
 
     def test_last_retry_of_the_budget_is_still_allowed(self):
-        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=2, max_retries=3)
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=2, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.RETRY
 
     def test_retry_past_the_budget_fails_and_says_so(self):
-        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=3, max_retries=3)
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=3, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.FAIL
         assert decision.retries_exhausted is True, 'the caller logs max_retries_exceeded off this flag'
 
+    def test_retry_past_the_budget_under_skip_sends_nothing_to_the_dlq(self):
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=3, max_retries=3, on_failure=ErrorAction.SKIP)
+
+        assert decision.sends_to_dlq is False
+
+    def test_retry_past_the_budget_under_dlq_sends_the_messages_to_the_dlq(self):
+        """A spent budget takes ``executor.on_failure``, as a spent sink budget takes the sink's."""
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=3, max_retries=3, on_failure=ErrorAction.DLQ)
+
+        assert decision.outcome is TaskOutcome.FAIL
+        assert decision.retries_exhausted is True
+        assert decision.sends_to_dlq is True
+
+    def test_retry_within_budget_under_dlq_still_retries(self):
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=0, max_retries=3, on_failure=ErrorAction.DLQ)
+
+        assert decision.outcome is TaskOutcome.RETRY
+        assert decision.sends_to_dlq is False
+
+    @pytest.mark.parametrize('action', [ErrorAction.SKIP, 'nonsense'])
+    def test_an_explicit_answer_is_not_overridden_by_the_declared_policy(self, action):
+        decision = decide_after_on_error(action, retry_count=0, max_retries=3, on_failure=ErrorAction.DLQ)
+
+        assert decision.outcome is TaskOutcome.FAIL
+        assert decision.sends_to_dlq is False
+
     def test_zero_budget_never_retries(self):
-        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=0, max_retries=0)
+        decision = decide_after_on_error(ErrorAction.RETRY, retry_count=0, max_retries=0, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.FAIL
         assert decision.retries_exhausted is True
 
     @pytest.mark.parametrize('action', [ErrorAction.SKIP, 'skip', None, 'nonsense', 42])
     def test_anything_that_is_not_retry_or_a_list_is_a_terminal_failure(self, action):
-        decision = decide_after_on_error(action, retry_count=0, max_retries=3)
+        decision = decide_after_on_error(action, retry_count=0, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.FAIL
         assert decision.retries_exhausted is False, 'only a spent RETRY budget is "exhausted"'
@@ -80,7 +106,7 @@ class TestDecideAfterOnError:
 
     @pytest.mark.parametrize('action', [ErrorAction.DLQ, 'dlq'])
     def test_dlq_is_a_terminal_failure_that_sends_the_messages_to_the_dlq(self, action):
-        decision = decide_after_on_error(action, retry_count=0, max_retries=3)
+        decision = decide_after_on_error(action, retry_count=0, max_retries=3, on_failure=ErrorAction.SKIP)
 
         assert decision.outcome is TaskOutcome.FAIL
         assert decision.sends_to_dlq is True

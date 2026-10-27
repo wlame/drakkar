@@ -75,7 +75,7 @@ dlq_dropped_payloads = Counter(
 
 dlq_unconfigured_drops = Counter(
     'drakkar_dlq_unconfigured_drops_total',
-    'DLQ sends dropped because no DLQ topic is configured and the Kafka source is disabled',
+    'Payloads (sink path) or source messages (task path) dropped because no DLQ topic is configured',
 )
 
 delivery_stalled_offsets = Counter(

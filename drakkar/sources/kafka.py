@@ -412,11 +412,12 @@ class KafkaSource:
                     on_commit=self._handle_commit,
                     recorder=ctx.recorder,
                     on_parse_error=config.sources.kafka.on_parse_error,
-                    dlq_send=ctx.dlq_sink.send if ctx.dlq_sink else None,
+                    dlq_send=ctx.sink_manager.send_parse_dlq if ctx.dlq_sink else None,
                     on_dlq_failure=config.dlq.on_send_failure,
                     on_stall=self.pause_stalled_partition,
                     throughput=ctx.throughput,
                     execute_dlq=ctx.sink_manager.send_execute_dlq,
+                    executor_on_failure=config.executor.on_failure,
                 )
                 self.processors[pid] = processor
                 processor.start()

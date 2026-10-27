@@ -53,6 +53,7 @@ from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
+    ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
@@ -1466,18 +1467,25 @@ class DebugRunner:
                 exec_error.error,
                 partition=msg.partition,
             )
+        on_failure = ErrorAction(self._app_config.executor.on_failure)
+        action: Any = call.action
         if call.exception is not None:
             self._record_error(
                 state=state,
                 error=self._build_probe_error(state=state, stage=stage, exc=call.exception),
             )
-            return taskflow.ErrorDecision(outcome=taskflow.TaskOutcome.FAIL)
-        # ErrorAction.DLQ is a terminal failure here, as in production, but
-        # its ``sends_to_dlq`` is ignored: a probe writes no DLQ record.
+            # Production takes executor.on_failure here; both of its
+            # answers are a terminal failure in the probe.
+            action = on_failure
+        # ErrorAction.DLQ (an answer, or the declared policy of a spent
+        # budget or a raising hook) is a terminal failure here, as in
+        # production, but its ``sends_to_dlq`` is ignored: a probe writes no
+        # DLQ record.
         return taskflow.decide_after_on_error(
-            call.action,
+            action,
             retry_count=retry_count,
             max_retries=self._app_config.executor.max_retries,
+            on_failure=on_failure,
         )
 
     async def _execute_and_record_task(

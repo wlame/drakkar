@@ -755,7 +755,7 @@ class SinkManager:
             # An earlier result of this message wrote its DLQ record: the
             # message is done, so none of its deliveries start.
             for key in groups:
-                self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id)
+                self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id, message_context)
             return dict.fromkeys(groups, DeliveryOutcome.NOT_STARTED)
 
         # One settle signal per group of this result. A dependent awaits the
@@ -831,12 +831,12 @@ class SinkManager:
                 if message_context is not None and message_context.is_on_dlq
                 else SinkNotStartedReason.DEPENDENCY_FAILED
             )
-            self._note_not_started(key, reason, partition_id)
+            self._note_not_started(key, reason, partition_id, message_context)
             return DeliveryOutcome.NOT_STARTED
         if message_context is not None and message_context.is_on_dlq:
             # Another group of this result wrote the record while this one
             # waited for its dependencies.
-            self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id)
+            self._note_not_started(key, SinkNotStartedReason.MESSAGE_DLQ, partition_id, message_context)
             return DeliveryOutcome.NOT_STARTED
         return await self._deliver_to_sink(
             key,
@@ -846,15 +846,30 @@ class SinkManager:
             message_context=message_context,
         )
 
-    def _note_not_started(self, key: SinkKey, reason: SinkNotStartedReason, partition_id: int) -> None:
-        """Count, log and record one group that did not start."""
+    def _note_not_started(
+        self,
+        key: SinkKey,
+        reason: SinkNotStartedReason,
+        partition_id: int,
+        message_context: MessageContext | None,
+    ) -> None:
+        """Count, log and record one group that did not start.
+
+        The row of an HTTP request carries its request id, as its
+        ``message_dlq`` row does.
+        """
         sink_deliveries_not_started.labels(sink_type=key[0], sink_name=key[1], reason=reason.value).inc()
         # Sync, not ``await logger.adebug``: the async variants pay for a
         # thread-pool hop before the level filter, and a message on the DLQ
         # makes this fire for every group of every later result.
         logger.debug('sink_not_started', category='sink', sink=sink_ref(key), reason=reason.value)
         if self._recorder is not None:
-            self._recorder.record_sink_not_started(sink=sink_ref(key), reason=reason.value, partition=partition_id)
+            self._recorder.record_sink_not_started(
+                sink=sink_ref(key),
+                reason=reason.value,
+                partition=partition_id,
+                request_id=message_context.request_id if message_context is not None else None,
+            )
 
     async def _deliver_with_transient_retry(
         self,
@@ -1331,6 +1346,19 @@ class SinkManager:
             return DeliveryOutcome.DLQ
         # No record now and none before: the loss was counted, now or earlier.
         return DeliveryOutcome.FAILED
+
+    async def send_parse_dlq(self, record: DLQRecord, partition_id: int) -> bool:
+        """Write the ``parse`` record of a message whose value could not be parsed.
+
+        Returns whether the write was confirmed; the caller applies
+        ``dlq.on_send_failure`` when it was not. A written record is logged
+        and recorded as ``message_dlq``, as the records of the other two
+        stages are.
+        """
+        if self._dlq_sink is None or not await self._dlq_sink.send(record, partition_id=partition_id):
+            return False
+        self._note_message_dlq(record)
+        return True
 
     async def send_execute_dlq(
         self,

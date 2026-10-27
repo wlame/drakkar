@@ -68,12 +68,13 @@ class ErrorDecision:
     #: this is what production logs as ``max_retries_exceeded``. A plain
     #: SKIP is a terminal failure but not an exhausted one.
     retries_exhausted: bool = False
-    #: True when the handler answered DLQ: a terminal failure whose source
-    #: messages production writes to the DLQ before the task settles.
+    #: True when the task's source messages go to the DLQ before the task
+    #: settles: the handler answered DLQ, or it asked for a retry the budget
+    #: could not pay for and ``executor.on_failure`` is ``dlq``.
     sends_to_dlq: bool = False
 
 
-def decide_after_on_error(action: Any, *, retry_count: int, max_retries: int) -> ErrorDecision:
+def decide_after_on_error(action: Any, *, retry_count: int, max_retries: int, on_failure: Any) -> ErrorDecision:
     """Map an ``on_error`` return value to what happens to the task.
 
     ``action`` is whatever the user's handler returned, deliberately typed
@@ -85,13 +86,23 @@ def decide_after_on_error(action: Any, *, retry_count: int, max_retries: int) ->
     first failure), and ``max_retries`` is the total budget — so
     ``max_retries=3`` allows up to four executor invocations in the worst
     case.
+
+    ``on_failure`` is ``executor.on_failure`` (``SKIP`` or ``DLQ``): what a
+    ``RETRY`` past the budget becomes, as a sink's declared policy is what a
+    spent sink budget becomes. A caller whose hook raised passes the same
+    value as ``action``. It is required so that no caller can forget it and
+    quietly keep the old ``SKIP``.
     """
     if isinstance(action, list):
         return ErrorDecision(outcome=TaskOutcome.REPLACE, replacements=tuple(action))
     if action == ErrorAction.RETRY:
         if retry_count < max_retries:
             return ErrorDecision(outcome=TaskOutcome.RETRY)
-        return ErrorDecision(outcome=TaskOutcome.FAIL, retries_exhausted=True)
+        return ErrorDecision(
+            outcome=TaskOutcome.FAIL,
+            retries_exhausted=True,
+            sends_to_dlq=on_failure == ErrorAction.DLQ,
+        )
     if action == ErrorAction.DLQ:
         return ErrorDecision(outcome=TaskOutcome.FAIL, sends_to_dlq=True)
     return ErrorDecision(outcome=TaskOutcome.FAIL)

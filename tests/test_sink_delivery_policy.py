@@ -761,6 +761,7 @@ def test_metrics_names_and_help_texts():
     from drakkar.metrics import (
         dlq_dropped_payloads,
         dlq_records,
+        dlq_unconfigured_drops,
         sink_deliveries_not_started,
         sink_deliveries_skipped,
         sink_dlq_messages,
@@ -787,6 +788,12 @@ def test_metrics_names_and_help_texts():
             'drakkar_sink_deliveries_not_started',
             ('sink_type', 'sink_name', 'reason'),
             'Sink deliveries not started, by reason',
+        ),
+        (
+            dlq_unconfigured_drops,
+            'drakkar_dlq_unconfigured_drops',
+            (),
+            'Payloads (sink path) or source messages (task path) dropped because no DLQ topic is configured',
         ),
     ]
     for metric, name, labels, help_text in expected:
@@ -844,3 +851,74 @@ def test_recorder_events_message_dlq_and_sink_not_started():
         'attempt': 3,
         'action': 'dlq',
     }
+
+
+def test_sink_not_started_row_of_an_http_request_carries_the_http_markers():
+    recorder = CollectingRecorder()
+
+    recorder.record_sink_not_started(sink='redis/cache', reason='message_dlq', partition=-1, request_id='req-7')
+
+    [row] = recorder.rows
+    assert (row['event'], row['partition'], row['origin'], row['request_id']) == (
+        'sink_not_started',
+        -1,
+        'http',
+        'req-7',
+    )
+    assert json.loads(row['metadata']) == {'sink': 'redis/cache', 'reason': 'message_dlq'}
+
+
+# --- The parse record ---
+
+
+def parse_record(offset: int = 10) -> DLQRecord:
+    message = source_message(offset)
+    return DLQRecord(
+        key=message.key,
+        value=message.value,
+        source_headers=message.headers,
+        stage='parse',
+        error='Invalid JSON',
+        source_topic=message.topic,
+        source_partition=message.partition,
+        source_offset=message.offset,
+        source_timestamp_ms=message.timestamp,
+    )
+
+
+async def test_a_written_parse_record_logs_and_records_message_dlq():
+    dlq = RecordingDLQ()
+    recorder = CollectingRecorder()
+    mgr = SinkManager()
+    mgr.attach_runtime(recorder=recorder, dlq_sink=dlq, dlq_on_send_failure='drop')  # ty: ignore[invalid-argument-type]
+
+    with capture_logs() as logs:
+        sent = await mgr.send_parse_dlq(parse_record(), 3)
+
+    assert sent is True
+    assert [partition_id for _, partition_id in dlq.sent] == [3]
+    [line] = [line for line in logs if line['event'] == 'message_dlq']
+    assert (line['stage'], line['partition'], line['offset'], line['sink']) == ('parse', 3, 10, None)
+    [row] = recorder.of('message_dlq')
+    assert (row['partition'], row['offset']) == (3, 10)
+    assert json.loads(row['metadata']) == {
+        'stage': 'parse',
+        'sink': None,
+        'error': 'Invalid JSON',
+        'delivered_sinks': [],
+        'attempts': None,
+    }
+
+
+@pytest.mark.parametrize('dlq', [RecordingDLQ(ok=False), None], ids=['write_not_confirmed', 'no_dlq_sink'])
+async def test_a_parse_record_not_written_logs_no_message_dlq(dlq):
+    recorder = CollectingRecorder()
+    mgr = SinkManager()
+    mgr.attach_runtime(recorder=recorder, dlq_sink=dlq, dlq_on_send_failure='drop')  # ty: ignore[invalid-argument-type]
+
+    with capture_logs() as logs:
+        sent = await mgr.send_parse_dlq(parse_record(), 3)
+
+    assert sent is False
+    assert [line for line in logs if line['event'] == 'message_dlq'] == []
+    assert recorder.of('message_dlq') == []

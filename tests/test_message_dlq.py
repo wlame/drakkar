@@ -150,6 +150,7 @@ class Pipeline:
         on_dlq_failure: str = 'drop',
         dlq: RecordingDLQ | None = None,
         with_execute_dlq: bool = True,
+        executor_on_failure: str = 'skip',
     ) -> None:
         self.dlq = dlq if dlq is not None else RecordingDLQ()
         self.recorder = CollectingRecorder()
@@ -181,6 +182,7 @@ class Pipeline:
             on_collect=on_collect,
             on_dlq_failure=on_dlq_failure,
             execute_dlq=self.manager.send_execute_dlq if with_execute_dlq else None,
+            executor_on_failure=executor_on_failure,
         )
 
     def offset_completed(self) -> bool:
@@ -364,6 +366,87 @@ async def test_a_task_of_a_message_already_on_the_dlq_is_only_logged():
     already = [line for line in logs if line['event'] == 'message_already_dlq']
     assert len(already) == 1
     assert already[0]['stage'] == 'execute'
+
+
+# --- executor.on_failure for a spent retry budget and a raising on_error ---
+
+
+class RetryForEver(FanOutHandler):
+    async def on_error(self, task, error):
+        return ErrorAction.RETRY
+
+
+class RaisingOnError(FanOutHandler):
+    async def on_error(self, task, error):
+        raise RuntimeError('on_error is broken')
+
+
+async def test_a_spent_retry_budget_with_on_failure_dlq_writes_one_record():
+    pipeline = Pipeline(RetryForEver(['t-1']), ScriptedPool(failing={'t-1'}), executor_on_failure='dlq')
+
+    with capture_logs() as logs:
+        await pipeline.run()
+        await wait_for(pipeline.offset_completed)
+    committable = pipeline.processor.offset_tracker.committable()
+    await pipeline.stop()
+
+    assert len(pipeline.dlq.sent) == 1
+    record, _ = pipeline.dlq.sent[0]
+    assert (record.stage, record.task_id, record.source_offset) == ('execute', 't-1', OFFSET)
+    assert record.attempts == 4, 'the first run and the three retries of max_retries=3'
+    assert len(pipeline.recorder.of('message_dlq')) == 1
+    exceeded = [line for line in logs if line['event'] == 'max_retries_exceeded']
+    assert len(exceeded) == 1
+    assert exceeded[0]['action'] == 'dlq'
+    assert committable == OFFSET + 1, 'the offset completes'
+
+
+async def test_a_spent_retry_budget_with_on_failure_skip_writes_nothing():
+    pipeline = Pipeline(RetryForEver(['t-1']), ScriptedPool(failing={'t-1'}), executor_on_failure='skip')
+
+    with capture_logs() as logs:
+        await pipeline.run()
+        await wait_for(pipeline.offset_completed)
+    await pipeline.stop()
+
+    assert pipeline.dlq.sent == []
+    exceeded = [line for line in logs if line['event'] == 'max_retries_exceeded']
+    assert [line['action'] for line in exceeded] == ['skip']
+
+
+async def test_a_raising_on_error_with_on_failure_dlq_writes_one_record():
+    pipeline = Pipeline(RaisingOnError(['t-1']), ScriptedPool(failing={'t-1'}), executor_on_failure='dlq')
+
+    with capture_logs() as logs:
+        await pipeline.run()
+        await wait_for(pipeline.offset_completed)
+    committable = pipeline.processor.offset_tracker.committable()
+    await pipeline.stop()
+
+    assert len(pipeline.dlq.sent) == 1
+    record, _ = pipeline.dlq.sent[0]
+    assert (record.stage, record.task_id, record.attempts) == ('execute', 't-1', 1)
+    hook_failed = [line for line in logs if line['event'] == 'on_error_hook_failed']
+    assert len(hook_failed) == 1
+    assert hook_failed[0]['action'] == 'dlq'
+    events = [line['event'] for line in logs]
+    assert events.index('on_error_hook_failed') < events.index('message_dlq'), 'logged first, then the policy'
+    assert committable == OFFSET + 1, 'the offset completes'
+
+
+async def test_a_raising_on_error_with_on_failure_skip_writes_nothing():
+    pipeline = Pipeline(RaisingOnError(['t-1']), ScriptedPool(failing={'t-1'}), executor_on_failure='skip')
+
+    with capture_logs() as logs:
+        await pipeline.run()
+        await wait_for(pipeline.offset_completed)
+    committable = pipeline.processor.offset_tracker.committable()
+    await pipeline.stop()
+
+    assert pipeline.dlq.sent == []
+    hook_failed = [line for line in logs if line['event'] == 'on_error_hook_failed']
+    assert [line['action'] for line in hook_failed] == ['skip']
+    assert committable == OFFSET + 1, 'the offset completes'
 
 
 @pytest.mark.parametrize(('on_failure', 'expected'), [('skip', ErrorAction.SKIP), ('dlq', ErrorAction.DLQ)])

@@ -28,6 +28,7 @@ from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
+    ErrorAction,
     ExecutorTask,
     KafkaPayload,
     PostgresPayload,
@@ -253,6 +254,26 @@ async def test_app_on_assign_creates_processors(test_config):
 
     for proc in app.processors.values():
         await proc.stop()
+
+
+async def test_app_on_assign_wires_the_parse_writer_and_the_executor_policy(test_config):
+    executor = test_config.executor.model_copy(update={'on_failure': 'dlq'})
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config.model_copy(update={'executor': executor}))
+
+    from drakkar.executor import ExecutorPool
+
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._dlq_sink = MagicMock()  # built at start; any writer will do here
+    wire_kafka_source(app, MagicMock())
+    app._consumer.commit = AsyncMock()
+
+    app.kafka_source.on_assign([0])
+    processor = app.processors[0]
+
+    # Parse records go through the manager, which logs and records message_dlq.
+    assert processor._dlq_send == app._sink_manager.send_parse_dlq
+    assert processor._executor_on_failure is ErrorAction.DLQ
+    await processor.stop()
 
 
 async def test_app_on_revoke_removes_processors(test_config):

@@ -19,7 +19,7 @@ from drakkar.sinks.dlq_record import render_headers
 from drakkar.sinks.manager import SinkManager
 from drakkar.webapp.models import WebRequestContext
 from drakkar.webapp.runner import WebappRunner
-from tests.test_sink_delivery_policy import Data, FakeSink, RecordingDLQ, manager_with, policy
+from tests.test_sink_delivery_policy import CollectingRecorder, Data, FakeSink, RecordingDLQ, manager_with, policy
 
 RECEIVED_AT = datetime(2026, 11, 5, 10, 15, 30, 123000, tzinfo=UTC)
 RECEIVED_MS = int(RECEIVED_AT.timestamp() * 1000)
@@ -316,3 +316,23 @@ async def test_http_stall_raise_is_reported_in_the_summary():
     assert set(report.sinks.by_type) == {'kafka', 'postgres'}
     for result in report.sinks.by_type.values():
         assert any(error.startswith('deliver_all_raised: ') for error in result.errors)
+
+
+async def test_http_not_started_rows_carry_the_request_markers():
+    kafka = FakeSink('out', 'kafka')
+    kafka.fail = True
+    postgres = FakeSink('main', 'postgres')
+    recorder = CollectingRecorder()
+    manager = manager_with(
+        (kafka, policy(max_retries=0)),
+        (postgres, policy(depends_on=('kafka/out',))),
+    )
+    manager.attach_runtime(recorder=recorder, dlq_sink=RecordingDLQ(), dlq_on_send_failure='drop')  # ty: ignore[invalid-argument-type]
+    collect = CollectResult(kafka=[KafkaPayload(data=Data())], postgres=[PostgresPayload(table='t', data=Data())])
+
+    await make_runner(Handler(collect), manager).run(make_ctx())
+
+    [dlq_row] = recorder.of('message_dlq')
+    [not_started_row] = recorder.of('sink_not_started')
+    for row in (dlq_row, not_started_row):
+        assert (row['partition'], row['origin'], row['request_id']) == (-1, 'http', 'req-7')

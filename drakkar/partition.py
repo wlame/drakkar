@@ -270,6 +270,7 @@ class PartitionProcessor:
         on_stall: StallCallback | None = None,
         throughput: ThroughputTracker | None = None,
         execute_dlq: ExecuteDLQCallback | None = None,
+        executor_on_failure: str = 'skip',
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
@@ -289,6 +290,9 @@ class PartitionProcessor:
         self._stall_signaled = False
         # Writes the record of a task that on_error sent to the DLQ.
         self._execute_dlq = execute_dlq
+        # executor.on_failure: what a spent retry budget and a raising
+        # on_error become (skip, or dlq through execute_dlq).
+        self._executor_on_failure = ErrorAction(executor_on_failure)
 
         # Whether anything will ever read the outcomes the window and the
         # message trackers would collect. Both lists cost the payload of
@@ -1226,16 +1230,18 @@ class PartitionProcessor:
                 # every later message replays on restart. ``call_on_error``
                 # therefore returns the exception instead of raising it.
                 #
-                # Degrade to SKIP: the task settles as a terminal failure,
-                # the tracker completes, the watermark keeps advancing.
-                # At-least-once holds either way.
-                action: Any = ErrorAction.SKIP
+                # Take executor.on_failure, as a raising on_delivery_error
+                # takes the sink's declared policy: the task settles as a
+                # terminal failure (with its record under dlq), the tracker
+                # completes, the watermark keeps advancing. The error line
+                # comes first, then the policy.
+                action: Any = self._executor_on_failure
                 handler_hook_errors.labels(hook='on_error').inc()
                 await log.aerror(
                     'on_error_hook_failed',
                     error=str(call.exception),
                     error_type=type(call.exception).__name__,
-                    action='treating as skip (terminal failure)',
+                    action=self._executor_on_failure.value,
                     exc_info=call.exception,
                 )
             else:
@@ -1244,6 +1250,7 @@ class PartitionProcessor:
                 action,
                 retry_count=retry_count,
                 max_retries=self._max_retries,
+                on_failure=self._executor_on_failure,
             )
             if decision.outcome is taskflow.TaskOutcome.REPLACE:
                 # Replacement: the original task is "replaced" (not a
@@ -1285,6 +1292,7 @@ class PartitionProcessor:
                         'max_retries_exceeded',
                         task_id=task.task_id,
                         retries=retry_count,
+                        action=self._executor_on_failure.value,
                     )
                 if decision.sends_to_dlq:
                     # Written now, before the task settles: from here on no

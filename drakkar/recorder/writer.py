@@ -836,16 +836,28 @@ class EventWriter:
             }
         )
 
-    def record_sink_not_started(self, *, sink: str, reason: str, partition: int | None) -> None:
-        """A result's delivery to ``sink`` (``<type>/<name>``) that did not start, and why."""
-        self._record(
-            {
-                'ts': time.time(),
-                'event': EventType.SINK_NOT_STARTED,
-                'partition': partition,
-                'metadata': encode_json_str({'sink': sink, 'reason': reason}),
-            }
-        )
+    def record_sink_not_started(
+        self,
+        *,
+        sink: str,
+        reason: str,
+        partition: int | None,
+        request_id: str | None = None,
+    ) -> None:
+        """A result's delivery to ``sink`` (``<type>/<name>``) that did not start, and why.
+
+        An HTTP request (``request_id`` set) gets the same row markers as its
+        ``message_dlq`` row: ``origin='http'``, the ``request_id`` column and
+        the synthetic partition -1.
+        """
+        event: dict[str, Any] = {
+            'ts': time.time(),
+            'event': EventType.SINK_NOT_STARTED,
+            'partition': partition,
+        }
+        if request_id is not None:
+            event.update({'partition': -1, 'origin': 'http', 'request_id': request_id})
+        self._record({**event, 'metadata': encode_json_str({'sink': sink, 'reason': reason})})
 
     def record_committed(self, partition: int, offset: int) -> None:
         self._counters['committed'] += 1

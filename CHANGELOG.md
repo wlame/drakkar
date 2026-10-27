@@ -91,7 +91,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
   gone. `scripts/replay_dlq.py` republishes each record's key, value and
   source headers, takes `--stage`, skips old-format records, and its summary
-  has `skipped_old_format` instead of `skipped_invalid`.
+  has `skipped_old_format` instead of `skipped_invalid`. A failed delivery of
+  an `on_window_complete` result no longer reaches the DLQ (it was written as
+  the old payload JSON): a window result has no source message, so there
+  `on_failure: dlq` acts as `skip` with `window_delivery_not_dlq`. A handler
+  that needs the DLQ for an aggregate delivers it from
+  `on_message_complete`, or sets `on_failure: skip` on that sink knowingly.
   See `docs/upgrading.md` ("The DLQ record").
 
 ### Added
@@ -109,8 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message. A window result cannot go to the DLQ, so there `dlq` drops the
   payloads with a `window_delivery_not_dlq` warning. `on_error` can return
   `ErrorAction.DLQ` (`dk-stage: execute`), and `executor.on_failure` (`skip`
-  or `dlq`, default `skip`) is what the default `on_error` returns; the
-  message probe treats `DLQ` as a failure and writes nothing. The HTTP
+  or `dlq`, default `skip`) is what the default `on_error` returns. It also
+  applies when `on_error` returns `RETRY` with `executor.max_retries` spent
+  (`max_retries_exceeded` gains `action`) and when `on_error` raises (after
+  `on_error_hook_failed`, whose `action` names the policy). The parse stage
+  logs and records `message_dlq` too. The `sink_not_started` recorder rows of
+  an HTTP request carry `origin` and `request_id`, as its `message_dlq` rows
+  do. The message probe treats `DLQ` as a failure and writes nothing. The HTTP
   source delivers a request's sinks in one pass with the same rules; its
   record holds the raw request body and `dk-request-id`. New metrics
   `drakkar_dlq_records_total{stage}` and
@@ -468,12 +478,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **New help texts for three DLQ and sink metrics.**
+- **New help texts for four DLQ and sink metrics.**
   `drakkar_sink_deliveries_skipped_total` names every cause of a skip (the
   handler, the declared policy, an open circuit, and a window result that
   cannot reach the DLQ); `drakkar_sink_dlq_messages_total` says it counts
-  records, one per source message, of all stages; and
-  `drakkar_dlq_dropped_payloads_total` says it counts lost source messages.
+  records, one per source message, of all stages;
+  `drakkar_dlq_dropped_payloads_total` says it counts lost source messages;
+  and `drakkar_dlq_unconfigured_drops_total` says its unit per path
+  (payloads on the sink path, source messages on the task path).
 
 ### Fixed
 
