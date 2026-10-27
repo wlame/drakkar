@@ -932,12 +932,11 @@ class PartitionProcessor:
                 partition_id=self._partition_id,
             )
         except Exception as exc:
-            # SinkDeliveryFailedError is the counted ``stall`` answer; any
-            # other error leaves the write unknown, so ``stall`` treats it
-            # as lost and ``drop`` lets the offset commit.
+            # SinkDeliveryFailedError is the counted ``stall`` answer. Any
+            # other error leaves the write unknown: ``stall`` treats it as
+            # lost and holds the offsets, ``drop`` counts the messages as
+            # lost and lets the offsets commit.
             is_stall = isinstance(exc, SinkDeliveryFailedError) or self._on_dlq_failure == 'stall'
-            if is_stall:
-                self._mark_offsets_delivery_failed(task.source_offsets)
             logger.error(
                 'execute_dlq_failed',
                 category='partition',
@@ -947,14 +946,39 @@ class PartitionProcessor:
                 error=str(exc),
                 error_type=type(exc).__name__,
                 offset_action='stall' if is_stall else 'commit',
+                exc_info=exc,
             )
+            if is_stall:
+                self._mark_offsets_delivery_failed(task.source_offsets)
+            else:
+                self._drop_execute_records(task, reason='the DLQ write raised')
 
     def _lose_execute_records(self, task: ExecutorTask) -> None:
         """Apply ``dlq.on_send_failure`` to a task sent to the DLQ with no writer wired."""
         if self._on_dlq_failure == 'stall':
             self._mark_offsets_delivery_failed(task.source_offsets)
             return
-        message_count = len(dict.fromkeys(task.source_offsets))
+        self._drop_execute_records(task, reason='on_error answered dlq but no DLQ writer is wired')
+
+    def _drop_execute_records(self, task: ExecutorTask, *, reason: str) -> None:
+        """Count and log, under ``drop``, the source messages of ``task`` whose record is lost.
+
+        A message already on the DLQ, or whose loss is already counted, is
+        left out, and the rest are marked lost, so a later failure of the
+        message counts nothing again (the manager's ``dlq_lost`` rule).
+        Without a tracker the task counts as one message, as a missing
+        context does in the manager.
+        """
+        message_context = self._message_context(task.source_offsets)
+        if message_context is None:
+            message_count = 1
+        else:
+            open_states = [state for state in message_context.states if not (state.dlq_written or state.dlq_lost)]
+            for state in open_states:
+                state.dlq_lost = True
+            message_count = len(open_states)
+        if message_count == 0:
+            return
         dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc(message_count)
         logger.critical(
             'dlq_failure_payloads_dropped',
@@ -962,7 +986,7 @@ class PartitionProcessor:
             partition=self._partition_id,
             task_id=task.task_id,
             message_count=message_count,
-            reason='on_error answered dlq but no DLQ writer is wired',
+            reason=reason,
             action='ALERT: source messages lost (dlq.on_send_failure=drop)',
         )
 

@@ -630,6 +630,34 @@ async def test_lost_dlq_write_under_drop_is_counted_once_per_message():
     ]
 
 
+async def test_lost_execute_dlq_write_is_not_written_or_counted_again_by_a_sink_failure():
+    """The flag lives in the lock loop both stages share: an execute loss under drop is the message's only loss."""
+    from drakkar.metrics import dlq_dropped_payloads
+    from drakkar.models import ExecutorError, ExecutorTask
+
+    sink = FakeSink('out', 'kafka')
+    sink.fail = True
+    dlq = RecordingDLQ(ok=False)
+    mgr = manager_with((sink, policy(max_retries=0)), dlq=dlq)
+    context = message_context()
+    task = ExecutorTask(task_id='t1', source_offsets=[10])
+    before = dlq_dropped_payloads.labels(partition='6')._value.get()
+
+    with capture_logs() as logs:
+        await mgr.send_execute_dlq(
+            context, task=task, error=ExecutorError(task=task, exit_code=1), attempts=1, partition_id=6
+        )
+        outcomes = await mgr.deliver_all(
+            CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 6, message_context=context
+        )
+
+    assert outcomes == {KAFKA: DeliveryOutcome.FAILED}
+    assert [record.stage for record, _ in dlq.sent] == ['execute']
+    assert dlq_dropped_payloads.labels(partition='6')._value.get() == before + 1
+    assert [entry['event'] for entry in logs].count('dlq_failure_payloads_dropped') == 1
+    assert 'message_already_dlq' not in [entry['event'] for entry in logs]
+
+
 async def test_dependent_of_a_lost_dlq_write_gets_dependency_failed():
     kafka = FakeSink('out', 'kafka')
     postgres = FakeSink('main', 'postgres')

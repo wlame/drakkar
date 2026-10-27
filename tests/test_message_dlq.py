@@ -457,6 +457,7 @@ async def test_execute_dlq_without_a_writer_under_drop_counts_the_lost_message()
     dropped = [line for line in logs if line['event'] == 'dlq_failure_payloads_dropped']
     assert len(dropped) == 1
     assert dropped[0]['message_count'] == 1
+    assert dropped[0]['reason'] == 'on_error answered dlq but no DLQ writer is wired'
 
 
 async def test_execute_dlq_without_a_writer_under_stall_holds_the_offset():
@@ -496,7 +497,9 @@ async def test_failed_execute_dlq_write_under_stall_holds_the_offset():
     await pipeline.stop()
 
     assert not pipeline.offset_completed()
-    assert any(line['event'] == 'execute_dlq_failed' for line in logs)
+    failed = [line for line in logs if line['event'] == 'execute_dlq_failed']
+    assert len(failed) == 1
+    assert failed[0]['offset_action'] == 'stall'
     assert pipeline.recorder.of('message_dlq') == []
 
 
@@ -506,6 +509,7 @@ async def test_a_raising_execute_dlq_write_still_settles_the_task():
             return ErrorAction.DLQ
 
     pipeline = Pipeline(DLQOnError(['t-1']), ScriptedPool(failing={'t-1'}))
+    before = dlq_dropped_payloads.labels(partition='0')._value.get()
 
     async def broken_write(message_context, **kwargs):
         raise RuntimeError('broken writer')
@@ -520,6 +524,70 @@ async def test_a_raising_execute_dlq_write_still_settles_the_task():
     failed = [line for line in logs if line['event'] == 'execute_dlq_failed']
     assert len(failed) == 1
     assert failed[0]['error'] == 'broken writer'
+    assert failed[0]['offset_action'] == 'commit'
+    assert isinstance(failed[0]['exc_info'], RuntimeError)
+    # Under drop the unknown write counts as a lost message, once.
+    assert dlq_dropped_payloads.labels(partition='0')._value.get() == before + 1
+    dropped = [line for line in logs if line['event'] == 'dlq_failure_payloads_dropped']
+    assert len(dropped) == 1
+    assert (dropped[0]['message_count'], dropped[0]['reason']) == (1, 'the DLQ write raised')
+
+
+async def test_a_raising_execute_dlq_write_under_stall_holds_the_offset():
+    class DLQOnError(FanOutHandler):
+        async def on_error(self, task, error):
+            return ErrorAction.DLQ
+
+    pipeline = Pipeline(DLQOnError(['t-1']), ScriptedPool(failing={'t-1'}), on_dlq_failure='stall')
+
+    async def broken_write(message_context, **kwargs):
+        raise RuntimeError('broken writer')
+
+    pipeline.processor._execute_dlq = broken_write
+
+    with capture_logs() as logs:
+        await pipeline.run()
+        await wait_for(lambda: OFFSET in pipeline.processor._stalled_offsets)
+    await pipeline.stop()
+
+    failed = [line for line in logs if line['event'] == 'execute_dlq_failed']
+    assert failed[0]['offset_action'] == 'stall'
+    assert not any(line['event'] == 'dlq_failure_payloads_dropped' for line in logs)
+
+
+async def test_after_an_execute_record_no_later_result_of_the_message_is_delivered():
+    record_written = asyncio.Event()
+
+    class SignallingDLQ(RecordingDLQ):
+        async def send(self, record, partition_id):
+            ok = await super().send(record, partition_id)
+            record_written.set()
+            return ok
+
+    class DLQThenMessageResult(FanOutHandler):
+        async def on_error(self, task, error):
+            return ErrorAction.DLQ
+
+        async def on_message_complete(self, group):
+            return kafka_result()
+
+    postgres = CountingSink('main', 'postgres')
+    kafka = CountingSink('out', 'kafka')
+    handler = DLQThenMessageResult(['t-fails', 't-sibling'], {'t-sibling': postgres_result()})
+    pool = ScriptedPool(failing={'t-fails'}, gates={'t-sibling': record_written})
+    pipeline = Pipeline(handler, pool, postgres, kafka, dlq=SignallingDLQ())
+
+    await pipeline.run()
+    await wait_for(pipeline.offset_completed)
+    await pipeline.stop()
+
+    assert [record.stage for record, _ in pipeline.dlq.sent] == ['execute']
+    assert (postgres.calls, kafka.calls) == (0, 0), 'neither the sibling result nor the message result was delivered'
+    not_started = pipeline.recorder.of('sink_not_started')
+    assert sorted(row['metadata'] for row in not_started) == [
+        '{"reason":"message_dlq","sink":"kafka/out"}',
+        '{"reason":"message_dlq","sink":"postgres/main"}',
+    ]
 
 
 async def test_send_execute_dlq_without_a_context_follows_on_send_failure():
