@@ -27,7 +27,6 @@ from structlog.testing import capture_logs
 from drakkar.config.connections import ConnectionsConfig, ConsulConnectionConfig
 from drakkar.config.fleet import FleetRegistryConfig
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig
-from drakkar.fleet import testkit
 from drakkar.fleet.card import WorkerIdentity, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -49,6 +48,7 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
+from tests import fleet_testkit as testkit
 from tests.consul_fake import FAKE_BASE, LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
 from tests.test_recorder_wiring import _app as recorder_wiring_app
 

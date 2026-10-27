@@ -37,12 +37,12 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.resilience import TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
-from drakkar.recorder import electiontest
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext
 from drakkar.recorder.election_consul import REFRESH_BEFORE_ACQUIRE, ConsulElection, consul_election_factory
-from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
 from drakkar.schedule import SCOPE_INVALID
+from tests import election_testkit as electiontest
 from tests.consul_fake import LEADER, FakeConsul, Seen, client_holding_the_first_renew, fake_client
+from tests.election_testkit import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['consul']
 EXAMPLE = FIXTURE['example']

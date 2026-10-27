@@ -803,3 +803,8 @@ def test_mongo_payload_requires_a_filter_for_every_mutating_op(op):
         kwargs['data'] = SampleData()
     with pytest.raises(ValidationError, match="requires 'filter'"):
         MongoPayload(op=op, **kwargs)
+
+
+def test_custom_payload_is_not_exported():
+    with pytest.raises(ImportError):
+        from drakkar import CustomPayload  # noqa: F401

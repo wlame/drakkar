@@ -19,7 +19,6 @@ from pydantic import (
     ConfigDict,
     Field,
     ModelWrapValidatorHandler,
-    PrivateAttr,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -54,9 +53,7 @@ _REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 
 # The failure policy of one sink instance. The three keys are shared by every
-# sink type, a plugin sink included, so their names are reserved in a plugin
-# sink's config: ``SinksConfig`` takes them out of the leaf before the plugin
-# sees it.
+# sink type.
 ON_FAILURE_CHOICES = ('dlq', 'skip')
 MAX_RETRIES_LIMIT = 10
 POLICY_KEYS = ('on_failure', 'max_retries', 'depends_on')
@@ -70,9 +67,8 @@ _WHOLE_NUMBER = TypeAdapter(int)
 class SinkInstanceConfig(BaseModel):
     """The failure policy, retry budget and dependencies of one sink instance.
 
-    Every sink config class inherits these keys. A plugin sink declares them
-    in its ``sinks.custom.<type>.<name>`` leaf; ``SinksConfig`` reads them
-    from there (see ``SinksConfig.policy_of``).
+    Every sink config class inherits these keys; ``SinksConfig`` reads them
+    through ``SinksConfig.policy_of``.
     """
 
     on_failure: Literal['dlq', 'skip'] = Field(
@@ -96,9 +92,8 @@ class SinkInstanceConfig(BaseModel):
     depends_on: list[str] = Field(
         default_factory=list,
         description=(
-            "Sinks that must deliver a result before this one starts, each written '<type>/<name>' "
-            '(a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, '
-            'no self-reference, no cycle.'
+            "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. "
+            'Checked at load: every reference exists, no self-reference, no cycle.'
         ),
     )
 
@@ -139,21 +134,6 @@ def check_instance_policy(path: str, raw: Mapping[str, Any]) -> None:
         return
     if not 0 <= retries <= MAX_RETRIES_LIMIT:
         raise ValueError(f'{path}.max_retries must be a whole number from 0 to {MAX_RETRIES_LIMIT}')
-
-
-def _plugin_policy(path: str, leaf: Mapping[str, Any]) -> SinkPolicy:
-    """The policy of a plugin sink leaf, read from its reserved keys.
-
-    A type error (a fraction, a ``depends_on`` that is not a list of strings)
-    names the leaf path, since no field of the plugin's config reports it.
-    """
-    declared = {key: leaf[key] for key in POLICY_KEYS if key in leaf}
-    try:
-        return SinkPolicy.of(SinkInstanceConfig.model_validate(declared))
-    except ValidationError as e:
-        first = e.errors()[0]
-        location = '.'.join(str(part) for part in first['loc'])
-        raise ValueError(f'{path}.{location}: {first["msg"]}') from None
 
 
 def find_dependency_cycle(graph: Mapping[str, list[str]]) -> list[str] | None:
@@ -652,31 +632,6 @@ class SinksConfig(BaseModel):
     http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
     filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
-    # Plugin-discovered (entry-point-registered) sink instances. Maps a
-    # sink type name (e.g. 'my_custom') to a dict of named instances:
-    # ``{ 'instance-1': { ...config... }, 'instance-2': { ... } }``.
-    # ``DrakkarApp._build_sinks`` consults ``SinkRegistry.get(type_name)``
-    # for each top-level key; unknown names raise at startup so a typo
-    # in YAML fails loud rather than silently dropping a sink.
-    #
-    # The instance config is a free-form ``dict[str, Any]`` because
-    # plugin authors define the shape — Drakkar cannot validate it
-    # ahead of time. The plugin's ``__init__(name, config)`` receives
-    # the dict and can wrap it in its own Pydantic model for validation.
-    # The three policy keys are the exception: they are read from the leaf
-    # and removed before the dict reaches the plugin (``_read_policies``).
-    custom: dict[str, dict[str, dict[str, Any]]] = Field(
-        default_factory=dict,
-        description=(
-            'Plugin-discovered sink instances. Top-level keys are sink type '
-            'names registered via [project.entry-points."drakkar.sinks"]; '
-            'second-level keys are instance names; leaf dicts are plugin-'
-            'defined config passed to the sink class constructor. The keys '
-            'on_failure, max_retries and depends_on are reserved: they declare '
-            'the failure policy of the instance, as on every built-in sink, '
-            'and are removed from the leaf before the plugin receives it.'
-        ),
-    )
     delivery_timeout_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -701,59 +656,32 @@ class SinksConfig(BaseModel):
         ),
     )
 
-    # The policies read from the plugin sink leaves, keyed by
-    # ``(custom type, instance name)``. Private: the leaves no longer carry
-    # the keys, and a public field would be a second place to set them.
-    _plugin_policies: dict[tuple[str, str], SinkPolicy] = PrivateAttr(default_factory=dict)
-
     @model_validator(mode='wrap')
     @classmethod
-    def _read_policies(cls, data: Any, handler: ModelWrapValidatorHandler['SinksConfig']) -> 'SinksConfig':
-        """Check the policy keys of every instance, and take them out of the plugin sink leaves.
+    def _check_policies(cls, data: Any, handler: ModelWrapValidatorHandler['SinksConfig']) -> 'SinksConfig':
+        """Check the policy keys of every instance on the raw input.
 
         The checks run on the raw input because only here is the instance
-        path known, and the messages name it. Plugin type names are checked
-        first, then the instances in sorted ``<type>/<name>`` order,
-        ``on_failure`` before ``max_retries``, so the first message is the
-        same for any key order.
+        path known, and the messages name it. Instances are checked in sorted
+        ``<type>/<name>`` order, ``on_failure`` before ``max_retries``, so the
+        first message is the same for any key order.
         """
-        if not isinstance(data, Mapping):
-            return handler(data)
-        check_plugin_type_names(data.get('custom'))
-        leaves = sorted(_raw_instance_leaves(data), key=lambda leaf: leaf[0])
-        for _, path, raw in leaves:
-            check_instance_policy(path, raw)
-        policies: dict[tuple[str, str], SinkPolicy] = {}
-        custom = data.get('custom')
-        if isinstance(custom, Mapping):
-            data = {**data, 'custom': _without_policy_keys(custom)}
-            for ref, path, raw in leaves:
-                if path.startswith('sinks.custom.'):
-                    sink_type, _, name = ref.partition('/')
-                    policies[(sink_type, name)] = _plugin_policy(path, raw)
-        config = handler(data)
-        config._plugin_policies = policies
-        return config
+        if isinstance(data, Mapping):
+            for _, path, raw in sorted(_raw_instance_leaves(data), key=lambda leaf: leaf[0]):
+                check_instance_policy(path, raw)
+        return handler(data)
 
     def _instances(self) -> dict[str, tuple[str, SinkPolicy]]:
-        """Every configured instance: its ``<type>/<name>`` reference, its config path and its policy.
-
-        References are unique: the load refuses a plugin type named like a
-        built-in one (``check_plugin_type_names``).
-        """
+        """Every configured instance: its ``<type>/<name>`` reference, its config path and its policy."""
         instances: dict[str, tuple[str, SinkPolicy]] = {}
         for sink_type in BUILTIN_SINK_TYPES:
             section: dict[str, SinkInstanceConfig] = getattr(self, sink_type)
             for name, instance in section.items():
                 instances[f'{sink_type}/{name}'] = (f'sinks.{sink_type}.{name}', SinkPolicy.of(instance))
-        for sink_type, named in self.custom.items():
-            for name in named:
-                policy = self._plugin_policies.get((sink_type, name), DEFAULT_SINK_POLICY)
-                instances[f'{sink_type}/{name}'] = (f'sinks.custom.{sink_type}.{name}', policy)
         return instances
 
     def policy_of(self, sink_type: str, name: str) -> SinkPolicy:
-        """The declared policy of the instance ``name`` of ``sink_type`` (a plugin type without ``custom``).
+        """The declared policy of the instance ``name`` of ``sink_type``.
 
         Raises:
             KeyError: no such instance is configured.
@@ -763,8 +691,7 @@ class SinksConfig(BaseModel):
     def instance_path(self, ref: str) -> str:
         """The config path of the instance ``ref`` (``<type>/<name>``).
 
-        ``sinks.<type>.<name>`` for a built-in type, ``sinks.custom.<type>.<name>``
-        for a plugin sink.
+        It is ``sinks.<type>.<name>``.
 
         Raises:
             KeyError: no such instance is configured.
@@ -802,14 +729,13 @@ class SinksConfig(BaseModel):
     @property
     def is_empty(self) -> bool:
         """True if no sinks of any type are configured."""
-        return not any([self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem, self.custom])
+        return not any([self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem])
 
     def summary(self) -> dict[str, list[str]]:
         """Return a dict of sink type → list of instance names.
 
         Useful for startup logging. Only includes types with at least one
-        instance. Instance names are SORTED (and custom types render after
-        the built-ins, sorted by type name) so the config-summary one-liner
+        instance. Instance names are SORTED so the config-summary one-liner
         is reproducible from config whose decoded form carries no
         insertion order.
         """
@@ -826,38 +752,16 @@ class SinksConfig(BaseModel):
             result['redis'] = sorted(self.redis)
         if self.filesystem:
             result['filesystem'] = sorted(self.filesystem)
-        for type_name in sorted(self.custom):
-            if self.custom[type_name]:
-                result[type_name] = sorted(self.custom[type_name])
         return result
 
 
-# The built-in sink sections: the ``SinksConfig`` fields that map instance
-# names to a sink config. ``custom`` nests one level deeper (type, then name).
+# The sink sections: the ``SinksConfig`` fields that map instance names to a
+# sink config.
 BUILTIN_SINK_TYPES: tuple[str, ...] = tuple(
-    name
-    for name, field in SinksConfig.model_fields.items()
-    if name != 'custom' and get_origin(field.annotation) is dict
+    name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict
 )
 
 DEFAULT_SINK_POLICY = SinkPolicy.of(SinkInstanceConfig())
-
-
-def check_plugin_type_names(custom: object) -> None:
-    """Refuse a raw ``sinks.custom`` type named like a built-in sink type, the first in sorted order.
-
-    A ``depends_on`` reference names a plugin sink without ``custom/``, so
-    such a type would share its references with the built-in one.
-    """
-    if not isinstance(custom, Mapping):
-        return
-    clashing = sorted(str(sink_type) for sink_type in custom if sink_type in BUILTIN_SINK_TYPES)
-    if clashing:
-        sink_type = clashing[0]
-        raise ValueError(
-            f"sinks.custom.{sink_type}: '{sink_type}' is the name of a built-in sink type; "
-            'give the plugin type another name'
-        )
 
 
 def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, Any]]]:
@@ -872,30 +776,7 @@ def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mappin
             for name, leaf in section.items():
                 if isinstance(leaf, Mapping):
                     leaves.append((f'{sink_type}/{name}', f'sinks.{sink_type}.{name}', leaf))
-    custom = data.get('custom')
-    if isinstance(custom, Mapping):
-        for sink_type, section in custom.items():
-            if isinstance(section, Mapping):
-                for name, leaf in section.items():
-                    if isinstance(leaf, Mapping):
-                        leaves.append((f'{sink_type}/{name}', f'sinks.custom.{sink_type}.{name}', leaf))
     return leaves
-
-
-def _without_policy_keys(custom: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of raw ``sinks.custom`` with the policy keys taken out of every leaf."""
-    stripped: dict[str, Any] = {}
-    for sink_type, section in custom.items():
-        if not isinstance(section, Mapping):
-            stripped[sink_type] = section
-            continue
-        stripped[sink_type] = {
-            name: {key: value for key, value in leaf.items() if key not in POLICY_KEYS}
-            if isinstance(leaf, Mapping)
-            else leaf
-            for name, leaf in section.items()
-        }
-    return stripped
 
 
 class DLQConfig(BaseModel):

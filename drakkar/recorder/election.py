@@ -21,11 +21,9 @@ runs on the loop through the election's
 at most the call's bound. A hung provider therefore holds up the archive
 thread for a bounded time and never the loop.
 
-A third-party provider is a class with the six async methods of
-:class:`ElectionProvider` plus a factory ``(options) -> provider`` that its
-package exposes as an entry point of the ``drakkar.election_providers``
-group. ``drakkar.recorder.electiontest`` holds the checks a provider should
-pass.
+A provider is a class with the six async methods of :class:`ElectionProvider`
+plus a factory ``(options) -> provider``; ``BUILTIN_ELECTIONS`` maps each
+provider name to its factory.
 """
 
 import asyncio
@@ -51,9 +49,6 @@ from drakkar.schedule import parse_task_scope
 if TYPE_CHECKING:
     # Only for the annotations: loading drakkar.cluster_tasks imports this module.
     from drakkar.cluster_tasks import SlotLease
-
-# Public and stable: plugin packages name this group in their metadata.
-ELECTION_ENTRY_POINT_GROUP = 'drakkar.election_providers'
 
 # The feature label of the election's provider calls, metrics and log lines.
 ELECTION_FEATURE = 'election'
@@ -81,8 +76,7 @@ class ElectionContext:
 
     ``shared_dir`` is the worker's shared folder (``shared.dir``); the
     ``filesystem`` provider keeps its locks in its ``tasks`` folder, others
-    ignore it. ``options`` is the provider's own settings mapping (for a
-    plugin, ``periodic.election.plugin_options``). ``connections``
+    ignore it. ``options`` is the provider's own settings mapping. ``connections``
     resolves the worker's named shared connections; it is ``None`` when the
     election runs outside a worker, as in a test.
     """

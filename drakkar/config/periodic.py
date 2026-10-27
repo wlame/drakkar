@@ -9,7 +9,6 @@ with ``@periodic``; an override that names no declared task fails startup.
 
 import time
 from collections.abc import Mapping
-from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -35,7 +34,7 @@ class ElectionConfig(BaseModel):
             'Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table '
             'of the database named by periodic.election.connection), redis (a key on the Redis '
             'server named by periodic.election.connection), consul (a key of the Consul agent named '
-            'by periodic.election.connection, held by a session), or the name of a provider plugin. '
+            'by periodic.election.connection, held by a session). '
             'Every worker of a cluster must use the same provider.'
         ),
     )
@@ -50,10 +49,6 @@ class ElectionConfig(BaseModel):
     resilience: ResilienceConfig = Field(
         default_factory=ResilienceConfig,
         description='Time limit, retries and circuit breaker for the calls to the election provider.',
-    )
-    plugin_options: dict[str, Any] = Field(
-        default_factory=dict,
-        description='Options passed unchanged to a provider plugin, which validates them itself.',
     )
 
     @model_validator(mode='after')

@@ -15,11 +15,10 @@ import asyncio
 import os
 import secrets
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import structlog
 from pydantic import BaseModel
@@ -47,7 +46,6 @@ from drakkar.providers.connections import Connections
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.helpers import detect_worker_ip
 from drakkar.schedule import cluster_tasks_hash
-from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
 from drakkar.sinks.http import HttpSink
@@ -581,7 +579,6 @@ class DrakkarApp:
         if not anchors:
             return
         sink_names = {name for section in BUILTIN_SINK_TYPES for name in getattr(self._config.sinks, section)}
-        sink_names |= {name for instances in self._config.sinks.custom.values() for name in instances}
         # One row per checkable selector: the match field, the warning it
         # raises, the declared names it must be one of, what such a name is,
         # and where the deployment declares one.
@@ -672,18 +669,9 @@ class DrakkarApp:
     def _build_sinks(self) -> None:
         """Create sink instances from config and register with SinkManager.
 
-        Built-in sinks (kafka, postgres, mongo, http, redis, filesystem)
-        are constructed directly — their config models are typed and
-        well-known. Plugin-discovered sinks declared under
-        ``sinks.custom.<type>.<instance>`` go through
-        ``SinkRegistry.get(type)`` which is populated by
-        ``SinkManager.discover()`` during the manager's construction
-        (see :class:`drakkar.sinks.registry.SinkRegistry`). Unknown type
-        names raise loudly so a typo or a missing plugin install
-        surfaces at startup rather than silently dropping data.
+        Sinks (kafka, postgres, mongo, http, redis, filesystem) are
+        constructed directly — their config models are typed and well-known.
         """
-        from drakkar.sinks.registry import SinkRegistry
-
         kafka_brokers = self._config.kafka.brokers
         # Each instance is registered with the policy its config declares,
         # read once here: a delivery reads the manager's copy, never the
@@ -716,41 +704,6 @@ class DrakkarApp:
 
         for name, cfg in self._config.sinks.filesystem.items():
             self._sink_manager.register(FileSink(name, cfg), policy=sinks.policy_of('filesystem', name))
-
-        # Plugin-discovered sinks. Each top-level key in ``sinks.custom``
-        # is a sink type name (matches the entry-point key in the plugin's
-        # pyproject.toml); the registry resolves it to the plugin class.
-        # Instances are constructed via ``cls(name, instance_cfg)`` —
-        # plugin authors are expected to accept the same ``(name, config)``
-        # signature the built-in sinks use.
-        for sink_type, instances in self._config.sinks.custom.items():
-            sink_cls = SinkRegistry.get(sink_type)
-            if sink_cls is None:
-                raise ValueError(
-                    f'Unknown sink type {sink_type!r} declared under sinks.custom — '
-                    f'no class registered under that name. '
-                    f'Known types: {SinkRegistry.all_names()!r}. '
-                    f'Make sure the plugin is installed and exposes the right '
-                    f'[project.entry-points."drakkar.sinks"] entry.'
-                )
-            # ``BaseSink.__init__`` declares ``(name, ui_url='')`` for the
-            # built-in sinks, but plugin authors widen the second parameter
-            # to a config dict / Pydantic model. ty cannot see across the
-            # entry-point boundary, so we cast ``sink_cls`` to a callable
-            # taking two ``Any`` positionals before invoking it. The plugin
-            # contract documented in docs/sinks.md is the source of truth
-            # for the constructor signature, not the local type-check view.
-            sink_factory = cast(Callable[[str, Any], BaseSink[Any]], sink_cls)
-            for instance_name, instance_cfg in instances.items():
-                sink = sink_factory(instance_name, instance_cfg)
-                # The manager keys a sink by the class's ``sink_type`` while
-                # ``depends_on`` and the policy are keyed by the config key;
-                # they must agree, or a dependency would never be found.
-                if sink.sink_type != sink_type:
-                    raise ValueError(
-                        f"sinks.custom.{sink_type}.{instance_name}: the plugin reports sink_type '{sink.sink_type}'"
-                    )
-                self._sink_manager.register(sink, policy=sinks.policy_of(sink_type, instance_name))
 
     def _build_dlq(self) -> None:
         """Create the DLQ sink, or leave it None when the config disables the DLQ (see DrakkarConfig.dlq_enabled)."""

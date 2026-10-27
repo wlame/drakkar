@@ -27,10 +27,10 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.redis import DEFAULT_KEY_PREFIX, SCRIPTS
 from drakkar.providers.resilience import TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
-from drakkar.recorder import electiontest
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext
 from drakkar.recorder.election_redis import REFRESH_BEFORE_ACQUIRE, RedisElection, redis_election_factory
-from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
+from tests import election_testkit as electiontest
+from tests.election_testkit import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
 from tests.redis_fake import FakeClock, RecordingClient, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['redis']

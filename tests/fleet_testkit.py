@@ -1,7 +1,6 @@
 """Behaviour checks for registry providers.
 
-A provider author runs these from their own test suite; the built-in
-providers run them too. Each check is an ``async`` function that raises
+The built-in providers run these in their tests. Each check is an ``async`` function that raises
 ``AssertionError`` with a plain message when the provider misbehaves. The
 module needs no test framework.
 
@@ -24,18 +23,6 @@ Three groups:
   above; ``offline_after_seconds`` is the age past which a card whose owner
   stopped publishing must no longer be reported ``online``. A provider that
   leaves ``online`` at ``None`` passes them: the service then judges the age.
-
-Example with pytest::
-
-    @pytest.mark.parametrize('check', testkit.PUBLISHING_CHECKS)
-    async def test_my_provider(check):
-        store = MyStore()
-        await check(lambda: MyProvider(store), store.advance, 600)
-
-    @pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS)
-    async def test_my_provider_liveness(check):
-        store = MyStore()
-        await check(lambda: MyProvider(store), store.advance, 60)
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable

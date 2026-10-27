@@ -110,7 +110,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 # The payload fields of a ``CollectResult``, in the order the summary lists the types.
-_PAYLOAD_FIELDS = ('kafka', 'postgres', 'mongo', 'http', 'redis', 'files', 'custom')
+_PAYLOAD_FIELDS = ('kafka', 'postgres', 'mongo', 'http', 'redis', 'files')
 
 # The summary error that says how a sink's delivery ended when it neither
 # delivered nor reached the DLQ and no skip dropped it: it did not start,
@@ -774,10 +774,7 @@ class WebappRunner:
         keys: list[SinkKey] = []
         for field in _PAYLOAD_FIELDS:
             for payload in getattr(sub_result, field):
-                if field == 'custom':
-                    sink = manager.resolve_custom_sink(payload.sink)
-                else:
-                    sink = manager.resolve_sink(summary_type, payload.sink)
+                sink = manager.resolve_sink(summary_type, payload.sink)
                 keys.append((sink.sink_type, sink.name))
         return keys
 
@@ -820,8 +817,7 @@ class WebappRunner:
 
         Returns a list of ``(sink_type, sub_result)`` tuples. The list
         order is deterministic — built-in sink types in the documented
-        order (kafka, postgres, mongo, http, redis, files), then
-        ``custom`` for plugin sinks. Empty fields are omitted so the
+        order (kafka, postgres, mongo, http, redis, files). Empty fields are omitted so the
         caller iterates only over types that actually carry payloads.
 
         Each sub-result is a fresh ``CollectResult`` containing payloads
@@ -841,13 +837,6 @@ class WebappRunner:
             groups.append(('redis', CollectResult(redis=list(result.redis))))
         if result.files:
             groups.append(('filesystem', CollectResult(files=list(result.files))))
-        if result.custom:
-            # Plugin sinks all share the synthetic ``'custom'`` key in
-            # the response summary because each plugin sink can have
-            # its own ``sink_type`` (resolved at runtime per payload).
-            # Operators read finer-grained per-sink stats from the
-            # SinkManager's existing ``get_all_stats`` API.
-            groups.append(('custom', CollectResult(custom=list(result.custom))))
         return groups
 
     @staticmethod

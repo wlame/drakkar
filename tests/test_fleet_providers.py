@@ -17,7 +17,6 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from drakkar.fleet import testkit
 from drakkar.fleet.card import serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import (
@@ -27,6 +26,7 @@ from drakkar.fleet.providers import (
     StaticRegistry,
     prepare_registry_folder,
 )
+from tests import fleet_testkit as testkit
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
 
 PRUNE_AFTER = 600.0

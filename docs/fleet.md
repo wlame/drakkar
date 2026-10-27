@@ -32,13 +32,13 @@ registry is off and the worker logs `fleet_registry_disabled_no_ui` once.
 A **provider** is the part of a feature that talks to a store or a
 service. Two features have one, and each is chosen on its own:
 
-| Feature | Key | Default | Plugin entry-point group |
-|---|---|---|---|
-| Worker registry (this page) | `fleet.registry.provider` | `filesystem` | `drakkar.registry_providers` |
-| [Election of cluster periodic tasks](local-databases.md#the-election-provider) (the archive included) | `periodic.election.provider` | `filesystem` | `drakkar.election_providers` |
+| Feature | Key | Default |
+|---|---|---|
+| Worker registry (this page) | `fleet.registry.provider` | `filesystem` |
+| [Election of cluster periodic tasks](local-databases.md#the-election-provider) (the archive included) | `periodic.election.provider` | `filesystem` |
 
-Each feature has its own `connection`, [`resilience`](#resilience) block and
-`plugin_options`. The rest of this page is about the registry.
+Each feature has its own `connection` and [`resilience`](#resilience) block.
+The rest of this page is about the registry.
 
 `fleet.registry.provider` selects where cards live:
 
@@ -50,7 +50,6 @@ Each feature has its own `connection`, [`resilience`](#resilience) block and
 | `redis` | one key per worker plus an index of workers, under the key prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
 | `consul` | one key per worker under the key prefix of a Consul connection, held by a session of the worker | the session's time to live (online while the key has a session; no age) |
 | `none` | nowhere: no peers | — |
-| a plugin name | wherever the plugin keeps them (see [Writing a provider](#writing-a-provider)) | the plugin's own clock, or its own verdict |
 
 With `none` the workers list shows only the current worker, and the cache
 exchange pulls nothing. `static` cards come from the config and carry no
@@ -60,19 +59,15 @@ cycle, without the mark check.
 `postgres`, `redis` and `consul` are built in; see [`postgres`](#postgres),
 [`redis`](#redis) and [`consul`](#consul). Each keeps its data in a service
 reached through a [named connection](#connections). The block
-`fleet.registry.consul` has the keys `mode` and `service_name`; a plugin does
-not read this block, it gets `plugin_options`.
+`fleet.registry.consul` has the keys `mode` and `service_name`.
 
 A name that uses a connection (`consul`, `redis` and `postgres`) is checked
 when the config loads: the connection it uses must be declared. Without
 `connections.consul.main`, for example, the load fails with
-`fleet.registry.connection 'main' is not defined under connections.consul`. A
-plugin of one of these names is checked the same way, and it wins over the
-built-in provider of that name, as any plugin name does.
+`fleet.registry.connection 'main' is not defined under connections.consul`.
 
 A worker starts with the name only when a provider of that name exists. For a
-name that is neither built in nor an installed plugin, startup fails (with the
-UI on, which the registry needs) with a message that lists the providers that
+name that is not built in, startup fails (with the UI on, which the registry needs) with a message that lists the providers that
 exist, for example
 `fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, postgres, redis, static`.
 
@@ -813,8 +808,7 @@ not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
 This release ships the `postgres`, `redis` and `consul` providers, which read
 `connections.postgres.<name>`, `connections.redis.<name>` and
-`connections.consul.<name>`; a provider plugin can use any entry (see [Writing
-a provider](#writing-a-provider)).
+`connections.consul.<name>`.
 
 ```yaml
 connections:
@@ -840,9 +834,8 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `periodic.election.connection` name
   an entry. The `postgres`, `redis` and `consul` providers read it.
-  `filesystem`, `static` and `none` ignore it, and so does
-  a plugin with any other name. The config load checks the key by provider name, so a provider
-  named `consul`, `redis` or `postgres` (a plugin of that name too) needs its
+  `filesystem`, `static` and `none` ignore it. The config load checks the key by
+  provider name, so a provider named `consul`, `redis` or `postgres` needs its
   connection declared; otherwise the load fails with
   `fleet.registry.connection 'main' is not defined under connections.consul`.
 - Features that name the same connection share one client. The first
@@ -995,158 +988,6 @@ that is live by the [liveness rule](#liveness), it logs `fleet_duplicate_worker_
 `drakkar_fleet_duplicate_worker_name_total`. Give every worker a unique
 name, for example from the pod name through `worker_name_env`.
 
-## Writing a provider
-
-A provider is a class with five async methods and a factory that builds it
-from an options mapping:
-
-```python
-from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
-
-
-class EtcdRegistry:
-    def __init__(self, options):
-        self._address = options['address']
-
-    async def start(self, ctx: RegistryContext) -> None:
-        """Prepare the provider. ctx carries the worker name, instance, cluster,
-        logger, options and the shared connections. Called again after a
-        failure, so leave nothing behind when it raises."""
-
-    async def publish(self, card: dict) -> None:
-        """Store the card, replacing any card stored under the same worker name."""
-
-    async def list(self) -> PeerCardList:
-        """Every card you can read, this worker's own included, with its age
-        on your own clock (None when you cannot tell)."""
-        return [PeerCard(card={...}, age_seconds=12.5)]
-
-    async def withdraw(self, worker: str, instance: str) -> None:
-        """Delete the worker's card, but only while it still holds this instance."""
-
-    async def stop(self) -> None:
-        """Release what start took. Called at most once, last."""
-
-
-def make_registry(options):
-    return EtcdRegistry(options)
-```
-
-Register the factory as an entry point of your package:
-
-```toml
-[project.entry-points."drakkar.registry_providers"]
-etcd = "drakkar_etcd:make_registry"
-```
-
-and select it:
-
-```yaml
-fleet:
-  registry:
-    provider: etcd
-    plugin_options:
-      address: etcd.service:2379
-```
-
-`plugin_options` is passed to the factory unchanged; the provider validates
-it. The config reference masks its values (see
-[Security](security.md#provider-credentials)). A plugin name wins over a
-built-in name, so a package can replace `filesystem`. A plugin named
-`consul`, `redis` or `postgres` is checked like the provider of that name:
-the connection that `fleet.registry.connection` names must be declared.
-
-A plugin that fails to load is logged and skipped
-(`provider_entry_point_load_failed`, with the fields `group`, `name`, `value`
-and `error`; the other two events of this family are
-`provider_entry_point_scan_failed`, with `group` and `error`, and
-`provider_entry_point_invalid`; the field `group` names
-`drakkar.registry_providers`). Startup then fails only
-if the configured name is the missing one, with a message that lists the
-providers that exist.
-
-Provider methods are coroutines that run on the worker's event loop, the
-same loop that runs the message pipeline. A method that blocks — file or
-network I/O without `await`, a synchronous client library — stalls every
-partition while it runs, and the time limit cannot interrupt it. Run
-blocking work in a thread of your own (for example a one-thread
-`concurrent.futures.ThreadPoolExecutor` driven with
-`loop.run_in_executor`), so a hung call holds only that thread.
-
-What the worker does, and what the provider does:
-
-| The worker | The provider |
-|---|---|
-| loops, time limits, retries, the breaker, the thread or task each call runs on | storing the cards |
-| building and validating cards | the age of each card on its own clock (`None` when unknown) |
-| the snapshot, the duplicate warning | its own liveness verdict (`PeerCard.online`), when its service has one |
-| online and offline from the verdict or the age | deleting old cards |
-
-`list()` returns the caller's own card too; the worker leaves it out of the
-snapshot and builds its own row from local state.
-
-Rules for the lifecycle methods:
-
-- **`start` is retried.** A `start` that raises or times out is called
-  again at the next heartbeat, so it must leave nothing behind that a second
-  call would trip over. Nothing else is called before a `start` succeeded.
-- **`stop` may not be called.** It is called at most once, and only after a
-  `start` that succeeded. It is not called while the breaker is open or when
-  the shutdown time is spent, and not for a `start` that the shutdown
-  cancelled half way. Open clients lazily, or make sure that a missing
-  `stop` leaks nothing that outlives the process.
-- **A provider is single-use.** The worker never calls `start` after
-  `stop`. The built-in `filesystem` provider raises `provider stopped` on
-  such a call, so a misuse shows at once.
-- **`online` is optional.** Set `PeerCard.online` to `True` or `False` only
-  when your service decides liveness itself. Leave it `None` otherwise: the
-  worker then judges `age_seconds` against `offline_after_seconds`.
-- **Shared connections.** `ctx.connections` resolves the entries of the
-  `connections` config (it is `None` outside a worker, as in a test).
-  `await ctx.connections.acquire(kind, name, opener, closer)` returns the
-  client of `connections.<kind>.<name>`. It calls `opener(settings)` for the
-  first caller only and keeps `closer` for the shutdown, so every feature
-  that names the connection shares one client. `ctx.connections.settings(kind, name)`
-  returns the declared settings. An undeclared name raises
-  `drakkar.providers.connections.UnknownConnectionError`. A plugin takes the
-  name from its own `plugin_options`.
-- **Raise `drakkar.providers.resilience.TransientError`** for an error that
-  is worth a retry and is not already an `OSError` or a timeout.
-
-### The test kit
-
-`drakkar.fleet.testkit` holds the checks every provider should pass. They
-need no test framework and raise `AssertionError` with a plain message:
-
-```python
-import pytest
-
-from drakkar.fleet import testkit
-
-
-@pytest.mark.parametrize('check', testkit.PUBLISHING_CHECKS)
-async def test_etcd_registry(check, etcd_store):
-    await check(lambda: EtcdRegistry({'address': etcd_store.address}), etcd_store.advance, 600)
-
-
-@pytest.mark.parametrize('check', testkit.LIVENESS_CHECKS)
-async def test_etcd_registry_liveness(check, etcd_store):
-    await check(lambda: EtcdRegistry({'address': etcd_store.address}), etcd_store.advance, 60)
-```
-
-- `make_provider()` returns a new provider that shares storage with the
-  others the same check builds (two of them stand for two processes).
-- `advance(seconds)` makes every stored card that much older on your clock.
-- The last argument of `PUBLISHING_CHECKS` is the age after which your
-  provider deletes a card. The last argument of `LIVENESS_CHECKS` is the age
-  after which a card whose owner stopped publishing must no longer be
-  reported `online`. A provider that leaves `online` at `None` passes them.
-
-`testkit.check_list_shape(provider, ctx)` and
-`testkit.check_age_is_none_or_non_negative(provider, ctx)` apply to every
-provider, including read-only ones; `testkit.make_context(worker)` builds a
-context for them.
-
 ## Metrics
 
 | Metric | Type | Labels | Meaning |
@@ -1188,7 +1029,6 @@ also counted by the three provider metrics:
 | `fleet_card_invalid` | warning | A card was skipped; once per file name (a file that is unreadable, not a plain file, too large or not a JSON object) or per worker (field rules). |
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
 | `fleet_duplicate_worker_name` | warning | Another live process publishes this worker's name; once per instance. |
-| `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid` | warning | A provider plugin could not be found or loaded. `scan_failed` has the fields `group` and `error`; `load_failed` and `invalid` add `name` and `value`. `group` is `drakkar.registry_providers` or `drakkar.election_providers`. |
 | `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
 | `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
 | `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |
@@ -1197,7 +1037,7 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul), or a plugin name. |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul). |
 | `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
@@ -1209,7 +1049,6 @@ also counted by the three provider metrics:
 | `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of the `consul` provider. `mode` is `publish`; `catalog` is reserved for a later release, and the load refuses it with `provider: consul`. `service_name` belongs to catalog mode and is not used. |
 | `fleet.registry.postgres` | `{}` | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 | `fleet.registry.redis` | `{}` | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
-| `fleet.registry.plugin_options` | `{}` | Options for a provider plugin. |
 | `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `consul` providers read `connections.consul.*`, the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example

@@ -296,7 +296,7 @@ class RedisSink(BaseSink[RedisPayload]):
         **Reachability, stated plainly:** a handler cannot get here today.
         Handlers never receive sink instances — ``SinkManager.sinks`` lives
         on the manager, and ``on_ready(config, db_pool)`` is handed only the
-        Postgres pool. So this is reachable only from a plugin sink
+        Postgres pool. So this is reachable only from a sink
         subclass. Giving handlers general access to sink clients affects
         every sink type and is a separate design, deliberately not settled
         as a side effect of the Redis command work.

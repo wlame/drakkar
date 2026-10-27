@@ -20,7 +20,6 @@ from structlog.testing import capture_logs
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
-from drakkar.recorder import electiontest
 from drakkar.recorder.election import (
     BUILTIN_ELECTIONS,
     ElectionContext,
@@ -31,6 +30,7 @@ from drakkar.recorder.election import (
 from drakkar.recorder.history import task_lock_dir
 from drakkar.recorder.task_lock import LOCK_SUFFIX, STALE_INFIX
 from drakkar.schedule import SCOPE_INVALID, task_scope
+from tests import election_testkit as electiontest
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 

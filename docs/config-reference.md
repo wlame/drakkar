@@ -184,7 +184,7 @@ Where processed results are delivered. Each sink type maps **instance names → 
 
 📚 [Deep details](configuration.md#keys-of-every-sink-instance) · [Failure policy](sinks.md#failure-policy)
 
-Every instance of every type, plugin sinks included, takes these three keys
+Every instance of every type takes these three keys
 next to its own:
 
 ```yaml
@@ -316,21 +316,6 @@ sinks:
     archive:
       base_path: /data/archive     # required, payload paths are resolved under this. env: DK_SINKS__FILESYSTEM__ARCHIVE__BASE_PATH
       ui_url: ''                   # env: DK_SINKS__FILESYSTEM__ARCHIVE__UI_URL
-```
-
-### Custom sinks (plugins)
-
-📚 [Deep details](configuration.md#custom-sinks-sinkscustomtypename) · [Plugin API](sinks.md#custom-sinks-plugin-api)
-
-Instances of sink types registered by plugin packages via `[project.entry-points."drakkar.sinks"]`. The leaf config dict is plugin-defined and passed to the sink class constructor; an unregistered type name fails at startup, and a type named like a built-in type fails the load. The shared keys `on_failure`, `max_retries` and `depends_on` are reserved: the framework reads them and removes them from the leaf (env `DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE`).
-
-```yaml
-sinks:
-  custom:
-    my_custom_type:                # entry-point-registered sink type name
-      audit_trail_out:             # instance name (free-form, referenced from handler code)
-        endpoint: https://audit.internal.example.com   # plugin-defined fields — Drakkar passes
-        buffer_size: 500                               #   the dict through unvalidated
 ```
 
 ### Delivery timeout (shared default)
@@ -748,7 +733,7 @@ history:
 periodic:
   election:                        # which worker of a cluster runs each slot of a cluster task (history.archive
                                    # included); see "Resilience block" below
-    provider: filesystem           # filesystem | postgres | redis | consul | <plugin name>.
+    provider: filesystem           # filesystem | postgres | redis | consul.
                                    # Every worker of one cluster uses the same provider. env: DK_PERIODIC__ELECTION__PROVIDER
     connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
                                    # env: DK_PERIODIC__ELECTION__CONNECTION
@@ -760,8 +745,6 @@ periodic:
       breaker:
         failure_threshold: 5       # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
         cooldown_seconds: 30.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
-    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
-                                   # env: one key per variable, DK_PERIODIC__ELECTION__PLUGIN_OPTIONS__<KEY>
   tasks: {}                        # overrides of declared @periodic tasks, keyed by method name:
                                    #   refresh_rates: {enabled: true, interval: 600, cron: null, lease_seconds: null}
                                    # give at most one of interval and cron; a name the handler does not declare
@@ -781,7 +764,7 @@ How workers find each other and exchange cache rows. Peers pull `cluster`/`globa
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | postgres | redis | consul | <plugin name>;
+    provider: filesystem           # filesystem | static | none | postgres | redis | consul;
                                    # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>;
                                    # redis keeps them in keys of connections.redis.<connection>, with an index of the workers;
                                    # consul keeps them in keys of connections.consul.<connection>, each held by a session of its worker.
@@ -810,14 +793,12 @@ fleet:
       dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
     static:
       peers: []                    # [{name, cluster, url}]. YAML only.
-    consul:                        # settings of the consul provider; a plugin does not read this block
+    consul:                        # settings of the consul provider
       mode: publish                # publish | catalog. catalog is reserved for a later release and fails the load with provider consul.
                                    # env: DK_FLEET__REGISTRY__CONSUL__MODE
       service_name: drakkar        # for the catalog mode of a later release; not used now. env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
     redis: {}                      # block of the redis provider; no keys (address, credentials and key prefix come from the connection)
     postgres: {}                   # block of the postgres provider; no keys (schema and pool come from the connection)
-    plugin_options: {}             # passed unchanged to a provider plugin; values masked in the config reference.
-                                   # env: one key per variable, DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
@@ -832,7 +813,7 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `periodic.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`. A provider plugin can use any entry through `ctx.connections`.
+Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `periodic.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`.
 
 ```yaml
 connections:

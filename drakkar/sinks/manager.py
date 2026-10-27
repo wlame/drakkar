@@ -22,7 +22,7 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import CircuitBreakerConfig, SinkPolicy, SinksConfig
-from drakkar.config.sinks import BUILTIN_SINK_TYPES, DEFAULT_SINK_POLICY
+from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.metrics import (
     dlq_dropped_payloads,
     dlq_unconfigured_drops,
@@ -43,7 +43,6 @@ from drakkar.models import (
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
-from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
 
 _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
@@ -82,10 +81,7 @@ DeliveryErrorCallback = Callable[[DeliveryError], Awaitable[DeliveryAction]]
 CIRCUIT_OPEN_ERROR = 'circuit open'
 
 # Mapping from CollectResult field name to sink_type string. Each entry
-# is a built-in sink whose payload model lives in ``drakkar.models``.
-# Plugin-registered sinks are dispatched separately via
-# ``CollectResult.custom`` (see ``_dispatch_custom_payloads``) so the
-# framework does not have to know the plugin's sink_type ahead of time.
+# is a sink whose payload model lives in ``drakkar.models``.
 _FIELD_TO_SINK_TYPE: dict[str, str] = {
     'kafka': 'kafka',
     'postgres': 'postgres',
@@ -286,7 +282,7 @@ class SinkManager:
         # captured section object stale. Going through the app on each read
         # follows both.
         #
-        # ``None`` for a manager built standalone (tests, plugin authors),
+        # ``None`` for a manager built standalone (tests),
         # which then uses the two explicit arguments.
         self._sinks_config: Callable[[], SinksConfig] | None = sinks_config
         # Fallbacks for a manager with no config section. None => default
@@ -318,13 +314,6 @@ class SinkManager:
         # call returns, so /readyz stays green while the worker does nothing.
         self._delivery_timeout_default: float = delivery_timeout_seconds
 
-        # Run plugin discovery once at construction so any third-party
-        # sinks installed via ``[project.entry-points."drakkar.sinks"]``
-        # are visible to ``resolve_sink_class``. ``discover()`` is
-        # idempotent — repeated SinkManager construction (in tests, in
-        # restart loops) does not re-walk the entry-point table.
-        SinkRegistry.discover()
-
     @property
     def _circuit_breaker_config(self) -> CircuitBreakerConfig:
         """Breaker thresholds, read live from the config section when there is one."""
@@ -338,17 +327,6 @@ class SinkManager:
         if self._sinks_config is not None:
             return self._sinks_config().delivery_timeout_seconds
         return self._delivery_timeout_default
-
-    def resolve_sink_class(self, type_name: str) -> type[BaseSink[Any]] | None:
-        """Look up a sink class by its registered type name.
-
-        Returns ``None`` when the name is not registered so the caller
-        can decide between hard failure (config explicitly named an
-        unknown sink type) and silent skip (optional plugin not
-        installed). Used by :class:`drakkar.app.DrakkarApp` when it
-        materialises sink instances from config.
-        """
-        return SinkRegistry.get(type_name)
 
     def attach_runtime(
         self,
@@ -412,7 +390,7 @@ class SinkManager:
         self._policies[key] = policy
         dependencies: list[SinkKey] = []
         for ref in policy.depends_on:
-            # The config load checked every reference; a plugin type name has no '/'.
+            # The config load checked every reference;
             dependency_type, _, dependency_name = ref.partition('/')
             dependencies.append((dependency_type, dependency_name))
         self._dependencies[key] = tuple(dependencies)
@@ -577,59 +555,6 @@ class SinkManager:
         """
         return [f'{sink.sink_type}:{sink.name}' for sink in self._sinks.values() if not sink.is_connected]
 
-    def resolve_custom_sink(self, sink_name: str) -> BaseSink[Any]:
-        """Resolve a plugin-registered sink instance by instance name.
-
-        Plugin sinks are addressed by name in ``CollectResult.custom`` —
-        the framework does not require the user to also pass the
-        plugin's ``sink_type`` because the instance name is unique
-        across plugin sinks (the validator below rejects duplicates so
-        this contract holds).
-
-        Args:
-            sink_name: The non-empty instance name from
-                ``CustomPayload.sink``. Must match a registered plugin
-                sink instance.
-
-        Raises:
-            SinkNotConfiguredError: No plugin sink instance has that
-                name (the operator forgot to declare it under
-                ``sinks.custom`` or there's a typo in the handler).
-            AmbiguousSinkError: Two or more plugin sink instances
-                across different ``sink_type`` values share the same
-                name — operators must rename one to disambiguate.
-        """
-        if not sink_name:
-            # Custom payloads must always carry an explicit instance
-            # name — the empty-string convenience used by built-in
-            # payloads only works when the framework knows the
-            # ``sink_type`` ahead of time. Plugin sinks have no shared
-            # type for that fallback to lean on.
-            raise SinkNotConfiguredError(
-                'CustomPayload.sink is empty — plugin sink payloads must name '
-                'the configured sink instance explicitly (one of: '
-                f'{[name for (st, name), _ in self._sinks.items() if st not in BUILTIN_SINK_TYPES]!r}).'
-            )
-
-        candidates = [
-            (sink_type, sink)
-            for (sink_type, name), sink in self._sinks.items()
-            if name == sink_name and sink_type not in BUILTIN_SINK_TYPES
-        ]
-        if not candidates:
-            plugin_names = sorted({name for (st, name), _ in self._sinks.items() if st not in BUILTIN_SINK_TYPES})
-            raise SinkNotConfiguredError(
-                f'No plugin sink instance named {sink_name!r} configured under sinks.custom — '
-                f'known plugin sink instances: {plugin_names!r}'
-            )
-        if len(candidates) > 1:
-            types = sorted({sink_type for sink_type, _ in candidates})
-            raise AmbiguousSinkError(
-                f'Plugin sink instance name {sink_name!r} is shared across multiple sink types '
-                f'({types}). Rename one of them so the routing is unambiguous.'
-            )
-        return candidates[0][1]
-
     def resolve_sink(self, sink_type: str, sink_name: str) -> BaseSink[Any]:
         """Resolve a sink instance by type and name.
 
@@ -661,16 +586,10 @@ class SinkManager:
     def validate_collect(self, result: CollectResult) -> None:
         """Validate that every payload in the result targets a configured sink.
 
-        Iterates all populated fields (built-in + ``custom``), resolves
+        Iterates all populated fields, resolves
         each payload's sink, and raises ``SinkNotConfiguredError`` or
         ``AmbiguousSinkError`` on the first problem. Called before
         delivery so the worker crashes fast on misconfiguration.
-
-        Plugin sink payloads in ``result.custom`` are resolved by
-        instance name via :meth:`resolve_custom_sink` — the framework
-        does not require the handler to also pass the sink type because
-        plugin instance names are unique across plugin types (see the
-        ambiguity check in ``resolve_custom_sink``).
         """
         for field_name, sink_type in _FIELD_TO_SINK_TYPE.items():
             payloads = getattr(result, field_name)
@@ -678,8 +597,6 @@ class SinkManager:
                 continue
             for payload in payloads:
                 self.resolve_sink(sink_type, payload.sink)
-        for payload in result.custom:
-            self.resolve_custom_sink(payload.sink)
 
     def _group_payloads(self, result: CollectResult) -> dict[SinkKey, list[BaseModel]]:
         """The result's payloads grouped by sink, each group in payload order."""
@@ -691,13 +608,6 @@ class SinkManager:
             for payload in payloads:
                 sink = self.resolve_sink(sink_type, payload.sink)
                 groups[(sink.sink_type, sink.name)].append(payload)
-        # Plugin sink payloads. Resolution is by instance name across the
-        # non-built-in sink set; the validate_collect step has already
-        # rejected unknown / ambiguous names so resolve_custom_sink is
-        # guaranteed to succeed at this point.
-        for payload in result.custom:
-            sink = self.resolve_custom_sink(payload.sink)
-            groups[(sink.sink_type, sink.name)].append(payload)
         return groups
 
     async def deliver_all(
@@ -711,8 +621,7 @@ class SinkManager:
     ) -> dict[SinkKey, DeliveryOutcome]:
         """Deliver every payload group of one result by its sink's declared policy and dependencies.
 
-        Groups payloads by (sink_type, resolved_sink_name), for the built-in
-        payload fields and the plugin-sink ``custom`` field. A group whose
+        Groups payloads by (sink_type, resolved_sink_name). A group whose
         sink has no dependency in this result starts at once, in parallel
         with the others; a group with dependencies starts when each of them
         settled with success (delivered or skipped). A dependency with no

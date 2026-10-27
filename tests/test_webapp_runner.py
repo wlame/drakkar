@@ -1289,28 +1289,26 @@ def test_split_collect_by_type_covers_every_sink_type():
     """The per-sink-type split must route every CollectResult field to its
     own batch — missing one here would silently drop that sink type's
     payloads from webapp delivery whenever sinks_enabled=True. kafka and
-    postgres are exercised elsewhere; this pins down the remaining five."""
-    from drakkar.models import CollectResult, CustomPayload, FilePayload, HttpPayload, MongoPayload, RedisPayload
+    postgres are exercised elsewhere; this pins down the remaining four."""
+    from drakkar.models import CollectResult, FilePayload, HttpPayload, MongoPayload, RedisPayload
 
     result = CollectResult(
         mongo=[MongoPayload(collection='out', data=_SinkOut(value=1))],
         http=[HttpPayload(data=_SinkOut(value=2))],
         redis=[RedisPayload(key='k', data=_SinkOut(value=3))],
         files=[FilePayload(path='out.jsonl', data=_SinkOut(value=4))],
-        custom=[CustomPayload(sink='my-plugin', data=_SinkOut(value=5))],
     )
 
     groups = WebappRunner._split_collect_by_type(result)
 
     # Deterministic order, one entry per populated field, each sub-result
     # carrying only that field's own payload.
-    assert [sink_type for sink_type, _ in groups] == ['mongo', 'http', 'redis', 'filesystem', 'custom']
+    assert [sink_type for sink_type, _ in groups] == ['mongo', 'http', 'redis', 'filesystem']
     by_type = dict(groups)
     assert len(by_type['mongo'].mongo) == 1
     assert len(by_type['http'].http) == 1
     assert len(by_type['redis'].redis) == 1
     assert len(by_type['filesystem'].files) == 1
-    assert len(by_type['custom'].custom) == 1
 
 
 @pytest.mark.asyncio

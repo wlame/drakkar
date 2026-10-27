@@ -1108,34 +1108,6 @@ class FilePayload(BaseModel):
     )
 
 
-class CustomPayload(BaseModel):
-    """Payload for a plugin-registered sink — passes ``data`` to the sink's ``deliver()`` method.
-
-    Plugin sinks (registered via ``[project.entry-points."drakkar.sinks"]``
-    and configured under ``sinks.custom.<type>.<instance>``) define their
-    own payload semantics — Drakkar carries the payload through unchanged
-    and the sink's ``deliver()`` method consumes ``data`` directly. The
-    ``data`` field is typed as ``BaseModel`` (the same constraint applied
-    to every other payload type) so plugin authors can define a Pydantic
-    model that captures whatever shape their downstream consumes.
-
-    Plugin authors are free to subclass this and add typed fields if
-    they prefer — the framework only inspects ``sink`` (instance name)
-    when routing, then hands the whole payload to the sink. Subclasses
-    therefore work transparently.
-    """
-
-    sink: str = Field(
-        description=(
-            'Name of the configured plugin sink instance to route this payload to. '
-            'Must match a key under ``sinks.custom.<type>.<instance>`` in config.'
-        ),
-    )
-    data: SerializeAsAny[BaseModel] = Field(
-        description="Payload model. Passed to the plugin sink's ``deliver()`` as-is."
-    )
-
-
 class CollectResult(BaseModel):
     """Result returned by on_task_complete(), on_message_complete(), and
     on_window_complete() hooks.
@@ -1182,30 +1154,18 @@ class CollectResult(BaseModel):
         default_factory=list,
         description='Payloads routed to configured filesystem sinks.',
     )
-    custom: list[CustomPayload] = Field(
-        default_factory=list,
-        description=(
-            "Payloads routed to plugin-registered sinks. Each payload's "
-            '``sink`` field must match a configured plugin sink instance '
-            'name under ``sinks.custom.<type>.<instance>``.'
-        ),
-    )
 
     @property
     def has_outputs(self) -> bool:
         """True if any sink field contains at least one payload."""
-        return bool(self.kafka or self.postgres or self.mongo or self.http or self.redis or self.files or self.custom)
+        return bool(self.kafka or self.postgres or self.mongo or self.http or self.redis or self.files)
 
     @property
     def used_sink_types(self) -> set[str]:
         """Return the set of sink type names that have payloads.
 
         Useful for validation — the framework checks that every returned
-        sink type has a corresponding configured sink. ``custom`` entries
-        contribute the resolved sink type of their target instance, but
-        we cannot resolve those without the SinkManager — for ``custom``
-        the property reports the placeholder ``'custom'`` and full
-        resolution happens in :meth:`SinkManager.validate_collect`.
+        sink type has a corresponding configured sink.
         """
         types: set[str] = set()
         if self.kafka:
@@ -1220,8 +1180,6 @@ class CollectResult(BaseModel):
             types.add('redis')
         if self.files:
             types.add('filesystem')
-        if self.custom:
-            types.add('custom')
         return types
 
 

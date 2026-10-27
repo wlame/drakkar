@@ -117,7 +117,7 @@ These keys are new. Their defaults work for most deployments.
 | `history.archive.due_after_hours` | `48` | A window is archived this many hours after it ends. |
 | `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. The second guide replaces it with `history.archive.lease_seconds` and `history.archive.sweep_after_seconds`. |
 | `history.merged_retention_days` | `32` | UI merge results older than this are deleted. `0` = never. |
-| `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `static`, `none`, or a plugin. Needs `ui.enabled`. |
+| `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `static`, `none`, `postgres`, `redis` or `consul`. Needs `ui.enabled`. |
 | `fleet.registry.heartbeat_seconds` | `10` | How often a worker publishes its card. |
 | `fleet.registry.refresh_seconds` | `15` | How often a worker reads the other cards. |
 | `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. |
@@ -294,7 +294,6 @@ publishing shows as offline after 60 seconds, not after 30. A value below
 |---|---|
 | `fleet_registry_publish_failed`, `fleet_registry_list_failed`, `fleet_registry_withdraw_failed` | `provider_call_failed` with `feature="registry"` and `op` set to `publish`, `list` or `withdraw`. At most once a minute per operation; `suppressed` says how many failures it stands for. |
 | `fleet_registry_start_failed` | `provider_call_failed` with `op="start"`. The worker no longer replaces a provider that fails to start with `none`: it tries the start again at the next heartbeat. |
-| `fleet_registry_entry_point_scan_failed`, `fleet_registry_entry_point_load_failed`, `fleet_registry_entry_point_invalid` | `provider_entry_point_scan_failed`, `provider_entry_point_load_failed`, `provider_entry_point_invalid`. The field `group` names the entry-point group. |
 | `recorder_archive_lock_taken_over` | `periodic_lock_taken_over`, in category `periodic`. Fields `provider`, `scope` (such as `main/history.archive`), `previous_worker`, `previous_instance`, `age_seconds`. |
 | `recorder_archive_lock_put_back_failed` | `periodic_lock_put_back_failed`, in category `periodic`. Fields `scope`, `folder`, `error`. |
 
@@ -333,29 +332,16 @@ are new. See [Fleet registry](fleet.md#metrics).
   `periodic.election` and the `resilience` blocks have working
   defaults.
 
-### 5. If you wrote a provider plugin
+### 5. If you wrote a plugin
 
-- **A plugin named `consul`, `redis` or `postgres` needs a declared
-  connection.** The config load checks `fleet.registry.connection` and
-  `periodic.election.connection` by provider name, and the default
-  connection name is `main`. A registry or election plugin with one of these
-  names now fails the load, for example with
-  `fleet.registry.connection 'main' is not defined under connections.consul`,
-  unless that entry exists. Declare `connections.<provider>.<connection>` (for
-  `consul` or `redis`, an empty entry such as `connections: {consul: {main: {}}}`
-  is enough; `postgres` needs a `dsn`), or rename the plugin.
-- **`postgres`, `redis` and `consul` are now built-in providers.** A registry
-  or election plugin named `postgres`, `redis` or `consul` still wins over the
-  built-in one, as any plugin name wins over a built-in name.
-- `start` can be called again after a failure (registry and election), so it
-  must leave nothing behind.
-- `stop` is not called when no `start` succeeded, while the breaker is open,
-  or when the shutdown time is spent.
-- A `PeerCard` may carry `online`; leave it `None` if your service has no
-  liveness verdict of its own.
-- `RegistryContext` has a `connections` field for the shared connections.
-
-See [Writing a provider](fleet.md#writing-a-provider).
+Plugins are not supported. The entry-point groups `drakkar.sinks`,
+`drakkar.registry_providers` and `drakkar.election_providers` are not read.
+`sinks.custom`, `fleet.registry.plugin_options` and
+`periodic.election.plugin_options` are not config keys, and `CustomPayload`
+and `CollectResult.custom` do not exist. A sink or a registry or election
+provider that you need must be one of the built-in ones: sinks `kafka`,
+`postgres`, `mongo`, `http`, `redis` and `filesystem`; providers `filesystem`,
+`postgres`, `redis` and `consul`.
 
 ### 6. Periodic tasks and the archive {#periodic-tasks-and-the-archive}
 
@@ -557,19 +543,13 @@ Do these steps in order.
    `skip` there and logs `window_delivery_not_dlq`. A handler that needs the
    DLQ for an aggregate delivers it from `on_message_complete` instead, or
    sets `on_failure: skip` on that sink knowingly.
-9. **Plugin sinks.** The keys `on_failure`, `max_retries` and `depends_on` in a
-   `sinks.custom.<type>.<name>` leaf are now read by the framework and removed
-   before the plugin receives the leaf; rename a plugin option that used one
-   of these names. A plugin type named like a built-in type (`kafka`,
-   `postgres`, ...) under `sinks.custom` fails the load, and a plugin class
-   whose `sink_type` differs from its config key fails startup.
-10. **The HTTP response summary.** In the per-type `sinks` summary of an HTTP
+9. **The HTTP response summary.** In the per-type `sinks` summary of an HTTP
     request, the error markers `dlq_unconfigured` and `dlq_send_failed: ...`
     are gone. A sink that did not start reports `<type>/<name>: not started`,
     and a sink that failed with no DLQ record reports
     `<type>/<name>: failed, no DLQ record`. `dlq` counts only when the
     request's DLQ record was written.
-11. **Update dashboards and alerts.** `drakkar_dlq_dropped_payloads_total` now
+10. **Update dashboards and alerts.** `drakkar_dlq_dropped_payloads_total` now
     counts source messages, once each, not payloads. New:
     `drakkar_dlq_records_total{stage}` and
     `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`.
@@ -583,5 +563,5 @@ Do these steps in order.
     `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
     gone: the shared `delivery_error_hook_failed`, `message_dlq`,
     `dlq_send_failed` and `dlq_failure_payloads_dropped` cover those cases.
-12. **Protect the DLQ topic like the source topic.** It now holds the original
+11. **Protect the DLQ topic like the source topic.** It now holds the original
     messages; see [Security](security.md#the-dlq-topic-holds-original-messages).

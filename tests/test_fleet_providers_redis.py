@@ -26,7 +26,6 @@ from structlog.testing import capture_logs
 from drakkar.config.connections import ConnectionsConfig, RedisConnectionConfig
 from drakkar.config.fleet import FleetRegistryConfig
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig
-from drakkar.fleet import testkit
 from drakkar.fleet.card import WorkerIdentity, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -36,6 +35,7 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.redis import DEFAULT_KEY_PREFIX, SCRIPTS
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
+from tests import fleet_testkit as testkit
 from tests.redis_fake import FakeClock, RecordingClient, fake_client
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['redis']

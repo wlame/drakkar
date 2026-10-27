@@ -7,11 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
 from drakkar.metrics import provider_calls
-from drakkar.providers import lookup
 from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
-from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ThreadFence
+from drakkar.recorder.election import BUILTIN_ELECTIONS, ThreadFence
 from tests.archive_helpers import idle_archive_task, run_won_slot
 from tests.conftest import wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
@@ -64,20 +63,13 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
         received['options'] = dict(options)
         return election
 
-    def discover(group: str) -> dict:
-        return {'example-election': factory} if group == ELECTION_ENTRY_POINT_GROUP else {}
-
-    monkeypatch.setattr(lookup, 'discover_plugin_factories', discover)
+    monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: received.update(kwargs))
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
-    election_config = {
-        'provider': 'example-election',
-        'plugin_options': {'address': 'consul:8500'},
-        'resilience': {'timeout_seconds': 1.5, 'retries': 0},
-    }
+    election_config = {'resilience': {'timeout_seconds': 1.5, 'retries': 0}}
     app = _app(tmp_path, periodic={'election': election_config})
     (tmp_path / 'storage').mkdir()
-    started_ok = provider_calls.labels(feature='election', provider='example-election', op='start', outcome='ok')
+    started_ok = provider_calls.labels(feature='election', provider='filesystem', op='start', outcome='ok')
     started_before = started_ok._value.get()
 
     app._lifecycle._create_connections()
@@ -95,16 +87,16 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
         await app._recorder.stop()
         await cluster_election.stop(None)
 
-    assert received['options'] == {'address': 'consul:8500'}
+    assert received['options'] == {}
     ctx = election.started_with
     assert ctx is not None
     assert (ctx.worker, ctx.instance, ctx.cluster) == ('w-1', app._instance, 'search')
     assert ctx.shared_dir == str(tmp_path / 'shared')
-    assert ctx.options == {'address': 'consul:8500'}
+    assert ctx.options == {}
     assert ctx.connections is app._connections
     fence = received['fence']
     assert isinstance(fence, ThreadFence)
-    assert (fence.provider_name, fence.token) == ('example-election', token)
+    assert (fence.provider_name, fence.token) == ('filesystem', token)
     assert store.leases == {}
     assert started_ok._value.get() == started_before + 1
     assert election.calls['stop'] == 1

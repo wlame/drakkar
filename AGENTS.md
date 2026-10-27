@@ -191,7 +191,7 @@ drakkar/
   sinks/                   sink implementations + DLQ + circuit breaker
   sources/                 input-source protocol, registry, handler validation
   cache/                   LWW SQLite cache + the HTTP cache exchange (client and query parsing)
-  fleet/                   worker registry: cards, providers, plugin lookup, test kit, service
+  fleet/                   worker registry: cards, providers, service
   periodic.py              @periodic decorator, its rules, the worker-scope loop, the shared run-once helper
   periodic_roster.py       discovery of declared tasks, periodic.tasks overrides, startup checks, definition hash
   cluster_tasks.py         cluster slot loop, slot lease, the worker's one election service, hash checker

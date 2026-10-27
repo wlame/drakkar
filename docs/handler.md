@@ -629,7 +629,7 @@ Called after every failed attempt of a sink's `deliver()`. See [Delivery Lifecyc
 | Field             | Type              | Description |
 |-------------------|-------------------|-------------|
 | `sink_name`       | `str`             | The configured name of the sink |
-| `sink_type`       | `str`             | The sink type (`kafka`, `postgres`, ..., or the plugin type) |
+| `sink_type`       | `str`             | The sink type (`kafka`, `postgres`, ...) |
 | `error`           | `str`             | The error text, URL credentials redacted |
 | `payloads`        | `list[BaseModel]` | The payloads of the failed group |
 | `attempt`         | `int`             | The failed attempt, from 1. The quick internal retries of an idempotent write are not counted. |

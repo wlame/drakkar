@@ -246,7 +246,7 @@ class PlannedSinkRecord(BaseModel):
     Postgres sink instance name, etc.) without bloating the core schema.
     """
 
-    sink_type: Literal['kafka', 'postgres', 'mongo', 'http', 'redis', 'files', 'custom'] = Field(
+    sink_type: Literal['kafka', 'postgres', 'mongo', 'http', 'redis', 'files'] = Field(
         description='Which CollectResult field the payload came from.'
     )
     destination: str = Field(

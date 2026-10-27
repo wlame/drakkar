@@ -1674,40 +1674,6 @@
       "message": "sinks: depends_on forms a cycle: kafka/b -> kafka/c -> kafka/b"
     },
     {
-      "name": "plugin_sink_on_failure_by_env",
-      "yaml": {
-        "sinks": {
-          "custom": {
-            "webhook": {
-              "main": {
-                "url": "https://hooks.example"
-              }
-            }
-          }
-        }
-      },
-      "env": {
-        "DK_SINKS__CUSTOM__WEBHOOK__MAIN__ON_FAILURE": "stall"
-      },
-      "message": "sinks.custom.webhook.main.on_failure must be dlq or skip, got 'stall'"
-    },
-    {
-      "name": "plugin_sink_max_retries_fraction",
-      "yaml": {
-        "sinks": {
-          "custom": {
-            "webhook": {
-              "main": {
-                "url": "https://hooks.example",
-                "max_retries": 2.5
-              }
-            }
-          }
-        }
-      },
-      "path": "sinks.custom.webhook.main.max_retries"
-    },
-    {
       "name": "executor_on_failure_unknown",
       "yaml": {
         "executor": {
@@ -1715,21 +1681,6 @@
         }
       },
       "message": "executor.on_failure must be skip or dlq, got 'retry'"
-    },
-    {
-      "name": "plugin_sink_type_named_like_builtin",
-      "yaml": {
-        "sinks": {
-          "custom": {
-            "kafka": {
-              "main": {
-                "topic": "out"
-              }
-            }
-          }
-        }
-      },
-      "message": "sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name"
     }
   ],
   "load_values": [
@@ -2009,25 +1960,6 @@
       "yaml": {},
       "path": "executor.on_failure",
       "value": "skip"
-    },
-    {
-      "name": "sink_plugin_leaf_without_reserved_keys",
-      "yaml": {
-        "sinks": {
-          "custom": {
-            "webhook": {
-              "main": {
-                "url": "https://hooks.example",
-                "on_failure": "skip"
-              }
-            }
-          }
-        }
-      },
-      "path": "sinks.custom.webhook.main",
-      "value": {
-        "url": "https://hooks.example"
-      }
     }
   ]
 }

@@ -1,7 +1,6 @@
 """Tests for Drakkar main application."""
 
 import asyncio
-import re
 import stat
 import sys
 from pathlib import Path
@@ -377,41 +376,6 @@ def test_build_sinks_registers_each_declared_policy(test_config):
     policies = app._sink_manager._policies
     assert (policies[('postgres', 'main')].on_failure, policies[('postgres', 'main')].max_retries) == ('skip', 5)
     assert app._sink_manager._dependencies[('kafka', 'results')] == (('postgres', 'main'),)
-
-
-def test_build_sinks_refuses_a_plugin_whose_sink_type_differs_from_its_key(test_config):
-    """A plugin class reporting another sink_type would make its depends_on references unreachable."""
-    from drakkar.sinks.base import BaseSink
-    from drakkar.sinks.registry import SinkRegistry
-
-    class MislabelledSink(BaseSink):
-        sink_type = 'other'
-
-        def __init__(self, name: str, config: dict) -> None:
-            super().__init__(name)
-
-        async def connect(self) -> None:  # pragma: no cover - never connected
-            pass
-
-        async def deliver(self, payloads: list) -> None:  # pragma: no cover - never delivered
-            pass
-
-        async def close(self) -> None:  # pragma: no cover - never closed
-            pass
-
-    cfg = DrakkarConfig.model_validate(
-        {**test_config.model_dump(), 'sinks': {'custom': {'webhookx': {'main': {'url': 'http://x'}}}}}
-    )
-    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
-    snapshot = dict(SinkRegistry._registered)
-    SinkRegistry.register('webhookx', MislabelledSink)
-    try:
-        with pytest.raises(
-            ValueError, match=re.escape("sinks.custom.webhookx.main: the plugin reports sink_type 'other'")
-        ):
-            app._build_sinks()
-    finally:
-        SinkRegistry._registered = snapshot
 
 
 async def test_app_routes_circuit_open_to_dlq_sink(test_config):

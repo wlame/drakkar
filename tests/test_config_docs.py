@@ -195,7 +195,7 @@ def test_builtin_sink_types_are_derived_from_the_sinks_model():
     ``delivery_timeout_seconds`` (a float) and blow up instead.
     """
     mapping_fields = {name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict}
-    assert set(BUILTIN_SINK_TYPES) == mapping_fields - {'custom'}
+    assert set(BUILTIN_SINK_TYPES) == mapping_fields
     assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(BUILTIN_SINK_TYPES)
     assert all(isinstance(getattr(SinksConfig(), section), dict) for section in BUILTIN_SINK_TYPES)
 
@@ -209,12 +209,6 @@ def test_startup_still_warns_on_a_bad_anchor_when_no_docs_site_is_configured():
     """
     warnings = _startup_warnings(anchors=[_anchor(match={'sink': 'archive_results_db'})], site_dir='')
     assert [w['event'] for w in warnings] == ['docs_anchor_unknown_sink']
-
-
-def test_startup_silent_when_docs_anchor_names_a_custom_sink_instance():
-    """Plugin-registered instances live one level deeper under sinks.custom."""
-    sinks = SinksConfig(custom={'vector_index': {'embed_results_index': {'endpoint': 'http://index:8080'}}})
-    assert _startup_warnings(anchors=[_anchor(match={'sink': 'embed_results_index'})], sinks=sinks) == []
 
 
 def test_startup_warns_on_docs_anchor_naming_an_unknown_event():

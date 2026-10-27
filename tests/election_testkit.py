@@ -1,7 +1,6 @@
 """Behaviour checks for election providers.
 
-A provider author runs these from their own test suite; the built-in
-``filesystem`` provider runs them too. Each check is an ``async`` function
+The built-in providers run these in their tests. Each check is an ``async`` function
 that raises ``AssertionError`` with a plain message when the provider
 misbehaves. The module needs no test framework.
 
@@ -21,14 +20,7 @@ of one cluster in the ``<cluster>/<task>`` form.
 
 The checks start each provider with :func:`make_context`, whose
 ``shared_dir`` is empty: a provider that keeps its leases in a folder is
-started on a test folder by the author's ``make_provider``.
-
-Example with pytest::
-
-    @pytest.mark.parametrize('check', electiontest.ELECTION_CHECKS)
-    async def test_my_provider(check):
-        service = MyFakeService()
-        await check(lambda: MyElection(service), service.advance, 600)
+started on a test folder by the caller's ``make_provider``.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable

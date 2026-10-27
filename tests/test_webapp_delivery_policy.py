@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import dlq_unconfigured_drops, sink_deliveries_not_started, webapp_dropped_after_timeout
-from drakkar.models import CollectResult, CustomPayload, DeliveryError, KafkaPayload, PostgresPayload
+from drakkar.models import CollectResult, DeliveryError, KafkaPayload, PostgresPayload
 from drakkar.sinks.dlq_record import render_headers
 from drakkar.sinks.manager import SinkManager
 from drakkar.webapp.models import WebRequestContext
@@ -157,12 +157,10 @@ async def test_http_summary_counts_per_type_from_outcomes():
     audit = FakeSink('audit', 'kafka')
     audit.fail = True
     postgres = FakeSink('main', 'postgres')
-    plugin = FakeSink('lake', 'datalake')
     manager = manager_with(
         (out, policy()),
         (audit, policy(on_failure='skip', max_retries=0)),
         (postgres, policy()),
-        (plugin, policy()),
     )
     calls: list[Any] = []
     deliver_all = manager.deliver_all
@@ -179,7 +177,6 @@ async def test_http_summary_counts_per_type_from_outcomes():
             KafkaPayload(sink='audit', data=Data(value=3)),
         ],
         postgres=[PostgresPayload(table='t', data=Data()) for _ in range(3)],
-        custom=[CustomPayload(sink='lake', data=Data())],
     )
 
     report = await make_runner(Handler(collect), manager).run(make_ctx())
@@ -190,7 +187,6 @@ async def test_http_summary_counts_per_type_from_outcomes():
     assert {kind: result.model_dump() for kind, result in report.sinks.by_type.items()} == {
         'kafka': {'attempted': 3, 'delivered': 2, 'dlq': 0, 'errors': ['kafka/audit: kafka is down']},
         'postgres': {'attempted': 3, 'delivered': 3, 'dlq': 0, 'errors': []},
-        'custom': {'attempted': 1, 'delivered': 1, 'dlq': 0, 'errors': []},
     }
     assert [len(batch) for batch in out.delivered] == [2]
 

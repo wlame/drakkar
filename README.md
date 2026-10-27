@@ -37,7 +37,7 @@ flowchart LR
 
 - **Two input sources** — Kafka and HTTP, each optional: a worker runs Kafka-only, HTTP-only, or both, behind one handler, one executor pool and one set of sinks
 - **Per-partition pipelines** with watermark offset tracking — commits happen only after every sink confirmed
-- **Pluggable sinks** — Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; multiple named instances per type, third-party sinks via entry points
+- **Sinks** — Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; multiple named instances per type
 - **Dead letter queue** of original messages with replay tooling; each sink declares its failure policy (`dlq` or `skip`, a retry budget, `depends_on`), and `on_delivery_error()` decides per failure
 - **Backpressure** via Kafka pause/resume — memory stays bounded regardless of lag
 - **Typed messages** — Pydantic models as type parameters, auto de/serialization

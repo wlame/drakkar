@@ -35,7 +35,7 @@ import asyncio
 import os
 import signal
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,8 +62,7 @@ from drakkar.cluster_tasks import (
 from drakkar.config.ui import PERSISTENCE_POSTGRES
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
-from drakkar.fleet.plugins import resolve_provider_factory
-from drakkar.fleet.providers import FleetRegistryFolderError, prepare_registry_folder
+from drakkar.fleet.providers import BUILTIN_PROVIDERS, FleetRegistryFolderError, prepare_registry_folder
 from drakkar.fleet.service import FleetRegistry
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
@@ -80,13 +79,11 @@ from drakkar.metrics import (
 from drakkar.periodic import STARTUP_NO_SHARED_FOLDER, SYSTEM_CLOCK, Clock, run_periodic_task
 from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
-from drakkar.providers.lookup import resolve_factory
 from drakkar.providers.resilience import ResilientCaller, describe_error
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.recorder.election import (
     BUILTIN_ELECTIONS,
-    ELECTION_ENTRY_POINT_GROUP,
     ELECTION_FEATURE,
     ElectionContext,
 )
@@ -104,6 +101,26 @@ if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig, ElectionConfig, FleetRegistryConfig
 
 logger = structlog.get_logger()
+
+
+class UnknownProviderError(ValueError):
+    """A configured provider name is not one of the built-in providers of its feature."""
+
+
+def _builtin_factory[F](table: Mapping[str, F], name: str, *, config_path: str) -> F:
+    """Return the factory of provider ``name`` from ``table``.
+
+    ``config_path`` is the config key that named the provider, for the error.
+
+    Raises:
+        UnknownProviderError: the table has no such name; the message names
+            the config key and lists the names that exist.
+    """
+    factory = table.get(name)
+    if factory is None:
+        raise UnknownProviderError(f"{config_path} '{name}' is not known; known providers: {', '.join(sorted(table))}")
+    return factory
+
 
 # Startup refuses a worker whose results go to sinks when it has none.
 NO_SINKS_ERROR = (
@@ -125,8 +142,10 @@ def _connection_only(election: ElectionConfig) -> dict[str, Any]:
 def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     """The options mapping the configured registry provider's factory receives.
 
-    The built-ins take their settings from their own config sections; any
-    other name is a plugin and gets ``fleet.registry.plugin_options``.
+    Each provider takes its settings from its own config keys.
+
+    Raises:
+        KeyError: ``config.fleet.registry.provider`` is not a built-in name.
     """
     registry = config.fleet.registry
     builders = {
@@ -141,15 +160,16 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
         # A consul card lives as long as its session, whose TTL comes from the offline limit; it is never pruned.
         'consul': lambda: {'connection': registry.connection, 'offline_after_seconds': registry.offline_after_seconds},
     }
-    build = builders.get(registry.provider, lambda: dict(registry.plugin_options))
-    return build()
+    return builders[registry.provider]()
 
 
 def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     """The options mapping the configured election provider's factory receives.
 
-    The built-ins take their settings from their own config keys; any other
-    name is a plugin and gets ``periodic.election.plugin_options``.
+    Each provider takes its settings from its own config keys.
+
+    Raises:
+        KeyError: ``config.periodic.election.provider`` is not a built-in name.
     """
     election = config.periodic.election
     builders = {
@@ -158,8 +178,7 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
         'redis': lambda: _connection_only(election),
         'consul': lambda: _connection_only(election),
     }
-    build = builders.get(election.provider, lambda: dict(election.plugin_options))
-    return build()
+    return builders[election.provider]()
 
 
 def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSettings | None:
@@ -668,7 +687,7 @@ class AppLifecycle:
         at the first slot that needs it.
 
         Raises:
-            UnknownProviderError: no built-in or plugin election has the configured name.
+            UnknownProviderError: no built-in election has the configured name.
             ValueError: the ``filesystem`` provider and no shared folder.
         """
         if not cluster_task_names:
@@ -676,12 +695,7 @@ class AppLifecycle:
         app = self._app
         config = app._config
         election = config.periodic.election
-        factory = resolve_factory(
-            ELECTION_ENTRY_POINT_GROUP,
-            BUILTIN_ELECTIONS,
-            election.provider,
-            config_path='periodic.election.provider',
-        )
+        factory = _builtin_factory(BUILTIN_ELECTIONS, election.provider, config_path='periodic.election.provider')
         if election.provider == FILESYSTEM_PROVIDER and not config.resolved_shared_dir:
             raise ValueError(STARTUP_NO_SHARED_FOLDER.format(name=sorted(cluster_task_names)[0]))
         options = election_provider_options(config)
@@ -764,8 +778,9 @@ class AppLifecycle:
             return
         if registry.provider == 'filesystem' and registry.filesystem.dir:
             await self._prepare_explicit_registry_folder(registry.filesystem.dir, registry.resilience.timeout_seconds)
+        factory = _builtin_factory(BUILTIN_PROVIDERS, registry.provider, config_path='fleet.registry.provider')
         options = registry_provider_options(config)
-        provider = resolve_provider_factory(registry.provider)(options)
+        provider = factory(options)
         app._fleet = FleetRegistry(
             provider,
             provider_name=registry.provider,

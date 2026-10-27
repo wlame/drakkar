@@ -242,10 +242,9 @@ included. It is configured once, under `periodic.election`:
 ```yaml
 periodic:
   election:
-    provider: filesystem   # filesystem | postgres | redis | consul | <plugin name>
+    provider: filesystem   # filesystem | postgres | redis | consul
     connection: main       # entry of connections.<provider>; read by postgres, redis and consul
     # resilience: {}       # time limit, retries and breaker; same keys as fleet.registry.resilience
-    # plugin_options: {}   # passed unchanged to a provider plugin
 ```
 
 Every worker of a cluster must use the same provider. Where each provider
@@ -258,7 +257,7 @@ keeps the lock of task `<task>` of cluster `<cluster>`:
 | `redis` | The key `<key_prefix>task-locks:<cluster>/<task>` |
 | `consul` | The key `<key_prefix>/task-locks/<cluster>/<task>`, held by a session named `drakkar/task-lock/<cluster>/<task>/<token>` |
 
-The details of each provider, and how to write a plugin, are on
+The details of each provider are on
 [Local databases](local-databases.md#the-election-provider).
 
 The provider is made at startup only when the worker runs at least one

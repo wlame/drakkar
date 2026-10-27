@@ -949,7 +949,7 @@ Each sink type is a dict mapping instance names to their config:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `static`, `none`, `postgres`, `redis`, `consul`, or a plugin name |
+| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `static`, `none`, `postgres`, `redis`, `consul` |
 | `fleet.registry.offline_after_seconds` | int | `60` | A peer card older than this is offline |
 | `fleet.cache_exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
 | `fleet.cache_exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |

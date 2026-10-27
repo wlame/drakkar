@@ -473,17 +473,16 @@ Sinks define where processed results are delivered. See [Sinks](sinks.md) for pa
 
 ### Keys of every sink instance
 
-Every instance of every type, plugin sinks included, also takes the
+Every instance of every type also takes the
 [failure policy](sinks.md#failure-policy) keys:
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `on_failure` | `'dlq'` \| `'skip'` | `'dlq'` | | What happens when the retry budget is spent. `dlq`: the source message goes to the DLQ and the message is done. `skip`: this sink's payloads are dropped. |
 | `max_retries` | `int` | `2` | whole number, 0 to 10 | Retries after the first attempt, spent only by a hook that returns `RETRY` (default 2). The default hook makes one attempt and then applies the declared `on_failure`. The quick internal retry of an idempotent write does not count. |
-| `depends_on` | `list[str]` | `[]` | each entry `<type>/<name>` of a configured sink; no self-reference, no cycle | Sinks that must deliver first inside one result. A plugin sink is written `<type>/<name>` too, without `custom/`. See [Sink dependencies](sinks.md#sink-dependencies-depends_on). |
+| `depends_on` | `list[str]` | `[]` | each entry `<type>/<name>` of a configured sink; no self-reference, no cycle | Sinks that must deliver first inside one result. See [Sink dependencies](sinks.md#sink-dependencies-depends_on). |
 
-Environment overrides: `DK_SINKS__<TYPE>__<NAME>__ON_FAILURE`, and
-`DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE` for a plugin sink. The load
+Environment overrides: `DK_SINKS__<TYPE>__<NAME>__ON_FAILURE`. The load
 messages are listed under [Failure policy](sinks.md#failure-policy).
 
 ### Kafka Sink (`sinks.kafka.<name>`)
@@ -614,19 +613,6 @@ Appends JSONL lines to files on disk.
 |-------|------|---------|-------------|
 | `base_path` | `str` | *(required)* | Base directory. Payload paths are resolved relative to it and must stay contained within it — absolute or traversing paths are rejected. |
 | `ui_url` | `str` | `''` | URL to a file browser or related UI. |
-
-### Custom Sinks (`sinks.custom.<type>.<name>`)
-
-Plugin-discovered sink instances. Top-level keys under `sinks.custom` are sink type names registered via `[project.entry-points."drakkar.sinks"]`; second-level keys are instance names; the leaf dict is plugin-defined config passed to the sink class constructor (Drakkar cannot validate its shape — the plugin can wrap it in its own Pydantic model). The three [shared keys](#keys-of-every-sink-instance) `on_failure`, `max_retries` and `depends_on` are reserved: the framework reads them and removes them from the leaf first. A type named like a built-in type fails the load: `sinks.custom.<type>: '<type>' is the name of a built-in sink type; give the plugin type another name`. An unregistered type name fails at startup rather than silently dropping the sink. See [Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api).
-
-```yaml
-sinks:
-  custom:
-    my_custom_type:
-      audit_trail_out:
-        endpoint: https://audit.internal.example.com
-        buffer_size: 500
-```
 
 ### Example: Multiple Named Sinks
 
@@ -1224,10 +1210,9 @@ overrides of the handler's declared `@periodic` tasks. See
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster runs each slot of a cluster task: `filesystem` (a lock file in `<shared.dir>/tasks/<cluster>/`), `postgres` (a row in a table of the database named by `election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)) or the name of a provider plugin (entry-point group `drakkar.election_providers`). Every worker of one cluster must use the same provider. The name is resolved only when the worker runs at least one cluster task; an unknown name then fails startup. |
+| `election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster runs each slot of a cluster task: `filesystem` (a lock file in `<shared.dir>/tasks/<cluster>/`), `postgres` (a row in a table of the database named by `election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)). Every worker of one cluster must use the same provider. The name is resolved only when the worker runs at least one cluster task; an unknown name then fails startup. |
 | `election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
-| `election.plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_PERIODIC__ELECTION__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_PERIODIC__ELECTION__PLUGIN_OPTIONS` itself fails the load. |
 | `tasks.<name>.enabled` | `bool` | `true` | | `false`: this worker does not run the declared task `<name>`. |
 | `tasks.<name>.interval` | `float \| null` | `null` | at most one of `interval` and `cron`; a cluster task needs a whole number of at least `30` | A new interval; replaces the declared interval or cron. |
 | `tasks.<name>.cron` | `str \| null` | `null` | the [accepted cron subset](periodic-tasks.md#cron) | A new cron expression; replaces the declared interval or cron. |
@@ -1258,12 +1243,12 @@ executor, sinks, offset commits) does not depend on it.
 
 ### Registry (`fleet.registry:`) {#fleet-registry}
 
-How the registry works, the card format, liveness and how to write a
-provider plugin are on [Fleet registry](fleet.md).
+How the registry works, the card format and liveness are on
+[Fleet registry](fleet.md).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)), or the name of a provider plugin. Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
 | `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
 | `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
@@ -1272,11 +1257,10 @@ provider plugin are on [Fleet registry](fleet.md).
 | `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
 | `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
 | `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
-| `consul.mode` | `str` | `publish` | `publish` or `catalog`; `catalog` fails the load when `provider` is `consul` | Setting of the `consul` provider; a plugin does not read it (it gets `plugin_options`). `publish`: every worker stores its own card and reads the cards of its peers. `catalog` is reserved for a later release, in which workers would be listed from the Consul service catalog and this worker would publish nothing; the load refuses it with the `consul` provider. |
+| `consul.mode` | `str` | `publish` | `publish` or `catalog`; `catalog` fails the load when `provider` is `consul` | Setting of the `consul` provider. `publish`: every worker stores its own card and reads the cards of its peers. `catalog` is reserved for a later release, in which workers would be listed from the Consul service catalog and this worker would publish nothing; the load refuses it with the `consul` provider. |
 | `consul.service_name` | `str` | `drakkar` | non-empty | Setting for the catalog mode of a later release; it is not used now. The Consul service that would list the workers. |
 | `redis` | block | `{}` | | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
 | `postgres` | block | `{}` | | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
-| `plugin_options` | `dict` | `{}` | | Passed unchanged to a provider plugin, which validates them itself. The config reference masks the values. From the environment, one key per variable: `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__<KEY>` (the key arrives in lower case, the value as a string; a further `__` nests a mapping). A JSON object in `DK_FLEET__REGISTRY__PLUGIN_OPTIONS` itself fails the load. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
 
@@ -1353,8 +1337,7 @@ settings. A feature that names no connection uses `main`. How features name
 and share a connection is on [Fleet registry](fleet.md#connections). This
 release ships the `postgres`, `redis` and `consul` registry and election
 providers, which read `connections.postgres.<name>`, `connections.redis.<name>`
-and `connections.consul.<name>`. A provider plugin can use any entry through
-`ctx.connections`.
+and `connections.consul.<name>`.
 
 Which feature names which entry: `fleet.registry.connection` and
 `periodic.election.connection`.

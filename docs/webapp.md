@@ -429,7 +429,7 @@ Successful response body (HTTP 200) -- the `sinks` field is now populated:
 ```
 
 The `sinks.by_type` map is keyed by sink type (`kafka`, `postgres`,
-`mongo`, ..., and `custom` for every plugin sink) and emits one entry per
+`mongo`, ...) and emits one entry per
 type that the request actually touched. Sinks that the request did not touch
 are omitted -- the response mirrors what was attempted, not the full
 configured sink set. Each entry carries:
@@ -479,8 +479,7 @@ message (see [Failure policy](sinks.md#failure-policy)):
   finish and the rest do not start; the worker logs
   `webapp_request_dropped_after_timeout` once, with `stage=during_sinks`,
   `next_sink` (`<type>/<name>` of the first sink that did not start) and
-  `next_sink_type` (that sink's own type; a plugin sink reports its plugin
-  type, not `custom`).
+  `next_sink_type`, the type of that sink.
 
 A failed task of an HTTP request stays an error of the request: the HTTP
 path does not call `on_error`, so it writes no `execute` record.

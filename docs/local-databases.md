@@ -719,10 +719,9 @@ publish and each delete.
 ```yaml
 periodic:
   election:
-    provider: filesystem       # the default: the task lock above; or postgres, redis, consul, or a plugin name
+    provider: filesystem       # the default: the task lock above; or postgres, redis, consul
     # connection: main         # read by the postgres, redis and consul providers
     # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
-    # plugin_options: {}       # passed unchanged to a provider plugin
 history:
   archive:
     lease_seconds: 60          # the lease length of the archive slot, for every provider
@@ -739,11 +738,7 @@ history:
   the scope at the next slot.
 - **Providers.** `filesystem`, `postgres`, `redis` and `consul` are built in.
   The last three keep the lease in a service reached through a [named
-  connection](fleet.md#connections). Other providers are plugins of the
-  entry-point group `drakkar.election_providers`, in the same way as for the
-  [fleet registry](fleet.md#writing-a-provider). A plugin named `postgres`,
-  `redis` or `consul` is checked like the provider of that name (its
-  connection must be declared) and wins over the built-in one. An unknown name
+  connection](fleet.md#connections). An unknown name
   fails startup with a message that lists the providers that exist, for
   example
   `periodic.election.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
@@ -1043,92 +1038,6 @@ follows the reason:
 | `taken_over` | `another worker took the archive lock over; this pass published and deleted nothing` |
 | `unconfirmed` | `the election provider could not confirm the lease; this pass published and deleted nothing` |
 
-#### Writing an election provider
-
-A provider is a class with six async methods and a factory that builds it
-from an options mapping:
-
-```python
-from drakkar.recorder.election import ElectionContext
-
-
-class EtcdElection:
-    def __init__(self, options):
-        self._address = options['address']
-
-    async def start(self, ctx: ElectionContext) -> None:
-        """Prepare the provider. ctx carries worker, instance, cluster, shared_dir,
-        logger, options and the shared connections. Called again after a failure."""
-
-    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
-        """Take the scope (<cluster>/<task>) for the token. False while another token holds a live lease."""
-
-    async def refresh(self, scope: str, token: str) -> bool:
-        """Extend the lease. False when the token no longer holds it."""
-
-    async def is_held(self, scope: str, token: str) -> bool:
-        """True while the token holds the scope (the fencing check)."""
-
-    async def release(self, scope: str, token: str) -> None:
-        """Free the scope, but only while the token holds it."""
-
-    async def stop(self) -> None:
-        """Release what start took. Called at most once, last."""
-
-
-def make_election(options):
-    return EtcdElection(options)
-```
-
-```toml
-[project.entry-points."drakkar.election_providers"]
-etcd = "drakkar_etcd:make_election"
-```
-
-Select it with `periodic.election.provider: etcd`. `plugin_options` is
-passed to the factory unchanged, and the config reference masks its values.
-
-- `acquire` answers `True` when the scope is free, when its lease has run
-  out, and when `token` already holds it. The last rule matters: an acquire
-  that is retried after a lost answer must not lock out its own holder.
-- `release` changes nothing while another token holds the scope.
-- `start` is called again after a failure, so it must leave nothing behind
-  that a second call would trip over. `stop` is called at most once, and
-  only after a `start` that succeeded.
-- A provider is single-use. After `stop`, every other method must raise,
-  `start` included. The worker's stop can leave an archive pass in its
-  window, and that pass is fenced at its next check only because the
-  provider refuses the call.
-- A scope is `<sanitized cluster>/<task name>`; a system task name has one
-  dot (`main/history.archive`). Treat it as an opaque key, or split it with
-  `drakkar.schedule.parse_task_scope`, which raises `ValueError` for any
-  other shape. The kit uses the scopes `kit_cluster/kit_task_a` and
-  `kit_cluster/kit_task_b`.
-- The methods run on the event loop. Do blocking work in a thread of your
-  own, as for the [registry](fleet.md#writing-a-provider).
-- `ctx.connections` resolves the entries of the `connections` config; see
-  [Connections](fleet.md#connections).
-
-`drakkar.recorder.electiontest` holds the checks every election provider
-should pass. They need no test framework and raise `AssertionError`:
-
-```python
-import pytest
-
-from drakkar.recorder import electiontest
-
-
-@pytest.mark.parametrize('check', electiontest.ELECTION_CHECKS)
-async def test_etcd_election(check, etcd_service):
-    await check(lambda: EtcdElection({'address': etcd_service.address}), etcd_service.advance, 600)
-```
-
-`make_provider()` returns a new, not started provider that shares its
-storage with the others the same check makes (two of them stand for two
-workers). `advance(seconds)` makes every stored lease that much older on the
-provider's clock. The last argument is the lease length the checks acquire
-with.
-
 Every provider operation is counted in `drakkar_provider_calls_total` with
 `feature="election"` and the `op` `start`, `acquire`, `refresh`, `is_held`,
 `release` or `stop`; see [Fleet registry — Metrics](fleet.md#metrics).
@@ -1234,7 +1143,7 @@ history:
   merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
 periodic:
   election:
-    provider: filesystem             # which worker runs each slot: the task lock, or postgres, redis, consul, a plugin
+    provider: filesystem             # which worker runs each slot: the task lock, or postgres, redis, consul
 ```
 
 ### Downloading archives

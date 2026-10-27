@@ -24,10 +24,10 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.postgres import FLEET_WORKERS_TABLE, missing_table_message, statements_for
 from drakkar.providers.resilience import TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
-from drakkar.recorder import electiontest
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext
 from drakkar.recorder.election_postgres import PostgresElection, postgres_election_factory
-from drakkar.recorder.electiontest import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
+from tests import election_testkit as electiontest
+from tests.election_testkit import INSTANCE_A, INSTANCE_B, TOKEN_A, TOKEN_B
 from tests.pg_fake import FakePostgres
 
 LEASE_SECONDS = 600.0

@@ -1900,7 +1900,7 @@ async def test_redis_sink_exposes_its_client_after_connect(redis_sink_config):
 
     Reads are out of scope for the sink itself (a sink discards results), so
     a handler that needs one goes through the client. Reachable only from a
-    plugin sink subclass today; see the property's docstring.
+    sink subclass today; see the property's docstring.
     """
     from drakkar.sinks.redis import RedisSink
 

@@ -7,15 +7,14 @@ peers. Neither is needed for the pipeline itself: sources, executor, sinks
 and offset commits work the same with both switched off.
 """
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
 
 # Providers that reach a shared service through a named entry of ``connections``.
-# The tuple is the set of keys of ``ConnectionsConfig``; a plugin provider
-# manages its own connections.
+# The tuple is the set of keys of ``ConnectionsConfig``.
 CONNECTION_PROVIDERS = ('consul', 'redis', 'postgres')
 
 # The floor of offline_after_seconds for every provider, not for one: a config written for one provider
@@ -102,8 +101,7 @@ class FleetRegistryConfig(BaseModel):
             'none (no peers), postgres (cards in a table of the database named by '
             'fleet.registry.connection), redis (cards in keys of the Redis server named by '
             'fleet.registry.connection), consul (cards in keys of the Consul agent named by '
-            'fleet.registry.connection, each held by a session of its worker), or the name of a '
-            'provider plugin. Needs ui.enabled.'
+            'fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.'
         ),
     )
     connection: str = Field(
@@ -147,10 +145,6 @@ class FleetRegistryConfig(BaseModel):
     postgres: PostgresRegistryConfig = Field(
         default_factory=PostgresRegistryConfig,
         description='Settings of the postgres provider; none yet. The schema and the pool come from the connection.',
-    )
-    plugin_options: dict[str, Any] = Field(
-        default_factory=dict,
-        description='Options passed unchanged to a provider plugin, which validates them itself.',
     )
 
     @model_validator(mode='after')

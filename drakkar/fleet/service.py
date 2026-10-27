@@ -386,7 +386,7 @@ class FleetRegistry:
         """Valid peer cards of a listing; invalid ones are logged, this worker's own name is checked for twins."""
         peers: list[SnapshotEntry] = []
         for listed_card in listed:
-            # A plugin may hand over something that is not a PeerCard; its
+            # A provider may hand over something that is not a PeerCard; its
             # card then reads as None and is rejected like any invalid card.
             card = getattr(listed_card, 'card', None)
             age_seconds = getattr(listed_card, 'age_seconds', None)

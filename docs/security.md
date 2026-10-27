@@ -56,7 +56,7 @@ network access.
 | **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`) or of its recorder memory store (`source=memory`), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `store_output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
 | **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder, each cluster task lock folder (`tasks/<cluster>/`) and `merged/` are created with mode `0700`. |
-| **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, every `*.client_config` and the `plugin_options` of the provider plugins by key name; the flight recorder applies the same redaction before storing task env. |
+| **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, and every `*.client_config`; the flight recorder applies the same redaction before storing task env. |
 | **No input echo in config errors** | A load error of the framework config names the key and the rule but does not add the input of the section that failed, so a wrong `connections` block cannot print a connection string. The messages of the framework still quote a value that is not a secret, such as a schema name. The model of your own `app:` section does not inherit this. |
 | **Request bounds** | Body size and read-time caps, header-size caps, keep-alive reaping, a bounded probe queue, and deadlines on Kafka reads — so one client cannot hold a worker open indefinitely. |
 
@@ -213,16 +213,13 @@ they open one pool with the `dsn` and use the `schema`. The `redis` providers
 read `connections.redis.<name>`: they open one client with the `url` and use
 the `key_prefix`. The `consul` providers read `connections.consul.<name>`: they
 open one client with the `address` and the `token`, and use the `key_prefix`.
-A provider plugin can use any entry through `ctx.connections`. The advice
-below applies to the entries you declare and to any provider that uses them.
+The advice below applies to the entries you declare and to any provider that
+uses them.
 
 - **Set them from the environment.** For example a Kubernetes Secret that
   becomes `DK_CONNECTIONS__POSTGRES__MAIN__DSN`, `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`
   or `DK_CONNECTIONS__REDIS__MAIN__URL`. The YAML file is often a ConfigMap
-  or sits in version control, and neither is a place for a password. A
-  plugin's own secret in `plugin_options` comes from the environment one key
-  per variable, for example `DK_FLEET__REGISTRY__PLUGIN_OPTIONS__TOKEN`
-  (the plugin gets the key `token` and the value as a string).
+  or sits in version control, and neither is a place for a password.
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
   to `key_prefix` and to sessions (see below for what its rules allow), a
@@ -381,17 +378,12 @@ below applies to the entries you declare and to any provider that uses them.
   categories allow, so keep the URL secret and use the user for the providers
   only.
 - **Operator views mask them.** The config reference shows a mask in place
-  of `token`, `url` and `dsn`. For `plugin_options` it masks at every depth
-  by key name (`password`, `token`, ...): every value under such a key is
-  masked, a string, a number or a boolean alike, and a secret-looking parent
-  key such as `credentials` or `auth` masks everything below it. Any other
-  string that is a URL loses its embedded credentials.
+  of `token`, `url` and `dsn`.
 - **Error text is redacted.** The worker removes credentials from a
   provider's error text before it logs it (`provider_call_failed`,
   `connections_close_failed`, `connection_close_failed`): `user:pass@` in a
   URL and the value of a secret-looking query parameter (`?password=...`)
-  become `***`. Only URL-shaped credentials are found this way, so a provider
-  plugin must still not put a bare token in the message of an exception.
+  become `***`. Only URL-shaped credentials are found this way.
 
 ## Even inside the private network
 

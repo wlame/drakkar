@@ -73,7 +73,6 @@ def test_fleet_registry_defaults():
     assert registry.static.peers == []
     assert registry.consul.mode == 'publish'
     assert registry.consul.service_name == 'drakkar'
-    assert registry.plugin_options == {}
 
 
 def test_the_old_offline_default_still_loads_with_the_default_heartbeat():
@@ -97,12 +96,7 @@ def test_consul_registry_service_name_must_not_be_empty():
 def test_election_defaults():
     election = PeriodicConfig().election
 
-    assert (election.provider, election.connection, election.resilience.retries, election.plugin_options) == (
-        'filesystem',
-        'main',
-        2,
-        {},
-    )
+    assert (election.provider, election.connection, election.resilience.retries) == ('filesystem', 'main', 2)
 
 
 def test_cache_exchange_defaults():
@@ -127,12 +121,6 @@ def test_static_peer_cluster_defaults_to_empty():
     peer = StaticPeerConfig(name='peer-a', url='http://10.0.0.5:8080/')
 
     assert peer.cluster == ''
-
-
-def test_plugin_options_accepts_any_mapping():
-    registry = FleetRegistryConfig(provider='consul', plugin_options={'address': 'consul:8500', 'tags': ['a']})
-
-    assert registry.plugin_options == {'address': 'consul:8500', 'tags': ['a']}
 
 
 # --- moved-key table -----------------------------------------------------
@@ -243,7 +231,7 @@ def test_fleet_summary(sections, expected):
 
 @pytest.mark.parametrize(
     ('provider', 'expected'),
-    [('filesystem', ''), ('consul', ' election=consul'), ('my-plugin', ' election=my-plugin')],
+    [('filesystem', ''), ('consul', ' election=consul')],
 )
 def test_election_summary_is_silent_for_the_filesystem_provider(provider, expected):
     config = _config(
@@ -274,17 +262,11 @@ def test_registry_and_election_load_when_the_named_connection_is_declared(provid
     assert config.fleet.registry.connection == 'cluster-a'
 
 
-@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'my-plugin'])
+@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none'])
 def test_providers_that_use_no_connection_ignore_the_connection_name(provider):
     config = _config(fleet={'registry': {'provider': provider, 'connection': 'not-declared'}})
 
     assert config.fleet.registry.connection == 'not-declared'
-
-
-def test_election_plugin_provider_ignores_the_connection_name():
-    config = _config(periodic={'election': {'provider': 'my-plugin', 'connection': 'not-declared'}})
-
-    assert config.periodic.election.connection == 'not-declared'
 
 
 def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():

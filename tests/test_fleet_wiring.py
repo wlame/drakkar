@@ -17,18 +17,14 @@ from drakkar import cluster_tasks as cluster_tasks_module
 from drakkar.app import DrakkarApp
 from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_task_runs
 from drakkar.config import DrakkarConfig
-from drakkar.fleet import plugins
-from drakkar.fleet.plugins import UnknownRegistryProviderError
 from drakkar.fleet.provider import PeerCardList, RegistryContext
-from drakkar.fleet.providers import FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
-from drakkar.lifecycle import election_provider_options, registry_provider_options
+from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.lifecycle import UnknownProviderError, election_provider_options, registry_provider_options
 from drakkar.models import SourceMessage
 from drakkar.periodic import periodic
-from drakkar.providers import lookup
 from drakkar.providers.connections import Connections
-from drakkar.providers.lookup import UnknownProviderError
 from drakkar.recorder import core as core_mod
-from drakkar.recorder.election import ELECTION_ENTRY_POINT_GROUP, ElectionContext, FilesystemElection
+from drakkar.recorder.election import BUILTIN_ELECTIONS, ElectionContext, FilesystemElection
 from drakkar.recorder.election_postgres import PostgresElection
 from drakkar.schedule import ARCHIVE_TASK_NAME, MIN_HOLD_SECONDS, ClusterTaskDefinition, cluster_tasks_hash
 from drakkar.sources import kafka as kafka_source_module
@@ -70,19 +66,14 @@ def _app(tmp_path, handler: object | None = None, **overrides) -> DrakkarApp:
     )
 
 
-def _install_plugins(monkeypatch, *, registry: dict | None = None, election: dict | None = None) -> None:
-    """Make ``registry`` and ``election`` the installed plugins of their groups; no other group has any."""
-    installed = {plugins.ENTRY_POINT_GROUP: registry or {}, ELECTION_ENTRY_POINT_GROUP: election or {}}
-
-    def discover(group: str) -> dict:
-        return dict(installed.get(group, {}))
-
-    monkeypatch.setattr(lookup, 'discover_plugin_factories', discover)
+def _install_registry_factory(monkeypatch, factory) -> None:
+    """Make ``factory`` the factory of the ``filesystem`` registry provider for the test."""
+    monkeypatch.setitem(BUILTIN_PROVIDERS, 'filesystem', factory)
 
 
-def _install_registry_plugins(monkeypatch, factories: dict) -> None:
-    """Make ``factories`` the installed registry plugins; the other provider groups have none."""
-    _install_plugins(monkeypatch, registry=factories)
+def _install_election_factory(monkeypatch, factory) -> None:
+    """Make ``factory`` the factory of the ``filesystem`` election provider for the test."""
+    monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
 
 
 # --- which provider runs ---
@@ -154,28 +145,26 @@ async def test_the_static_provider_gets_the_configured_peers(tmp_path):
     assert [(view.card['worker'], view.card['cluster']) for view in app.fleet.peer_views()] == [('w-2', 'search')]
 
 
-async def test_a_plugin_provider_gets_the_plugin_options(tmp_path, monkeypatch):
+async def test_the_registry_factory_gets_the_provider_options_and_the_worker_context(tmp_path, monkeypatch):
     received = {}
 
-    class _Plugin(StaticRegistry):
+    class _Recording(StaticRegistry):
         async def start(self, ctx: RegistryContext) -> None:
             received['ctx'] = ctx
 
     def factory(options):
         received['options'] = dict(options)
-        return _Plugin([])
+        return _Recording([])
 
-    _install_registry_plugins(monkeypatch, {'example-plugin': factory})
-    app = _app(
-        tmp_path, fleet={'registry': {'provider': 'example-plugin', 'plugin_options': {'address': 'consul:8500'}}}
-    )
+    _install_registry_factory(monkeypatch, factory)
+    app = _app(tmp_path)
 
     await app._lifecycle._start_fleet()
     await wait_for(lambda: 'ctx' in received)
     await app._fleet.stop()
 
-    assert received['options'] == {'address': 'consul:8500'}
-    assert received['ctx'].options == {'address': 'consul:8500'}
+    assert received['options'] == registry_provider_options(app._config)
+    assert received['ctx'].options == received['options']
     assert received['ctx'].worker == 'w-1'
 
 
@@ -213,7 +202,7 @@ def test_election_provider_options_for_redis_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'redis': {'locks': {'url': 'redis://user:secret@cache:6379/0'}}},
-        periodic={'election': {'provider': 'redis', 'connection': 'locks', 'plugin_options': {'unused': 1}}},
+        periodic={'election': {'provider': 'redis', 'connection': 'locks'}},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
@@ -223,47 +212,29 @@ def test_election_provider_options_for_consul_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'consul': {'locks': {}}},
-        periodic={'election': {'provider': 'consul', 'connection': 'locks', 'plugin_options': {'unused': 1}}},
+        periodic={'election': {'provider': 'consul', 'connection': 'locks'}},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
 
 
-def test_election_provider_options_for_a_plugin_name_are_its_plugin_options(tmp_path):
-    config = _config(
-        tmp_path,
-        periodic={'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}},
-    )
-
-    assert election_provider_options(config) == {'address': 'consul:8500'}
-
-
-def test_the_cluster_election_passes_the_connection_to_the_postgres_factory(tmp_path, monkeypatch):
-    received: list[dict] = []
-    _install_plugins(monkeypatch, election={'example-election': lambda options: received.append(dict(options))})
-    postgres_app = _app(
+def test_the_cluster_election_passes_the_connection_to_the_postgres_factory(tmp_path):
+    app = _app(
         tmp_path,
         connections={'postgres': {'reports_db': {'dsn': 'postgresql://user:secret@db/x'}}},
-        periodic={'election': {'provider': 'postgres', 'connection': 'reports_db', 'plugin_options': {'unused': 1}}},
-    )
-    plugin_app = _app(
-        tmp_path,
-        periodic={'election': {'provider': 'example-election', 'plugin_options': {'address': 'consul:8500'}}},
+        periodic={'election': {'provider': 'postgres', 'connection': 'reports_db'}},
     )
 
-    postgres_election = postgres_app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
-    plugin_election = plugin_app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
+    election = app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
 
-    assert postgres_election is not None and plugin_election is not None
-    assert isinstance(postgres_election.provider, PostgresElection)
-    assert postgres_election.provider._connection == 'reports_db'
-    assert postgres_election._context.options == {'connection': 'reports_db'}
-    assert received == [{'address': 'consul:8500'}]
-    assert plugin_election._context.options == {'address': 'consul:8500'}
+    assert election is not None
+    assert isinstance(election.provider, PostgresElection)
+    assert election.provider._connection == 'reports_db'
+    assert election._context.options == {'connection': 'reports_db'}
 
 
 def test_the_cluster_election_gives_the_filesystem_factory_no_options(tmp_path):
-    app = _app(tmp_path, periodic={'election': {'plugin_options': {'unused': 1}}})
+    app = _app(tmp_path)
 
     election = app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
 
@@ -293,7 +264,6 @@ def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(t
 
 
 def test_no_cluster_task_builds_no_election(tmp_path, monkeypatch):
-    _install_plugins(monkeypatch)
     app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}})
 
     assert app._lifecycle._build_cluster_election([]) is None
@@ -322,7 +292,6 @@ def test_the_filesystem_election_without_a_shared_folder_fails_startup_naming_th
     ids=['ui-off', 'memory-only', 'archiving-off'],
 )
 def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, overrides):
-    _install_plugins(monkeypatch)
     app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}}, **overrides)
 
     app._lifecycle._build_periodic_roster()
@@ -332,15 +301,13 @@ def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, ove
 
 
 async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
-    _install_registry_plugins(monkeypatch, {})
     app = _app(tmp_path, fleet={'registry': {'provider': 'etcd'}})
 
-    with pytest.raises(UnknownRegistryProviderError, match="'etcd'"):
+    with pytest.raises(UnknownProviderError, match="'etcd'"):
         await app._lifecycle._start_fleet()
 
 
 async def test_unknown_election_provider_fails_startup_when_the_archive_runs(tmp_path, monkeypatch):
-    _install_plugins(monkeypatch)
     app = _app(tmp_path, periodic={'election': {'provider': 'etcd'}})
 
     assert archive_task_runs(app._config)
@@ -452,7 +419,7 @@ def _runnable_app(
     source = StubSource('kafka')
     app.sources = [source]
     order: list[str] = []
-    _install_registry_plugins(monkeypatch, {'filesystem': provider_factory})
+    _install_registry_factory(monkeypatch, provider_factory)
     monkeypatch.setattr(app._sink_manager, 'connect_all', AsyncMock())
     monkeypatch.setattr(app._sink_manager, 'close_all', AsyncMock())
     monkeypatch.setattr(app, '_build_dlq', lambda: setattr(app, '_dlq_sink', None))
@@ -777,15 +744,15 @@ def _first_archive_slot_clock() -> SteppingClock:
 async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypatch):
     """Core isolation: messages are processed and committed, and shutdown ends, while every election call hangs."""
     election = _BlockedElection()
-    _install_plugins(monkeypatch, election={'blocked-election': lambda _options: election})
+    _install_election_factory(monkeypatch, lambda _options: election)
     resilience = {'timeout_seconds': ELECTION_START_LIMIT_SECONDS, 'retries': 0}
     app, consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
-        periodic={'election': {'provider': 'blocked-election', 'resilience': resilience}},
+        periodic={'election': {'provider': 'filesystem', 'resilience': resilience}},
     )
     due_source = make_sealed_db(history_folder(tmp_path), 'w-2', due_start(time.time()))
-    timeouts_before = election_calls('blocked-election', 'start', 'timeout')
+    timeouts_before = election_calls('filesystem', 'start', 'timeout')
     app._lifecycle._clock = _first_archive_slot_clock()
 
     run = asyncio.create_task(app._lifecycle._async_run())
@@ -800,8 +767,8 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     )
     await wait_for(lambda: consumer.committed.get(0) == MESSAGE_COUNT, timeout=COMMIT_BUDGET_SECONDS)
     # The commits landed while the election start still hung.
-    assert election_calls('blocked-election', 'start', 'timeout') == timeouts_before
-    await wait_for(lambda: election_calls('blocked-election', 'start', 'timeout') >= timeouts_before + 1)
+    assert election_calls('filesystem', 'start', 'timeout') == timeouts_before
+    await wait_for(lambda: election_calls('filesystem', 'start', 'timeout') >= timeouts_before + 1)
     app._lifecycle._handle_signal()
     await asyncio.wait_for(run, timeout=WAIT_FOR_TIMEOUT_SECONDS)
 
@@ -813,10 +780,10 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
 async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp_path, monkeypatch):
     """The wait for an archive pass keeps one registry call's time limit, so the card withdraw after it gets time."""
     provider = _RecordingRegistry()
-    _install_plugins(monkeypatch, registry={'recording': lambda _options: provider})
+    _install_registry_factory(monkeypatch, lambda _options: provider)
     # The reserve (0.5 s) is shorter than the drain budget (1 s), which is
     # shorter than the stuck window.
-    registry = {'provider': 'recording', 'resilience': {'timeout_seconds': 0.5}}
+    registry = {'provider': 'filesystem', 'resilience': {'timeout_seconds': 0.5}}
     app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': registry})
     in_window = threading.Event()
     window_may_end = threading.Event()
@@ -887,17 +854,13 @@ class _OrderRecordingRegistry(_RecordingRegistry):
 async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_registry(tmp_path, monkeypatch):
     order: list[str] = []
     election = _OrderRecordingElection(order)
-    _install_plugins(
-        monkeypatch,
-        registry={'recording': lambda _options: _OrderRecordingRegistry(order)},
-        election={'recording-election': lambda _options: election},
-    )
+    _install_registry_factory(monkeypatch, lambda _options: _OrderRecordingRegistry(order))
+    _install_election_factory(monkeypatch, lambda _options: election)
     app, _consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
         executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': WAIT_FOR_TIMEOUT_SECONDS},
-        fleet={'registry': {'provider': 'recording', 'resilience': {'timeout_seconds': 0.5}}},
-        periodic={'election': {'provider': 'recording-election'}},
+        fleet={'registry': {'resilience': {'timeout_seconds': 0.5}}},
     )
     in_window = threading.Event()
 
@@ -1089,12 +1052,7 @@ async def test_startup_with_failing_election_start_still_runs_the_pipeline(tmp_p
     app, source, _order = _runnable_app(
         tmp_path, monkeypatch, lambda _options: registry, handler=_PipelineGuardHandler()
     )
-    _install_plugins(
-        monkeypatch,
-        registry={'filesystem': lambda _options: registry},
-        election={'down-election': lambda _options: _DownElection(ElectionStore())},
-    )
-    app._config.periodic.election.provider = 'down-election'
+    _install_election_factory(monkeypatch, lambda _options: _DownElection(ElectionStore()))
     app._config.periodic.election.resilience.retries = 0
     clock = VirtualClock(NOW)
     # Two slots of the task, SLOT and SLOT + 30, both within one minute.

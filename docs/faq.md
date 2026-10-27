@@ -192,18 +192,6 @@ Each failed attempt calls `on_delivery_error` on your handler; `RETRY` delivers 
 
 Name each in config (`sinks.kafka.results`, `sinks.kafka.audit`); your handler routes records by setting `sink='results'` on each payload. See [Multiple named sinks](sinks.md#multiple-named-sinks).
 
-### How do I add a custom sink type?
-
-Drakkar discovers third-party sinks via Python's standard
-`importlib.metadata` entry points. Subclass
-`BaseSink[YourPayloadT]` from `drakkar.sinks.base`, register it under
-`[project.entry-points."drakkar.sinks"]` in your plugin's
-`pyproject.toml`, and reference it in your worker config under
-`sinks.custom.<type>.<instance>`. See
-[Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api) for the
-full contract — `BaseSink` interface, entry-point declaration, the
-config layout `_build_sinks` consumes, and failure modes.
-
 ---
 
 ## Deployment and operations

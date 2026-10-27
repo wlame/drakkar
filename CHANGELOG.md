@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Plugins are removed.** There are no custom sinks and no custom registry or
+  election providers. `sinks.custom`, `CustomPayload` and
+  `CollectResult.custom` are gone, and so are `SinkRegistry`, the entry-point
+  groups `drakkar.sinks`, `drakkar.registry_providers` and
+  `drakkar.election_providers`, and the keys `fleet.registry.plugin_options`
+  and `periodic.election.plugin_options`. The `provider_entry_point_*` log
+  events and the provider test kits are gone too. A probe record no longer has
+  the sink type `custom`, and the HTTP response summary has no `custom` entry.
+  The built-in sinks and providers are the only ones. See `docs/upgrading.md`.
 - **Provider settings changed.** `fleet.registry.timeout_seconds` is now
   `fleet.registry.resilience.timeout_seconds` (env
   `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the
@@ -19,15 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again at the next heartbeat. It is no longer replaced with `none`. The log
   events `fleet_registry_publish_failed`, `fleet_registry_list_failed`,
   `fleet_registry_withdraw_failed` and `fleet_registry_start_failed` are
-  replaced by `provider_call_failed`, and `fleet_registry_entry_point_*` by
-  `provider_entry_point_*`. `drakkar_fleet_registry_errors_total` now counts
+  replaced by `provider_call_failed`. `drakkar_fleet_registry_errors_total` now counts
   operations (retries are part of one operation) and loop iterations that
   raised, and its `op` label gains `start` and `stop`. A config error no
   longer prints the input of the section it rejected. The archive lock body
-  has a new key, `provider`. A registry or election plugin named `consul`,
-  `redis` or `postgres` now fails the config load unless the connection it
-  uses is declared as `connections.<provider>.<connection>`. Declare the
-  connection, or rename the plugin. See `docs/upgrading.md`.
+  has a new key, `provider`. A registry or election provider named `consul`,
+  `redis` or `postgres` fails the config load unless the connection it uses
+  is declared as `connections.<provider>.<connection>`. See
+  `docs/upgrading.md`.
 - **The `redis` package must be version 7.2 or later** (it was 5.2.0). The
   Redis sink uses the same package, so this applies to it too.
 - **Periodic tasks have new schedules, and the archive is a cluster
@@ -78,10 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the circuit open the hook is never called; the declared `on_failure`
   decides. After a message's first DLQ record no later result of that message
   is delivered. `drakkar_dlq_dropped_payloads_total` counts source messages,
-  not payloads. The keys `on_failure`, `max_retries` and `depends_on` in a
-  plugin sink's leaf are now reserved, and startup fails with
-  `sinks.custom.<type>.<name>: the plugin reports sink_type '<t>'` when a
-  plugin class's `sink_type` differs from its config key. The HTTP response's per-type sink
+  not payloads. The HTTP response's per-type sink
   summary lost the markers `dlq_unconfigured` and `dlq_send_failed: ...`; it
   now reports `<type>/<name>: not started` and
   `<type>/<name>: failed, no DLQ record`, and `dlq` counts only when the
@@ -102,13 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Failure policy, retry budget and dependencies per sink.** Every sink
-  instance, a plugin sink too, takes `on_failure` (`dlq` or `skip`, default
+  instance takes `on_failure` (`dlq` or `skip`, default
   `dlq`), `max_retries` (0 to 10, default 2) and `depends_on` (a list of
   `<type>/<name>`). A sink starts after the sinks in its `depends_on`
   delivered or skipped; the others run in parallel. The load checks every
   value and every reference, refuses a sink that depends on itself or a
-  cycle, and refuses a plugin type under `sinks.custom` named like a built-in
-  type. `on_delivery_error` sees `attempt`, `retries_left` and
+  cycle. `on_delivery_error` sees `attempt`, `retries_left` and
   `declared_policy`, and by default returns the declared policy. A delivery
   that ends in `dlq` writes one record per source message and ends the
   message. A window result cannot go to the DLQ, so there `dlq` drops the

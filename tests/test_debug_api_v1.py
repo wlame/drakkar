@@ -5,7 +5,7 @@ Covers:
   * The three v1-only endpoints: ``/api/v1/partitions``,
     ``/api/v1/task/{id}``, ``/api/v1/live/overview``.
   * The contract reconciliations: events 422 on malformed partitions CSV,
-    probe report omitting ``traceback``, ``custom`` planned-sink payloads,
+    probe report omitting ``traceback``,
     and merge/download/trace/trace-by-label input hardening.
 """
 
@@ -19,7 +19,6 @@ from urllib.parse import quote
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from drakkar.config import (
@@ -724,33 +723,6 @@ class TestProbeErrorTracebackOmitted:
         assert 'traceback' not in dump['deserialize_error']
         assert 'traceback' not in dump['errors'][0]
         assert dump['errors'][0]['message'] == 'bad payload'
-
-
-# ---------------------------------------------------------------------------
-# Reconciliation 9: planned_sink_payloads includes custom sinks
-# ---------------------------------------------------------------------------
-
-
-class TestPlannedSinkCustomPayloads:
-    def test_flatten_includes_custom_payloads(self):
-        from drakkar.models import CollectResult, CustomPayload
-        from drakkar.uiserver.runner import DebugSinkCollector
-
-        class _Doc(BaseModel):
-            answer: int = 42
-
-        collector = DebugSinkCollector()
-        collector.entries.append(
-            ('task_complete:t-1', CollectResult(custom=[CustomPayload(sink='my-plugin', data=_Doc())])),
-        )
-        records = collector.flatten()
-        assert len(records) == 1
-        record = records[0]
-        assert record.sink_type == 'custom'
-        assert record.destination == 'my-plugin'
-        assert record.origin_stage == 'task_complete:t-1'
-        assert record.payload == {'answer': 42}
-        assert record.extras == {'sink_instance': 'my-plugin'}
 
 
 # ---------------------------------------------------------------------------

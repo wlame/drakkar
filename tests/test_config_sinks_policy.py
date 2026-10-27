@@ -1,12 +1,8 @@
 """The failure policy, retry budget and dependencies declared on every sink instance.
 
 The shared cases live in ``tests/fixtures/config_contract.json``; these tests
-cover the rest: every sink type, the check order, the plugin sink leaves and
-the graph accessors.
+cover the rest: every sink type, the check order and the graph accessors.
 """
-
-import json
-import os
 
 import pytest
 from pydantic import ValidationError
@@ -21,7 +17,7 @@ from drakkar.config import (
     PostgresSinkConfig,
     RedisSinkConfig,
     SinkPolicy,
-    load_config,
+    SinksConfig,
 )
 from tests.test_config_contract import FIXTURE
 
@@ -103,14 +99,6 @@ def test_depends_on_unknown_reference_message():
     assert "sinks.kafka.results.depends_on: 'postgres/main-db' is not a configured sink; write '<type>/<name>'" in text
 
 
-def test_depends_on_custom_prefix_is_not_a_reference():
-    sinks = {**_kafka_sinks(results={'depends_on': ['custom/webhook/main']}), 'custom': {'webhook': {'main': {}}}}
-
-    text = _load_error(sinks=sinks)
-
-    assert "sinks.kafka.results.depends_on: 'custom/webhook/main' is not a configured sink" in text
-
-
 def test_depends_on_self_message():
     text = _load_error(sinks=_kafka_sinks(results={'depends_on': ['kafka/results']}))
 
@@ -154,99 +142,20 @@ def test_instance_checks_come_before_references():
 
 def test_dependency_graph_and_instance_path():
     sinks = {
-        'kafka': {'results': {'topic': 'out', 'depends_on': ['postgres/main-db', 'webhook/main']}},
+        'kafka': {'results': {'topic': 'out', 'depends_on': ['postgres/main-db', 'http/webhook']}},
         'postgres': {'main-db': {'dsn': 'postgresql://db.example/drakkar'}},
-        'custom': {'webhook': {'main': {'url': 'https://hooks.example', 'depends_on': ['postgres/main-db']}}},
+        'http': {'webhook': {'url': 'https://hooks.example', 'depends_on': ['postgres/main-db']}},
     }
 
     config = _config(sinks=sinks)
 
     assert config.sinks.dependency_graph() == {
-        'kafka/results': ['postgres/main-db', 'webhook/main'],
+        'http/webhook': ['postgres/main-db'],
+        'kafka/results': ['postgres/main-db', 'http/webhook'],
         'postgres/main-db': [],
-        'webhook/main': ['postgres/main-db'],
     }
     assert config.sinks.instance_path('kafka/results') == 'sinks.kafka.results'
-    assert config.sinks.instance_path('webhook/main') == 'sinks.custom.webhook.main'
-
-
-def test_plugin_sink_keys_are_read_and_removed_from_the_leaf():
-    leaf = {'url': 'https://hooks.example', 'on_failure': 'skip', 'max_retries': 0, 'depends_on': []}
-
-    config = _config(sinks={'custom': {'webhook': {'main': leaf}}})
-
-    assert config.sinks.custom == {'webhook': {'main': {'url': 'https://hooks.example'}}}
-    assert config.sinks.policy_of('webhook', 'main') == SinkPolicy(on_failure='skip', max_retries=0, depends_on=())
-
-
-def test_plugin_sink_without_the_keys_gets_the_defaults():
-    config = _config(sinks={'custom': {'webhook': {'main': {'url': 'https://hooks.example'}}}})
-
-    assert config.sinks.policy_of('webhook', 'main') == SinkPolicy(on_failure='dlq', max_retries=2, depends_on=())
-
-
-def test_plugin_sink_type_named_like_a_builtin_type_fails_the_load():
-    custom = {'zeta': {'main': {}}, 'redis': {'main': {}}, 'kafka': {'main': {}}}
-
-    text = _load_error(sinks={'custom': custom})
-
-    assert "sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name" in text
-    assert 'sinks.custom.redis' not in text
-
-
-@pytest.mark.parametrize(
-    ('custom', 'path'),
-    [({'webhook': 'main'}, 'sinks.custom.webhook'), ({'webhook': {'main': 'url'}}, 'sinks.custom.webhook.main')],
-    ids=['section', 'leaf'],
-)
-def test_plugin_sink_that_is_not_a_mapping_fails_on_its_type(custom, path):
-    text = _load_error(sinks={'custom': custom})
-
-    assert path in text
-    assert 'valid dictionary' in text
-
-
-@pytest.mark.parametrize(
-    ('settings', 'message'),
-    [
-        ({'on_failure': 'stall'}, "sinks.custom.webhook.main.on_failure must be dlq or skip, got 'stall'"),
-        ({'max_retries': 11}, 'sinks.custom.webhook.main.max_retries must be a whole number from 0 to 10'),
-        ({'max_retries': 2.5}, 'sinks.custom.webhook.main.max_retries'),
-        (
-            {'depends_on': ['kafka/missing']},
-            "sinks.custom.webhook.main.depends_on: 'kafka/missing' is not a configured sink; write '<type>/<name>'",
-        ),
-        ({'depends_on': ['webhook/main']}, 'sinks.custom.webhook.main.depends_on: a sink cannot depend on itself'),
-    ],
-    ids=['on_failure', 'max_retries', 'max_retries_fraction', 'unknown_reference', 'self_reference'],
-)
-def test_plugin_sink_messages_use_the_custom_path(settings, message):
-    text = _load_error(sinks={'custom': {'webhook': {'main': {'url': 'https://hooks.example', **settings}}}})
-
-    assert message in text
-
-
-def test_plugin_sink_policy_by_env(tmp_path, monkeypatch):
-    for name in list(os.environ):
-        if name.startswith('DK_'):
-            monkeypatch.delenv(name)
-    monkeypatch.setenv('DK_SINKS__CUSTOM__WEBHOOK__MAIN__MAX_RETRIES', '7')
-    path = tmp_path / 'drakkar.yaml'
-    path.write_text(
-        json.dumps(
-            {
-                'sources': {'kafka': {'enabled': True}},
-                'ui': {'release': {'enabled': False}},
-                'sinks': {'custom': {'webhook': {'main': {'url': 'https://hooks.example'}}}},
-            }
-        ),
-        encoding='utf-8',
-    )
-
-    config = load_config(path)
-
-    assert config.sinks.policy_of('webhook', 'main').max_retries == 7
-    assert config.sinks.custom['webhook']['main'] == {'url': 'https://hooks.example'}
+    assert config.sinks.instance_path('http/webhook') == 'sinks.http.webhook'
 
 
 def test_executor_on_failure_values():
@@ -265,9 +174,6 @@ NEW_VALIDATION_CASES = [
     'sink_depends_on_unknown',
     'sink_depends_on_self',
     'sink_depends_on_cycle',
-    'plugin_sink_on_failure_by_env',
-    'plugin_sink_max_retries_fraction',
-    'plugin_sink_type_named_like_builtin',
     'executor_on_failure_unknown',
 ]
 NEW_LOAD_VALUE_CASES = [
@@ -277,7 +183,6 @@ NEW_LOAD_VALUE_CASES = [
     'http_sink_max_retries_default_two',
     'sink_max_retries_whole_float',
     'sink_depends_on_loads',
-    'sink_plugin_leaf_without_reserved_keys',
     'executor_on_failure_default_skip',
 ]
 
@@ -290,3 +195,7 @@ def test_config_contract_fixture_has_the_sink_policy_cases():
 
     assert set(NEW_VALIDATION_CASES) <= validation
     assert set(NEW_LOAD_VALUE_CASES) <= load_values
+
+
+def test_sinks_custom_key_is_not_a_field():
+    assert 'custom' not in SinksConfig.model_fields

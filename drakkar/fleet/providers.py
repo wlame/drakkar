@@ -1,7 +1,6 @@
 """The built-in registry providers: ``filesystem``, ``static``, ``none``, ``postgres``, ``redis`` and ``consul``.
 
 ``BUILTIN_PROVIDERS`` maps each name to its factory ``(options) -> provider``.
-Plugins add names to that table at lookup time (see ``drakkar.fleet.plugins``).
 """
 
 import errno

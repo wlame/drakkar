@@ -1,6 +1,6 @@
 # Sinks
 
-Sinks are pluggable output destinations for processed results. After your [on_task_complete()](handler.md#on_task_complete),
+Sinks are output destinations for processed results. After your [on_task_complete()](handler.md#on_task_complete),
 [on_message_complete()](handler.md#on_message_complete), or [on_window_complete()](handler.md#on_window_complete) hook
 returns a `CollectResult`, the framework routes each payload to the correct sink, serializes the data, and delivers it.
 
@@ -315,7 +315,7 @@ any number of sinks in one shot. Groups run in parallel unless a sink declares
 
 ### Failure policy
 
-Every sink instance, of every type and plugin sinks included, declares what
+Every sink instance, of every type, declares what
 happens when its delivery fails for good:
 
 ```yaml
@@ -332,21 +332,17 @@ sinks:
 |-----|---------|---------|
 | `on_failure` | `dlq` | What happens when the retry budget is spent. `dlq`: the message goes to the [DLQ](#dead-letter-queue) and is done. `skip`: the payloads of this sink are dropped and the message goes on. |
 | `max_retries` | `2` | Retries after the first attempt, spent only by a hook that returns `RETRY` (0 to 10). The default hook makes one attempt and then applies `on_failure`. The budget belongs to one sink for one result. |
-| `depends_on` | `[]` | Sinks that must deliver first, written `<type>/<name>` (a plugin sink too, without `custom/`). See [Sink dependencies](#sink-dependencies-depends_on). |
+| `depends_on` | `[]` | Sinks that must deliver first, written `<type>/<name>`. See [Sink dependencies](#sink-dependencies-depends_on). |
 
 Environment overrides follow the usual rule:
-`DK_SINKS__POSTGRES__MAIN_DB__ON_FAILURE=skip`, and
-`DK_SINKS__CUSTOM__<TYPE>__<NAME>__ON_FAILURE` for a plugin sink. For a plugin
-sink the three keys are reserved: the framework reads them and removes them
-from the leaf before the plugin receives its config.
+`DK_SINKS__POSTGRES__MAIN_DB__ON_FAILURE=skip`.
 
 The quick transient retry of an idempotent batch (see
 [Retry contract](#retry-contract)) is a separate internal budget. It runs
 inside one attempt, does not call the hook, and does not spend `max_retries`.
 
 The config load refuses a bad policy with one of these messages
-(`<path>` is `sinks.<type>.<name>`, or `sinks.custom.<type>.<name>` for a
-plugin sink):
+(`<path>` is `sinks.<type>.<name>`):
 
 ```text
 <path>.on_failure must be dlq or skip, got '<v>'
@@ -638,7 +634,7 @@ def batch_idempotent(self, payloads):
     return all(p.safe for p in payloads)
 ```
 
-Custom sinks inherit the safe default (`False`). Set the attribute explicitly
+A sink subclass inherits the safe default (`False`). Set the attribute explicitly
 on your subclass when you know duplicates are safe:
 
 ```python
@@ -935,7 +931,7 @@ prevents silent failures where the pipeline runs but cannot deliver results.
 `close()` is called for every sink during worker shutdown. Close errors are logged
 but never raised, so shutdown proceeds cleanly even if a connection is already lost.
 
-### Connection-state flag (custom sinks)
+### Connection-state flag
 
 `BaseSink` maintains an `is_connected: bool` read-only property backed by the
 `mark_connected()` / `mark_disconnected()` methods. You do NOT call these from
@@ -944,7 +940,7 @@ your subclass — the `SinkManager` drives the flag: `connect_all()` calls
 `mark_disconnected()` after `close()` runs (even when `close()` raises, so the
 flag faithfully reflects the manager's view of the connection). Readiness
 probes (`/readyz`) read `is_connected` to decide whether to report the sink
-as ready. Your custom sink only needs to implement `connect()` / `close()`;
+as ready. A sink only needs to implement `connect()` / `close()`;
 the bookkeeping is handled for you.
 
 ### Sink-specific details
@@ -970,7 +966,7 @@ sinks:
 counterpart to `PostgresSink.pool`. It is the way to run a read-modify-write
 cycle, since sinks discard results and read commands are deliberately absent.
 Note the current limit: handlers are never handed sink instances, so this is
-reachable only from a plugin sink subclass. A general `self.sinks` accessor is
+reachable only from a sink subclass. A general `self.sinks` accessor is
 a separate design.
 
 It uses `redis.asyncio` (via `from_url`), connecting to the URL specified in
@@ -1008,199 +1004,6 @@ sinks:
 
 **FileSink** requires `base_path` (non-empty) and validates it exists at connect time. All payload paths are contained within `base_path` — traversal attempts raise `ValueError`.
 Individual payload paths must have existing parent directories.
-
----
-
-## Custom sinks (plugin API)
-
-Drakkar discovers third-party sink types through Python's standard
-[`importlib.metadata` entry points](https://docs.python.org/3/library/importlib.metadata.html#entry-points).
-A plugin package registers a `BaseSink` subclass under the
-`drakkar.sinks` group, and `SinkRegistry.discover()` (called once when
-`SinkManager` is constructed) loads it automatically — no monkey-patches,
-no fork of Drakkar.
-
-The same registry holds the built-in sinks, as a table of import paths
-that resolve to classes on first lookup rather than at import time.
-`SinkRegistry.get(name)` returns the class registered under that name,
-whether it shipped with Drakkar or arrived through a plugin. An explicit
-registration wins over the built-in table, so `SinkRegistry.get('kafka')`
-returns a plugin class that registers the name `kafka`. The worker still
-builds the built-in sections (`sinks.kafka`, `sinks.postgres`, ...) with the
-built-in classes and their config models, and a plugin type is declared only
-under `sinks.custom.<type>`. The config load refuses a `sinks.custom.<type>`
-whose type is the name of a built-in sink type:
-
-```text
-sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name
-```
-
-So a Kafka sink with extra metrics is a plugin type of its own name (for
-example `kafka_metrics`, a `KafkaSink` subclass) declared under
-`sinks.custom.kafka_metrics.<name>`.
-
-### BaseSink contract
-
-Subclass [`drakkar.sinks.base.BaseSink`](https://github.com/wlame/drakkar/blob/main/drakkar/sinks/base.py) and implement three async methods:
-
-```python
-from drakkar.sinks.base import BaseSink
-from pydantic import BaseModel
-
-class MyCustomPayload(BaseModel):
-    """Whatever shape your sink consumes."""
-    value: str
-
-class MyCustomSink(BaseSink[MyCustomPayload]):
-    sink_type = 'my_custom'           # canonical type name (used in config)
-    idempotent = False                # see "Retry contract" above
-
-    def __init__(self, name: str, config) -> None:
-        super().__init__(name)
-        self._config = config
-
-    async def connect(self) -> None:
-        """Open the underlying client. Raise on failure — the worker
-        crashes fast with a clear startup error.
-        """
-
-    async def deliver(self, payloads: list[MyCustomPayload]) -> None:
-        """Send a batch. Raise on failure — the framework handles
-        retries, DLQ routing, and circuit-breaker bookkeeping.
-        """
-
-    async def close(self) -> None:
-        """Release resources. Should not raise — log and continue."""
-```
-
-The `idempotent` class attribute and the circuit-breaker / retry
-behaviour described under [Retry contract](#retry-contract) apply to
-custom sinks identically. You do not call `mark_connected` /
-`mark_disconnected` or any of the `record_*` circuit-breaker methods
-yourself — `SinkManager` drives those.
-
-### Entry-point declaration
-
-In your plugin's `pyproject.toml`:
-
-```toml
-[project.entry-points."drakkar.sinks"]
-my_custom = "my_package.sinks:MyCustomSink"
-```
-
-The left side (`my_custom`) is the registry key — it is what
-`SinkRegistry.get()` returns your class for, and it is the type name
-operators use in their Drakkar config. The right side is a standard
-`module:attribute` reference resolvable by `EntryPoint.load()`.
-
-After `pip install my-package` (or `uv sync` in a workspace that
-declares the dependency), Drakkar picks up the new sink at startup
-without any further wiring.
-
-### Configuring instances
-
-Plugin sinks are declared under `sinks.custom.<type>.<instance>` in
-the worker config. The `<type>` segment must match the entry-point
-key; `<instance>` is whatever name your handler uses to route
-payloads. The leaf dict is passed verbatim as the second argument to
-your sink's constructor (`MyCustomSink(name, config)`), so you can
-shape it however your sink expects. The three [failure policy](#failure-policy)
-keys `on_failure`, `max_retries` and `depends_on` are reserved: the framework
-reads them and removes them from the leaf before your constructor sees it.
-The plugin class's `sink_type` must equal the `<type>` key; startup fails
-with `sinks.custom.<type>.<name>: the plugin reports sink_type '<t>'`
-otherwise.
-
-```yaml
-sinks:
-  kafka:
-    results:
-      topic: "search-results"
-  custom:
-    my_custom:
-      primary:
-        endpoint: "https://api.example.com/v1/ingest"
-        api_key: "xxx"
-      secondary:
-        endpoint: "https://api.example.com/v1/audit"
-        api_key: "xxx"
-```
-
-If the `<type>` is not registered (plugin missing or entry-point
-typo), `DrakkarApp._build_sinks` raises a `ValueError` at startup
-listing the known types — failing loud beats a silently-dropped
-sink.
-
-### Inspecting registered sinks
-
-```python
-from drakkar.sinks import SinkRegistry
-
-SinkRegistry.discover()                      # idempotent — safe to call repeatedly
-print(SinkRegistry.all_names())              # ['filesystem', 'http', 'kafka', 'my_custom', ...]
-print(SinkRegistry.get('my_custom'))         # <class 'my_package.sinks.MyCustomSink'>
-print(SinkRegistry.get('not_installed'))     # None — get() never raises
-```
-
-### Failure modes
-
-If a plugin entry point fails to load (missing dependency, ImportError,
-non-`BaseSink` target), `SinkRegistry.discover()` logs a structured
-`sink_registry_entry_point_load_failed` (or `..._invalid`) warning and
-skips that entry. One broken plugin never crashes the worker — operators
-see the warning in their log aggregator and remove or fix the offending
-package.
-
-### Routing payloads to a plugin sink
-
-Plugin sinks receive payloads through the `custom` field on
-`CollectResult`. Each `CustomPayload.sink` names the configured plugin
-sink instance (one of the keys you put under `sinks.custom.<type>` in
-your config); the framework looks the instance up by name across all
-plugin sinks, validates it at startup-time *and* per-result, and hands
-your `data` field to the sink's `deliver()` method as-is.
-
-```python
-import drakkar as dk
-from pydantic import BaseModel
-
-class MyOutput(BaseModel):
-    request_id: str
-    payload: dict
-
-class SearchHandler(dk.BaseDrakkarHandler):
-    async def on_task_complete(self, result):
-        out = MyOutput(request_id='abc', payload={'matches': 12})
-        return dk.CollectResult(
-            custom=[
-                dk.CustomPayload(sink='primary', data=out),
-                dk.CustomPayload(sink='secondary', data=out),
-            ],
-        )
-```
-
-The corresponding config:
-
-```yaml
-sinks:
-  custom:
-    my_custom:
-      primary:
-        endpoint: 'https://api.example.com/v1/ingest'
-      secondary:
-        endpoint: 'https://api.example.com/v1/audit'
-```
-
-`my_custom` here is the entry-point key your `pyproject.toml` declared
-(`MyCustomSink.sink_type`); `primary` / `secondary` are the instance
-names the handler routes to via `CustomPayload.sink`.
-
-If the handler returns a `CustomPayload` with a `sink` name that no
-configured plugin instance owns, `SinkManager.validate_collect` raises
-`SinkNotConfiguredError` *before* any payload is delivered — same
-fail-loud guarantee as for the built-in sinks. If the same instance
-name is shared across two plugin sink types, `AmbiguousSinkError` is
-raised so operators rename one to disambiguate.
 
 ---
 

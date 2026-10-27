@@ -5,10 +5,9 @@ its own liveness verdict when its service keeps one. It knows nothing about
 loops, timeouts, retries or validation: the registry service owns those.
 Adding a provider never touches the features that use the registry.
 
-A third-party provider is a class with the five async methods of
-:class:`RegistryProvider` plus a factory ``(options) -> provider`` that the
-package exposes as an entry point of the ``drakkar.registry_providers``
-group. ``drakkar.fleet.testkit`` holds the checks a provider should pass.
+A provider is a class with the five async methods of :class:`RegistryProvider`
+plus a factory ``(options) -> provider``; ``BUILTIN_PROVIDERS`` maps each
+provider name to its factory.
 """
 
 from collections.abc import Callable, Mapping
@@ -47,7 +46,7 @@ class RegistryContext:
     """What a provider learns about the worker that runs it, at ``start``.
 
     ``options`` is the provider's own settings mapping: the same mapping its
-    factory received (for a plugin, ``fleet.registry.plugin_options``).
+    factory received.
 
     ``connections`` resolves the worker's named shared connections
     (``connections.<kind>.<name>``); a provider that needs none ignores it.

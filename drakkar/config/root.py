@@ -403,8 +403,7 @@ def _require_declared_connection(path: str, provider: str, name: str, connection
 
     ``path`` is the config path of the ``connection`` key, for the message. The check
     goes by the provider name alone: a name in ``CONNECTION_PROVIDERS`` (``consul``,
-    ``redis``, ``postgres``) is checked whether a built-in or a plugin of that name
-    runs it; any other name, a plugin's or a provider without a service, is not.
+    ``redis``, ``postgres``) is checked; any other name is not.
     """
     if provider not in CONNECTION_PROVIDERS:
         return

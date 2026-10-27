@@ -141,7 +141,7 @@ def validate_card(card: Any) -> str:
     ``state`` value.
     """
     if not isinstance(card, dict):
-        # A provider plugin handed over something that is not a card object.
+        # A provider handed over something that is not a card object.
         return 'not_object'
     reason = _schema_reason(card)
     if reason:
