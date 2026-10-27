@@ -295,6 +295,45 @@ async def test_dependency_that_raises_still_releases_its_dependents():
     assert [entry['reason'] for entry in logs if entry['event'] == 'sink_not_started'] == ['dependency_failed']
 
 
+async def test_group_gate_runs_before_each_group_and_its_raise_ends_the_call():
+    """The gate is awaited once per group, after its dependencies settled; what it raises comes out of the call."""
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    mgr = manager_with((kafka, policy(depends_on=('postgres/main',))), (postgres, policy()))
+    gated: list[tuple[str, str]] = []
+
+    async def gate(key: tuple[str, str]) -> None:
+        gated.append(key)
+        if key == KAFKA:
+            raise asyncio.CancelledError('stop before kafka')
+
+    with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
+        await mgr.deliver_all(both_results(), declared, -1, message_context=message_context(), before_group_start=gate)
+
+    assert gated == [POSTGRES, KAFKA]
+    assert (len(postgres.delivered), kafka.delivered) == (1, [])
+    assert [entry for entry in logs if entry['event'] == 'sink_not_started'] == []
+
+
+async def test_group_gate_runs_before_a_not_started_note():
+    """A gate that raises keeps a dependent of a failed dependency from being counted as not started."""
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    postgres.fail = True
+    mgr = manager_with((kafka, policy(depends_on=('postgres/main',))), (postgres, policy(on_failure='dlq')))
+
+    async def gate(key: tuple[str, str]) -> None:
+        if key == KAFKA:
+            raise asyncio.CancelledError('stop')
+
+    with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
+        await mgr.deliver_all(
+            both_results(), declared, 0, message_context=MessageContext.window(), before_group_start=gate
+        )
+
+    assert [entry for entry in logs if entry['event'] == 'sink_not_started'] == []
+
+
 def test_message_context_needs_one_state_per_source_message():
     with pytest.raises(ValueError, match='one DLQ state per source message'):
         MessageContext(source_messages=[source_message()], states=[])

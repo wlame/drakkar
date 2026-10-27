@@ -804,10 +804,6 @@ class DrakkarApp:
             state['throughput'] = self._throughput.window_stats()
         return state
 
-    async def _drop_dlq_send_unconfigured(self, partition_id: int, payload_count: int) -> None:
-        """Count and log a DLQ send that has nowhere to go because the DLQ is off (see the sink manager)."""
-        await self._sink_manager.drop_unconfigured_dlq_send(partition_id, payload_count)
-
     async def _handle_collect(
         self,
         result: CollectResult,

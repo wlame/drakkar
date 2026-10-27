@@ -98,6 +98,9 @@ _FIELD_TO_SINK_TYPE: dict[str, str] = {
 # A sink instance, keyed by its sink type and its name.
 SinkKey = tuple[str, str]
 
+# A caller's check before one group starts (see ``SinkManager.deliver_all``).
+GroupGate = Callable[[SinkKey], Awaitable[None]]
+
 
 def sink_ref(key: SinkKey) -> str:
     """The ``<type>/<name>`` reference of a sink, as ``depends_on`` and the DLQ record write it."""
@@ -704,6 +707,7 @@ class SinkManager:
         partition_id: int,
         *,
         message_context: MessageContext | None = None,
+        before_group_start: GroupGate | None = None,
     ) -> dict[SinkKey, DeliveryOutcome]:
         """Deliver every payload group of one result by its sink's declared policy and dependencies.
 
@@ -728,6 +732,12 @@ class SinkManager:
                 ``None`` means no context: a ``dlq`` outcome then has no
                 record to write and follows ``dlq.on_send_failure``, so a
                 caller that forgets the context loses nothing silently.
+            before_group_start: Awaited once per group with its key, after
+                the group's dependencies settled and before it starts or is
+                counted as not started. What it raises ends that group with
+                nothing counted for it; the other groups still settle, and
+                the first raise comes out of this call. The HTTP source
+                checks its request timeout here, between groups.
 
         Returns:
             The outcome of every group, keyed by (sink_type, sink_name).
@@ -764,6 +774,7 @@ class SinkManager:
                     on_delivery_error=on_delivery_error,
                     partition_id=partition_id,
                     message_context=message_context,
+                    before_group_start=before_group_start,
                 )
             finally:
                 # Set on every exit, a raise and a cancellation included:
@@ -790,8 +801,10 @@ class SinkManager:
         on_delivery_error: DeliveryErrorCallback,
         partition_id: int,
         message_context: MessageContext | None,
+        before_group_start: GroupGate | None,
     ) -> DeliveryOutcome:
         """Wait for the group's dependencies in this result, then deliver it, or say why it did not start."""
+        dependency_failed = False
         for dependency in self._dependencies.get(key, ()):
             dependency_settled = settled.get(dependency)
             if dependency_settled is None:
@@ -800,8 +813,15 @@ class SinkManager:
             # Shielded: a waiter that is cancelled must not cancel the shared
             # signal that the other dependents of the same sink await.
             outcome = await asyncio.shield(dependency_settled)
-            if outcome in _SATISFIED:
-                continue
+            if outcome not in _SATISFIED:
+                dependency_failed = True
+                break
+        if before_group_start is not None:
+            # Before the not-started note too: a gate that stops the call
+            # (a dependency it stopped settles as failed) must not leave a
+            # dependent counted as failed by its dependency.
+            await before_group_start(key)
+        if dependency_failed:
             # A dependency that wrote the record, or did not start because the
             # message is on the DLQ, ends the message; anything else (a window
             # failure, a lost record) is a failed dependency. The message's

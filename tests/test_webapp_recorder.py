@@ -76,6 +76,7 @@ def _make_request_ctx(client: str = 'anonymous', request_id: str = 'req_t_0001')
         request=_FakeBody(payload='hello'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
 
 
@@ -538,6 +539,7 @@ async def test_webapp_request_received_row_with_non_pydantic_body(tmp_path):
             request='not-a-pydantic-model',  # plain str fallback
             started_at=datetime.now(UTC),
             headers={},
+            raw_body=b'',
         )
         rec.record_webapp_request_received(ctx)
         rows = await _read_events_columns(rec)
@@ -564,6 +566,7 @@ async def test_webapp_request_received_row_with_bytes_body(tmp_path):
             request=b'\x00\x01\x02ABCDE',
             started_at=datetime.now(UTC),
             headers={},
+            raw_body=b'',
         )
         rec.record_webapp_request_received(ctx)
         rows = await _read_events_columns(rec)

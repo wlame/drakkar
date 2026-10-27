@@ -345,6 +345,7 @@ async def test_cancellation_set_pre_complete_skips_response_hook():
         request=_HttpReq(pattern='hi'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
     captured['ctx'] = ctx
 
@@ -400,6 +401,7 @@ async def test_subprocess_completion_after_cancellation_does_not_invoke_response
         request=_HttpReq(pattern='hi'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
     # Pre-allocate the cancelled flag on this loop and set it. The
     # runner's "if ctx.cancelled is None" branch leaves ours alone.

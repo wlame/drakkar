@@ -45,12 +45,15 @@ may add SIGTERM-on-cancel for in-flight subprocesses.
 The optional sinks-enabled path sits between the two cancellation
 checks. When ``config.sinks_enabled`` is True the runner
 calls ``handler.on_message_complete(group)`` and, if it returns a
-``CollectResult``, delivers each sink-type batch sequentially through
-``SinkManager.deliver_all`` so the cancellation flag can short-circuit
-the next batch on a late timeout. Per-sink outcomes (attempted /
-delivered / dlq / errors) are captured into a ``SinkDeliverySummary``
-on the ``WebReport`` so operators can see exactly what was delivered
-without re-correlating against sink-level metrics.
+``CollectResult``, delivers it in one ``SinkManager.deliver_all`` call
+with the same declared policies and ``depends_on`` order as a Kafka
+message result; a delivery that ends in the DLQ writes the raw request
+body as the record. The cancellation flag is checked before each sink
+group starts, so a late timeout stops the groups that have not started.
+Per-type outcomes (attempted / delivered / dlq / errors) are captured
+into a ``SinkDeliverySummary`` on the ``WebReport`` so operators can see
+exactly what was delivered without re-correlating against sink-level
+metrics.
 """
 
 from __future__ import annotations
@@ -58,11 +61,13 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
-from collections.abc import Awaitable, Callable
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import BaseModel
+from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar.config import WebAppConfig
 from drakkar.executor import ExecutorTaskError
@@ -79,7 +84,14 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
-from drakkar.sinks.dlq_record import DLQRecord
+from drakkar.sinks.manager import (
+    DeliveryErrorCallback,
+    DeliveryOutcome,
+    GroupGate,
+    MessageContext,
+    SinkKey,
+    sink_ref,
+)
 from drakkar.webapp.models import (
     CacheStats,
     SinkDeliverySummary,
@@ -97,13 +109,21 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# Type alias for the SinkManager's on_delivery_error callback. Mirrors
-# :data:`drakkar.sinks.manager.DeliveryErrorCallback` but is duplicated
-# here so the runner module does not depend on a private re-export from
-# the sink manager. The signature is fixed by ``SinkManager.deliver_all``:
-# an async callable taking a ``DeliveryError`` and returning a
-# ``DeliveryAction``.
-OnDeliveryErrorCallback = Callable[[DeliveryError], Awaitable[DeliveryAction]]
+# The payload fields of a ``CollectResult``, in the order the summary lists the types.
+_PAYLOAD_FIELDS = ('kafka', 'postgres', 'mongo', 'http', 'redis', 'files', 'custom')
+
+# The summary error that says how a sink's delivery ended when it neither
+# delivered nor reached the DLQ and no skip dropped it: it did not start,
+# or it failed with no DLQ record written.
+_OUTCOME_ERROR_TEXT = {
+    DeliveryOutcome.NOT_STARTED: 'not started',
+    DeliveryOutcome.FAILED: 'failed, no DLQ record',
+}
+
+
+def received_ms(ctx: WebRequestContext) -> int:
+    """When the request was received, in ms since the epoch (the Kafka timestamp convention)."""
+    return int(ctx.started_at.timestamp() * 1000)
 
 
 class WebappHandlerError(Exception):
@@ -222,9 +242,7 @@ class WebappRunner:
         # request body rather than re-reading the raw POST body so the
         # bytes match what arrange_http_request sees in ``ctx.request``.
         request_body_bytes = self._serialize_request_body(ctx.request)
-        # SourceMessage.timestamp expects milliseconds-since-epoch (Kafka
-        # convention). Convert the UTC ``datetime`` from ctx to ms.
-        ts_ms = int(ctx.started_at.timestamp() * 1000)
+        ts_ms = received_ms(ctx)
         source_message = SourceMessage(
             topic='__webapp__',
             partition=-1,
@@ -621,33 +639,28 @@ class WebappRunner:
         rollup payloads — same convention as the Kafka pipeline) so the
         ``WebReport.sinks`` field stays ``null`` for that case.
 
-        When a ``CollectResult`` comes back, the runner splits it by
-        sink type (``kafka`` / ``postgres`` / ``mongo`` / ``http`` /
-        ``redis`` / ``filesystem`` / plugin sinks via ``custom``) and
-        delivers each batch sequentially through
-        :meth:`SinkManager.deliver_all`. Sequential dispatch (rather than
-        parallel) is the divergence from the Kafka path: it lets us
-        check ``ctx.cancelled`` between sink-type batches so a late T2
-        timeout can short-circuit the rest of the delivery without
-        committing wasted work to downstreams.
+        When a ``CollectResult`` comes back, every sink of it is delivered
+        in one :meth:`SinkManager.deliver_all` call, as a Kafka message
+        result is: each sink by its declared ``on_failure`` and
+        ``max_retries``, groups in parallel unless ``depends_on`` orders
+        them. The request is one source message whose DLQ record carries
+        the raw request body; once a delivery writes it, the sinks that
+        have not started do not start. The per-type
+        :class:`SinkDeliverySummary` is built from the outcome of each
+        sink.
 
-        Per-sink delivery outcomes are captured into a
-        :class:`SinkDeliverySummary` via a wrapped ``on_delivery_error``
-        callback that mirrors :meth:`DrakkarApp._handle_collect`'s DLQ
-        routing — the user's ``handler.on_delivery_error`` decides the
-        action (DLQ / RETRY / SKIP); when DLQ wins and a DLQ sink is
-        configured, the failed payloads are forwarded there. Either
-        way, the failure is recorded in the response summary so the
-        client sees what happened.
+        Validation:
+            Each sink type is validated on its own; a type whose payloads
+            name no configured sink is recorded in its summary and left
+            out, and the other types are still delivered.
 
-        Cancellation between batches:
-            ``ctx.cancelled.is_set()`` is checked before each sink-type
-            batch. If set, the runner logs
-            ``webapp_request_dropped_after_timeout`` with
-            ``stage='during_sinks'`` and raises ``CancelledError``.
-            Already-delivered batches are not rolled back — sink
-            deliveries are not transactional and the user has already
-            received a 504 client-side.
+        Cancellation between groups:
+            Before each group starts, ``ctx.cancelled`` is checked. If set,
+            the runner logs ``webapp_request_dropped_after_timeout`` with
+            ``stage='during_sinks'`` once and raises ``CancelledError``.
+            Groups already in flight finish; nothing delivered is rolled
+            back — sink deliveries are not transactional and the client
+            already received a 504.
 
         ``on_message_complete`` raising:
             Wrapped into :class:`WebappHandlerError` so the route
@@ -655,7 +668,6 @@ class WebappRunner:
             ``arrange_http_request`` / ``on_http_request_complete``
             failure pattern.
         """
-        # Step 1: invoke on_message_complete to gather sink payloads.
         # Wrap user-hook exceptions in WebappHandlerError so the route
         # handler can emit a flat 500 — same pattern as
         # arrange_http_request / on_http_request_complete.
@@ -685,109 +697,122 @@ class WebappRunner:
         if collect_result is None or not collect_result.has_outputs:
             return None
 
-        # Step 2: split CollectResult by sink type so we can dispatch
-        # batches sequentially with cancellation checks between them.
-        # ``custom`` payloads are grouped under the synthetic key
-        # ``'custom'`` because plugin sinks span arbitrary sink types
-        # whose names are runtime-resolved per payload — splitting them
-        # further would require resolving each plugin sink upfront.
-        per_type: list[tuple[str, CollectResult]] = self._split_collect_by_type(collect_result)
-
-        # Step 3: build the per-sink summary scaffold. Initialise each
-        # sink type with attempted=N (count of payloads) and
-        # delivered=N — the wrapped on_delivery_error decrements
-        # delivered and increments dlq when a batch fails.
+        manager = self._app._sink_manager
         summary = SinkDeliverySummary()
-        for sink_type, sub_result in per_type:
-            attempted = self._count_payloads(sub_result)
-            summary.by_type[sink_type] = SinkResult(
-                attempted=attempted,
-                delivered=attempted,
-                dlq=0,
-                errors=[],
-            )
-
-        # Step 4: dispatch each sink-type batch sequentially.
-        for sink_type, sub_result in per_type:
-            # Late-cancellation gate. T2 may have timed out while we
-            # were inside an earlier sink's deliver call; bail out
-            # before the next batch so we don't burn another
-            # round-trip on a request the client has already given up
-            # on.
-            if ctx.cancelled is not None and ctx.cancelled.is_set():
-                await logger.ainfo(
-                    'webapp_request_dropped_after_timeout',
-                    category='webapp',
-                    request_id=ctx.request_id,
-                    client=ctx.client_name,
-                    stage='during_sinks',
-                    next_sink_type=sink_type,
-                )
-                webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
-                if self._app._recorder is not None:
-                    self._app._recorder.record_webapp_request_dropped_after_timeout(ctx)
-                raise asyncio.CancelledError(
-                    f'webapp request cancelled before {sink_type!r} sink delivery; T2 already 504d'
-                )
-
-            # Validate the sub-result against the SinkManager (mirrors
-            # DrakkarApp._handle_collect). Misconfigured sinks should
-            # surface as a clear server-side error; we don't fail the
-            # whole request, we just record the validation failure in
-            # the per-sink summary and skip delivery for that type.
-            sink_result = summary.by_type[sink_type]
+        valid: list[CollectResult] = []
+        # The summary type and the payload count of every sink of the request.
+        summary_type_of: dict[SinkKey, str] = {}
+        payload_count: Counter[SinkKey] = Counter()
+        for summary_type, sub_result in self._split_collect_by_type(collect_result):
+            sink_result = SinkResult(attempted=self._count_payloads(sub_result))
+            summary.by_type[summary_type] = sink_result
             try:
-                self._app._sink_manager.validate_collect(sub_result)
+                manager.validate_collect(sub_result)
             except Exception as exc:
-                # Validation failures are recorded but do not raise:
-                # the user-side response was built and the request can
-                # still return 200; the sinks summary explains the gap.
-                sink_result.delivered = 0
+                # Recorded, not raised: the response can still be built and
+                # return 200; the summary explains the gap.
                 sink_result.errors.append(f'validation_error: {exc!r}')
                 await logger.awarning(
                     'webapp_sink_validation_failed',
                     category='webapp',
                     request_id=ctx.request_id,
                     client=ctx.client_name,
-                    sink_type=sink_type,
+                    sink_type=summary_type,
                     error=str(exc),
                 )
                 continue
+            valid.append(sub_result)
+            for key in self._sink_keys(summary_type, sub_result):
+                summary_type_of[key] = summary_type
+                payload_count[key] += 1
+        if not valid:
+            return summary
 
-            # Wrapped on_delivery_error mirrors DrakkarApp._handle_collect:
-            # delegates to the user hook, then routes DLQ-action results
-            # to the configured DLQ sink (when present). The wrapper
-            # additionally captures per-sink outcomes into the summary
-            # so the response body reflects what actually happened.
-            on_delivery_error = self._make_on_delivery_error_capturer(
-                sink_result=sink_result,
+        try:
+            outcomes = await manager.deliver_all(
+                self._merge(valid),
+                on_delivery_error=self._make_on_delivery_error_capturer(summary, summary_type_of),
+                partition_id=-1,
+                message_context=MessageContext.for_request(
+                    body=ctx.raw_body,
+                    request_id=ctx.request_id,
+                    received_ms=received_ms(ctx),
+                ),
+                before_group_start=self._make_cancellation_gate(ctx),
             )
+        except Exception as exc:
+            # A raise (a DLQ record that could not be written under
+            # ``dlq.on_send_failure: stall``, or a manager bug) carries no
+            # outcomes. The request is not failed for it: the response was
+            # built, and a 200 with sink errors tells the client more than
+            # a 500.
+            for summary_type in set(summary_type_of.values()):
+                summary.by_type[summary_type].errors.append(f'deliver_all_raised: {exc!r}')
+            await logger.aerror(
+                'webapp_sink_deliver_all_failed',
+                category='webapp',
+                request_id=ctx.request_id,
+                client=ctx.client_name,
+                error=str(exc),
+            )
+            return summary
 
-            try:
-                await self._app._sink_manager.deliver_all(
-                    sub_result,
-                    on_delivery_error=on_delivery_error,
-                    partition_id=-1,
-                )
-            except Exception as exc:
-                # Catastrophic failure inside SinkManager (rare —
-                # SinkManager normally routes failures through
-                # on_delivery_error). We record it in the summary but
-                # don't fail the request: the user's HTTP response was
-                # already built, and a 200-with-sink-errors gives the
-                # client more useful information than a 500.
-                sink_result.delivered = 0
-                sink_result.errors.append(f'deliver_all_raised: {exc!r}')
-                await logger.aerror(
-                    'webapp_sink_deliver_all_failed',
+        for key, outcome in outcomes.items():
+            sink_result = summary.by_type[summary_type_of[key]]
+            if outcome == DeliveryOutcome.DELIVERED:
+                sink_result.delivered += payload_count[key]
+            elif outcome == DeliveryOutcome.DLQ:
+                sink_result.dlq += payload_count[key]
+            elif outcome in _OUTCOME_ERROR_TEXT:
+                # The hook entries name failed attempts, not how the delivery ended.
+                sink_result.errors.append(f'{sink_ref(key)}: {_OUTCOME_ERROR_TEXT[outcome]}')
+        return summary
+
+    def _sink_keys(self, summary_type: str, sub_result: CollectResult) -> list[SinkKey]:
+        """The sink key of each payload of a validated one-type sub-result, in payload order."""
+        manager = self._app._sink_manager
+        keys: list[SinkKey] = []
+        for field in _PAYLOAD_FIELDS:
+            for payload in getattr(sub_result, field):
+                if field == 'custom':
+                    sink = manager.resolve_custom_sink(payload.sink)
+                else:
+                    sink = manager.resolve_sink(summary_type, payload.sink)
+                keys.append((sink.sink_type, sink.name))
+        return keys
+
+    def _make_cancellation_gate(self, ctx: WebRequestContext) -> GroupGate:
+        """Build the check that stops the delivery between groups once T2 gave up on the request.
+
+        Groups start in parallel, so several can reach the check at once;
+        the drop is logged, counted and recorded once per request.
+        """
+        app = self._app
+        dropped = False
+
+        async def _gate(key: SinkKey) -> None:
+            nonlocal dropped
+            if ctx.cancelled is None or not ctx.cancelled.is_set():
+                return
+            if not dropped:
+                dropped = True
+                await logger.ainfo(
+                    'webapp_request_dropped_after_timeout',
                     category='webapp',
                     request_id=ctx.request_id,
                     client=ctx.client_name,
-                    sink_type=sink_type,
-                    error=str(exc),
+                    stage='during_sinks',
+                    next_sink_type=key[0],
+                    next_sink=sink_ref(key),
                 )
+                webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
+                if app._recorder is not None:
+                    app._recorder.record_webapp_request_dropped_after_timeout(ctx)
+            raise asyncio.CancelledError(
+                f'webapp request cancelled before {sink_ref(key)!r} sink delivery; T2 already 504d'
+            )
 
-        return summary
+        return _gate
 
     @staticmethod
     def _split_collect_by_type(result: CollectResult) -> list[tuple[str, CollectResult]]:
@@ -800,8 +825,8 @@ class WebappRunner:
         caller iterates only over types that actually carry payloads.
 
         Each sub-result is a fresh ``CollectResult`` containing payloads
-        for exactly one type — that's what lets ``deliver_all`` run on
-        a single batch at a time with cancellation checks between.
+        for exactly one type, so each type is validated and counted on
+        its own before the valid ones are merged into one delivery.
         """
         groups: list[tuple[str, CollectResult]] = []
         if result.kafka:
@@ -828,126 +853,46 @@ class WebappRunner:
     @staticmethod
     def _count_payloads(result: CollectResult) -> int:
         """Total payload count across every sink-typed field of ``result``."""
-        return (
-            len(result.kafka)
-            + len(result.postgres)
-            + len(result.mongo)
-            + len(result.http)
-            + len(result.redis)
-            + len(result.files)
-            + len(result.custom)
+        return len(WebappRunner._payloads(result))
+
+    @staticmethod
+    def _payloads(result: CollectResult) -> list[BaseModel]:
+        """Every payload of ``result``, field by field, each field in payload order."""
+        return [payload for field in _PAYLOAD_FIELDS for payload in getattr(result, field)]
+
+    @staticmethod
+    def _merge(results: list[CollectResult]) -> CollectResult:
+        """One ``CollectResult`` holding the payloads of ``results``, each field in payload order."""
+        return CollectResult(
+            **{
+                field: [payload for result in results for payload in getattr(result, field)]
+                for field in _PAYLOAD_FIELDS
+            }
         )
 
     def _make_on_delivery_error_capturer(
         self,
-        sink_result: SinkResult,
-    ) -> OnDeliveryErrorCallback:
-        """Build a wrapped ``on_delivery_error`` that captures into ``sink_result``.
+        summary: SinkDeliverySummary,
+        summary_type_of: dict[SinkKey, str],
+    ) -> DeliveryErrorCallback:
+        """Build the ``on_delivery_error`` callback that also lists each failed attempt in the summary.
 
-        The wrapper:
-          1. delegates to the user's ``handler.on_delivery_error`` to
-             learn the desired :class:`DeliveryAction` (DLQ / RETRY /
-             SKIP);
-          2. appends a redacted error message to ``sink_result.errors``
-             so the response summary surfaces what went wrong;
-          3. when DLQ wins and a DLQ sink is configured (mirrors
-             :meth:`DrakkarApp._handle_collect`), forwards the failed
-             payloads to the DLQ and increments ``sink_result.dlq``;
-          4. decrements ``sink_result.delivered`` by the failed payload
-             count so ``attempted = delivered + dlq + skipped``
-             relationship holds at the end (modulo SKIP; see below).
-
-        SKIP semantics: SKIP drops payloads silently from the
-        downstream, so we count them as not-delivered (decrement
-        ``delivered``) but do NOT add to ``dlq``. They show up implicitly
-        in ``attempted - delivered - dlq``. RETRY exhausting its budget
-        eventually flows back through here as a final DLQ/SKIP, so the
-        summary remains consistent.
+        It appends ``<type>/<name>: <error>`` to the errors of the sink's
+        summary type (the error text is already redacted by the
+        SinkManager), then asks the handler's ``on_delivery_error``. The
+        SinkManager acts on the answer: it retries, skips, or writes the
+        DLQ record; a hook that raises is logged there and the sink's
+        declared ``on_failure`` applies.
         """
         app = self._app
 
         async def _capturing_on_delivery_error(error: DeliveryError) -> DeliveryAction:
-            # Append a compact error string. The raw error message is
-            # already redacted by the SinkManager (see
-            # :func:`drakkar.utils.redact_url`) so we forward it
-            # directly. We prepend the sink type so the operator can
-            # tell at a glance which downstream blew up.
-            sink_result.errors.append(f'{error.sink_type}/{error.sink_name}: {error.error}')
-
-            # Delegate to the user hook to learn the action. ``app`` is
-            # captured by closure so tests can swap it out without
-            # reaching into the runner.
+            summary_type = summary_type_of[(error.sink_type, error.sink_name)]
+            summary.by_type[summary_type].errors.append(f'{error.sink_type}/{error.sink_name}: {error.error}')
+            bind_contextvars(hook='on_delivery_error', sink_type=error.sink_type, sink_name=error.sink_name)
             try:
-                action = await app._handler.on_delivery_error(error)
-            except Exception as exc:
-                # User hook raising is itself an error — log it and
-                # default to DLQ (the safest fallback). Mirrors the
-                # SinkManager's existing tolerance for handler bugs.
-                await logger.aerror(
-                    'webapp_on_delivery_error_failed',
-                    category='webapp',
-                    sink_type=error.sink_type,
-                    sink_name=error.sink_name,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-                action = DeliveryAction.DLQ
-
-            failed_count = len(error.payloads)
-
-            if action == DeliveryAction.DLQ:
-                # Match DrakkarApp._handle_collect: the DLQ send happens
-                # only when a DLQ sink is configured, and a deployment
-                # without one gets the unconfigured-drop path below.
-                if app._dlq_sink is not None:
-                    try:
-                        # The runner does not pass the request body down
-                        # yet, so the record holds the failed payloads' JSON.
-                        sent = await app._dlq_sink.send(DLQRecord.from_delivery_error(error), partition_id=-1)
-                    except Exception as exc:
-                        # DLQ send raising is rare but should not crash
-                        # the request — record and continue.
-                        sent = False
-                        sink_result.errors.append(f'dlq_send_failed: {exc!r}')
-                        await logger.aerror(
-                            'webapp_sink_dlq_send_failed',
-                            category='webapp',
-                            sink_type=error.sink_type,
-                            error=str(exc),
-                        )
-                    if not sent and not any(e.startswith('dlq_send_failed') for e in sink_result.errors):
-                        # send() reported failure without raising — surface
-                        # it in the response so the HTTP caller knows the
-                        # payloads were not persisted anywhere. The webapp
-                        # path has no offsets to stall; the request-level
-                        # error report IS the recovery signal.
-                        sink_result.errors.append('dlq_send_failed: DLQ write not confirmed')
-                elif not app._config.dlq_enabled:
-                    # The DLQ is off by configuration, not broken. That is a
-                    # drop, not a failed write, so it gets its own counter
-                    # and its own marker in the response.
-                    await app._drop_dlq_send_unconfigured(-1, failed_count)
-                    sink_result.errors.append('dlq_unconfigured')
-                else:
-                    # The DLQ is configured but the sink is missing — it
-                    # failed to build. Report it as a failed write, like a
-                    # send that could not be confirmed.
-                    sink_result.errors.append('dlq_send_failed: DLQ is configured but no DLQ sink was built')
-                sink_result.dlq += failed_count
-                sink_result.delivered = max(0, sink_result.delivered - failed_count)
-            elif action == DeliveryAction.SKIP:
-                # SKIP drops the payloads from the downstream entirely.
-                # We decrement ``delivered`` so the response shape
-                # matches reality but do NOT count toward DLQ — that
-                # column is reserved for routed-to-DLQ outcomes.
-                sink_result.delivered = max(0, sink_result.delivered - failed_count)
-            else:  # DeliveryAction.RETRY
-                # The SinkManager will retry the call; we don't update
-                # the summary yet because the retry's terminal outcome
-                # will surface back through this same callback (or the
-                # success path implicit in deliver_all returning).
-                pass
-
-            return action
+                return await app._handler.on_delivery_error(error)
+            finally:
+                unbind_contextvars('hook', 'sink_type', 'sink_name')
 
         return _capturing_on_delivery_error

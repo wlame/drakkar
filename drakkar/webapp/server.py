@@ -780,6 +780,7 @@ class WebApp:
                 request=parsed,
                 started_at=datetime.now(UTC),
                 headers=dict(request.headers),
+                raw_body=body_bytes,
             )
 
             # T2-side concurrency cap. ``acquire`` with a tiny non-zero

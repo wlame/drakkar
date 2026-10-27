@@ -410,6 +410,7 @@ async def test_inflight_gauge_increments_on_entry_and_decrements_in_finally():
         request=_HttpReq(pattern='x'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
     await runner.run(ctx)
     after = _gauge_value(metrics.webapp_inflight)
@@ -438,6 +439,7 @@ async def test_inflight_gauge_decrements_on_handler_error():
         request=_HttpReq(pattern='x'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
 
     from drakkar.webapp.runner import WebappHandlerError
@@ -496,6 +498,7 @@ async def test_inflight_gauge_tracks_three_concurrent_requests():
             request=_HttpReq(pattern='x'),
             started_at=datetime.now(UTC),
             headers={},
+            raw_body=b'',
         )
         await runner.run(ctx)
 
@@ -541,6 +544,7 @@ async def test_dropped_after_timeout_increments_when_cancellation_set():
         request=_HttpReq(pattern='x'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
     # Pre-allocate cancelled and trip it so the post-execute gate fires.
     ctx.cancelled = asyncio.Event()

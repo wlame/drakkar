@@ -92,6 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   results and the result of `on_message_complete`) share one DLQ state, so
   the message gets one record. The message probe treats `DLQ` as a failure and writes
   nothing.
+- **The HTTP source delivers a request's sinks in one pass.** The sinks follow
+  the same policy and `depends_on` order as for a Kafka message. A request that
+  ends in `dlq` writes one record with the raw request body as its value and
+  `dk-request-id`, and its sinks that have not started do not start.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys

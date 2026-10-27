@@ -3031,44 +3031,6 @@ def test_dlq_sink_topic():
     assert sink.sink_type == 'dlq'
 
 
-def test_dlq_record_from_delivery_error_holds_the_payloads_json():
-    from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq_record import DLQRecord
-
-    error = DeliveryError(sink_name='results', sink_type='kafka', error='connection refused', payloads=[SampleOutput()])
-
-    record = DLQRecord.from_delivery_error(error, attempts=3)
-
-    assert record.key is None
-    assert json.loads(record.value) == ['{"request_id":"abc","answer":"42"}']
-    assert record.stage == 'sink'
-    assert record.sink == 'kafka/results'
-    assert record.attempts == 3
-    assert record.error == 'connection refused'
-
-
-def test_dlq_record_from_delivery_error_falls_back_to_str_and_logs():
-    """The str(p) fallback stays, but the degraded value must leave a trace."""
-    from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq_record import DLQRecord
-
-    class _Broken(SampleOutput):
-        def model_dump_json(self, **kwargs):
-            raise RuntimeError('cannot serialize')
-
-    error = DeliveryError(sink_name='results', sink_type='kafka', error='boom', payloads=[_Broken()])
-
-    with patch('drakkar.sinks.dlq_record.logger') as mock_logger:
-        record = DLQRecord.from_delivery_error(error)
-
-    mock_logger.warning.assert_called_once()
-    assert mock_logger.warning.call_args[0][0] == 'dlq_payload_serialization_fallback'
-    assert mock_logger.warning.call_args[1]['payload_type'] == '_Broken'
-    values = json.loads(record.value)
-    assert len(values) == 1
-    assert 'request_id' in values[0]
-
-
 # =============================================================================
 # close() exception paths — each sink catches Exception from inner resource
 # =============================================================================

@@ -689,23 +689,6 @@ def test_postgres_payload_where_and_params_survive_serialization():
     assert stmt['params'] == _DLQ_ROW_JSON
 
 
-def test_dlq_message_preserves_payload_data():
-    """End to end through the real DLQ path, not just the payload model."""
-    import json
-
-    from drakkar.models import DeliveryError
-    from drakkar.sinks.dlq_record import DLQRecord
-
-    error = DeliveryError(
-        sink_name='main',
-        sink_type='postgres',
-        error='boom',
-        payloads=[PostgresPayload(table='results', data=_DLQRow())],
-    )
-    values = json.loads(DLQRecord.from_delivery_error(error).value)
-    assert json.loads(values[0])['data'] == _DLQ_ROW_JSON
-
-
 # --- MongoPayload operations ---
 
 

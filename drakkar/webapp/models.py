@@ -79,6 +79,10 @@ class WebRequestContext:
         Request headers as received by FastAPI. ``Mapping[str, str]``
         because handler hooks (``http_request_id``) inspect them but
         should never mutate them.
+    raw_body:
+        The request body bytes exactly as the client sent them. A request
+        whose delivery ends in the DLQ is written there with this body as
+        the record value, not the parsed model re-serialized.
     cancelled:
         Set by T2 when its outer ``wait_for`` times out, signalling T1
         to skip side effects (sinks, ``on_http_request_complete``).
@@ -91,6 +95,7 @@ class WebRequestContext:
     request: Any
     started_at: datetime
     headers: Mapping[str, str]
+    raw_body: bytes
     cancelled: asyncio.Event | None = None
 
 

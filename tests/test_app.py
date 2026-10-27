@@ -2465,13 +2465,13 @@ def test_build_dlq_with_topic_when_kafka_off(test_config):
     assert app._dlq_sink is not None and app._dlq_sink.topic == 'x-dlq'
 
 
-async def test_handle_collect_dlq_action_without_dlq_counts_unconfigured_drop(test_config):
+async def test_unconfigured_dlq_drop_is_counted(test_config):
     from drakkar.metrics import dlq_unconfigured_drops
 
     cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     before = dlq_unconfigured_drops._value.get()
-    await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=3)
+    await app._sink_manager.drop_unconfigured_dlq_send(partition_id=-1, payload_count=3)
     assert dlq_unconfigured_drops._value.get() == before + 3
 
 
@@ -2485,8 +2485,8 @@ async def test_dlq_unconfigured_drop_warns_once_then_drops_to_debug(test_config)
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
 
     with capture_logs() as cap:
-        await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=1)
-        await app._drop_dlq_send_unconfigured(partition_id=-1, payload_count=2)
+        await app._sink_manager.drop_unconfigured_dlq_send(partition_id=-1, payload_count=1)
+        await app._sink_manager.drop_unconfigured_dlq_send(partition_id=-1, payload_count=2)
 
     drops = [entry for entry in cap if entry['event'] == 'dlq_send_dropped_unconfigured']
     assert [entry['log_level'] for entry in drops] == ['warning', 'debug']

@@ -38,6 +38,7 @@ from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.executor import ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
+    CollectResult,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
@@ -45,9 +46,11 @@ from drakkar.models import (
     PrecomputedResult,
     make_task_id,
 )
+from drakkar.sinks.manager import SinkManager
 from drakkar.webapp import WebApp
 from drakkar.webapp.models import WebRequestContext
 from drakkar.webapp.runner import WebappHandlerError, WebappRunner
+from tests.test_sink_delivery_policy import FakeSink, policy
 
 # ---------------------------------------------------------------------------
 # Test fixtures: tiny Pydantic models + a configurable handler
@@ -159,6 +162,7 @@ def _make_ctx(client_name: str = 'anonymous', request_id: str = 'req_test_0001')
         request=_HttpReq(pattern='hello'),
         started_at=datetime.now(UTC),
         headers={},
+        raw_body=b'',
     )
 
 
@@ -743,8 +747,7 @@ async def test_runner_allocates_cancelled_event_lazily():
 # that lands on ``WebReport.sinks``. The tests here exercise:
 #
 #   * happy path → summary populated with attempted/delivered counts;
-#   * delivery failure → DLQ count + error message captured;
-#   * cancellation between sink-type batches → next batch skipped;
+#   * a validation failure or a raising ``deliver_all`` → recorded in the summary;
 #   * ``on_message_complete`` returning ``None`` → ``WebReport.sinks=None``;
 #   * ``sinks_enabled=False`` → ``on_message_complete`` not called;
 #   * ``on_message_complete`` raising → wrapped in ``WebappHandlerError``.
@@ -783,96 +786,35 @@ def _make_sinks_enabled_config() -> WebAppConfig:
     )
 
 
-class _StubSinkManager:
-    """Records validate_collect / deliver_all calls without real sinks.
+class _RecordingSinkManager(SinkManager):
+    """A real SinkManager over one in-memory kafka and one postgres sink, recording each deliver_all call."""
 
-    The webapp runner reaches into ``app._sink_manager`` to validate and
-    deliver per-sink-type batches. The stub records every call so tests
-    can assert on dispatch order, then optionally raises a configured
-    delivery error so the wrapped on_delivery_error fires.
-    """
+    def __init__(self) -> None:
+        super().__init__()
+        self.kafka = FakeSink('default', 'kafka')
+        self.postgres = FakeSink('default', 'postgres')
+        self.register(self.kafka, policy=policy())
+        self.register(self.postgres, policy=policy())
+        self.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='drop', dlq_enabled=False)
+        self.deliver_calls: list[CollectResult] = []
 
-    def __init__(
-        self,
-        *,
-        deliver_failures: dict[str, str] | None = None,
-        validate_raises: dict[str, Exception] | None = None,
-    ) -> None:
-        # ``deliver_failures`` maps sink_type → error message. When the
-        # runner calls ``deliver_all`` for that sink_type, the stub
-        # synthesises a ``DeliveryError`` and invokes the supplied
-        # ``on_delivery_error`` callback so the per-sink summary
-        # captures the failure.
-        self._deliver_failures = deliver_failures or {}
-        # ``validate_raises`` maps sink_type → exception to raise from
-        # ``validate_collect`` for that sub-result. Used by the tests
-        # that exercise the validation-error branch.
-        self._validate_raises = validate_raises or {}
-        # Capture each call so tests can assert ordering / count.
-        self.validate_calls: list[Any] = []
-        self.deliver_calls: list[Any] = []
-
-    def validate_collect(self, result):
-        self.validate_calls.append(result)
-        # Pull the (single) populated sink_type from the sub-result so
-        # the configured raise-table can target it.
-        for field in ('kafka', 'postgres', 'mongo', 'http', 'redis', 'files', 'custom'):
-            if getattr(result, field):
-                sink_type = 'filesystem' if field == 'files' else field
-                if sink_type in self._validate_raises:
-                    raise self._validate_raises[sink_type]
-                break
-
-    async def deliver_all(self, result, on_delivery_error, partition_id):
-        self.deliver_calls.append((result, partition_id))
-        # If the test configured a failure for this sink_type, build a
-        # DeliveryError and feed it through the runner's wrapped
-        # on_delivery_error so the summary captures the outcome.
-        from drakkar.models import DeliveryError
-
-        for field, sink_type in (
-            ('kafka', 'kafka'),
-            ('postgres', 'postgres'),
-            ('mongo', 'mongo'),
-            ('http', 'http'),
-            ('redis', 'redis'),
-            ('files', 'filesystem'),
-            ('custom', 'custom'),
-        ):
-            payloads = getattr(result, field)
-            if not payloads:
-                continue
-            if sink_type in self._deliver_failures:
-                error = DeliveryError(
-                    sink_name='default',
-                    sink_type=sink_type,
-                    error=self._deliver_failures[sink_type],
-                    payloads=list(payloads),
-                )
-                # The runner's wrapped callback returns the action; we
-                # don't act on it because the SinkManager would
-                # normally; the stub's only job is to fire the
-                # callback so the summary updates.
-                await on_delivery_error(error)
-            break  # Each sub-result has exactly one populated sink type.
+    async def deliver_all(self, result, on_delivery_error, partition_id, **kwargs):
+        self.deliver_calls.append(result)
+        return await super().deliver_all(result, on_delivery_error, partition_id, **kwargs)
 
 
 def _make_stub_app_with_sinks(
     handler: BaseDrakkarHandler,
     *,
     pool: Any,
-    sink_manager: _StubSinkManager,
-    dlq_sink: Any = None,
-    dlq_enabled: bool = False,
+    sink_manager: SinkManager,
 ) -> Any:
-    """Build a stub ``DrakkarApp`` that exposes ``_sink_manager`` + ``_dlq_sink``."""
+    """Build a stub ``DrakkarApp`` that exposes ``_sink_manager``."""
     app = MagicMock()
     app._handler = handler
     app._executor_pool = pool
     app._recorder = None
     app._sink_manager = sink_manager
-    app._dlq_sink = dlq_sink
-    app._config = MagicMock(dlq_enabled=dlq_enabled)
     app.is_ready = True
     app.main_loop = None
     return app
@@ -899,7 +841,7 @@ async def test_runner_sinks_enabled_happy_path_populates_summary():
     handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
 
     pool = _make_pool_returning([_make_canned_result(task)])
-    sink_manager = _StubSinkManager()
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     runner = WebappRunner(app, _make_sinks_enabled_config())
 
@@ -921,317 +863,22 @@ async def test_runner_sinks_enabled_happy_path_populates_summary():
     assert pg_summary.dlq == 0
     assert pg_summary.errors == []
 
-    # Sequential dispatch: validate + deliver called once per sink type.
-    assert len(sink_manager.validate_calls) == 2
-    assert len(sink_manager.deliver_calls) == 2
+    # One delivery pass for the whole request.
+    assert len(sink_manager.deliver_calls) == 1
+    assert [len(batch) for batch in sink_manager.kafka.delivered] == [2]
+    assert [len(batch) for batch in sink_manager.postgres.delivered] == [3]
 
     # Timeline records the new ``sinks`` stage.
     stages = [s.stage for s in report.timeline]
     assert 'sinks' in stages
 
 
-@pytest.mark.asyncio
-async def test_runner_sinks_failure_routes_to_dlq_and_records_error():
-    """deliver_all → on_delivery_error returns DLQ → summary.dlq increments."""
-    from drakkar.models import DeliveryAction
-
-    handler = _RecordingHandler()
-    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-
-    async def arrange_impl(req, pending):
-        return [task]
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    # User on_delivery_error → DLQ (the default action — explicit here
-    # for clarity).
-    async def on_delivery_error_impl(error):
-        return DeliveryAction.DLQ
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([_make_canned_result(task)])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-
-    # Capture DLQ sends so we can assert routing.
-    dlq_sink = MagicMock()
-
-    sent_to_dlq: list[Any] = []
-
-    async def _dlq_send(error, partition_id):
-        sent_to_dlq.append((error, partition_id))
-        return True  # DLQSink.send contract: True = write confirmed
-
-    dlq_sink.send = _dlq_send
-
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=dlq_sink)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    report = await runner.run(_make_ctx())
-
-    # The summary surfaces the failure: 1 attempted, 0 delivered, 1
-    # in DLQ, error string captured.
-    assert report.sinks is not None
-    kafka_summary = report.sinks.by_type['kafka']
-    assert kafka_summary.attempted == 1
-    assert kafka_summary.delivered == 0
-    assert kafka_summary.dlq == 1
-    assert len(kafka_summary.errors) == 1
-    assert 'broker connection refused' in kafka_summary.errors[0]
-    assert 'kafka/default' in kafka_summary.errors[0]
-
-    # The DLQ sink was invoked with partition_id=-1 (synthetic webapp
-    # partition) so DLQ rows can be filtered out from real partitions.
-    assert len(sent_to_dlq) == 1
-    _, partition_id = sent_to_dlq[0]
-    assert partition_id == -1
-
-    # The request as a whole still succeeded — sink failures should not
-    # bubble into the user-facing ``status`` field.
-    assert report.status == 'ok'
-
-
-@pytest.mark.asyncio
-async def test_runner_dlq_action_without_dlq_sink_records_unconfigured_drop():
-    """DLQ action on a worker with no DLQ configured → the drop is counted and named.
-
-    An HTTP-only worker may legitimately run without a DLQ topic. The
-    payloads are still lost, so the request report has to say so rather
-    than reporting a DLQ write that never happened.
-    """
-    from drakkar.models import DeliveryAction
-
-    handler = _RecordingHandler()
-    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-
-    async def arrange_impl(req, pending):
-        return [task]
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    async def on_delivery_error_impl(error):
-        return DeliveryAction.DLQ
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([_make_canned_result(task)])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=None)
-    drops: list[tuple[int, int]] = []
-
-    async def _drop(partition_id, payload_count):
-        drops.append((partition_id, payload_count))
-
-    app._drop_dlq_send_unconfigured = _drop
-
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    report = await runner.run(_make_ctx())
-
-    kafka_summary = report.sinks.by_type['kafka']
-    assert kafka_summary.delivered == 0
-    assert kafka_summary.dlq == 1
-    assert 'dlq_unconfigured' in kafka_summary.errors
-    assert drops == [(-1, 1)]
-
-
-@pytest.mark.asyncio
-async def test_runner_dlq_action_without_sink_but_dlq_configured_reports_a_failed_write():
-    """A configured DLQ whose sink is missing is a failure, not a drop.
-
-    Mirrors ``DrakkarApp._handle_collect``: only ``dlq.dlq_enabled`` being
-    false makes a missing sink an unconfigured drop. A DLQ that was asked
-    for and did not build is a broken deployment, so the request report
-    says the write failed and the drop counter stays untouched.
-    """
-    from drakkar.models import DeliveryAction
-
-    handler = _RecordingHandler()
-    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-
-    async def arrange_impl(req, pending):
-        return [task]
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    async def on_delivery_error_impl(error):
-        return DeliveryAction.DLQ
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([_make_canned_result(task)])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=None, dlq_enabled=True)
-    drops: list[tuple[int, int]] = []
-
-    async def _drop(partition_id, payload_count):
-        drops.append((partition_id, payload_count))
-
-    app._drop_dlq_send_unconfigured = _drop
-
-    report = await WebappRunner(app, _make_sinks_enabled_config()).run(_make_ctx())
-
-    kafka_summary = report.sinks.by_type['kafka']
-    assert drops == []
-    assert 'dlq_unconfigured' not in kafka_summary.errors
-    assert any(error.startswith('dlq_send_failed') for error in kafka_summary.errors)
-
-
-@pytest.mark.asyncio
-async def test_runner_sink_delivery_action_skip_drops_payload_without_dlq_count():
-    """SKIP drops the payload from the downstream entirely — delivered must
-    decrement (the payload really is gone) but dlq must NOT increment,
-    since SKIP is a distinct outcome from routed-to-DLQ."""
-    from drakkar.models import DeliveryAction
-
-    handler = _RecordingHandler()
-
-    async def arrange_impl(req, pending):
-        return []
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    async def on_delivery_error_impl(error):
-        return DeliveryAction.SKIP
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    report = await runner.run(_make_ctx())
-
-    kafka_summary = report.sinks.by_type['kafka']
-    assert kafka_summary.delivered == 0
-    assert kafka_summary.dlq == 0
-    assert len(kafka_summary.errors) == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_on_delivery_error_hook_raising_falls_back_to_dlq():
-    """A handler.on_delivery_error that raises must not crash the request —
-    the runner falls back to DLQ (the safest default) and still routes the
-    payload, mirroring the SinkManager's own tolerance for handler bugs."""
-    handler = _RecordingHandler()
-
-    async def arrange_impl(req, pending):
-        return []
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    async def on_delivery_error_impl(error):
-        raise RuntimeError('handler bug')
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-
-    dlq_sink = MagicMock()
-    sent_to_dlq: list[Any] = []
-
-    async def _dlq_send(error, partition_id):
-        sent_to_dlq.append(error)
-        return True
-
-    dlq_sink.send = _dlq_send
-
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=dlq_sink)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    report = await runner.run(_make_ctx())
-
-    # Fell back to DLQ despite the raising hook — request still returns 200.
-    assert report.status == 'ok'
-    kafka_summary = report.sinks.by_type['kafka']
-    assert kafka_summary.dlq == 1
-    assert len(sent_to_dlq) == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_dlq_send_raising_is_captured_without_crashing_request():
-    """A DLQ sink whose ``send`` raises must not crash the request — the
-    failure is recorded in the summary (dlq_send_failed) so the caller
-    sees the payload was not actually persisted anywhere."""
-    from drakkar.models import DeliveryAction
-
-    handler = _RecordingHandler()
-
-    async def arrange_impl(req, pending):
-        return []
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=0)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    async def on_delivery_error_impl(error):
-        return DeliveryAction.DLQ
-
-    handler.on_delivery_error = on_delivery_error_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager(deliver_failures={'kafka': 'broker connection refused'})
-
-    dlq_sink = MagicMock()
-
-    async def _dlq_send_raises(error, partition_id):
-        raise OSError('dlq broker unreachable')
-
-    dlq_sink.send = _dlq_send_raises
-
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager, dlq_sink=dlq_sink)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    report = await runner.run(_make_ctx())
-
-    assert report.status == 'ok'
-    kafka_summary = report.sinks.by_type['kafka']
-    # Still counted as routed-to-DLQ (the intent), but the errors list
-    # names the send failure so the caller knows persistence is unconfirmed.
-    assert kafka_summary.dlq == 1
-    assert any('dlq_send_failed' in e for e in kafka_summary.errors)
-
-
-class _RaisingSinkManager:
-    """Minimal sink manager whose deliver_all raises directly — simulates
-    a catastrophic SinkManager-internal failure rather than the normal
-    per-payload on_delivery_error routing."""
-
-    def validate_collect(self, result: Any) -> None:
-        pass
-
-    async def deliver_all(self, result: Any, on_delivery_error: Any, partition_id: int) -> None:
+class _RaisingSinkManager(_RecordingSinkManager):
+    """A sink manager whose deliver_all raises directly — simulates a
+    catastrophic SinkManager-internal failure rather than the normal
+    per-sink outcome."""
+
+    async def deliver_all(self, result, on_delivery_error, partition_id, **kwargs):
         raise RuntimeError('sink manager internal failure')
 
 
@@ -1262,114 +909,10 @@ async def test_runner_deliver_all_raising_records_catastrophic_failure():
     report = await runner.run(_make_ctx())
 
     assert report.status == 'ok'
+    assert report.sinks is not None
     kafka_summary = report.sinks.by_type['kafka']
     assert kafka_summary.delivered == 0
     assert any('deliver_all_raised' in e for e in kafka_summary.errors)
-
-
-@pytest.mark.asyncio
-async def test_runner_sinks_cancellation_between_batches_skips_remaining():
-    """ctx.cancelled set between sink batches → next batch NOT delivered."""
-    handler = _RecordingHandler()
-    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-
-    async def arrange_impl(req, pending):
-        return [task]
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        # Return both kafka AND postgres so the runner has two batches.
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=1)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([_make_canned_result(task)])
-
-    # The stub's ``deliver_all`` flips ctx.cancelled mid-flight so the
-    # second batch's pre-batch gate trips. We achieve this by injecting
-    # the flip via a custom subclass.
-    class _FlippingSinkManager(_StubSinkManager):
-        def __init__(self, ctx):
-            super().__init__()
-            self._ctx = ctx
-
-        async def deliver_all(self, result, on_delivery_error, partition_id):
-            await super().deliver_all(result, on_delivery_error, partition_id)
-            # Flip cancellation AFTER the kafka batch — the runner's
-            # pre-batch gate will see this before postgres dispatch.
-            assert self._ctx.cancelled is not None
-            self._ctx.cancelled.set()
-
-    ctx = _make_ctx()
-    # Pre-allocate cancelled on this loop so the stub can reach it
-    # before the runner's lazy initialisation.
-    ctx.cancelled = asyncio.Event()
-
-    sink_manager = _FlippingSinkManager(ctx)
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    with pytest.raises(asyncio.CancelledError):
-        await runner.run(ctx)
-
-    # The kafka batch was delivered; the postgres batch must NOT be.
-    delivered_types = []
-    for sub_result, _ in sink_manager.deliver_calls:
-        if sub_result.kafka:
-            delivered_types.append('kafka')
-        if sub_result.postgres:
-            delivered_types.append('postgres')
-    assert delivered_types == ['kafka']
-
-
-@pytest.mark.asyncio
-async def test_runner_records_dropped_request_during_sinks_delivery():
-    """When a recorder is configured, the in-loop during_sinks
-    cancellation gate must also persist a row via
-    record_webapp_request_dropped_after_timeout — the same contract the
-    other two gates uphold (see
-    test_runner_records_dropped_request_when_recorder_configured for the
-    post-execute gate). Reuses the mid-delivery cancellation setup from
-    test_runner_sinks_cancellation_between_batches_skips_remaining, adding
-    a recorder to assert on."""
-    handler = _RecordingHandler()
-    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-
-    async def arrange_impl(req, pending):
-        return [task]
-
-    handler.arrange_http_request_impl = arrange_impl
-
-    async def on_message_complete_impl(group):
-        # Two batches (kafka + postgres) so there's a "next" iteration
-        # for the gate to intercept.
-        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=1)
-
-    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
-
-    pool = _make_pool_returning([_make_canned_result(task)])
-
-    ctx = _make_ctx()
-    ctx.cancelled = asyncio.Event()
-
-    class _FlippingSinkManager(_StubSinkManager):
-        async def deliver_all(self, result, on_delivery_error, partition_id):
-            await super().deliver_all(result, on_delivery_error, partition_id)
-            # Flip cancellation AFTER the kafka batch — the runner's
-            # during_sinks gate will see this before postgres dispatch.
-            ctx.cancelled.set()
-
-    sink_manager = _FlippingSinkManager()
-    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    recorder = MagicMock()
-    app._recorder = recorder
-    runner = WebappRunner(app, _make_sinks_enabled_config())
-
-    with pytest.raises(asyncio.CancelledError):
-        await runner.run(ctx)
-
-    recorder.record_webapp_request_dropped_after_timeout.assert_called_once_with(ctx)
 
 
 @pytest.mark.asyncio
@@ -1391,7 +934,7 @@ async def test_runner_sinks_enabled_but_on_message_complete_returns_none():
     handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
 
     pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager()
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     runner = WebappRunner(app, _make_sinks_enabled_config())
 
@@ -1417,7 +960,12 @@ async def test_runner_sink_validation_failure_records_error_and_skips_that_sink_
 
     handler.arrange_http_request_impl = arrange_impl
 
-    collected = _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=1)
+    from drakkar.models import KafkaPayload, PostgresPayload
+
+    collected = CollectResult(
+        kafka=[KafkaPayload(sink='nope', data=_SinkOut())],
+        postgres=[PostgresPayload(table='out', data=_SinkOut())],
+    )
 
     async def on_message_complete_impl(group):
         return collected
@@ -1425,7 +973,7 @@ async def test_runner_sink_validation_failure_records_error_and_skips_that_sink_
     handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
 
     pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager(validate_raises={'kafka': ValueError('bad payload')})
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     runner = WebappRunner(app, _make_sinks_enabled_config())
 
@@ -1440,9 +988,10 @@ async def test_runner_sink_validation_failure_records_error_and_skips_that_sink_
     postgres_summary = report.sinks.by_type['postgres']
     assert postgres_summary.delivered == 1
     assert postgres_summary.errors == []
-    # Only postgres reached deliver_all — kafka was skipped after its
-    # validation error (``continue`` in the runner).
-    assert len(sink_manager.deliver_calls) == 1
+    # Only postgres reached deliver_all — kafka was left out after its
+    # validation error.
+    [delivered] = sink_manager.deliver_calls
+    assert (delivered.kafka, len(delivered.postgres)) == ([], 1)
 
 
 @pytest.mark.asyncio
@@ -1450,17 +999,16 @@ async def test_runner_drops_request_when_timeout_detected_before_response_hook()
     """A timeout detected after the sinks stage finishes (but before the
     user's response hook runs) must still skip on_http_request_complete.
 
-    This exercises the ``pre_on_http_request_complete`` gate
-    (``runner.py:383-394``), distinct from the post-execute gate: T2 may
+    This exercises the ``pre_on_http_request_complete`` gate, distinct
+    from the post-execute gate: T2 may
     504 the caller while ``_deliver_sinks`` is still on the call stack,
     and the user's response hook must not run afterward on a request the
-    caller already gave up on. This is NOT the in-loop ``during_sinks``
-    gate (``runner.py:653-667``) — ``on_message_complete`` returns
-    ``None`` below, so ``_deliver_sinks`` short-circuits before that
-    per-sink-type loop is ever reached. The ``during_sinks`` gate itself
-    is covered by ``test_runner_sinks_cancellation_between_batches_skips_remaining``
-    above; its recorder sub-branch is covered separately by
-    ``test_runner_records_dropped_request_during_sinks_delivery``.
+    caller already gave up on. This is NOT the ``during_sinks`` gate
+    between sink groups — ``on_message_complete`` returns ``None`` below,
+    so ``_deliver_sinks`` short-circuits before any delivery is reached.
+    The ``during_sinks`` gate itself, with its recorder row, is covered by
+    ``test_http_cancellation_between_groups_keeps_its_log_event`` in
+    ``test_webapp_delivery_policy.py``.
     """
     handler = _RecordingHandler()
     task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
@@ -1496,7 +1044,7 @@ async def test_runner_drops_request_when_timeout_detected_before_response_hook()
     handler.on_http_request_complete_impl = complete_impl
 
     pool = _make_pool_returning([_make_canned_result(task)])
-    sink_manager = _StubSinkManager()
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     runner = WebappRunner(app, _make_sinks_enabled_config())
 
@@ -1526,7 +1074,7 @@ async def test_runner_sinks_disabled_does_not_call_on_message_complete():
     handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
 
     pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager()
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     # Default config has sinks_enabled=False — verify the default.
     config = _make_config()
@@ -1556,7 +1104,7 @@ async def test_runner_sinks_on_message_complete_raising_wraps_handler_error():
     handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
 
     pool = _make_pool_returning([])
-    sink_manager = _StubSinkManager()
+    sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
     runner = WebappRunner(app, _make_sinks_enabled_config())
 

@@ -16,18 +16,13 @@ implementation; ``tests/fixtures/dlq_contract.json`` pins it.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Literal
 
-import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from drakkar.models import DeliveryError
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import redact_url
-
-logger = structlog.get_logger()
 
 DLQ_RECORD_VERSION = '1'
 DLQ_ERROR_CUT_BYTES = 2000
@@ -94,43 +89,6 @@ class DLQRecord(BaseModel):
     worker: str | None = Field(default=None, description='The worker name; set by the DLQ sink.')
     instance: str | None = Field(default=None, description='The worker instance id; set by the DLQ sink.')
     failed_at: datetime | None = Field(default=None, description='When the record was written; set by the DLQ sink.')
-
-    @classmethod
-    def from_delivery_error(cls, error: DeliveryError, *, attempts: int | None = None) -> DLQRecord:
-        """Build a ``sink`` record from a failed delivery that has no source message at hand.
-
-        The value is the JSON list of the failed payloads (each its own
-        ``model_dump_json()`` text), so the payloads stay readable on the
-        DLQ topic until the delivery path carries the source message itself.
-        """
-        value = json.dumps([_payload_json(payload, error) for payload in error.payloads]).encode()
-        return cls(
-            key=None,
-            value=value,
-            stage='sink',
-            error=error.error,
-            sink=f'{error.sink_type}/{error.sink_name}',
-            attempts=attempts,
-        )
-
-
-def _payload_json(payload: BaseModel, error: DeliveryError) -> str:
-    """Serialize one failed payload, falling back to ``str()`` when its model cannot dump itself."""
-    try:
-        return payload.model_dump_json()
-    except Exception as e:
-        # str(payload) keeps the record usable, but the degraded shape
-        # deserves a trace: a payload that cannot serialize itself usually
-        # points at a broken user model.
-        logger.warning(
-            'dlq_payload_serialization_fallback',
-            category='sink',
-            payload_type=type(payload).__name__,
-            sink_name=error.sink_name,
-            error=str(e),
-            error_type=type(e).__name__,
-        )
-        return str(payload)
 
 
 def cut_error(text: str) -> str:

@@ -185,7 +185,12 @@ def _record_calls() -> dict:
     task = ExecutorTask(task_id='t1', args=['-a'], source_offsets=[10], labels={'k': 'v'}, stdin='in')
     message = SourceMessage(topic='orders', partition=0, offset=10, value=b'{}', timestamp=0)
     ctx = WebRequestContext(
-        request_id='req-1', client_name='client', request=_Payload(), started_at=datetime.now(UTC), headers={}
+        request_id='req-1',
+        client_name='client',
+        request=_Payload(),
+        started_at=datetime.now(UTC),
+        headers={},
+        raw_body=b'',
     )
     result = ExecutorResult(exit_code=0, stdout='out', stderr='err', duration_seconds=0.1, task=task, pid=42)
     return {
