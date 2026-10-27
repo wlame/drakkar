@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2752,14 +2753,20 @@ class _FakeSyncProducer:
         self.produced: list[dict] = []
         self.flush_timeouts: list[float] = []
         self.pending_callbacks: list = []
+        self.threads: list[tuple[int, str]] = []
+
+    def _note_thread(self):
+        self.threads.append((threading.get_ident(), threading.current_thread().name))
 
     def produce(self, **kwargs):
+        self._note_thread()
         if self.produce_error is not None:
             raise self.produce_error
         self.produced.append(kwargs)
         self.pending_callbacks.append(kwargs['on_delivery'])
 
     def flush(self, timeout):
+        self._note_thread()
         self.flush_timeouts.append(timeout)
         if self.flush_error is not None:
             raise self.flush_error
@@ -2981,6 +2988,32 @@ async def test_dlq_sink_close():
 
     assert producer.flush_timeouts == [sink._flush_timeout_seconds]
     assert sink._producer is None
+
+
+async def test_dlq_sink_produces_on_its_own_thread_not_the_loop():
+    """A flush can block for the whole flush timeout; it must hold neither the loop nor the shared pool."""
+    sink, producer = _make_dlq_sink()
+
+    await sink.send(_sample_record(), partition_id=0)
+    await sink.send(_sample_record(), partition_id=0)
+
+    loop_thread = threading.get_ident()
+    assert all(ident != loop_thread for ident, _ in producer.threads)
+    assert all(name.startswith('dlq') for _, name in producer.threads)
+    assert len({ident for ident, _ in producer.threads}) == 1
+
+
+async def test_dlq_sink_close_flushes_on_its_thread_and_shuts_it_down():
+    sink, producer = _make_dlq_sink()
+    await sink.send(_sample_record(), partition_id=0)
+    executor = sink._executor
+
+    await sink.close()
+
+    assert producer.threads[-1][1].startswith('dlq')
+    assert sink._executor is None
+    with pytest.raises(RuntimeError):
+        executor.submit(lambda: None)
 
 
 async def test_dlq_sink_close_not_connected():

@@ -11,6 +11,7 @@ import functools
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import structlog
@@ -30,6 +31,7 @@ logger = structlog.get_logger()
 # Mirrors ``DLQConfig.flush_timeout_seconds``' default, for a DLQSink built
 # outside a ``DrakkarApp`` (tests, tools).
 DEFAULT_FLUSH_TIMEOUT_SECONDS = 30.0
+DLQ_THREAD_NAME_PREFIX = 'dlq'
 
 DeliveryReport = tuple[KafkaError | None, Message | None]
 
@@ -90,8 +92,16 @@ class DLQSink(BaseSink[BaseModel]):
         self._security = security or KafkaSecurityConfig()
         self._client_config = dict(client_config or {})
         # A plain (sync) producer: the asyncio producer of the client cannot
-        # send headers. Its blocking calls run in the loop's executor.
+        # send headers. Its blocking calls run on the sink's own thread.
         self._producer: Producer | None = None
+        # One thread of the sink's own, not the loop's shared default pool
+        # (the same reason as ``drakkar/providers/thread.py`` and
+        # ``drakkar/recorder/sealing.py``): a flush can block for the whole
+        # flush timeout against a broken broker, and with one write per open
+        # circuit that would starve every other user of the shared pool
+        # (file sinks, the archive, handler ``to_thread`` work). One worker
+        # also keeps the writes in order. Created on first use.
+        self._executor: ThreadPoolExecutor | None = None
 
     @property
     def topic(self) -> str:
@@ -110,6 +120,12 @@ class DLQSink(BaseSink[BaseModel]):
             brokers=redact_url(self._brokers),
             security=self._security.describe(),
         )
+
+    def _thread(self) -> ThreadPoolExecutor:
+        """The sink's own one-thread executor, created on first use."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=DLQ_THREAD_NAME_PREFIX)
+        return self._executor
 
     async def deliver(self, payloads: list[BaseModel]) -> None:
         """Not used directly — use send() instead."""
@@ -151,7 +167,7 @@ class DLQSink(BaseSink[BaseModel]):
             # otherwise, and the DLQ sits on the hot failure paths, so that
             # second would throttle the whole partition.
             remaining = await loop.run_in_executor(
-                None,
+                self._thread(),
                 functools.partial(
                     _produce_and_flush,
                     producer=producer,
@@ -226,19 +242,27 @@ class DLQSink(BaseSink[BaseModel]):
             return False
 
     async def close(self) -> None:
-        """Flush and drop the DLQ producer."""
+        """Flush the DLQ producer on the sink's thread, then drop the producer and shut the thread down."""
         producer = self._producer
-        if producer is None:
-            return
         self._producer = None
+        executor = self._thread() if producer is not None else self._executor
+        self._executor = None
         try:
-            await asyncio.get_running_loop().run_in_executor(None, producer.flush, self._flush_timeout_seconds)
+            if producer is not None:
+                await asyncio.get_running_loop().run_in_executor(executor, producer.flush, self._flush_timeout_seconds)
         except Exception as e:
             await logger.awarning(
                 'dlq_sink_close_error',
                 category='sink',
                 error=str(e),
             )
+        finally:
+            # The one worker ran every earlier write before this flush, and a
+            # send that starts now finds no producer and touches no thread,
+            # so the executor is idle here: the wait is bounded by the flush
+            # above and returns at once.
+            if executor is not None:
+                executor.shutdown(wait=True)
 
 
 def _delivery_callback(
