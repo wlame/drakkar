@@ -88,11 +88,10 @@ sys.exit(0 if {"source", "dlq"} <= aliases else 1)
 ' <<<"$answer"
 }
 
-# The clock of the kafka container, in epoch milliseconds.
-kafka_clock_ms() {
-    local seconds
-    seconds=$("${COMPOSE[@]}" exec -T kafka date +%s)
-    echo $((seconds * 1000))
+# The clock of the kafka container, in epoch seconds, as `date` prints it.
+# Fails when the container cannot be reached.
+kafka_clock_seconds() {
+    "${COMPOSE[@]}" exec -T kafka date +%s 2>/dev/null
 }
 
 # Produce the message: one line of headers, key and value, split by tabs.
@@ -170,6 +169,9 @@ def fail(reason):
 
 
 record = json.load(sys.stdin)
+for field in ("partition", "offset"):
+    if not isinstance(record.get(field), int):
+        fail(f"the DLQ record has no {field} number: {record.get(field)!r}")
 expected_key = os.environ["MESSAGE_KEY"]
 expected_value = os.environ["MESSAGE_VALUE"]
 key = text(record.get("key"), record.get("key_encoding"))
@@ -256,7 +258,13 @@ read_aliases_listed \
 ok "worker-1 serves the source and dlq read aliases"
 
 step "Produce one message that cannot be parsed"
-from_ts=$(($(kafka_clock_ms) - WINDOW_MARGIN_MS))
+# Checked before the arithmetic: an empty or odd answer would otherwise give
+# a wrong window, or end the script with no verdict.
+kafka_seconds=$(kafka_clock_seconds) \
+    || fail "the clock of the kafka container cannot be read (docker compose exec failed)"
+[[ "$kafka_seconds" =~ ^[0-9]+$ ]] \
+    || fail "the clock of the kafka container is not a number of seconds: '${kafka_seconds}'"
+from_ts=$((kafka_seconds * 1000 - WINDOW_MARGIN_MS))
 produce_output=$(produce_message 2>&1) \
     || fail "the console producer failed: $(tr '\n' ' ' <<<"$produce_output")"
 ok "produced key ${MESSAGE_KEY} with value '${MESSAGE_VALUE}' into ${SOURCE_TOPIC}"
