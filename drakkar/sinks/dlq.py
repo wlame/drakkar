@@ -10,12 +10,12 @@ import asyncio
 import functools
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import structlog
-from confluent_kafka import KafkaError, Message, Producer
+from confluent_kafka import KafkaError, Producer
 from confluent_kafka.aio import AIOConsumer
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,7 +23,9 @@ from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 from drakkar.metrics import dlq_records, dlq_send_failures, sink_dlq_messages
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import DLQRecord, Header, render_headers
-from drakkar.sinks.kafka_delivery import settle_budget
+from drakkar.sinks.kafka_delivery import DeliveryReport, produce_and_flush, settle_budget
+from drakkar.sinks.kafka_delivery import delivery_callback as _delivery_callback
+from drakkar.sinks.kafka_delivery import delivery_failure as _delivery_failure
 from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
@@ -32,8 +34,6 @@ logger = structlog.get_logger()
 # outside a ``DrakkarApp`` (tests, tools).
 DEFAULT_FLUSH_TIMEOUT_SECONDS = 30.0
 DLQ_THREAD_NAME_PREFIX = 'dlq'
-
-DeliveryReport = tuple[KafkaError | None, Message | None]
 
 
 class DLQEntry(BaseModel):
@@ -169,10 +169,11 @@ class DLQSink(BaseSink[BaseModel]):
             remaining = await loop.run_in_executor(
                 self._thread(),
                 functools.partial(
-                    _produce_and_flush,
+                    produce_and_flush,
                     producer=producer,
                     topic=self._topic,
-                    record=stamped,
+                    key=stamped.key,
+                    value=stamped.value,
                     headers=headers,
                     on_delivery=on_delivery,
                     flush_timeout_seconds=self._flush_timeout_seconds,
@@ -264,61 +265,6 @@ class DLQSink(BaseSink[BaseModel]):
             # above and returns at once.
             if executor is not None:
                 executor.shutdown(wait=True)
-
-
-def _delivery_callback(
-    loop: asyncio.AbstractEventLoop, report: asyncio.Future[DeliveryReport]
-) -> Callable[[KafkaError | None, Message | None], None]:
-    """Build the producer's delivery callback for one write.
-
-    librdkafka calls it from inside ``flush()``/``poll()``, so on an executor
-    thread, never on the loop: it may only hand the report over with
-    ``call_soon_threadsafe``.
-    """
-
-    def settle(error: KafkaError | None, message: Message | None) -> None:
-        # A send that timed out leaves the future pending, so a late report
-        # still settles it, harmlessly. librdkafka serves each report once;
-        # the check keeps a second call from raising inside the loop.
-        if not report.done():
-            report.set_result((error, message))
-
-    def on_delivery(error: KafkaError | None, message: Message | None) -> None:
-        try:
-            loop.call_soon_threadsafe(settle, error, message)
-        except RuntimeError:
-            # The loop is closed: a report served by a flush at shutdown has
-            # no send left waiting for it.
-            pass
-
-    return on_delivery
-
-
-def _produce_and_flush(
-    *,
-    producer: Producer,
-    topic: str,
-    record: DLQRecord,
-    headers: list[Header],
-    on_delivery: Callable[[KafkaError | None, Message | None], None],
-    flush_timeout_seconds: float,
-) -> int:
-    """Enqueue one record and flush the producer; blocking, so run in an executor."""
-    # The client also takes text header values; the record only ever holds bytes.
-    wire_headers: list[tuple[str, str | bytes | None]] = [*headers]
-    producer.produce(topic=topic, key=record.key, value=record.value, headers=wire_headers, on_delivery=on_delivery)
-    return producer.flush(flush_timeout_seconds)
-
-
-def _delivery_failure(error: KafkaError | None, message: Message | None) -> str | None:
-    """The reason a delivery report is not a confirmation, or None when it is one."""
-    if error is not None:
-        return str(error)
-    if message is None:
-        return 'no delivery report'
-    if message.error() is not None:
-        return str(message.error())
-    return None
 
 
 async def read_dlq_entries(

@@ -132,7 +132,7 @@ The sink delivery and DLQ log events (category `sink`, except where noted):
 | Event | Level | Meaning |
 |-------|-------|---------|
 | `message_dlq` | warning | A source message was written to the DLQ; no later delivery of it starts. Fields `stage`, `sink`, `error`, `source_topic`, `partition`, `offset`, `request_id` (HTTP), `delivered_sinks`. |
-| `message_already_dlq` | info | A failure of a message that already has its DLQ record; no second record is written. Fields `stage` and, for the `execute` stage, `task_id`. |
+| `message_already_dlq` | info | A failure of a message that already has its DLQ record; no second record is written. Fields `stage` and `partition`, plus `sink` for the `sink` stage and `task_id` for the `execute` stage. |
 | `sink_not_started` | debug | A sink group did not start. Fields `sink`, `reason` (`message_dlq` or `dependency_failed`). |
 | `sink_delivery_skipped` | warning | A delivery ended in `skip`. At most once a minute per sink, with `suppressed`. |
 | `sink_retry_budget_spent` | warning | The hook answered `RETRY` with no retries left; the declared `on_failure` applied. Fields `sink`, `attempts`, `max_retries`, `on_failure`. At most once a minute per sink. |

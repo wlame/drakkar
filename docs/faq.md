@@ -467,7 +467,7 @@ The error-handling philosophy is: never wedge the pipeline silently — let the 
 - **`drop` (default)** — the loss is logged at CRITICAL and counted in `drakkar_dlq_dropped_payloads_total` (one per source message); the message counts as processed, its offset commits, and the pipeline keeps moving.
 - **`stall`** — the offset is left uncommitted (`drakkar_delivery_stalled_offsets_total`) and the partition is paused so no new messages are fetched. Note that *not committing alone would not stop consumption* — Kafka consumers fetch from their in-memory position, so the explicit pause is what bounds duplicate processing and tracker memory. The partition resumes after a worker restart or reassignment, replaying from the last committed offset.
 
-Both strategies tick `drakkar_dlq_send_failures_total` and emit a CRITICAL `dlq_send_failed` log. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails).
+When a DLQ write fails, both strategies tick `drakkar_dlq_send_failures_total` and emit a CRITICAL `dlq_send_failed` log. With the DLQ off (no Kafka source and no `dlq.topic`) there is no write to fail: the loss is counted on `drakkar_dlq_unconfigured_drops_total` instead, and neither strategy applies. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails).
 
 ### What redactions apply to per-task env?
 

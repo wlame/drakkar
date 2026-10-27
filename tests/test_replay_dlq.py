@@ -210,6 +210,49 @@ async def test_replay_flushes_each_record_with_the_bound_and_once_more_at_the_en
     assert producer.flush_timeouts == [7.5, 7.5]
 
 
+def _old_format_entry(offset: int) -> DLQEntry:
+    """A record as an older worker wrote it: a JSON document of payloads, with no headers."""
+    return DLQEntry(
+        key=None,
+        value=b'{"original_payloads": ["{\\"id\\": 1}"], "sink_name": "results", "sink_type": "kafka"}',
+        headers=[],
+        partition=0,
+        offset=offset,
+    )
+
+
+async def test_old_format_record_is_skipped_and_the_record_next_to_it_is_replayed(replay_module):
+    """A record without dk-record-version is never published, so the old JSON document never reaches the topic."""
+    producer = _FakeProducer()
+    entries = [_old_format_entry(offset=1), _dlq_entry('new-record', offset=2)]
+
+    stats = await _run(replay_module, entries, producer)
+
+    assert [call['value'] for call in producer.produced] == [b'new-record']
+    assert (stats.read, stats.published, stats.skipped_old_format, stats.filtered_out) == (2, 1, 1, 0)
+
+
+async def test_old_format_record_is_skipped_before_the_filters(replay_module):
+    """An old record that would match the text filter is still skipped as old, not counted as filtered."""
+    producer = _FakeProducer()
+
+    stats = await _run(replay_module, [_old_format_entry(offset=1)], producer, filter_pattern='results')
+
+    assert producer.produced == []
+    assert (stats.skipped_old_format, stats.filtered_out) == (1, 0)
+
+
+async def test_main_reports_old_format_records_in_a_dry_run(replay_module, tmp_path, capsys):
+    entries = [_old_format_entry(offset=1), _old_format_entry(offset=2), _dlq_entry('new', offset=3)]
+
+    with patch.object(replay_module, 'read_dlq_entries', return_value=_async_iter(entries)):
+        exit_code = await replay_module.main(['--dlq-config', _write_config(tmp_path), '--dry-run'])
+
+    assert exit_code == 0
+    stderr = capsys.readouterr().err
+    assert 'summary: read=3 published=0 would_publish=1 filtered_out=0 skipped_old_format=2 errors=0' in stderr
+
+
 # =============================================================================
 # --dry-run
 # =============================================================================
@@ -412,7 +455,7 @@ async def test_main_returns_exit_code_1_on_produce_failure(replay_module, tmp_pa
     fake_producer_cls.assert_called_once_with({'bootstrap.servers': 'localhost:9092'})
     stderr = capsys.readouterr().err
     # The summary line is printed even on error so the operator sees progress.
-    assert 'summary: read=2 published=1 would_publish=0 filtered_out=0 errors=1' in stderr
+    assert 'summary: read=2 published=1 would_publish=0 filtered_out=0 skipped_old_format=0 errors=1' in stderr
 
 
 async def test_main_passes_the_stage_filter(replay_module, tmp_path, capsys):
@@ -431,7 +474,7 @@ async def test_main_passes_the_stage_filter(replay_module, tmp_path, capsys):
     assert [call['value'] for call in producer.produced] == [b'p']
     stderr = capsys.readouterr().err
     assert "stage='parse'" in stderr
-    assert 'summary: read=2 published=1 would_publish=0 filtered_out=1 errors=0' in stderr
+    assert 'summary: read=2 published=1 would_publish=0 filtered_out=1 skipped_old_format=0 errors=0' in stderr
 
 
 # =============================================================================

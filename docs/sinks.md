@@ -876,12 +876,18 @@ uv run python scripts/replay_dlq.py \
 
 Each record is flushed and confirmed by the broker before the next one is
 read. The script prints `replayed N/M` to stderr every 1000 records and a
-final summary line (`summary: read=… published=… would_publish=… filtered_out=… errors=…`)
+final summary line (`summary: read=… published=… would_publish=… filtered_out=… skipped_old_format=… errors=…`)
 when it finishes. Ctrl+C is handled gracefully — the record in flight
 completes and the producer is flushed before exit.
 
 #### Caveats
 
+- **An old-format record is never replayed**: a record without a
+  `dk-record-version` header was written by an older release (a JSON
+  document of payloads, not a source message). The script skips it, also in
+  a `--dry-run`, and counts it as `skipped_old_format` in the summary line.
+  It stays in the DLQ topic: drain or delete the old topic content before a
+  replay if it must not stay (see [Upgrading](upgrading.md#dlq-record)).
 - **Duplicate processing**: the script does NOT deduplicate against the
   source topic. A message that reached the DLQ after some of its sinks
   delivered (`dk-delivered-sinks`) delivers to those sinks again when it is

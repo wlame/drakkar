@@ -507,10 +507,14 @@ happens when its delivery fails (see [Failure policy](sinks.md#failure-policy)).
 Do these steps in order.
 
 1. **Drain or archive the old DLQ topic first.** Records written by an older
-   worker are JSON documents; records written by this release are the
-   original messages. Nothing reads both. Replay or copy away the old records
-   with the tool of the older release before you upgrade, or move the new
-   workers to a new `dlq.topic`.
+   worker are JSON documents with no headers; records written by this release
+   are the original messages with `dk-` headers. The new replay tool never
+   republishes an old record: it skips every record without a
+   `dk-record-version` header and counts it as `skipped_old_format`. Replay
+   the old records with the tool of the older release before you upgrade,
+   copy them away, or delete them; or move the new workers to a new
+   `dlq.topic`. Old records left in the topic stay there until its retention
+   removes them.
 2. **Change every consumer of the DLQ topic.** A tool that parsed the JSON
    document must read the record instead: the value is the original message
    value (it may not be JSON or UTF-8), the failure facts are headers
@@ -523,8 +527,8 @@ Do these steps in order.
    record with `dk-stage: parse`.
 4. **Use the new replay tool.** `scripts/replay_dlq.py` republishes the key,
    the value and the source headers of each record, and takes `--stage`. Its
-   summary line has no `skipped_invalid` field any more, and its report lines
-   name `dlq_partition=` and `dlq_offset=`.
+   summary line has `skipped_old_format` instead of `skipped_invalid`, and its
+   report lines name `dlq_partition=` and `dlq_offset=`.
 5. **Check `sinks.http.<name>.max_retries`.** It is now the shared retry
    budget of every sink: the default is 2 (it was 3, and unused), and a value
    above 10 fails the load with

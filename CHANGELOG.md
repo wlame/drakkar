@@ -63,8 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers with the failure facts (`dk-record-version`, `dk-stage`,
   `dk-error`, `dk-sink`, `dk-attempts`, `dk-source-*`, `dk-worker` and more).
   The JSON body with `original_payloads` is gone, so every consumer of the
-  DLQ topic must change; records written before the upgrade are not read by
-  the new tools. `DLQMessage` and `ParseFailurePayload` are removed,
+  DLQ topic must change. A record written before the upgrade has no `dk-`
+  headers: the replay tool never republishes one and counts it as
+  `skipped_old_format`, so drain or delete the old topic content when it must
+  not stay. `DLQMessage` and `ParseFailurePayload` are removed,
   `DLQSink.send` takes a `DLQRecord`, `read_dlq_entries` yields `DLQEntry`
   (key, value, headers, partition, offset) instead of decoded JSON, and
   `SourceMessage` has `headers`. `sinks.http.<name>.max_retries` is now the
@@ -77,7 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decides. After a message's first DLQ record no later result of that message
   is delivered. `drakkar_dlq_dropped_payloads_total` counts source messages,
   not payloads. The keys `on_failure`, `max_retries` and `depends_on` in a
-  plugin sink's leaf are now reserved. The HTTP response's per-type sink
+  plugin sink's leaf are now reserved, and startup fails with
+  `sinks.custom.<type>.<name>: the plugin reports sink_type '<t>'` when a
+  plugin class's `sink_type` differs from its config key. The HTTP response's per-type sink
   summary lost the markers `dlq_unconfigured` and `dlq_send_failed: ...`; it
   now reports `<type>/<name>: not started` and
   `<type>/<name>: failed, no DLQ record`, and `dlq` counts only when the
@@ -86,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields; `dlq_payload_serialization_fallback`,
   `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
   gone. `scripts/replay_dlq.py` republishes each record's key, value and
-  source headers, takes `--stage`, and its summary has no `skipped_invalid`.
+  source headers, takes `--stage`, skips old-format records, and its summary
+  has `skipped_old_format` instead of `skipped_invalid`.
   See `docs/upgrading.md` ("The DLQ record").
 
 ### Added
