@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, periodic, election and connections). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, periodic, election, connections and sinks). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "sources": {
       "kafka": {
@@ -1570,6 +1570,151 @@
         }
       },
       "path": "ui.recorder.postgres.retention_hours"
+    },
+    {
+      "name": "sink_on_failure_unknown",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "on_failure": "stall"
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.on_failure must be dlq or skip, got 'stall'"
+    },
+    {
+      "name": "sink_max_retries_above_ten",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "max_retries": 11
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.max_retries must be a whole number from 0 to 10"
+    },
+    {
+      "name": "sink_max_retries_fraction",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "max_retries": 2.5
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.max_retries"
+    },
+    {
+      "name": "sink_depends_on_unknown",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ]
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.depends_on: 'postgres/main-db' is not a configured sink; write '<type>/<name>'"
+    },
+    {
+      "name": "sink_depends_on_self",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "kafka/results"
+              ]
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.depends_on: a sink cannot depend on itself"
+    },
+    {
+      "name": "sink_depends_on_cycle",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "a": {
+              "topic": "out",
+              "depends_on": [
+                "kafka/c"
+              ]
+            },
+            "c": {
+              "topic": "out",
+              "depends_on": [
+                "kafka/b"
+              ]
+            },
+            "b": {
+              "topic": "out",
+              "depends_on": [
+                "kafka/c"
+              ]
+            }
+          }
+        }
+      },
+      "message": "sinks: depends_on forms a cycle: kafka/b -> kafka/c -> kafka/b"
+    },
+    {
+      "name": "plugin_sink_on_failure_by_env",
+      "yaml": {
+        "sinks": {
+          "custom": {
+            "webhook": {
+              "main": {
+                "url": "https://hooks.example"
+              }
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_SINKS__CUSTOM__WEBHOOK__MAIN__ON_FAILURE": "stall"
+      },
+      "message": "sinks.custom.webhook.main.on_failure must be dlq or skip, got 'stall'"
+    },
+    {
+      "name": "plugin_sink_max_retries_fraction",
+      "yaml": {
+        "sinks": {
+          "custom": {
+            "webhook": {
+              "main": {
+                "url": "https://hooks.example",
+                "max_retries": 2.5
+              }
+            }
+          }
+        }
+      },
+      "path": "sinks.custom.webhook.main.max_retries"
+    },
+    {
+      "name": "executor_on_failure_unknown",
+      "yaml": {
+        "executor": {
+          "on_failure": "retry"
+        }
+      },
+      "message": "executor.on_failure must be skip or dlq, got 'retry'"
     }
   ],
   "load_values": [
@@ -1748,6 +1893,107 @@
       },
       "path": "ui.recorder.persistence",
       "value": "postgres"
+    },
+    {
+      "name": "sink_on_failure_default_dlq",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.on_failure",
+      "value": "dlq"
+    },
+    {
+      "name": "sink_max_retries_default_two",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.max_retries",
+      "value": 2
+    },
+    {
+      "name": "sink_depends_on_default_empty",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on",
+      "value": []
+    },
+    {
+      "name": "http_sink_max_retries_default_two",
+      "yaml": {
+        "sinks": {
+          "http": {
+            "api": {
+              "url": "https://api.example.com/results"
+            }
+          }
+        }
+      },
+      "path": "sinks.http.api.max_retries",
+      "value": 2
+    },
+    {
+      "name": "sink_max_retries_whole_float",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "max_retries": 3.0
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.max_retries",
+      "value": 3
+    },
+    {
+      "name": "sink_depends_on_loads",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ]
+            }
+          },
+          "postgres": {
+            "main-db": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on",
+      "value": [
+        "postgres/main-db"
+      ]
+    },
+    {
+      "name": "executor_on_failure_default_skip",
+      "yaml": {},
+      "path": "executor.on_failure",
+      "value": "skip"
     }
   ]
 }

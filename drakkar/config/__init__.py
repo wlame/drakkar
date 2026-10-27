@@ -52,6 +52,8 @@ from drakkar.config.sinks import (
     MongoStatementConfig,
     PostgresSinkConfig,
     RedisSinkConfig,
+    SinkInstanceConfig,
+    SinkPolicy,
     SinksConfig,
 )
 from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
@@ -135,6 +137,8 @@ __all__ = [
     'ResilienceConfig',
     'RuntimeHealthConfig',
     'SharedConfig',
+    'SinkInstanceConfig',
+    'SinkPolicy',
     'SinksConfig',
     'SourcesConfig',
     'StaticPeerConfig',

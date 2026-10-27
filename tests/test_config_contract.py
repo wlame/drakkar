@@ -10,6 +10,7 @@ its ``env`` entries are set as ``DK_*`` variables.
 
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,14 @@ def _load(case: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Drakka
     return load_config(path)
 
 
+def value_at_path(config: DrakkarConfig, path: str) -> object:
+    """The value at a dotted YAML path: a section by its field, a map entry (a sink instance) by its key."""
+    value: object = config
+    for part in path.split('.'):
+        value = value[part] if isinstance(value, Mapping) else getattr(value, part)
+    return value
+
+
 def test_fixture_case_names_are_unique():
     for section in ('moved_keys', 'summary', 'load_values', 'validation'):
         names = _case_ids(FIXTURE[section])
@@ -64,10 +73,7 @@ def test_summary_case_matches_the_contract_line(case, tmp_path, monkeypatch):
 def test_load_value_case_loads_with_the_contract_value(case, tmp_path, monkeypatch):
     config = _load(case, tmp_path, monkeypatch)
 
-    value = config
-    for part in case['path'].split('.'):
-        value = getattr(value, part)
-    assert value == case['value']
+    assert value_at_path(config, case['path']) == case['value']
 
 
 @pytest.mark.parametrize('case', FIXTURE['validation'], ids=_case_ids(FIXTURE['validation']))

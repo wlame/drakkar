@@ -1,0 +1,294 @@
+"""The failure policy, retry budget and dependencies declared on every sink instance.
+
+The shared cases live in ``tests/fixtures/config_contract.json``; these tests
+cover the rest: every sink type, the check order, the plugin sink leaves and
+the graph accessors.
+"""
+
+import json
+import os
+
+import pytest
+from pydantic import ValidationError
+
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    FileSinkConfig,
+    HttpSinkConfig,
+    KafkaSinkConfig,
+    MongoSinkConfig,
+    PostgresSinkConfig,
+    RedisSinkConfig,
+    SinkPolicy,
+    load_config,
+)
+from tests.test_config_contract import FIXTURE, _load, value_at_path
+
+
+def _config(**sections) -> DrakkarConfig:
+    """A loadable config: one enabled source, bundle fetching off, plus ``sections``."""
+    sections.setdefault('sources', {'kafka': {'enabled': True}})
+    ui = sections.setdefault('ui', {})
+    ui.setdefault('release', {'enabled': False})
+    return DrakkarConfig(**sections)
+
+
+def _kafka_sinks(**instances: dict) -> dict:
+    """``sinks`` with Kafka sink instances named by the keyword, each with a topic."""
+    return {'kafka': {name: {'topic': 'out', **settings} for name, settings in instances.items()}}
+
+
+def _load_error(**sections) -> str:
+    with pytest.raises(ValidationError) as excinfo:
+        _config(**sections)
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    'instance',
+    [
+        KafkaSinkConfig(topic='out'),
+        PostgresSinkConfig(dsn='postgresql://db.example/drakkar'),
+        MongoSinkConfig(uri='mongodb://db.example', database='drakkar'),
+        HttpSinkConfig(url='https://api.example.com/results'),
+        RedisSinkConfig(),
+        FileSinkConfig(base_path='/data/out'),
+    ],
+    ids=lambda instance: type(instance).__name__,
+)
+def test_defaults_dlq_two_retries_no_dependencies(instance):
+    assert instance.on_failure == 'dlq'
+    assert instance.max_retries == 2
+    assert instance.depends_on == []
+
+
+def test_policy_of_reads_the_declared_policy():
+    config = _config(sinks=_kafka_sinks(results={'on_failure': 'skip', 'max_retries': 5}, audit={}))
+
+    assert config.sinks.policy_of('kafka', 'results') == SinkPolicy(on_failure='skip', max_retries=5, depends_on=())
+    assert config.sinks.policy_of('kafka', 'audit') == SinkPolicy(on_failure='dlq', max_retries=2, depends_on=())
+
+
+def test_on_failure_refuses_other_values():
+    text = _load_error(sinks=_kafka_sinks(results={'on_failure': 'stall'}))
+
+    assert "sinks.kafka.results.on_failure must be dlq or skip, got 'stall'" in text
+
+
+@pytest.mark.parametrize('value', [0, 10, 3.0, '4'])
+def test_max_retries_bounds_and_whole_number_values_that_load(value):
+    config = _config(sinks=_kafka_sinks(results={'max_retries': value}))
+
+    assert config.sinks.kafka['results'].max_retries == int(value)
+
+
+@pytest.mark.parametrize('value', [-1, 11, 11.0, '11'])
+def test_max_retries_bounds_and_whole_number_values_out_of_range(value):
+    text = _load_error(sinks=_kafka_sinks(results={'max_retries': value}))
+
+    assert 'sinks.kafka.results.max_retries must be a whole number from 0 to 10' in text
+
+
+def test_max_retries_bounds_and_whole_number_fraction_keeps_the_integer_rule():
+    text = _load_error(sinks=_kafka_sinks(results={'max_retries': 2.5}))
+
+    assert 'sinks.kafka.results.max_retries' in text
+    assert 'fractional part' in text
+
+
+def test_depends_on_unknown_reference_message():
+    text = _load_error(sinks=_kafka_sinks(results={'depends_on': ['postgres/main-db']}))
+
+    assert "sinks.kafka.results.depends_on: 'postgres/main-db' is not a configured sink; write '<type>/<name>'" in text
+
+
+def test_depends_on_custom_prefix_is_not_a_reference():
+    sinks = {**_kafka_sinks(results={'depends_on': ['custom/webhook/main']}), 'custom': {'webhook': {'main': {}}}}
+
+    text = _load_error(sinks=sinks)
+
+    assert "sinks.kafka.results.depends_on: 'custom/webhook/main' is not a configured sink" in text
+
+
+def test_depends_on_self_message():
+    text = _load_error(sinks=_kafka_sinks(results={'depends_on': ['kafka/results']}))
+
+    assert 'sinks.kafka.results.depends_on: a sink cannot depend on itself' in text
+
+
+def test_depends_on_cycle_message_starts_at_smallest_reference():
+    # The search starts at kafka/a and meets the cycle at kafka/c; the
+    # message still starts at the cycle's smallest member, kafka/b.
+    sinks = _kafka_sinks(
+        a={'depends_on': ['kafka/c']},
+        c={'depends_on': ['kafka/b']},
+        b={'depends_on': ['kafka/c']},
+    )
+
+    text = _load_error(sinks=sinks)
+
+    assert 'sinks: depends_on forms a cycle: kafka/b -> kafka/c -> kafka/b' in text
+
+
+def test_depends_on_checks_instances_in_sorted_reference_order():
+    sinks = _kafka_sinks(
+        zeta={'depends_on': ['kafka/zeta']},
+        alpha={'depends_on': ['kafka/missing']},
+    )
+
+    text = _load_error(sinks=sinks)
+
+    assert "sinks.kafka.alpha.depends_on: 'kafka/missing' is not a configured sink" in text
+    assert 'zeta' not in text
+
+
+def test_instance_checks_come_before_references():
+    sinks = _kafka_sinks(alpha={'depends_on': ['kafka/missing']}, zeta={'on_failure': 'stall'})
+
+    text = _load_error(sinks=sinks)
+
+    assert "sinks.kafka.zeta.on_failure must be dlq or skip, got 'stall'" in text
+    assert 'missing' not in text
+
+
+def test_dependency_graph_and_instance_path():
+    sinks = {
+        'kafka': {'results': {'topic': 'out', 'depends_on': ['postgres/main-db', 'webhook/main']}},
+        'postgres': {'main-db': {'dsn': 'postgresql://db.example/drakkar'}},
+        'custom': {'webhook': {'main': {'url': 'https://hooks.example', 'depends_on': ['postgres/main-db']}}},
+    }
+
+    config = _config(sinks=sinks)
+
+    assert config.sinks.dependency_graph() == {
+        'kafka/results': ['postgres/main-db', 'webhook/main'],
+        'postgres/main-db': [],
+        'webhook/main': ['postgres/main-db'],
+    }
+    assert config.sinks.instance_path('kafka/results') == 'sinks.kafka.results'
+    assert config.sinks.instance_path('webhook/main') == 'sinks.custom.webhook.main'
+
+
+def test_plugin_sink_keys_are_read_and_removed_from_the_leaf():
+    leaf = {'url': 'https://hooks.example', 'on_failure': 'skip', 'max_retries': 0, 'depends_on': []}
+
+    config = _config(sinks={'custom': {'webhook': {'main': leaf}}})
+
+    assert config.sinks.custom == {'webhook': {'main': {'url': 'https://hooks.example'}}}
+    assert config.sinks.policy_of('webhook', 'main') == SinkPolicy(on_failure='skip', max_retries=0, depends_on=())
+
+
+def test_plugin_sink_without_the_keys_gets_the_defaults():
+    config = _config(sinks={'custom': {'webhook': {'main': {'url': 'https://hooks.example'}}}})
+
+    assert config.sinks.policy_of('webhook', 'main') == SinkPolicy(on_failure='dlq', max_retries=2, depends_on=())
+
+
+@pytest.mark.parametrize(
+    ('custom', 'path'),
+    [({'webhook': 'main'}, 'sinks.custom.webhook'), ({'webhook': {'main': 'url'}}, 'sinks.custom.webhook.main')],
+    ids=['section', 'leaf'],
+)
+def test_plugin_sink_that_is_not_a_mapping_fails_on_its_type(custom, path):
+    text = _load_error(sinks={'custom': custom})
+
+    assert path in text
+    assert 'valid dictionary' in text
+
+
+@pytest.mark.parametrize(
+    ('settings', 'message'),
+    [
+        ({'on_failure': 'stall'}, "sinks.custom.webhook.main.on_failure must be dlq or skip, got 'stall'"),
+        ({'max_retries': 11}, 'sinks.custom.webhook.main.max_retries must be a whole number from 0 to 10'),
+        ({'max_retries': 2.5}, 'sinks.custom.webhook.main.max_retries'),
+        (
+            {'depends_on': ['kafka/missing']},
+            "sinks.custom.webhook.main.depends_on: 'kafka/missing' is not a configured sink; write '<type>/<name>'",
+        ),
+        ({'depends_on': ['webhook/main']}, 'sinks.custom.webhook.main.depends_on: a sink cannot depend on itself'),
+    ],
+    ids=['on_failure', 'max_retries', 'max_retries_fraction', 'unknown_reference', 'self_reference'],
+)
+def test_plugin_sink_messages_use_the_custom_path(settings, message):
+    text = _load_error(sinks={'custom': {'webhook': {'main': {'url': 'https://hooks.example', **settings}}}})
+
+    assert message in text
+
+
+def test_plugin_sink_policy_by_env(tmp_path, monkeypatch):
+    for name in list(os.environ):
+        if name.startswith('DK_'):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv('DK_SINKS__CUSTOM__WEBHOOK__MAIN__MAX_RETRIES', '7')
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(
+        json.dumps(
+            {
+                'sources': {'kafka': {'enabled': True}},
+                'ui': {'release': {'enabled': False}},
+                'sinks': {'custom': {'webhook': {'main': {'url': 'https://hooks.example'}}}},
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    config = load_config(path)
+
+    assert config.sinks.policy_of('webhook', 'main').max_retries == 7
+    assert config.sinks.custom['webhook']['main'] == {'url': 'https://hooks.example'}
+
+
+def test_executor_on_failure_values():
+    assert ExecutorConfig().on_failure == 'skip'
+    assert _config(executor={'on_failure': 'dlq'}).executor.on_failure == 'dlq'
+
+    text = _load_error(executor={'on_failure': 'retry'})
+
+    assert "executor.on_failure must be skip or dlq, got 'retry'" in text
+
+
+NEW_VALIDATION_CASES = [
+    'sink_on_failure_unknown',
+    'sink_max_retries_above_ten',
+    'sink_max_retries_fraction',
+    'sink_depends_on_unknown',
+    'sink_depends_on_self',
+    'sink_depends_on_cycle',
+    'plugin_sink_on_failure_by_env',
+    'plugin_sink_max_retries_fraction',
+    'executor_on_failure_unknown',
+]
+NEW_LOAD_VALUE_CASES = [
+    'sink_on_failure_default_dlq',
+    'sink_max_retries_default_two',
+    'sink_depends_on_default_empty',
+    'http_sink_max_retries_default_two',
+    'sink_max_retries_whole_float',
+    'sink_depends_on_loads',
+    'executor_on_failure_default_skip',
+]
+
+
+def _fixture_case(section: str, name: str) -> dict:
+    return next(case for case in FIXTURE[section] if case['name'] == name)
+
+
+@pytest.mark.parametrize('name', NEW_VALIDATION_CASES)
+def test_config_contract_fixture_cases_fail_the_load(name, tmp_path, monkeypatch):
+    case = _fixture_case('validation', name)
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load(case, tmp_path, monkeypatch)
+
+    assert (case.get('message') or case['path']) in str(excinfo.value)
+
+
+@pytest.mark.parametrize('name', NEW_LOAD_VALUE_CASES)
+def test_config_contract_fixture_cases_load(name, tmp_path, monkeypatch):
+    case = _fixture_case('load_values', name)
+
+    config = _load(case, tmp_path, monkeypatch)
+
+    assert value_at_path(config, case['path']) == case['value']

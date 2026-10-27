@@ -218,6 +218,12 @@ class DrakkarConfig(BaseSettings):
         )
         return self
 
+    @model_validator(mode='after')
+    def _validate_sink_dependencies(self) -> 'DrakkarConfig':
+        """Every ``depends_on`` reference names a configured sink, none names its own sink, and none forms a cycle."""
+        self.sinks.check_dependencies()
+        return self
+
     @property
     def resolved_persistence(self) -> Persistence:
         """The effective recorder mode: the explicit key, else ``sqlite`` with a ``storage.dir``, else ``none``.

@@ -63,9 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The old JSON body and `ParseFailurePayload` are gone. `DLQSink.send` takes
   a `DLQRecord`, and `read_dlq_entries` yields `DLQEntry` (key, value,
   headers, partition, offset). `SourceMessage` has `headers`.
+  `sinks.http.<name>.max_retries` now defaults to 2 (it was 3), and a value
+  above 10 fails the load.
 
 ### Added
 
+- **Failure policy, retry budget and dependencies per sink.** Every sink
+  instance, a plugin sink too, takes `on_failure` (`dlq` or `skip`, default
+  `dlq`), `max_retries` (0 to 10, default 2) and `depends_on` (a list of
+  `<type>/<name>`). The load checks every value and every reference, and
+  refuses a sink that depends on itself or a cycle. In a plugin sink's config
+  the three keys are reserved. `executor.on_failure` (`skip` or `dlq`,
+  default `skip`) is what the default `on_error` returns.
 - **Recorder mode `postgres`: the history table in Postgres.**
   `ui.recorder.persistence` accepts `postgres`. It is never derived from
   `storage.dir`. The new section `ui.recorder.postgres` has the keys

@@ -131,7 +131,7 @@ def test_http_sink_config_defaults():
     assert cfg.method == 'POST'
     assert cfg.timeout_seconds == 30
     assert cfg.headers == {}
-    assert cfg.max_retries == 3
+    assert cfg.max_retries == 2
 
 
 # --- H8: HttpSinkConfig.url validation ---

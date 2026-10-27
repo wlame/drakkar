@@ -503,6 +503,16 @@
           "group": "executor"
         },
         {
+          "path": "executor.on_failure",
+          "env": "DK_EXECUTOR__ON_FAILURE",
+          "description": "What the default on_error returns when a task fails for good: 'skip' drops the task; 'dlq' writes its source message to the DLQ and ends the message.",
+          "full_description": "What the default on_error returns when a task fails for good: 'skip' drops the task; 'dlq' writes its source message to the DLQ and ends the message.",
+          "type": "string",
+          "default": "skip",
+          "secret": false,
+          "group": "executor"
+        },
+        {
           "path": "executor.drain_timeout_seconds",
           "env": "DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS",
           "description": "Maximum seconds to wait for in-flight executor tasks to finish during graceful shutdown or partition revocation.",
@@ -539,6 +549,36 @@
       "title": "Sinks (sinks:)",
       "doc_anchor": "sinks-sinks",
       "entries": [
+        {
+          "path": "sinks.kafka.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
         {
           "path": "sinks.kafka.*.topic",
           "env": null,
@@ -680,6 +720,36 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.postgres.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.postgres.*.dsn",
           "env": null,
           "description": "PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.",
@@ -726,6 +796,36 @@
           "full_description": "URL to a database management UI (e.g. pgAdmin), shown as a link in the operator UI.",
           "type": "string",
           "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
           "secret": false,
           "group": "sinks"
         },
@@ -800,6 +900,36 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.http.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.http.*.url",
           "env": null,
           "description": "Target URL for requests.",
@@ -850,22 +980,42 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.http.*.max_retries",
-          "env": null,
-          "description": "Maximum retry attempts for failed HTTP requests.",
-          "full_description": "Maximum retry attempts for failed HTTP requests.",
-          "type": "integer",
-          "default": 3,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
           "path": "sinks.http.*.ui_url",
           "env": null,
           "description": "URL to a related web UI, shown as a link in the operator UI.",
           "full_description": "URL to a related web UI, shown as a link in the operator UI.",
           "type": "string",
           "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
           "secret": false,
           "group": "sinks"
         },
@@ -910,6 +1060,36 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.filesystem.*.on_failure",
+          "env": null,
+          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "type": "string",
+          "default": "dlq",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.max_retries",
+          "env": null,
+          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix).",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>' (a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.filesystem.*.base_path",
           "env": null,
           "description": "Base directory for all writes.",
@@ -933,7 +1113,7 @@
           "path": "sinks.custom",
           "env": "DK_SINKS__CUSTOM",
           "description": "Plugin-discovered sink instances.",
-          "full_description": "Plugin-discovered sink instances. Top-level keys are sink type names registered via [project.entry-points.\"drakkar.sinks\"]; second-level keys are instance names; leaf dicts are plugin-defined config passed verbatim to the sink class constructor.",
+          "full_description": "Plugin-discovered sink instances. Top-level keys are sink type names registered via [project.entry-points.\"drakkar.sinks\"]; second-level keys are instance names; leaf dicts are plugin-defined config passed to the sink class constructor. The keys on_failure, max_retries and depends_on are reserved: they declare the failure policy of the instance, as on every built-in sink, and are removed from the leaf before the plugin receives it.",
           "type": "object",
           "default": {},
           "secret": false,

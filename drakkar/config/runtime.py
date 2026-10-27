@@ -4,7 +4,11 @@ Everything that tunes how a worker runs, as opposed to where its data
 comes from (``kafka``) or goes (``sinks``).
 """
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+EXECUTOR_ON_FAILURE_CHOICES = ('skip', 'dlq')
 
 
 class ExecutorConfig(BaseModel):
@@ -110,6 +114,13 @@ class ExecutorConfig(BaseModel):
             'Maximum retry attempts per failed task (0 = no retries). A task runs at most max_retries + 1 times.'
         ),
     )
+    on_failure: Literal['skip', 'dlq'] = Field(
+        default='skip',
+        description=(
+            "What the default on_error returns when a task fails for good: 'skip' drops the "
+            "task; 'dlq' writes its source message to the DLQ and ends the message."
+        ),
+    )
     drain_timeout_seconds: int = Field(
         default=30,
         ge=1,
@@ -140,6 +151,14 @@ class ExecutorConfig(BaseModel):
             'drop to max(1, max_executors * this value).'
         ),
     )
+
+    @field_validator('on_failure', mode='before')
+    @classmethod
+    def _check_on_failure(cls, value: object) -> object:
+        """Refuse any other value with the pinned message, which names the key by its path."""
+        if value not in EXECUTOR_ON_FAILURE_CHOICES:
+            raise ValueError(f"executor.on_failure must be skip or dlq, got '{value}'")
+        return value
 
 
 class MetricsConfig(BaseModel):

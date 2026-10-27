@@ -10,10 +10,21 @@ is safe and the reverse one is not.
 """
 
 import re
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Literal, get_origin
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
 from drakkar.models import MongoOp
@@ -42,7 +53,148 @@ _MONGO_STATEMENT_NAME_RE = _PG_STATEMENT_NAME_RE
 _REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 
-class KafkaSinkConfig(BaseModel):
+# The failure policy of one sink instance. The three keys are shared by every
+# sink type, a plugin sink included, so their names are reserved in a plugin
+# sink's config: ``SinksConfig`` takes them out of the leaf before the plugin
+# sees it.
+ON_FAILURE_CHOICES = ('dlq', 'skip')
+MAX_RETRIES_LIMIT = 10
+POLICY_KEYS = ('on_failure', 'max_retries', 'depends_on')
+
+# The same integer rule as the ``max_retries`` field, so the range check sees
+# the value the field would hold (``3.0`` and ``'3'`` are 3; ``2.5`` is left to
+# the field, whose integer message names the path).
+_WHOLE_NUMBER = TypeAdapter(int)
+
+
+class SinkInstanceConfig(BaseModel):
+    """The failure policy, retry budget and dependencies of one sink instance.
+
+    Every sink config class inherits these keys. A plugin sink declares them
+    in its ``sinks.custom.<type>.<name>`` leaf; ``SinksConfig`` reads them
+    from there (see ``SinksConfig.policy_of``).
+    """
+
+    on_failure: Literal['dlq', 'skip'] = Field(
+        default='dlq',
+        description=(
+            "What happens when the retry budget of a delivery is spent: 'dlq' writes the "
+            "source message to the DLQ and ends the message; 'skip' drops this sink's "
+            'payloads and goes on.'
+        ),
+    )
+    max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=MAX_RETRIES_LIMIT,
+        description=(
+            'Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). '
+            'on_delivery_error returning RETRY spends one; the quick internal retries of an '
+            'idempotent write are not counted.'
+        ),
+    )
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sinks that must deliver a result before this one starts, each written '<type>/<name>' "
+            '(a plugin sink too, with no custom/ prefix). Checked at load: every reference exists, '
+            'no self-reference, no cycle.'
+        ),
+    )
+
+
+class SinkPolicy(BaseModel):
+    """The declared policy of one sink instance, as the delivery reads it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    on_failure: Literal['dlq', 'skip']
+    max_retries: int
+    depends_on: tuple[str, ...]
+
+    @classmethod
+    def of(cls, instance: SinkInstanceConfig) -> 'SinkPolicy':
+        """The policy declared by ``instance``."""
+        return cls(
+            on_failure=instance.on_failure,
+            max_retries=instance.max_retries,
+            depends_on=tuple(instance.depends_on),
+        )
+
+
+def check_instance_policy(path: str, raw: Mapping[str, Any]) -> None:
+    """Refuse a bad ``on_failure`` or ``max_retries`` in the raw leaf at ``path``, with the pinned message.
+
+    A ``max_retries`` that is not a whole number is left to the field's
+    integer rule. ``depends_on`` references are checked once every instance
+    is known (``SinksConfig.check_dependencies``).
+    """
+    if 'on_failure' in raw and raw['on_failure'] not in ON_FAILURE_CHOICES:
+        raise ValueError(f"{path}.on_failure must be dlq or skip, got '{raw['on_failure']}'")
+    if 'max_retries' not in raw:
+        return
+    try:
+        retries = _WHOLE_NUMBER.validate_python(raw['max_retries'])
+    except ValidationError:
+        return
+    if not 0 <= retries <= MAX_RETRIES_LIMIT:
+        raise ValueError(f'{path}.max_retries must be a whole number from 0 to {MAX_RETRIES_LIMIT}')
+
+
+def _plugin_policy(path: str, leaf: Mapping[str, Any]) -> SinkPolicy:
+    """The policy of a plugin sink leaf, read from its reserved keys.
+
+    A type error (a fraction, a ``depends_on`` that is not a list of strings)
+    names the leaf path, since no field of the plugin's config reports it.
+    """
+    declared = {key: leaf[key] for key in POLICY_KEYS if key in leaf}
+    try:
+        return SinkPolicy.of(SinkInstanceConfig.model_validate(declared))
+    except ValidationError as e:
+        first = e.errors()[0]
+        location = '.'.join(str(part) for part in first['loc'])
+        raise ValueError(f'{path}.{location}: {first["msg"]}') from None
+
+
+def find_dependency_cycle(graph: Mapping[str, list[str]]) -> list[str] | None:
+    """The first cycle of ``graph``, closed by its first member, or ``None``.
+
+    The search visits nodes in sorted order and follows each node's
+    dependencies in their declared order, so the cycle it finds is the same
+    for any implementation. The cycle is then turned to start at its smallest
+    member: ``b -> c -> b``, never ``c -> b -> c``.
+    """
+    visiting: set[str] = set()
+    done: set[str] = set()
+    stack: list[str] = []
+
+    def visit(node: str) -> list[str] | None:
+        visiting.add(node)
+        stack.append(node)
+        for dependency in graph.get(node, []):
+            if dependency in visiting:
+                return stack[stack.index(dependency) :]
+            if dependency not in done:
+                found = visit(dependency)
+                if found is not None:
+                    return found
+        stack.pop()
+        visiting.discard(node)
+        done.add(node)
+        return None
+
+    for node in sorted(graph):
+        if node in done:
+            continue
+        cycle = visit(node)
+        if cycle is not None:
+            start = cycle.index(min(cycle))
+            turned = cycle[start:] + cycle[:start]
+            return [*turned, turned[0]]
+    return None
+
+
+class KafkaSinkConfig(SinkInstanceConfig):
     """Configuration for a Kafka output sink.
 
     Each named instance produces messages to a specific topic.
@@ -99,7 +251,7 @@ class KafkaSinkConfig(BaseModel):
         return validate_client_config(v)
 
 
-class PostgresSinkConfig(BaseModel):
+class PostgresSinkConfig(SinkInstanceConfig):
     """Configuration for a PostgreSQL output sink.
 
     Each named instance connects to a database via asyncpg pool.
@@ -218,7 +370,7 @@ class MongoStatementConfig(BaseModel):
         return document
 
 
-class MongoSinkConfig(BaseModel):
+class MongoSinkConfig(SinkInstanceConfig):
     """Configuration for a MongoDB output sink.
 
     Each named instance connects to a database via PyMongo's AsyncMongoClient.
@@ -290,7 +442,7 @@ class MongoSinkConfig(BaseModel):
         return value
 
 
-class HttpSinkConfig(BaseModel):
+class HttpSinkConfig(SinkInstanceConfig):
     """Configuration for an HTTP output sink.
 
     Each named instance POSTs a payload to a URL, encoded per ``encoding``.
@@ -327,7 +479,6 @@ class HttpSinkConfig(BaseModel):
             'The Content-Type header always derives from it, so headers must not set one.'
         ),
     )
-    max_retries: int = Field(default=3, ge=0, description='Maximum retry attempts for failed HTTP requests.')
     ui_url: str = Field(
         default='',
         description='URL to a related web UI, shown as a link in the operator UI.',
@@ -368,7 +519,7 @@ class HttpSinkConfig(BaseModel):
         return self
 
 
-class RedisSinkConfig(BaseModel):
+class RedisSinkConfig(SinkInstanceConfig):
     """Configuration for a Redis output sink.
 
     Each named instance connects to a Redis server and issues one write
@@ -424,7 +575,7 @@ class RedisSinkConfig(BaseModel):
         return value
 
 
-class FileSinkConfig(BaseModel):
+class FileSinkConfig(SinkInstanceConfig):
     """Configuration for a filesystem output sink.
 
     Writes JSONL lines to files. `base_path` is required — all payload
@@ -512,13 +663,18 @@ class SinksConfig(BaseModel):
     # plugin authors define the shape — Drakkar cannot validate it
     # ahead of time. The plugin's ``__init__(name, config)`` receives
     # the dict and can wrap it in its own Pydantic model for validation.
+    # The three policy keys are the exception: they are read from the leaf
+    # and removed before the dict reaches the plugin (``_read_policies``).
     custom: dict[str, dict[str, dict[str, Any]]] = Field(
         default_factory=dict,
         description=(
             'Plugin-discovered sink instances. Top-level keys are sink type '
             'names registered via [project.entry-points."drakkar.sinks"]; '
             'second-level keys are instance names; leaf dicts are plugin-'
-            'defined config passed verbatim to the sink class constructor.'
+            'defined config passed to the sink class constructor. The keys '
+            'on_failure, max_retries and depends_on are reserved: they declare '
+            'the failure policy of the instance, as on every built-in sink, '
+            'and are removed from the leaf before the plugin receives it.'
         ),
     )
     delivery_timeout_seconds: float = Field(
@@ -544,6 +700,102 @@ class SinksConfig(BaseModel):
             'per-sink override in a future release.'
         ),
     )
+
+    # The policies read from the plugin sink leaves, keyed by
+    # ``(custom type, instance name)``. Private: the leaves no longer carry
+    # the keys, and a public field would be a second place to set them.
+    _plugin_policies: dict[tuple[str, str], SinkPolicy] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def _read_policies(cls, data: Any, handler: ModelWrapValidatorHandler['SinksConfig']) -> 'SinksConfig':
+        """Check the policy keys of every instance, and take them out of the plugin sink leaves.
+
+        The checks run on the raw input because only here is the instance
+        path known, and the messages name it. Instances are checked in
+        sorted ``<type>/<name>`` order, ``on_failure`` before
+        ``max_retries``, so the first message is the same for any key order.
+        """
+        if not isinstance(data, Mapping):
+            return handler(data)
+        leaves = sorted(_raw_instance_leaves(data), key=lambda leaf: leaf[0])
+        for _, path, raw in leaves:
+            check_instance_policy(path, raw)
+        policies: dict[tuple[str, str], SinkPolicy] = {}
+        custom = data.get('custom')
+        if isinstance(custom, Mapping):
+            data = {**data, 'custom': _without_policy_keys(custom)}
+            for ref, path, raw in leaves:
+                if path.startswith('sinks.custom.'):
+                    sink_type, _, name = ref.partition('/')
+                    policies[(sink_type, name)] = _plugin_policy(path, raw)
+        config = handler(data)
+        config._plugin_policies = policies
+        return config
+
+    def _instances(self) -> dict[str, tuple[str, SinkPolicy]]:
+        """Every configured instance: its ``<type>/<name>`` reference, its config path and its policy.
+
+        A plugin type named like a built-in one shares its references; the
+        built-in instance wins.
+        """
+        instances: dict[str, tuple[str, SinkPolicy]] = {}
+        for sink_type in BUILTIN_SINK_TYPES:
+            section: dict[str, SinkInstanceConfig] = getattr(self, sink_type)
+            for name, instance in section.items():
+                instances[f'{sink_type}/{name}'] = (f'sinks.{sink_type}.{name}', SinkPolicy.of(instance))
+        for sink_type, named in self.custom.items():
+            for name in named:
+                policy = self._plugin_policies.get((sink_type, name), DEFAULT_SINK_POLICY)
+                instances.setdefault(f'{sink_type}/{name}', (f'sinks.custom.{sink_type}.{name}', policy))
+        return instances
+
+    def policy_of(self, sink_type: str, name: str) -> SinkPolicy:
+        """The declared policy of the instance ``name`` of ``sink_type`` (a plugin type without ``custom``).
+
+        Raises:
+            KeyError: no such instance is configured.
+        """
+        return self._instances()[f'{sink_type}/{name}'][1]
+
+    def instance_path(self, ref: str) -> str:
+        """The config path of the instance ``ref`` (``<type>/<name>``).
+
+        ``sinks.<type>.<name>`` for a built-in type, ``sinks.custom.<type>.<name>``
+        for a plugin sink.
+
+        Raises:
+            KeyError: no such instance is configured.
+        """
+        return self._instances()[ref][0]
+
+    def dependency_graph(self) -> dict[str, list[str]]:
+        """Every instance's ``depends_on`` list, keyed by its ``<type>/<name>`` reference, in sorted order."""
+        instances = self._instances()
+        return {ref: list(instances[ref][1].depends_on) for ref in sorted(instances)}
+
+    def check_dependencies(self) -> None:
+        """Refuse an unknown reference, a self-reference or a cycle in ``depends_on``.
+
+        Instances are checked in sorted reference order and each one's
+        references in their declared order; the cycle check runs last.
+
+        Raises:
+            ValueError: with the pinned message of the first broken rule.
+        """
+        instances = self._instances()
+        for ref in sorted(instances):
+            path, policy = instances[ref]
+            for dependency in policy.depends_on:
+                if dependency == ref:
+                    raise ValueError(f'{path}.depends_on: a sink cannot depend on itself')
+                if dependency not in instances:
+                    raise ValueError(
+                        f"{path}.depends_on: '{dependency}' is not a configured sink; write '<type>/<name>'"
+                    )
+        cycle = find_dependency_cycle(self.dependency_graph())
+        if cycle is not None:
+            raise ValueError('sinks: depends_on forms a cycle: ' + ' -> '.join(cycle))
 
     @property
     def is_empty(self) -> bool:
@@ -576,6 +828,55 @@ class SinksConfig(BaseModel):
             if self.custom[type_name]:
                 result[type_name] = sorted(self.custom[type_name])
         return result
+
+
+# The built-in sink sections: the ``SinksConfig`` fields that map instance
+# names to a sink config. ``custom`` nests one level deeper (type, then name).
+BUILTIN_SINK_TYPES: tuple[str, ...] = tuple(
+    name
+    for name, field in SinksConfig.model_fields.items()
+    if name != 'custom' and get_origin(field.annotation) is dict
+)
+
+DEFAULT_SINK_POLICY = SinkPolicy.of(SinkInstanceConfig())
+
+
+def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, Any]]]:
+    """``(reference, path, leaf)`` of every instance in raw ``sinks`` input whose leaf is a mapping.
+
+    Anything else is left to the field types, which report it.
+    """
+    leaves: list[tuple[str, str, Mapping[str, Any]]] = []
+    for sink_type in BUILTIN_SINK_TYPES:
+        section = data.get(sink_type)
+        if isinstance(section, Mapping):
+            for name, leaf in section.items():
+                if isinstance(leaf, Mapping):
+                    leaves.append((f'{sink_type}/{name}', f'sinks.{sink_type}.{name}', leaf))
+    custom = data.get('custom')
+    if isinstance(custom, Mapping):
+        for sink_type, section in custom.items():
+            if isinstance(section, Mapping):
+                for name, leaf in section.items():
+                    if isinstance(leaf, Mapping):
+                        leaves.append((f'{sink_type}/{name}', f'sinks.custom.{sink_type}.{name}', leaf))
+    return leaves
+
+
+def _without_policy_keys(custom: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of raw ``sinks.custom`` with the policy keys taken out of every leaf."""
+    stripped: dict[str, Any] = {}
+    for sink_type, section in custom.items():
+        if not isinstance(section, Mapping):
+            stripped[sink_type] = section
+            continue
+        stripped[sink_type] = {
+            name: {key: value for key, value in leaf.items() if key not in POLICY_KEYS}
+            if isinstance(leaf, Mapping)
+            else leaf
+            for name, leaf in section.items()
+        }
+    return stripped
 
 
 class DLQConfig(BaseModel):
