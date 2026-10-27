@@ -443,7 +443,8 @@ The hook must return one of four types of responses:
   - The function returns immediately **without** decrementing `_inflight_count` or incrementing `window.completed_count` -- the retry reuses the same slot.
   - There is **no sleep or backoff** between retries; the task is immediately re-submitted to the executor pool.
 - If `retry_count >= executor.max_retries` (retries exhausted):
-  - Logs a `max_retries_exceeded` warning with the task_id and retry count.
+  - Logs a `max_retries_exceeded` warning with the task_id, the retry count and `action` (`executor.on_failure`).
+  - With `executor.on_failure: dlq`, writes the task's `execute` DLQ record, as Response D below.
   - The failed result is appended to the window's results list (kept only when `on_window_complete` is implemented).
   - Falls through to the finally block (task counted as completed).
 

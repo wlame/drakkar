@@ -479,7 +479,7 @@ Every instance of every type, plugin sinks included, also takes the
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `on_failure` | `'dlq'` \| `'skip'` | `'dlq'` | | What happens when the retry budget is spent. `dlq`: the source message goes to the DLQ and the message is done. `skip`: this sink's payloads are dropped. |
-| `max_retries` | `int` | `2` | whole number, 0 to 10 | Retries after the first attempt, spent by the handler's `RETRY` (default 2 = 3 attempts). The quick internal retry of an idempotent write does not count. |
+| `max_retries` | `int` | `2` | whole number, 0 to 10 | Retries after the first attempt, spent only by a hook that returns `RETRY` (default 2). The default hook makes one attempt and then applies the declared `on_failure`. The quick internal retry of an idempotent write does not count. |
 | `depends_on` | `list[str]` | `[]` | each entry `<type>/<name>` of a configured sink; no self-reference, no cycle | Sinks that must deliver first inside one result. A plugin sink is written `<type>/<name>` too, without `custom/`. See [Sink dependencies](sinks.md#sink-dependencies-depends_on). |
 
 Environment overrides: `DK_SINKS__<TYPE>__<NAME>__ON_FAILURE`, and

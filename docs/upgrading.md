@@ -551,24 +551,31 @@ Do these steps in order.
    did not fail, and `on_message_complete` still runs but its result is not
    delivered. A sink that may lose its payloads without stopping the message
    should declare `on_failure: skip`.
-8. **Plugin sinks.** The keys `on_failure`, `max_retries` and `depends_on` in a
+8. **Window results cannot reach the DLQ.** A failed delivery of an
+   `on_window_complete` result went to the DLQ before (as the payload JSON).
+   A window result has no source message, so `on_failure: dlq` now acts as
+   `skip` there and logs `window_delivery_not_dlq`. A handler that needs the
+   DLQ for an aggregate delivers it from `on_message_complete` instead, or
+   sets `on_failure: skip` on that sink knowingly.
+9. **Plugin sinks.** The keys `on_failure`, `max_retries` and `depends_on` in a
    `sinks.custom.<type>.<name>` leaf are now read by the framework and removed
    before the plugin receives the leaf; rename a plugin option that used one
    of these names. A plugin type named like a built-in type (`kafka`,
    `postgres`, ...) under `sinks.custom` fails the load, and a plugin class
    whose `sink_type` differs from its config key fails startup.
-9. **The HTTP response summary.** In the per-type `sinks` summary of an HTTP
-   request, the error markers `dlq_unconfigured` and `dlq_send_failed: ...`
-   are gone. A sink that did not start reports `<type>/<name>: not started`,
-   and a sink that failed with no DLQ record reports
-   `<type>/<name>: failed, no DLQ record`. `dlq` counts only when the
-   request's DLQ record was written.
-10. **Update dashboards and alerts.** `drakkar_dlq_dropped_payloads_total` now
+10. **The HTTP response summary.** In the per-type `sinks` summary of an HTTP
+    request, the error markers `dlq_unconfigured` and `dlq_send_failed: ...`
+    are gone. A sink that did not start reports `<type>/<name>: not started`,
+    and a sink that failed with no DLQ record reports
+    `<type>/<name>: failed, no DLQ record`. `dlq` counts only when the
+    request's DLQ record was written.
+11. **Update dashboards and alerts.** `drakkar_dlq_dropped_payloads_total` now
     counts source messages, once each, not payloads. New:
     `drakkar_dlq_records_total{stage}` and
     `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`.
     The help texts of `drakkar_sink_dlq_messages_total`,
-    `drakkar_dlq_dropped_payloads_total` and
+    `drakkar_dlq_dropped_payloads_total`,
+    `drakkar_dlq_unconfigured_drops_total` and
     `drakkar_sink_deliveries_skipped_total` changed. The log events
     `dlq_message_sent` and `dlq_send_failed` carry `stage`, `sink` and
     `value_bytes` instead of payload fields. `dlq_payload_serialization_fallback`
@@ -576,5 +583,5 @@ Do these steps in order.
     `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
     gone: the shared `delivery_error_hook_failed`, `message_dlq`,
     `dlq_send_failed` and `dlq_failure_payloads_dropped` cover those cases.
-11. **Protect the DLQ topic like the source topic.** It now holds the original
+12. **Protect the DLQ topic like the source topic.** It now holds the original
     messages; see [Security](security.md#the-dlq-topic-holds-original-messages).

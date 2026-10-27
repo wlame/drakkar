@@ -547,7 +547,7 @@ partition. Return one of:
 
 | Return value            | Behavior                                      |
 |-------------------------|-----------------------------------------------|
-| `ErrorAction.RETRY`     | Re-run the same task (up to `executor.max_retries`) |
+| `ErrorAction.RETRY`     | Re-run the same task (up to `executor.max_retries`; then `executor.on_failure` applies) |
 | `ErrorAction.SKIP`      | Drop the task, continue processing            |
 | `ErrorAction.DLQ`       | Write the task's source messages to the [DLQ](sinks.md#dead-letter-queue); no later delivery of those messages starts |
 | `list[ExecutorTask]`    | Spawn replacement tasks instead               |
@@ -555,6 +555,16 @@ partition. Return one of:
 The default `on_error` returns `executor.on_failure`: `SKIP` unless the config
 sets `executor.on_failure: dlq`. A handler that does not override the hook
 gets the configured answer.
+
+`executor.on_failure` also decides two cases the hook does not answer, as a
+sink's declared `on_failure` does for a spent sink budget and a raising
+`on_delivery_error`:
+
+- `RETRY` when `executor.max_retries` is spent. The worker logs
+  `max_retries_exceeded` with `action` (`skip` or `dlq`); with `dlq` the
+  record is written as for `ErrorAction.DLQ`, and `dk-attempts` is
+  `max_retries + 1`.
+- An `on_error` that raises (see below).
 
 `ErrorAction.DLQ` writes the record at once, while the other tasks of the
 message may still run. The record carries `dk-stage: execute`, the task id in
@@ -569,12 +579,15 @@ logs `message_already_dlq`. If the record cannot be written,
 logs `execute_dlq_failed`.
 
 The [message probe](faq.md#what-is-the-message-probe-tab) runs the same hook. There
-`ErrorAction.DLQ` is a terminal failure of the task, and nothing is written
-to the DLQ.
+`ErrorAction.DLQ` (an answer, or `executor.on_failure: dlq` for a spent
+budget or a raising hook) is a terminal failure of the task, and nothing is
+written to the DLQ.
 
-If `on_error` **itself raises**, the framework contains the exception and
-treats the task as a terminal `SKIP`, logging `on_error_hook_failed` and
-incrementing `drakkar_handler_hook_errors_total{hook="on_error"}`. A handler
+If `on_error` **itself raises**, the framework contains the exception, logs
+`on_error_hook_failed` (its `action` names the policy), increments
+`drakkar_handler_hook_errors_total{hook="on_error"}`, and then applies
+`executor.on_failure`: `skip` makes the task a terminal failure, `dlq` also
+writes its record (`dk-attempts` is the task's attempts so far). A handler
 bug must not wedge offset commits: an uncontained exception here would leave
 the message's offset pending forever, and since the commit watermark only
 advances over a gap-free prefix, that would freeze **every later commit on

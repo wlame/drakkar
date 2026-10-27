@@ -14,7 +14,7 @@ supports multiple named instances (e.g., two separate Kafka topics or three Post
 | `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Every configured sink's `connect()` runs concurrently (`asyncio.gather`), so cold-start latency is bounded by the slowest sink, not the sum. If any fails, the worker crashes immediately. |
 | `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)`, then dispatches one `deliver()` call per group **in parallel** via `asyncio.gather`. A group whose sink declares [`depends_on`](#sink-dependencies-depends_on) waits for those sinks first. One slow or failing sink does not block the others. Each group owns its own retry budget and circuit-breaker state. |
 | [Circuit breaker](#circuit-breaker) | Before each `deliver()` call | If the sink's breaker is open, `deliver()` is skipped and the sink's declared [`on_failure`](#failure-policy) decides at once: `dlq` writes the message's [DLQ record](#the-dlq-record), `skip` drops the payloads. |
-| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ`, `RETRY`, or `SKIP`. The default answer is the sink's declared `on_failure`. `RETRY` re-calls `deliver()` up to the sink's `max_retries` (default 2, so 3 attempts in all). |
+| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ`, `RETRY`, or `SKIP`. The default answer is the sink's declared `on_failure`. `RETRY` re-calls `deliver()` up to the sink's `max_retries` (default 2). Only a hook that returns `RETRY` spends that budget: the default hook makes one attempt and then applies the declared policy. |
 | Offset commit | After **all** sinks settled for the message | Kafka offsets are committed only when every payload of the message was delivered, skipped, or the message was written to the DLQ. No partial commits. |
 | `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
 
@@ -324,14 +324,14 @@ sinks:
     main_db:
       dsn: "postgresql://user:pass@db:5432/app"
       on_failure: dlq        # dlq (default) | skip
-      max_retries: 2         # 0 to 10: retries after the first attempt (default 2 = 3 attempts)
+      max_retries: 2         # 0 to 10: retries after the first attempt, spent only by a hook that returns RETRY
       depends_on: []         # sinks to deliver first, as '<type>/<name>'
 ```
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `on_failure` | `dlq` | What happens when the retry budget is spent. `dlq`: the message goes to the [DLQ](#dead-letter-queue) and is done. `skip`: the payloads of this sink are dropped and the message goes on. |
-| `max_retries` | `2` | Retries after the first attempt, spent by the handler's `RETRY` (0 to 10). The budget belongs to one sink for one result. |
+| `max_retries` | `2` | Retries after the first attempt, spent only by a hook that returns `RETRY` (0 to 10). The default hook makes one attempt and then applies `on_failure`. The budget belongs to one sink for one result. |
 | `depends_on` | `[]` | Sinks that must deliver first, written `<type>/<name>` (a plugin sink too, without `custom/`). See [Sink dependencies](#sink-dependencies-depends_on). |
 
 Environment overrides follow the usual rule:
@@ -799,6 +799,10 @@ sink that is not configured (the result is rejected before any delivery). The
 |----------|----------|-----------|
 | `drop` (default) | The loss is logged at CRITICAL (`dlq_failure_payloads_dropped`: with `message_count` for a sink or task failure, with `offset` for a parse failure) and counted in `drakkar_dlq_dropped_payloads_total` (source messages); the message counts as processed and its offset commits. The pipeline keeps moving. | The message is **lost**. Alert on the counter. |
 | `stall` | The affected offset is left uncommitted (counted in `drakkar_delivery_stalled_offsets_total`) and the partition is **paused** — no new messages are fetched from it until the worker restarts or the partition is reassigned. On restart, processing resumes from the last committed offset, so the messages are redelivered. | No data loss, but the partition accrues consumer lag until the downstream is fixed and the worker restarted. |
+
+A write judged unconfirmed at the flush timeout can still land later, so a
+message that comes back under `stall` may get a second record, and a loss
+counted under `drop` may have been written.
 
 Both strategies are loud: `drakkar_dlq_send_failures_total` ticks on every failed
 DLQ write regardless of the strategy, and a CRITICAL `dlq_send_failed` log entry

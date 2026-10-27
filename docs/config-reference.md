@@ -193,7 +193,7 @@ sinks:
     results:
       topic: search-results
       on_failure: dlq              # dlq | skip: when the retry budget is spent. env: DK_SINKS__KAFKA__RESULTS__ON_FAILURE
-      max_retries: 2               # 0-10: retries after the first attempt, spent by RETRY. env: DK_SINKS__KAFKA__RESULTS__MAX_RETRIES
+      max_retries: 2               # 0-10: retries after the first attempt, spent only by a hook that returns RETRY (the default hook makes one attempt, then applies on_failure). env: DK_SINKS__KAFKA__RESULTS__MAX_RETRIES
       depends_on: []               # sinks to deliver first, as '<type>/<name>' (set it in YAML)
 ```
 

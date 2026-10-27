@@ -150,13 +150,13 @@ When a task fails, the framework calls your [on_error()](handler.md#on_error) ho
 
 The hook must return one of:
 
-**`ErrorAction.RETRY`** -- Re-execute the same task. The framework retries up to `executor.max_retries` (default: 3) times. Retries are immediate (no backoff). If retries are exhausted, the task is marked as failed and the window continues.
+**`ErrorAction.RETRY`** -- Re-execute the same task. The framework retries up to `executor.max_retries` (default: 3) times. Retries are immediate (no backoff). If retries are exhausted, `executor.on_failure` applies: `skip` marks the task as failed and the window continues; `dlq` also writes its source messages to the DLQ. The worker logs `max_retries_exceeded` with `action` (`skip` or `dlq`).
 
 **`ErrorAction.SKIP`** -- Mark the task as failed, append its result to the window, and continue.
 
 **`ErrorAction.DLQ`** -- Mark the task as failed and write its source messages to the [DLQ](sinks.md#dead-letter-queue) at once (`dk-stage: execute`). No later delivery of those messages starts; tasks already running finish. See [on_error](handler.md#on_error).
 
-The default `on_error` returns `executor.on_failure`, which is `SKIP` unless the config sets `executor.on_failure: dlq`.
+The default `on_error` returns `executor.on_failure`, which is `SKIP` unless the config sets `executor.on_failure: dlq`. The same policy applies when `on_error` raises: the worker logs `on_error_hook_failed` and then skips the task or writes its record.
 
 **`list[ExecutorTask]`** -- Replace the failed task with new tasks. The new tasks are added to the current window and execute immediately. The window's `total_tasks` grows dynamically to include them. Use this to split a large failing task into smaller ones, or to substitute a fallback binary.
 
@@ -529,7 +529,7 @@ executor:
 | `max_stderr_bytes` | `int` | `0` | 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
-| `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
+| `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns, and what a spent retry budget and a raising `on_error` become. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
 | `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
 | `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
