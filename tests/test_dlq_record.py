@@ -19,7 +19,7 @@ from drakkar.config import KafkaConfig, KafkaSourceConfig
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.models import SourceMessage
+from drakkar.models import ExecutorError, ExecutorTask, SourceMessage
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks import dlq as dlq_module
 from drakkar.sinks.dlq import DLQEntry, read_dlq_entries
@@ -30,6 +30,7 @@ from drakkar.sinks.dlq_record import (
     cut_error,
     render_headers,
 )
+from drakkar.sinks.manager import execute_error_text
 from tests.conftest import wait_for
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'dlq_contract.json').read_text(encoding='utf-8'))
@@ -134,6 +135,24 @@ def test_error_cut_cases(case):
     assert cut == case['expected']
     assert len(cut.encode('utf-8')) == case['expected_bytes']
     assert len(cut.encode('utf-8')) <= FIXTURE['error_cut_bytes']
+
+
+@pytest.mark.parametrize('case', FIXTURE['execute_error_text_cases'], ids=lambda case: case['name'])
+def test_execute_error_text_cases(case):
+    """The error text of the execute stage, before and after the cut."""
+    facts = case['input']
+    error = ExecutorError(
+        task=ExecutorTask(task_id='t1', source_offsets=[1]),
+        kind=facts['kind'],
+        exit_code=facts['exit_code'],
+        stderr=facts['stderr'],
+        exception=facts['exception'],
+    )
+
+    text = execute_error_text(error)
+
+    assert text == case['expected_error']
+    assert cut_error(text) == case['expected_dk_error']
 
 
 def test_error_with_a_lone_surrogate_is_still_written():

@@ -398,7 +398,8 @@ sink_delivery_retries = Counter(
 
 sink_deliveries_skipped = Counter(
     'drakkar_sink_deliveries_skipped_total',
-    'Total sink deliveries skipped via on_delivery_error handler',
+    'Sink deliveries skipped: by the handler, by the declared policy, on an open circuit, '
+    'or for a window result that cannot reach the DLQ',
     ['sink_type', 'sink_name'],
 )
 

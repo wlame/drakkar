@@ -431,6 +431,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the new instance takes its card over from the old session. See
   `docs/integration.md`.
 
+### Changed
+
+- **The help text of `drakkar_sink_deliveries_skipped_total` names every
+  cause of a skip:** the handler, the declared policy, an open circuit, and a
+  window result that cannot reach the DLQ.
+
 ### Fixed
 
 - **The task detail and the two trace reads give up after 5 seconds.**

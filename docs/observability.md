@@ -688,7 +688,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `window_complete` | `on_window_complete()` hook finishes for one arrange() window | `partition`, `duration`, `metadata` (window_id, task_count, output_message_count) |
 | `produced` | Kafka payload delivered to output topic | `partition`, `offset`, `output_topic` |
 | `sink_delivered` | Sink delivery succeeds | `metadata` (sink_type, sink_name, payload_count, duration) |
-| `sink_error` | One sink delivery attempt fails (`attempt` 0: the circuit is open) | `metadata` (sink_type, sink_name, error, attempt, action: retry/skip/dlq) |
+| `sink_error` | One sink delivery attempt fails (`attempt` 0: the circuit is open) | `metadata` (sink_type, sink_name, error, attempt, action: retry/skip/dlq/failed — `dlq` only when a record was written, `skip` also for a window result, `failed` when no record could be written) |
 | `message_dlq` | A source message is written to the DLQ; no later delivery of it starts | `partition`, `offset`; for an HTTP request `origin='http'`, `request_id`, `partition=-1` and no `offset`; `metadata` (stage, sink, error, delivered_sinks, attempts) |
 | `sink_not_started` | A result's delivery to a sink does not start: its message is on the DLQ, or a `depends_on` dependency failed | `partition`, `metadata` (sink, reason: message_dlq/dependency_failed) |
 | `committed` | Kafka offset committed | `partition`, `offset` |

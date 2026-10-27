@@ -129,11 +129,15 @@ class MessageDLQState:
     ``dlq_written`` ends the message: no later delivery of it starts.
     ``delivered_sinks`` collects the ``<type>/<name>`` of every sink that
     delivered a result of it, for the record's ``dk-delivered-sinks``.
-    ``lock`` guards the check and the set of ``dlq_written`` together with
-    the record write, so one message gets one record.
+    ``dlq_lost`` marks a message whose record could not be written under
+    ``dlq.on_send_failure: drop``: the loss is counted once, so a later
+    failure of the message writes, counts and logs nothing new.
+    ``lock`` guards the checks and the sets of both flags together with the
+    record write, so one message gets one record or one counted loss.
     """
 
     dlq_written: bool = False
+    dlq_lost: bool = False
     delivered_sinks: set[str] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -162,6 +166,12 @@ class MessageContext:
     def __post_init__(self) -> None:
         if len(self.source_messages) != len(self.states):
             raise ValueError('MessageContext needs one DLQ state per source message')
+        if not self.source_messages and not self.is_window:
+            # An empty context would make a dlq outcome write nothing and
+            # look handled; only the explicit window form may have no message.
+            raise ValueError(
+                'MessageContext needs at least one source message; use MessageContext.window() for a window result'
+            )
 
     @classmethod
     def window(cls) -> MessageContext:
@@ -190,7 +200,8 @@ class CollectCallback(Protocol):
     ``partition_id`` is -1 for an HTTP request. ``message_context`` names
     the source messages of a task or message result and their DLQ state;
     ``MessageContext.window()`` marks a window result, which has no source
-    message; ``None`` is no context (see ``SinkManager.deliver_all``).
+    message. ``None`` means no context (fail closed): a ``dlq`` outcome then
+    follows ``dlq.on_send_failure`` (see ``SinkManager.deliver_all``).
     """
 
     def __call__(
@@ -985,7 +996,6 @@ class SinkManager:
             stats.error_count += 1
             stats.last_error = CIRCUIT_OPEN_ERROR
             stats.last_error_ts = time.time()
-            self._record_sink_error(key, CIRCUIT_OPEN_ERROR, attempt=0, action=declared)
             logger.warning(
                 'sink_delivery_circuit_open',
                 category='sink',
@@ -994,7 +1004,7 @@ class SinkManager:
                 payload_count=len(payloads),
                 on_failure=policy.on_failure,
             )
-            return await self._end_delivery(
+            return await self._end_failed_delivery(
                 key,
                 action=declared,
                 error_text=CIRCUIT_OPEN_ERROR,
@@ -1055,7 +1065,7 @@ class SinkManager:
                         # docs/sinks.md. The log says it explicitly so an
                         # operator choosing RETRY for a non-idempotent sink can
                         # see the cost.
-                        self._record_sink_error(key, safe_error, attempt=attempt, action=DeliveryAction.RETRY)
+                        self._record_sink_error(key, safe_error, attempt=attempt, action=DeliveryAction.RETRY.value)
                         stats.retry_count += 1
                         sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
                         logger.warning(
@@ -1081,7 +1091,6 @@ class SinkManager:
                             on_failure=policy.on_failure,
                         )
                         action = declared
-                    self._record_sink_error(key, safe_error, attempt=attempt, action=action)
                     if action != DeliveryAction.SKIP:
                         # A terminal failure — tell the breaker so consecutive
                         # failures accumulate toward the trip threshold. SKIP
@@ -1089,7 +1098,7 @@ class SinkManager:
                         # so it does not count; the finally below releases
                         # the probe slot instead.
                         sink.record_failure()
-                    return await self._end_delivery(
+                    return await self._end_failed_delivery(
                         key,
                         action=action,
                         error_text=safe_error,
@@ -1144,14 +1153,49 @@ class SinkManager:
             )
             return error.declared_policy
 
-    def _record_sink_error(self, key: SinkKey, error: str, *, attempt: int, action: DeliveryAction) -> None:
+    def _record_sink_error(self, key: SinkKey, error: str, *, attempt: int, action: str) -> None:
         if self._recorder is not None:
             self._recorder.record_sink_error(
                 sink_type=key[0],
                 sink_name=key[1],
                 error=error,
                 attempt=attempt,
-                action=action.value,
+                action=action,
+            )
+
+    async def _end_failed_delivery(
+        self,
+        key: SinkKey,
+        *,
+        action: DeliveryAction,
+        error_text: str,
+        attempts: int,
+        payload_count: int,
+        partition_id: int,
+        message_context: MessageContext | None,
+    ) -> DeliveryOutcome:
+        """End a failed delivery by ``action`` and record ``sink_error`` with what really came of it.
+
+        The recorded action is the outcome, not the request: ``dlq`` only
+        when a record exists, ``skip`` for a skip and for a window result
+        (where ``dlq`` acts as ``skip``), and ``failed`` when no record could
+        be written (a lost write, no context, a stall).
+        """
+        outcome = DeliveryOutcome.FAILED
+        try:
+            outcome = await self._end_delivery(
+                key,
+                action=action,
+                error_text=error_text,
+                attempts=attempts,
+                payload_count=payload_count,
+                partition_id=partition_id,
+                message_context=message_context,
+            )
+            return outcome
+        finally:
+            self._record_sink_error(
+                key, error_text, attempt=attempts, action=_recorded_action(outcome, message_context)
             )
 
     async def _end_delivery(
@@ -1237,7 +1281,7 @@ class SinkManager:
             self._lose_messages(key, message_count=1, partition_id=partition_id, reason='no message context')
             return DeliveryOutcome.FAILED
 
-        written, lost = await self._write_records(
+        written, lost, already_written = await self._write_records(
             message_context,
             partition_id=partition_id,
             build=lambda message, state: _message_record(
@@ -1252,18 +1296,20 @@ class SinkManager:
         )
         if lost:
             self._lose_messages(key, message_count=lost, partition_id=partition_id, reason=self._lost_reason())
-        if written or not lost:
-            if not written:
-                # Every message of the result was already on the DLQ: a group
-                # that was in flight when an earlier failure wrote the record.
-                logger.info(
-                    'message_already_dlq',
-                    category='sink',
-                    stage='sink',
-                    sink=sink_ref(key),
-                    partition=partition_id,
-                )
+        if written:
             return DeliveryOutcome.DLQ
+        if already_written and not lost:
+            # A message of the result was already on the DLQ: a group that
+            # was in flight when an earlier failure wrote the record.
+            logger.info(
+                'message_already_dlq',
+                category='sink',
+                stage='sink',
+                sink=sink_ref(key),
+                partition=partition_id,
+            )
+            return DeliveryOutcome.DLQ
+        # No record now and none before: the loss was counted, now or earlier.
         return DeliveryOutcome.FAILED
 
     async def send_execute_dlq(
@@ -1292,7 +1338,7 @@ class SinkManager:
             self._lose_messages(subject, message_count=1, partition_id=partition_id, reason='no message context')
             return
         error_text = execute_error_text(error)
-        written, lost = await self._write_records(
+        written, lost, already_written = await self._write_records(
             message_context,
             partition_id=partition_id,
             build=lambda message, state: _message_record(
@@ -1307,7 +1353,7 @@ class SinkManager:
         )
         if lost:
             self._lose_messages(subject, message_count=lost, partition_id=partition_id, reason=self._lost_reason())
-        if not written and not lost:
+        if already_written and not written and not lost:
             # A sink failure or an earlier task of the message wrote its record.
             logger.info(
                 'message_already_dlq',
@@ -1323,13 +1369,15 @@ class SinkManager:
         *,
         partition_id: int,
         build: Callable[[SourceMessage, MessageDLQState], DLQRecord],
-    ) -> tuple[int, int]:
-        """Write the record ``build`` makes for each source message not yet on the DLQ.
+    ) -> tuple[int, int, int]:
+        """Write the record ``build`` makes for each source message not yet on the DLQ or lost.
 
-        Returns how many records were written and how many could not be.
+        Returns how many records were written, how many could not be, and
+        how many messages were already on the DLQ.
         """
         written = 0
         lost = 0
+        already_written = 0
         for message, state in message_context.pairs():
             # The flag is read and set under the message's own lock, with the
             # write in between: two results of one message (or two groups of
@@ -1339,6 +1387,10 @@ class SinkManager:
             # flag clear, so the next failure of the message tries again.
             async with state.lock:
                 if state.dlq_written:
+                    already_written += 1
+                    continue
+                if state.dlq_lost:
+                    # Its loss is already counted and logged.
                     continue
                 record = build(message, state)
                 if self._dlq_sink is not None and await self._dlq_sink.send(record, partition_id=partition_id):
@@ -1347,7 +1399,10 @@ class SinkManager:
                     self._note_message_dlq(record)
                 else:
                     lost += 1
-        return written, lost
+                    # Under stall the offset stays pending and the message
+                    # comes back; under drop it is gone, and counted once.
+                    state.dlq_lost = self._dlq_on_send_failure == 'drop'
+        return written, lost, already_written
 
     def _lost_reason(self) -> str:
         """Why a record could not be written."""
@@ -1415,6 +1470,17 @@ class SinkManager:
             payload_count=payload_count,
             hint='set dlq.topic to enable the DLQ on a worker without the Kafka source',
         )
+
+
+def _recorded_action(outcome: DeliveryOutcome, message_context: MessageContext | None) -> str:
+    """The ``action`` of a terminal ``sink_error`` row for ``outcome``."""
+    if outcome == DeliveryOutcome.SKIPPED:
+        return 'skip'
+    if outcome == DeliveryOutcome.DLQ:
+        return 'dlq'
+    if message_context is not None and message_context.is_window:
+        return 'skip'
+    return 'failed'
 
 
 def execute_error_text(error: ExecutorError) -> str:

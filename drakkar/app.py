@@ -820,7 +820,9 @@ class DrakkarApp:
         via SinkManager, which asks the handler's on_delivery_error hook
         after a failed attempt and writes the DLQ record when a delivery
         ends in ``dlq``. ``message_context`` names the source messages of a
-        task or message result; ``None`` is a window result.
+        task or message result, or is ``MessageContext.window()`` for a
+        window result. ``None`` means no context (fail closed): a ``dlq``
+        outcome then follows ``dlq.on_send_failure``.
         """
         if not result.has_outputs:
             return

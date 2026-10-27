@@ -229,18 +229,27 @@ async def test_dlq_dependency_stops_dependents_with_reason_message_dlq():
 
 
 async def test_window_dependency_failure_stops_dependents_with_reason_dependency_failed():
+    from drakkar.metrics import sink_deliveries_not_started
+
     kafka = FakeSink('out', 'kafka')
     postgres = FakeSink('main', 'postgres')
     postgres.fail = True
     dlq = RecordingDLQ()
     mgr = manager_with((kafka, policy(depends_on=('postgres/main',))), (postgres, policy()), dlq=dlq)
+    counter = sink_deliveries_not_started.labels(
+        sink_type='kafka', sink_name='out', reason=SinkNotStartedReason.DEPENDENCY_FAILED.value
+    )
+    before = counter._value.get()
 
-    outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=MessageContext.window())
+    with capture_logs() as logs:
+        outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=MessageContext.window())
 
     assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.FAILED}
     assert kafka.delivered == []
     assert dlq.sent == []
-    assert SinkNotStartedReason.DEPENDENCY_FAILED == 'dependency_failed'
+    assert counter._value.get() == before + 1
+    not_started = [entry for entry in logs if entry['event'] == 'sink_not_started']
+    assert [(entry['sink'], entry['reason']) for entry in not_started] == [('kafka/out', 'dependency_failed')]
 
 
 async def test_not_started_dependency_passes_its_reason_down_the_chain():
@@ -289,6 +298,14 @@ async def test_dependency_that_raises_still_releases_its_dependents():
 def test_message_context_needs_one_state_per_source_message():
     with pytest.raises(ValueError, match='one DLQ state per source message'):
         MessageContext(source_messages=[source_message()], states=[])
+
+
+def test_message_context_without_messages_is_refused():
+    """Only the explicit window form may have no source message: an empty context would hide a lost dlq."""
+    with pytest.raises(ValueError, match=r'at least one source message; use MessageContext\.window\(\)'):
+        MessageContext(source_messages=[], states=[])
+
+    assert MessageContext.window().source_messages == ()
 
 
 # --- The hook and the retry budget ---
@@ -575,6 +592,84 @@ async def test_missing_context_on_a_dlq_outcome_follows_on_send_failure(on_send_
         assert dropped['reason'] == 'no message context'
 
 
+async def test_lost_dlq_write_under_drop_is_counted_once_per_message():
+    """Two failing groups of one message, a DLQ that answers False: one counted loss, not two."""
+    from drakkar.metrics import dlq_dropped_payloads
+
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    kafka.fail = postgres.fail = True
+    dlq = RecordingDLQ(ok=False)
+    mgr = manager_with((kafka, policy(max_retries=0)), (postgres, policy(max_retries=0)), dlq=dlq)
+    context = message_context()
+    before = dlq_dropped_payloads.labels(partition='5')._value.get()
+
+    with capture_logs() as logs:
+        outcomes = await mgr.deliver_all(both_results(), declared, 5, message_context=context)
+
+    assert outcomes == {KAFKA: DeliveryOutcome.FAILED, POSTGRES: DeliveryOutcome.FAILED}
+    assert len(dlq.sent) == 1
+    assert dlq_dropped_payloads.labels(partition='5')._value.get() == before + 1
+    assert [entry['event'] for entry in logs].count('dlq_failure_payloads_dropped') == 1
+    assert context.states[0].dlq_lost is True
+    assert context.states[0].dlq_written is False
+
+    # A later result of the same message fails too: no new write, count or line.
+    with capture_logs() as later_logs:
+        later = await mgr.deliver_all(
+            CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 5, message_context=context
+        )
+
+    assert later == {KAFKA: DeliveryOutcome.FAILED}
+    assert len(dlq.sent) == 1
+    assert dlq_dropped_payloads.labels(partition='5')._value.get() == before + 1
+    assert not [
+        entry
+        for entry in later_logs
+        if entry['event'] in ('dlq_failure_payloads_dropped', 'message_already_dlq', 'message_dlq')
+    ]
+
+
+async def test_dependent_of_a_lost_dlq_write_gets_dependency_failed():
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    postgres.fail = True
+    mgr = manager_with(
+        (kafka, policy(depends_on=('postgres/main',))), (postgres, policy(max_retries=0)), dlq=RecordingDLQ(ok=False)
+    )
+
+    with capture_logs() as logs:
+        outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=message_context())
+
+    assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.FAILED}
+    assert [entry['reason'] for entry in logs if entry['event'] == 'sink_not_started'] == ['dependency_failed']
+
+
+@pytest.mark.parametrize(
+    ('context_kind', 'dlq_ok', 'expected_action'),
+    [
+        ('message', True, 'dlq'),
+        ('message', False, 'failed'),
+        ('window', True, 'skip'),
+        ('none', True, 'failed'),
+    ],
+)
+async def test_sink_error_records_the_real_outcome(context_kind, dlq_ok, expected_action):
+    """``action: dlq`` only when a record was written; a window result records a skip, a lost record a failure."""
+    sink = FakeSink('out', 'kafka')
+    sink.fail = True
+    mgr = manager_with((sink, policy(max_retries=0)))
+    recorder = CollectingRecorder()
+    mgr.attach_runtime(recorder=recorder, dlq_sink=RecordingDLQ(ok=dlq_ok))  # ty: ignore[invalid-argument-type]
+    contexts = {'message': message_context(), 'window': MessageContext.window(), 'none': None}
+
+    await mgr.deliver_all(
+        CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 0, message_context=contexts[context_kind]
+    )
+
+    assert [json.loads(row['metadata'])['action'] for row in recorder.of('sink_error')] == [expected_action]
+
+
 async def test_dlq_off_by_config_counts_an_unconfigured_drop():
     from drakkar.metrics import dlq_unconfigured_drops
 
@@ -596,10 +691,23 @@ async def test_dlq_off_by_config_counts_an_unconfigured_drop():
 
 
 def test_metrics_names_and_help_texts():
-    from drakkar.metrics import dlq_dropped_payloads, dlq_records, sink_deliveries_not_started, sink_dlq_messages
+    from drakkar.metrics import (
+        dlq_dropped_payloads,
+        dlq_records,
+        sink_deliveries_not_started,
+        sink_deliveries_skipped,
+        sink_dlq_messages,
+    )
 
     expected = [
         (sink_dlq_messages, 'drakkar_sink_dlq_messages', (), 'DLQ records written, one per source message, all stages'),
+        (
+            sink_deliveries_skipped,
+            'drakkar_sink_deliveries_skipped',
+            ('sink_type', 'sink_name'),
+            'Sink deliveries skipped: by the handler, by the declared policy, on an open circuit, '
+            'or for a window result that cannot reach the DLQ',
+        ),
         (dlq_records, 'drakkar_dlq_records', ('stage',), 'DLQ records written by the stage that failed'),
         (
             dlq_dropped_payloads,
