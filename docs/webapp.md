@@ -477,7 +477,10 @@ message (see [Failure policy](sinks.md#failure-policy)):
   worker.
 - When the request's timeout passes during delivery, the sinks in flight
   finish and the rest do not start; the worker logs
-  `webapp_request_dropped_after_timeout` with `stage=during_sinks`.
+  `webapp_request_dropped_after_timeout` once, with `stage=during_sinks`,
+  `next_sink` (`<type>/<name>` of the first sink that did not start) and
+  `next_sink_type` (that sink's own type; a plugin sink reports its plugin
+  type, not `custom`).
 
 A failed task of an HTTP request stays an error of the request: the HTTP
 path does not call `on_error`, so it writes no `execute` record.

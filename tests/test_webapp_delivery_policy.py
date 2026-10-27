@@ -223,6 +223,7 @@ async def test_http_cancellation_between_groups_keeps_its_log_event():
     assert len(dropped) == 1
     assert dropped[0]['stage'] == 'during_sinks'
     assert dropped[0]['next_sink_type'] == 'postgres'
+    assert dropped[0]['next_sink'] == 'postgres/main'
     assert dropped[0]['request_id'] == 'req-7'
     assert webapp_dropped_after_timeout.labels(client='anonymous')._value.get() == dropped_before + 1
     recorder.record_webapp_request_dropped_after_timeout.assert_called_once_with(ctx)

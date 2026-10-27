@@ -551,8 +551,9 @@ for the full knobs.
 When a sink with `on_failure: dlq` meets an open circuit and no record can be
 written, the rules of [When the DLQ itself fails](#when-the-dlq-itself-fails)
 apply. A worker whose DLQ is off by configuration (no Kafka source and no
-`dlq.topic`) counts the message on `drakkar_dlq_unconfigured_drops_total` and
-goes on; it never stalls. A worker with a DLQ that cannot write follows
+`dlq.topic`) counts the payloads of the failed sink on
+`drakkar_dlq_unconfigured_drops_total` and goes on; it never stalls. (A task
+that `on_error` sends to the DLQ counts its source messages there instead.) A worker with a DLQ that cannot write follows
 `dlq.on_send_failure`. Declare `on_failure: skip` for a sink whose losses
 you accept, so a down sink does not reach that path at all.
 
@@ -796,7 +797,7 @@ sink that is not configured (the result is rejected before any delivery). The
 
 | Strategy | Behavior | Trade-off |
 |----------|----------|-----------|
-| `drop` (default) | The loss is logged at CRITICAL (`dlq_failure_payloads_dropped`, with `message_count`) and counted in `drakkar_dlq_dropped_payloads_total` (source messages); the message counts as processed and its offset commits. The pipeline keeps moving. | The message is **lost**. Alert on the counter. |
+| `drop` (default) | The loss is logged at CRITICAL (`dlq_failure_payloads_dropped`: with `message_count` for a sink or task failure, with `offset` for a parse failure) and counted in `drakkar_dlq_dropped_payloads_total` (source messages); the message counts as processed and its offset commits. The pipeline keeps moving. | The message is **lost**. Alert on the counter. |
 | `stall` | The affected offset is left uncommitted (counted in `drakkar_delivery_stalled_offsets_total`) and the partition is **paused** — no new messages are fetched from it until the worker restarts or the partition is reassigned. On restart, processing resumes from the last committed offset, so the messages are redelivered. | No data loss, but the partition accrues consumer lag until the downstream is fixed and the worker restarted. |
 
 Both strategies are loud: `drakkar_dlq_send_failures_total` ticks on every failed

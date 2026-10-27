@@ -122,7 +122,7 @@ Prometheus needed for a quick read.
 | `drakkar_sink_dlq_messages_total` | Counter | -- | DLQ records written, one per source message, all stages (see [the DLQ record](sinks.md#the-dlq-record)) |
 | `drakkar_dlq_records_total` | Counter | `stage` | DLQ records written by the stage that failed: `parse`, `execute` or `sink` |
 | `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. What happens next depends on `dlq.on_send_failure`: `drop` (default) commits past the lost messages, `stall` leaves the offsets uncommitted and pauses the partition — alert on this counter either way. |
-| `drakkar_dlq_unconfigured_drops_total` | Counter | -- | DLQ sends dropped because no DLQ topic is configured and the Kafka source is disabled. See [the DLQ rule](sources.md#the-dlq-without-the-kafka-source). The first drop also logs `dlq_send_dropped_unconfigured` at warning level. |
+| `drakkar_dlq_unconfigured_drops_total` | Counter | -- | DLQ sends dropped because no DLQ topic is configured and the Kafka source is disabled. A sink failure counts its payloads; a task that `on_error` sends to the DLQ counts its source messages. See [the DLQ rule](sources.md#the-dlq-without-the-kafka-source). The first drop also logs `dlq_send_dropped_unconfigured` at warning level. |
 | `drakkar_dlq_dropped_payloads_total` | Counter | `partition` | Source messages lost because no DLQ record could be written and `dlq.on_send_failure` is `drop`. Each lost message counts once. The offset committed and the message is lost. **Alert on this.** |
 | `drakkar_sink_circuit_open` | Gauge | `sink_type`, `sink_name` | Per-sink [circuit breaker](sinks.md#circuit-breaker) state: `0.0` closed, `0.5` half-open, `1.0` open. Gauges are zero-initialized at sink registration so a never-tripped sink still appears in scrape output. Sustained `1.0` on a sink means its downstream has been down longer than the cooldown can recover from. |
 | `drakkar_sink_circuit_trips_total` | Counter | `sink_type`, `sink_name` | Transitions *into* the open state per sink — both the initial failure-threshold trip and every half-open probe failure. A flapping circuit surfaces as a rising rate on this counter, not a single trip plus silent reopens. Alert on `rate(...[5m]) > 0` paired with non-zero `drakkar_sink_circuit_open`. |
@@ -141,7 +141,7 @@ The sink delivery and DLQ log events (category `sink`, except where noted):
 | `sink_delivery_circuit_open` | warning | A delivery met an open circuit; the declared `on_failure` (field `on_failure`) decided without the hook. |
 | `dlq_message_sent` | info | A DLQ record was confirmed by the broker. Fields `stage`, `sink`, `partition`, `value_bytes`. |
 | `dlq_send_failed`, `dlq_flush_incomplete`, `dlq_delivery_report_failed` | critical | A DLQ write failed or was not confirmed in time. `dlq_send_failed` carries `stage`, `sink`, `partition`, `value_bytes`, `attempts`. |
-| `dlq_failure_payloads_dropped` | critical | No record could be written and `dlq.on_send_failure` is `drop`; field `message_count`. |
+| `dlq_failure_payloads_dropped` | critical | No record could be written and `dlq.on_send_failure` is `drop`. A sink or task failure carries `message_count`; a parse failure carries `partition`, `offset` and `reason` instead. |
 | `execute_dlq_failed` | error | Category `partition`. The `execute` record of a task that `on_error` sent to the DLQ raised or was refused under `stall`. Fields `task_id`, `source_offsets`, `error`, `error_type`, `offset_action`. |
 
 #### Handler Hooks
