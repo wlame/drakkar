@@ -712,12 +712,14 @@ class SinksConfig(BaseModel):
         """Check the policy keys of every instance, and take them out of the plugin sink leaves.
 
         The checks run on the raw input because only here is the instance
-        path known, and the messages name it. Instances are checked in
-        sorted ``<type>/<name>`` order, ``on_failure`` before
-        ``max_retries``, so the first message is the same for any key order.
+        path known, and the messages name it. Plugin type names are checked
+        first, then the instances in sorted ``<type>/<name>`` order,
+        ``on_failure`` before ``max_retries``, so the first message is the
+        same for any key order.
         """
         if not isinstance(data, Mapping):
             return handler(data)
+        check_plugin_type_names(data.get('custom'))
         leaves = sorted(_raw_instance_leaves(data), key=lambda leaf: leaf[0])
         for _, path, raw in leaves:
             check_instance_policy(path, raw)
@@ -736,8 +738,8 @@ class SinksConfig(BaseModel):
     def _instances(self) -> dict[str, tuple[str, SinkPolicy]]:
         """Every configured instance: its ``<type>/<name>`` reference, its config path and its policy.
 
-        A plugin type named like a built-in one shares its references; the
-        built-in instance wins.
+        References are unique: the load refuses a plugin type named like a
+        built-in one (``check_plugin_type_names``).
         """
         instances: dict[str, tuple[str, SinkPolicy]] = {}
         for sink_type in BUILTIN_SINK_TYPES:
@@ -747,7 +749,7 @@ class SinksConfig(BaseModel):
         for sink_type, named in self.custom.items():
             for name in named:
                 policy = self._plugin_policies.get((sink_type, name), DEFAULT_SINK_POLICY)
-                instances.setdefault(f'{sink_type}/{name}', (f'sinks.custom.{sink_type}.{name}', policy))
+                instances[f'{sink_type}/{name}'] = (f'sinks.custom.{sink_type}.{name}', policy)
         return instances
 
     def policy_of(self, sink_type: str, name: str) -> SinkPolicy:
@@ -839,6 +841,23 @@ BUILTIN_SINK_TYPES: tuple[str, ...] = tuple(
 )
 
 DEFAULT_SINK_POLICY = SinkPolicy.of(SinkInstanceConfig())
+
+
+def check_plugin_type_names(custom: object) -> None:
+    """Refuse a raw ``sinks.custom`` type named like a built-in sink type, the first in sorted order.
+
+    A ``depends_on`` reference names a plugin sink without ``custom/``, so
+    such a type would share its references with the built-in one.
+    """
+    if not isinstance(custom, Mapping):
+        return
+    clashing = sorted(str(sink_type) for sink_type in custom if sink_type in BUILTIN_SINK_TYPES)
+    if clashing:
+        sink_type = clashing[0]
+        raise ValueError(
+            f"sinks.custom.{sink_type}: '{sink_type}' is the name of a built-in sink type; "
+            'give the plugin type another name'
+        )
 
 
 def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, Any]]]:

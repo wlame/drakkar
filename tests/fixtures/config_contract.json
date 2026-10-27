@@ -1715,6 +1715,21 @@
         }
       },
       "message": "executor.on_failure must be skip or dlq, got 'retry'"
+    },
+    {
+      "name": "plugin_sink_type_named_like_builtin",
+      "yaml": {
+        "sinks": {
+          "custom": {
+            "kafka": {
+              "main": {
+                "topic": "out"
+              }
+            }
+          }
+        }
+      },
+      "message": "sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name"
     }
   ],
   "load_values": [
@@ -1994,6 +2009,25 @@
       "yaml": {},
       "path": "executor.on_failure",
       "value": "skip"
+    },
+    {
+      "name": "sink_plugin_leaf_without_reserved_keys",
+      "yaml": {
+        "sinks": {
+          "custom": {
+            "webhook": {
+              "main": {
+                "url": "https://hooks.example",
+                "on_failure": "skip"
+              }
+            }
+          }
+        }
+      },
+      "path": "sinks.custom.webhook.main",
+      "value": {
+        "url": "https://hooks.example"
+      }
     }
   ]
 }

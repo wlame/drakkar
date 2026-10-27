@@ -23,7 +23,7 @@ from drakkar.config import (
     SinkPolicy,
     load_config,
 )
-from tests.test_config_contract import FIXTURE, _load, value_at_path
+from tests.test_config_contract import FIXTURE
 
 
 def _config(**sections) -> DrakkarConfig:
@@ -185,6 +185,15 @@ def test_plugin_sink_without_the_keys_gets_the_defaults():
     assert config.sinks.policy_of('webhook', 'main') == SinkPolicy(on_failure='dlq', max_retries=2, depends_on=())
 
 
+def test_plugin_sink_type_named_like_a_builtin_type_fails_the_load():
+    custom = {'zeta': {'main': {}}, 'redis': {'main': {}}, 'kafka': {'main': {}}}
+
+    text = _load_error(sinks={'custom': custom})
+
+    assert "sinks.custom.kafka: 'kafka' is the name of a built-in sink type; give the plugin type another name" in text
+    assert 'sinks.custom.redis' not in text
+
+
 @pytest.mark.parametrize(
     ('custom', 'path'),
     [({'webhook': 'main'}, 'sinks.custom.webhook'), ({'webhook': {'main': 'url'}}, 'sinks.custom.webhook.main')],
@@ -258,6 +267,7 @@ NEW_VALIDATION_CASES = [
     'sink_depends_on_cycle',
     'plugin_sink_on_failure_by_env',
     'plugin_sink_max_retries_fraction',
+    'plugin_sink_type_named_like_builtin',
     'executor_on_failure_unknown',
 ]
 NEW_LOAD_VALUE_CASES = [
@@ -267,28 +277,16 @@ NEW_LOAD_VALUE_CASES = [
     'http_sink_max_retries_default_two',
     'sink_max_retries_whole_float',
     'sink_depends_on_loads',
+    'sink_plugin_leaf_without_reserved_keys',
     'executor_on_failure_default_skip',
 ]
 
 
-def _fixture_case(section: str, name: str) -> dict:
-    return next(case for case in FIXTURE[section] if case['name'] == name)
+def test_config_contract_fixture_has_the_sink_policy_cases():
+    # The shared runner in test_config_contract.py loads every case; this
+    # only keeps the sink policy cases from leaving the fixture.
+    validation = {case['name'] for case in FIXTURE['validation']}
+    load_values = {case['name'] for case in FIXTURE['load_values']}
 
-
-@pytest.mark.parametrize('name', NEW_VALIDATION_CASES)
-def test_config_contract_fixture_cases_fail_the_load(name, tmp_path, monkeypatch):
-    case = _fixture_case('validation', name)
-
-    with pytest.raises(ValidationError) as excinfo:
-        _load(case, tmp_path, monkeypatch)
-
-    assert (case.get('message') or case['path']) in str(excinfo.value)
-
-
-@pytest.mark.parametrize('name', NEW_LOAD_VALUE_CASES)
-def test_config_contract_fixture_cases_load(name, tmp_path, monkeypatch):
-    case = _fixture_case('load_values', name)
-
-    config = _load(case, tmp_path, monkeypatch)
-
-    assert value_at_path(config, case['path']) == case['value']
+    assert set(NEW_VALIDATION_CASES) <= validation
+    assert set(NEW_LOAD_VALUE_CASES) <= load_values
