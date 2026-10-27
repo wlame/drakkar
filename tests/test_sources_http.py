@@ -51,7 +51,6 @@ def _context(config: DrakkarConfig) -> SourceContext:
         sink_manager=MagicMock(),
         dlq_sink=None,
         recorder=None,
-        throughput=None,
         worker_id='w',
         cluster_name='',
         on_collect=AsyncMock(),

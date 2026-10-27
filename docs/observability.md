@@ -342,8 +342,7 @@ was lost.
 
 Some feature-specific metrics are documented on their own pages rather
 than here: [runtime health](runtime-health.md#what-you-see) (event-loop
-lag gauges and stall counters),
-[task cost & throughput](throughput.md#where-the-numbers-appear), and
+lag gauges and stall counters) and
 [consume pause](consume-pause.md#observability).
 
 ### User-Defined Metrics
@@ -700,7 +699,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `arranged` | `arrange()` completes for a window | `partition`, `metadata` (message_count, task_count, offsets, message_labels, window_id) |
 | `annotation` | A handler calls `self.annotate(...)` — see [Annotations](annotations.md) | `partition`, `offset` (message scope), `task_id` (task scope), `labels`, `metadata` (kind, scope, hook, window_id, offsets, data) |
 | `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot, queue_wait_ms; stdin + stdin_truncated when `store_stdin` is on, else stdin_bytes size marker) |
-| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms; plus `cost`/`speed` for [throughput](throughput.md)-counted tasks) |
+| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms) |
 | `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `stdin_max_bytes`) |
 | `task_complete` | `on_task_complete()` hook finishes for one task | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
 | `message_complete` | `on_message_complete()` hook finishes for one source message | `partition`, `offset`, `duration`, `metadata` (task_count, succeeded, failed, replaced, output_message_count) |
@@ -727,14 +726,6 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `webapp_request_rate_limited` | Per-client rpm window full; client received a 429 | `origin='http'`, `client_name`, `metadata` (rpm_limit, requests_in_window) |
 | `webapp_request_auth_failed` | `Authorization` header missing or naming a non-configured token; client received a 401 | `origin='http'`, `metadata` (token_prefix -- redacted to first 4 chars) |
 | `webapp_request_dropped_after_timeout` | T1 reached a cancellation gate after T2 had already 504'd. Marks pipeline work the framework managed to skip thanks to cooperative cancellation. | `origin='http'`, `client_name`, `request_id` |
-
-The `/ws` stream additionally carries a **`throughput`** frame — the
-three-window cost/speed aggregate behind the [throughput](throughput.md)
-strips. It is broadcast only and never written to `events`, so it has no row
-above: buffering a periodic aggregate would grow the table with rows no
-query reads back. A fixture pins the full vocabulary, stored and
-broadcast-only alike, against one shared fixture — see
-`drakkar-ui/docs/api-contract-v1.md`, "Recorder event-type vocabulary".
 
 For HTTP-origin rows, `partition=-1` is used as a synthetic partition value so they remain distinct from any real Kafka partition without requiring a separate table. Filter by `origin='http'` to see all webapp activity, or by `request_id=...` to walk the full lifecycle of one HTTP request (received → task_started → task_completed → completed/timeout/dropped).
 
@@ -808,7 +799,7 @@ This table names the worker and cluster that wrote each file, for history, merge
 
 #### `worker_state` -- Periodic Snapshots
 
-Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), `paused` flag, `health_state` and `loop_lag_ms` from the [runtime health monitor](runtime-health.md), and a `throughput` JSON column with the windowed [task throughput](throughput.md) snapshot (NULL when `throughput.cost_label` is unset).
+Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), `paused` flag, `health_state` and `loop_lag_ms` from the [runtime health monitor](runtime-health.md).
 
 ### File Layout and Rotation
 

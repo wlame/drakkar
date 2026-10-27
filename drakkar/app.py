@@ -326,10 +326,6 @@ class DrakkarApp:
         # the import graph at app construction time; the uiserver routes
         # read it for the /runtime/health snapshot.
         self._runtime_health: Any = None
-        # Throughput tracker (contract v1.16) — constructed by the
-        # lifecycle when throughput.cost_label is set; None otherwise.
-        # Partition processors feed it, worker_state snapshots read it.
-        self._throughput: Any = None
         # Framework cache — constructed in lifecycle._async_run when
         # cache.enabled=true, else the handler keeps its default NoOpCache
         # stub. Held here so _shutdown can stop the engine in the correct
@@ -751,10 +747,6 @@ class DrakkarApp:
             health_state, loop_lag_ms = self._runtime_health.brief_state()
             state['health_state'] = health_state
             state['loop_lag_ms'] = loop_lag_ms
-        if self._throughput is not None:
-            # Contract v1.16: the five-window aggregate as JSON — the
-            # worker_state time series then replays throughput history.
-            state['throughput'] = self._throughput.window_stats()
         return state
 
     async def _handle_collect(

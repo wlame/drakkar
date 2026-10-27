@@ -202,7 +202,7 @@ def _record_calls() -> dict:
         'record_task_started': lambda w: w.record_task_started(
             task, 0, origin='http', client_name='client', request_id='req-1', queue_wait_ms=1.5
         ),
-        'record_task_completed': lambda w: w.record_task_completed(result, 0, cost=1.0, speed=2.0),
+        'record_task_completed': lambda w: w.record_task_completed(result, 0),
         'record_task_failed': lambda w: w.record_task_failed(
             task, ExecutorError(task=task, exit_code=1, stderr='boom'), 0, duration_seconds=0.2
         ),

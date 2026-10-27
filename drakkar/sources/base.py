@@ -34,7 +34,6 @@ class SourceContext:
     sink_manager: SinkManager
     dlq_sink: DLQSink | None
     recorder: EventRecorder | None
-    throughput: Any
     worker_id: str
     cluster_name: str
     on_collect: CollectCallback

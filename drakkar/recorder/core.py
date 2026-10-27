@@ -1212,8 +1212,8 @@ class EventRecorder(EventWriter):
                 pool_active, pool_max, total_queued,
                 consumed_count, completed_count, failed_count,
                 produced_count, committed_count, paused,
-                health_state, loop_lag_ms, throughput, updated_at, updated_at_dt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                health_state, loop_lag_ms, updated_at, updated_at_dt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 app_state.get('uptime_seconds', 0),
                 encode_json_str(app_state.get('assigned_partitions', [])),
@@ -1230,8 +1230,6 @@ class EventRecorder(EventWriter):
                 # NULL when the runtime-health monitor is off (v1.15).
                 app_state.get('health_state'),
                 app_state.get('loop_lag_ms'),
-                # NULL when throughput.cost_label is off (v1.16).
-                encode_json_str(app_state['throughput']) if app_state.get('throughput') else None,
                 now,
                 format_dt(now),
             ],

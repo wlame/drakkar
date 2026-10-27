@@ -26,7 +26,6 @@ from drakkar.config.runtime import (
     MetricsConfig,
     OffloadConfig,
     RuntimeHealthConfig,
-    ThroughputConfig,
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
@@ -126,7 +125,6 @@ class DrakkarConfig(BaseSettings):
     sinks: SinksConfig = Field(default_factory=SinksConfig)
     dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
-    throughput: ThroughputConfig = Field(default_factory=ThroughputConfig)
     runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
     io: IOConfig = Field(default_factory=IOConfig)
     offload: OffloadConfig = Field(default_factory=OffloadConfig)

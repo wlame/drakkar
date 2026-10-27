@@ -98,7 +98,6 @@ CREATE TABLE worker_states (
     paused              INTEGER,
     health_state        TEXT,
     loop_lag_ms         REAL,
-    throughput          TEXT,
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );
@@ -173,11 +172,11 @@ _STATE_COLUMNS = [
     'produced_count',
     'committed_count',
     'paused',
-    # v1.15/v1.16 columns; row.get() yields None for databases written by
-    # older versions, which INSERTs as NULL.
+    # row.get() yields None for source files that lack a column, which
+    # INSERTs as NULL. A source file may carry columns this schema does not
+    # have; only the columns listed here are read.
     'health_state',
     'loop_lag_ms',
-    'throughput',
     'updated_at',
     'updated_at_dt',
 ]

@@ -558,7 +558,6 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
         monkeypatch.setattr(lifecycle, name, _noop)
     for name in (
         '_start_runtime_health',
-        '_start_throughput',
         '_wire_annotator',
         '_wire_io_executor',
         '_wire_offload_pool',
@@ -1639,7 +1638,7 @@ async def test_revoke_while_arrange_running(test_config):
 async def test_shutdown_continues_when_an_optional_subsystem_refuses_to_stop(test_config):
     """One subsystem failing to stop must not abandon the rest of teardown.
 
-    The offload pool, the throughput tracker and the runtime-health monitor
+    The offload pool and the runtime-health monitor
     are stopped in sequence before the recorder and the consumer. An
     exception escaping any of them would skip everything after it: the
     recorder would never flush its buffer, sinks would stay open, and the
@@ -1671,14 +1670,13 @@ async def test_shutdown_continues_when_an_optional_subsystem_refuses_to_stop(tes
             self.stop_attempted = True
             raise RuntimeError('subsystem will not stop')
 
-    offload, throughput, health = _RefusesToStop(), _RefusesToStop(), _RefusesToStop()
+    offload, health = _RefusesToStop(), _RefusesToStop()
     app._offload_pool = offload
-    app._throughput = throughput
     app._runtime_health = health
 
     await AppLifecycle(app)._shutdown()
 
-    assert offload.stop_attempted and throughput.stop_attempted and health.stop_attempted
+    assert offload.stop_attempted and health.stop_attempted
     # Everything downstream of the failures still ran.
     assert app.is_ready is False
     app._consumer.close.assert_called_once()

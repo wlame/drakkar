@@ -40,7 +40,6 @@ from drakkar.config.runtime import (
     MetricsConfig,
     OffloadConfig,
     RuntimeHealthConfig,
-    ThroughputConfig,
 )
 from drakkar.config.sinks import (
     CircuitBreakerConfig,
@@ -144,7 +143,6 @@ __all__ = [
     'StaticPeerConfig',
     'StaticRegistryConfig',
     'StorageConfig',
-    'ThroughputConfig',
     'TimelineColorRule',
     'TimelineEventType',
     'TimelineLabels',

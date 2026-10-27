@@ -130,7 +130,7 @@ gently with the executor pool: `ceil(executor.max_executors / 4)`, minimum
 | lag episode verdict `cpu_bound` | CPU-bound Python on the loop | episode stacks → `offload()` it |
 | census shows hundreds suspended in `to_thread` | blocking-I/O pool saturated | `io.max_threads`, and [Host Pressure](host-pressure.md) RTT for the storage side |
 | `drakkar_offload_queued` sustained > 0 | offload pool saturated | raise `offload.max_threads` only if the work releases the GIL or partitions genuinely overlap |
-| tasks slow, loop healthy | the subprocesses themselves | timeline + [Throughput](throughput.md) speed, host pressure |
+| tasks slow, loop healthy | the subprocesses themselves | timeline, host pressure |
 
 ## See also
 

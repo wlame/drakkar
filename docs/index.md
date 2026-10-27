@@ -115,7 +115,6 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Task labels](handler.md#task-labels)** -- custom [message_label()](handler.md#message_label) for human-readable log/UI identifiers
 - **[Runtime health](runtime-health.md)** -- event-loop lag watchdog with a live state badge, lag episodes with verdicts, and opt-in stack probes
 - **[Host pressure](host-pressure.md)** -- CPU / cgroup / memory / network-mount pressure sampling that answers "which shared resource is this worker fighting for?"
-- **[Task cost & throughput](throughput.md)** -- opt-in per-task cost and speed via a `cost_label` role, plus windowed worker throughput on the Live page
 - **[Offload](offload.md)** -- `await self.offload(fn, ...)` runs CPU-bound hook work on a thread pool instead of freezing the event loop
 - **[Consume pause](consume-pause.md)** -- opt-in timed pause of message intake from the Live page, auto-resuming at its deadline
 - **[Kafka read API](kafka-read.md)** -- inspect the worker's topics from the operator UI without touching any consumer group
@@ -245,7 +244,6 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Debugging Bottlenecks](debugging-bottlenecks.md) | Runbook for a worker that periodically looks stuck: the recorded signals and what each combination means |
 | [Runtime Health](runtime-health.md) | Event-loop lag monitor: heartbeat, stall sampler, state badge, Prometheus metrics |
 | [Host Pressure](host-pressure.md) | CPU / cgroup / memory / network-mount pressure sampling with episode verdicts — which shared resource the worker is fighting for |
-| [Throughput](throughput.md) | Opt-in task cost and speed via the `cost_label` role, plus windowed worker throughput |
 | [Offload](offload.md) | `await self.offload(fn, ...)` — CPU-bound hook work on a thread pool instead of freezing the event loop |
 | [Threads & Pools](threads.md) | Map of the worker's execution mechanisms — event loop, subprocess pool, two thread pools — and their sizing rules |
 | [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, the cache exchange wire format, mixed-fleet support |

@@ -773,24 +773,6 @@ metrics:
 
 ---
 
-## Throughput (`throughput:`)
-
-Opt-in task cost tracking: per-task speed and windowed throughput — see the dedicated
-[Throughput](throughput.md) page for the full feature.
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `cost_label` | `str` | `''` | | Task label key whose numeric value is the task cost — a number correlating with computational hardness (bytes, a computed score, any unit). Empty (the default) disables the whole feature. Values that do not parse as finite numbers leave the task uncounted. |
-| `min_cost` | `float` | `0.0` | >= 0 | Smallest cost worth counting. Tasks below it carry no speed and enter no aggregate — useful when fixed overhead dominates small tasks and their speeds would mislead. |
-
-```yaml
-throughput:
-  cost_label: file_size_bytes
-  min_cost: 0.0
-```
-
----
-
 ## Runtime health (`runtime_health:`)
 
 Event-loop lag monitoring and stall introspection — see the dedicated

@@ -737,14 +737,6 @@ def group_timeline_tasks(
                 entry['pid'] = event['pid']
             if event['event'] == EventType.TASK_COMPLETED:
                 entry['stdout_size'] = event.get('stdout_size')
-                # Contract v1.16: throughput-counted completions carry
-                # cost/speed in their metadata; surface them on the row so
-                # the timeline shows per-task speed without re-deriving.
-                # Absent for excluded tasks.
-                metadata = parse_json_object(event.get('metadata'))
-                if 'speed' in metadata:
-                    entry['cost'] = metadata.get('cost')
-                    entry['speed'] = metadata.get('speed')
 
     rows = [
         entry

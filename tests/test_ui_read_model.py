@@ -236,24 +236,6 @@ class TestGroupTimelineTasks:
         assert row['slot'] == 4
         assert row['env'] == {'A': '1'}
 
-    def test_cost_and_speed_come_from_the_completion_metadata(self):
-        (row,), _ = group_timeline_tasks(
-            [started(), completed(metadata=json.dumps({'cost': 2.0, 'speed': 5.0}))],
-            ws_min_duration_seconds=0.0,
-            limit=10,
-        )
-
-        assert (row['cost'], row['speed']) == (2.0, 5.0)
-
-    def test_a_completion_without_speed_adds_no_throughput_keys(self):
-        (row,), _ = group_timeline_tasks(
-            [started(), completed(metadata=json.dumps({'other': 1}))],
-            ws_min_duration_seconds=0.0,
-            limit=10,
-        )
-
-        assert 'cost' not in row and 'speed' not in row
-
     def test_origin_defaults_to_kafka_on_an_older_row(self):
         (row,), _ = group_timeline_tasks([started()], ws_min_duration_seconds=0.0, limit=10)
 

@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events and the provider test kits are gone too. A probe record no longer has
   the sink type `custom`, and the HTTP response summary has no `custom` entry.
   The built-in sinks and providers are the only ones. See `docs/upgrading.md`.
+- **Task cost, speed and throughput are removed.** The `throughput` config
+  section (`cost_label`, `min_cost`), the `cost` and `speed` keys of
+  `task_completed` metadata and `recent-tasks` rows, the `throughput` frame on
+  `/ws`, the `worker_state.throughput` column, and the metrics
+  `drakkar_task_speed`, `drakkar_throughput` and `drakkar_task_rate` are gone.
+  Merge still reads recorder files that carry extra `worker_state` columns.
+  See `docs/upgrading.md`.
 - **Provider settings changed.** `fleet.registry.timeout_seconds` is now
   `fleet.registry.resilience.timeout_seconds` (env
   `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the

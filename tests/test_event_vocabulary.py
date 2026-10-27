@@ -32,9 +32,7 @@ def test_vocabulary_matches_the_shared_fixture() -> None:
 def test_docs_table_documents_every_stored_event() -> None:
     """The observability page's event table is part of the vocabulary contract.
 
-    ``throughput`` is deliberately absent: it is broadcast on ``/ws`` and
-    never written to ``events.event``, so it has no row in a table that
-    describes that column.
+    Every event type is stored in ``events.event``, so each has a row.
     """
     import re
 
@@ -48,13 +46,6 @@ def test_docs_table_documents_every_stored_event() -> None:
     assert documented == stored, (
         f'undocumented: {sorted(stored - documented)}; documented but not stored: {sorted(documented - stored)}'
     )
-
-
-def test_ws_only_events_are_never_buffered() -> None:
-    """A WS-only name must not reach the events table."""
-    fixture = json.loads(FIXTURE.read_text())
-    ws_only = {name for name, is_stored in fixture['stored_in_events'].items() if not is_stored}
-    assert ws_only == {EventType.THROUGHPUT.value}
 
 
 def test_every_member_value_equals_its_lowercased_name() -> None:

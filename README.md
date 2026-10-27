@@ -46,7 +46,7 @@ flowchart LR
 - **Cache** (optional) — `self.cache` key/value store with write-behind SQLite and a cache exchange between workers over HTTP
 - **Offload** — `await self.offload(fn, ...)` keeps CPU-bound hook work off the event loop
 - **Webapp** (optional) — the same handler pipeline exposed as a synchronous HTTP endpoint with auth and rate limits
-- **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log), runtime-health and host-pressure monitors, task cost/throughput stats
+- **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log) and runtime-health and host-pressure monitors
 - **Kubernetes-ready** — `/healthz` and `/readyz` probes, reference manifests, crash/OOM detection on restart
 
 The operator UI is [drakkar-ui](https://github.com/wlame/drakkar-ui), a versioned SPA the worker fetches at startup and caches on disk — so co-located workers share one download, and the UI ships on its own release cadence.

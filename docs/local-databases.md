@@ -251,7 +251,6 @@ CREATE TABLE IF NOT EXISTS worker_state (
     paused              INTEGER,
     health_state        TEXT,    -- 'healthy'/'degraded'/'stalled'; NULL = monitor off
     loop_lag_ms         REAL,    -- event-loop lag at the sync tick
-    throughput          TEXT,    -- three-window throughput JSON; NULL = feature off
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );

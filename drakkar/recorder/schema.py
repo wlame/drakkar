@@ -82,13 +82,12 @@ class EventType(StrEnum):
     MESSAGE_DLQ = 'message_dlq'
     SINK_NOT_STARTED = 'sink_not_started'
 
-    # --- Worker health, sampling and throughput ---
+    # --- Worker health and sampling ---
     RUNTIME_HEALTH = 'runtime_health'
     RUNTIME_STALL = 'runtime_stall'
     RUNTIME_LAG_EPISODE = 'runtime_lag_episode'
     RUNTIME_PROBE = 'runtime_probe'
     RESOURCE_SAMPLE = 'resource_sample'
-    THROUGHPUT = 'throughput'
 
     # --- Handler extension points ---
     ANNOTATION = 'annotation'
@@ -247,7 +246,6 @@ CREATE TABLE IF NOT EXISTS worker_state (
     paused              INTEGER,
     health_state        TEXT,
     loop_lag_ms         REAL,
-    throughput          TEXT,
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );

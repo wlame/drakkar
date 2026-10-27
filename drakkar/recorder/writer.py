@@ -31,7 +31,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.recorder.fanout import WSFanout, WSSubscriber
-from drakkar.recorder.helpers import encode_json_str, format_dt, sanitize_env_value
+from drakkar.recorder.helpers import encode_json_str, sanitize_env_value
 from drakkar.recorder.schema import EventType
 from drakkar.timefmt import format_rfc3339_micro
 
@@ -158,23 +158,6 @@ class EventWriter:
     def unsubscribe(self, sub: WSSubscriber) -> None:
         """Unsubscribe from the live event stream."""
         self._fanout.unsubscribe(sub)
-
-    def broadcast_throughput(self, windows: dict) -> None:
-        """Broadcast one ``throughput`` WS frame (contract v1.16).
-
-        Broadcast-only — never buffered to the DB, so the pinned
-        events-table row shape is untouched. ``windows`` is the
-        three-window aggregate from the throughput tracker.
-        """
-        ts = time.time()
-        self._fanout.broadcast(
-            {
-                'ts': ts,
-                'dt': format_dt(ts),
-                'event': EventType.THROUGHPUT,
-                'metadata': encode_json_str({'windows': windows}),
-            }
-        )
 
     def record_consumed(self, msg: SourceMessage) -> None:
         self._counters['consumed'] += 1
@@ -356,8 +339,6 @@ class EventWriter:
         origin: str | None = None,
         client_name: str | None = None,
         request_id: str | None = None,
-        cost: float | None = None,
-        speed: float | None = None,
     ) -> None:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
@@ -414,12 +395,6 @@ class EventWriter:
             # Parent-side share of the duration (see ExecutorResult.spawn_seconds);
             # the live UI shows it in the timeline hover detail.
             completed_meta['spawn_ms'] = round(result.spawn_seconds * 1000, 1)
-        if cost is not None and speed is not None:
-            # Contract v1.16: present only for throughput-counted tasks —
-            # the caller applied the counting rules; excluded tasks carry
-            # no keys at all, never zeros.
-            completed_meta['cost'] = cost
-            completed_meta['speed'] = round(speed, 3)
         if completed_meta:
             entry['metadata'] = encode_json_str(completed_meta)
         if include_output:

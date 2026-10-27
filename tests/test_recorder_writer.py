@@ -192,16 +192,6 @@ class TestDeferredStartEvents:
         assert skip_ws is False, 'failures are never suppressed by ws_min_duration_ms'
 
 
-class TestThroughputBroadcast:
-    def test_throughput_is_broadcast_only(self, writer):
-        sub = writer.subscribe()
-
-        writer.broadcast_throughput({'1s': {'tasks': 5}})
-
-        assert writer.rows == [], 'throughput frames must never reach the events table'
-        assert [event['event'] for event in _drain(sub)] == ['throughput']
-
-
 def _drain(sub) -> list[dict]:
     out = []
     while not sub.empty():

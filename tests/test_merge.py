@@ -367,6 +367,24 @@ def test_merge_single_db_state(tmp_path):
     merged.close()
 
 
+def test_merge_reads_a_file_with_an_extra_worker_state_column(tmp_path):
+    db1 = tmp_path / 'w1.db'
+    _create_source_db(db1, worker_name='worker-1', state={'consumed_count': 7})
+    source = sqlite3.connect(str(db1))
+    source.execute('ALTER TABLE worker_state ADD COLUMN extra_nullable TEXT')
+    source.execute("UPDATE worker_state SET extra_nullable = 'x'")
+    source.commit()
+    source.close()
+    output = str(tmp_path / 'merged.db')
+
+    result = merge_databases([str(db1)], output)
+
+    assert result.state_count == 1
+    merged = sqlite3.connect(output)
+    assert merged.execute('SELECT consumed_count FROM worker_states').fetchone() == (7,)
+    merged.close()
+
+
 # ─── merge_databases — multi-worker ──────────────────────────
 
 

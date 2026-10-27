@@ -20,11 +20,6 @@ from pathlib import Path
 
 from drakkar.recorder.schema import EventType
 
-# Names that are broadcast on ``/ws`` but never written to ``events.event``.
-# ``throughput`` is a periodic aggregate the UI renders live; buffering it
-# would grow the events table without any query reading it back.
-WS_ONLY: frozenset[str] = frozenset({'throughput'})
-
 FIXTURE_NAME = 'event_vocabulary.json'
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / 'tests' / 'fixtures'
 
@@ -41,9 +36,9 @@ def build_document() -> dict[str, object]:
     return {
         '_comment': COMMENT,
         'events': events,
-        # True when the name appears in the events.event column; False for
-        # the WS-only broadcasts. The docs table is checked against this.
-        'stored_in_events': {name: name not in WS_ONLY for name in events},
+        # True when the name appears in the events.event column. The docs
+        # table is checked against this.
+        'stored_in_events': {name: True for name in events},
     }
 
 

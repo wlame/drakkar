@@ -1,4 +1,4 @@
-"""Runtime configuration: executor, metrics, throughput, health, IO, offload, logging.
+"""Runtime configuration: executor, metrics, health, IO, offload, logging.
 
 Everything that tunes how a worker runs, as opposed to where its data
 comes from (``kafka``) or goes (``sinks``).
@@ -181,40 +181,6 @@ class MetricsConfig(BaseModel):
             'drakkar_task_label_value histogram at task completion, one time '
             'series per key (e.g. a file-size or line-count label). Values '
             'that do not parse as finite numbers are skipped.'
-        ),
-    )
-
-
-class ThroughputConfig(BaseModel):
-    """Opt-in task cost tracking: per-task speed and windowed throughput.
-
-    The operator names a numeric task label (set in ``arrange()``) whose
-    value correlates with the task's computational hardness — file size, a
-    computed score, any unit. The framework then derives per-task ``speed``
-    (cost / duration) and sliding-window ``throughput`` aggregates (1, 5,
-    30 s), surfaced in task events, the recent-tasks API, a
-    per-second WebSocket frame, Prometheus, and worker_state snapshots.
-
-    Purely observational: nothing schedules or prioritizes on cost.
-    """
-
-    cost_label: str = Field(
-        default='',
-        description=(
-            'Task label key whose numeric value is the task cost — a '
-            'number correlating with computational hardness (bytes, a '
-            'computed score, any unit). Empty (the default) disables the '
-            'whole feature. Values that do not parse as finite numbers '
-            'leave the task uncounted.'
-        ),
-    )
-    min_cost: float = Field(
-        default=0.0,
-        ge=0,
-        description=(
-            'Smallest cost worth counting. Tasks below it carry no speed '
-            'and enter no aggregate — useful when fixed overhead dominates '
-            'small tasks and their speeds would mislead.'
         ),
     )
 
