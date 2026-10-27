@@ -2217,7 +2217,7 @@ components:
       properties:
         sink_type:
           type: string
-          enum: [kafka, postgres, mongo, http, redis, files, custom]
+          enum: [kafka, postgres, mongo, http, redis, files]
         destination: {type: string}
         origin_stage: {type: string}
         payload: {}
