@@ -8,7 +8,7 @@ invariants with non-obvious rationale, and commands.
 
 A subprocess-pool → sinks orchestration framework: the worker reads from Kafka
 and/or HTTP, `arrange()`s input into tasks run by a managed subprocess pool,
-delivers results to pluggable sinks (Kafka, Postgres, Mongo, Redis, HTTP,
+delivers results to sinks (Kafka, Postgres, Mongo, Redis, HTTP,
 files), and commits Kafka offsets at-least-once on a per-partition watermark
 when the Kafka source is enabled. The framework owns the control loop and
 calls into user code; the actual work runs in an external subprocess.

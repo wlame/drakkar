@@ -21,7 +21,7 @@ from drakkar.config import (
     UIDocsConfig,
     UITimelineConfig,
 )
-from drakkar.config.sinks import BUILTIN_SINK_TYPES
+from drakkar.config.sinks import SINK_TYPES
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.probe import Column
 from drakkar.uipages import Page, TasksSource, Widget
@@ -195,9 +195,9 @@ def test_builtin_sink_types_are_derived_from_the_sinks_model():
     ``delivery_timeout_seconds`` (a float) and blow up instead.
     """
     mapping_fields = {name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict}
-    assert set(BUILTIN_SINK_TYPES) == mapping_fields
-    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(BUILTIN_SINK_TYPES)
-    assert all(isinstance(getattr(SinksConfig(), section), dict) for section in BUILTIN_SINK_TYPES)
+    assert set(SINK_TYPES) == mapping_fields
+    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(SINK_TYPES)
+    assert all(isinstance(getattr(SinksConfig(), section), dict) for section in SINK_TYPES)
 
 
 def test_startup_still_warns_on_a_bad_anchor_when_no_docs_site_is_configured():

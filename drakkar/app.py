@@ -1,7 +1,7 @@
 """Main Drakkar application — wires all components together.
 
 Orchestrates Kafka consumption, subprocess execution, sink delivery,
-and offset management. Uses the pluggable sink system for output.
+and offset management. Delivers results to the configured sinks.
 
 The bulk of the runtime — startup orchestration, the poll loop,
 partition rebalance callbacks, and graceful shutdown — lives in
@@ -29,7 +29,7 @@ from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
 from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, load_config
-from drakkar.config.sinks import BUILTIN_SINK_TYPES
+from drakkar.config.sinks import SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -574,7 +574,7 @@ class DrakkarApp:
         anchors = self._config.ui.docs.anchors
         if not anchors:
             return
-        sink_names = {name for section in BUILTIN_SINK_TYPES for name in getattr(self._config.sinks, section)}
+        sink_names = {name for section in SINK_TYPES for name in getattr(self._config.sinks, section)}
         # One row per checkable selector: the match field, the warning it
         # raises, the declared names it must be one of, what such a name is,
         # and where the deployment declares one.

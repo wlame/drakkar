@@ -390,7 +390,7 @@ class SinkManager:
         self._policies[key] = policy
         dependencies: list[SinkKey] = []
         for ref in policy.depends_on:
-            # The config load checked every reference;
+            # The config load already checked that every reference names a configured sink.
             dependency_type, _, dependency_name = ref.partition('/')
             dependencies.append((dependency_type, dependency_name))
         self._dependencies[key] = tuple(dependencies)

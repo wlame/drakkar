@@ -101,7 +101,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 
 - **[Two input sources](sources.md)** -- Kafka and HTTP, each optional: a worker runs Kafka-only, HTTP-only, or both, with the same handler, executor pool and sinks behind either
 - **[Per-partition pipelines](data-flow.md#phase-3-window-collection-and-arrangement)** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
-- **[Pluggable sinks](sinks.md)** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
+- **[Sinks](sinks.md)** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- a message that fails to parse, execute or deliver goes to a DLQ topic as the original message, with `dk-` headers that say where and why; each sink declares its [failure policy](sinks.md#failure-policy) and [dependencies](sinks.md#sink-dependencies-depends_on)
 - **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization

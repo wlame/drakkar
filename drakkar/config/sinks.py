@@ -674,7 +674,7 @@ class SinksConfig(BaseModel):
     def _instances(self) -> dict[str, tuple[str, SinkPolicy]]:
         """Every configured instance: its ``<type>/<name>`` reference, its config path and its policy."""
         instances: dict[str, tuple[str, SinkPolicy]] = {}
-        for sink_type in BUILTIN_SINK_TYPES:
+        for sink_type in SINK_TYPES:
             section: dict[str, SinkInstanceConfig] = getattr(self, sink_type)
             for name, instance in section.items():
                 instances[f'{sink_type}/{name}'] = (f'sinks.{sink_type}.{name}', SinkPolicy.of(instance))
@@ -755,9 +755,9 @@ class SinksConfig(BaseModel):
         return result
 
 
-# The sink sections: the ``SinksConfig`` fields that map instance names to a
+# The sink types: the ``SinksConfig`` fields that map instance names to a
 # sink config.
-BUILTIN_SINK_TYPES: tuple[str, ...] = tuple(
+SINK_TYPES: tuple[str, ...] = tuple(
     name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict
 )
 
@@ -770,7 +770,7 @@ def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mappin
     Anything else is left to the field types, which report it.
     """
     leaves: list[tuple[str, str, Mapping[str, Any]]] = []
-    for sink_type in BUILTIN_SINK_TYPES:
+    for sink_type in SINK_TYPES:
         section = data.get(sink_type)
         if isinstance(section, Mapping):
             for name, leaf in section.items():
