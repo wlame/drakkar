@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.27"
+  version: "1.28"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -1364,6 +1364,8 @@ components:
             enum: clients must tolerate unknown future values. The retired
             "embedded" and "builtin" values went with the baked-in bundle
             and the server-rendered pages in v1.19. (v1.2)
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
         link_bases:
           type: object
           additionalProperties: {type: string}
@@ -1668,6 +1670,36 @@ components:
         last_error_ts: {type: [number, 'null']}
       required: [sink_type, name, delivered_count, error_count]
 
+    Capabilities:
+      type: object
+      description: >-
+        What this worker runs (v1.28). Absent on older backends: clients
+        treat every capability as on.
+      properties:
+        recorder:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            provider: {type: string, enum: [none, sqlite, postgres]}
+            history_search:
+              type: boolean
+              description: True when recorder.enabled is true.
+        memory:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            window_seconds: {type: integer}
+            max_rows: {type: integer}
+        autodiscover:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            provider: {type: [string, 'null']}
+        cache_exchange:
+          type: boolean
+          description: >-
+            True when the cache and its exchange are on and autodiscover is on.
+
     Worker:
       type: object
       properties:
@@ -1704,6 +1736,10 @@ components:
         # unknown or the peer is in another cluster. Absent on older
         # backends: treat as unknown.
         cluster_tasks_match: {type: [boolean, 'null']}
+        # v1.28, optional: from the card's features.ui. Absent or null: on.
+        # A worker with ui_enabled false serves no UI routes; clients leave
+        # it out of their fan-out and switcher links.
+        ui_enabled: {type: [boolean, 'null']}
       required: [worker_name, url, is_current]
 
     ProcessorsReport:
@@ -1860,10 +1896,6 @@ components:
         origin: {type: string}
         client_name: {type: [string, 'null']}
         request_id: {type: [string, 'null']}
-        # v1.16, optional: present only for throughput-counted completions
-        # (throughput.cost_label configured, success, cost >= min_cost).
-        cost: {type: [number, 'null']}
-        speed: {type: [number, 'null'], description: cost / duration, cost-units per second.}
       required: [task_id, status]
 
     ArrangeTasksMap:
