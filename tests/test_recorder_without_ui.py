@@ -234,6 +234,20 @@ async def test_last_breath_writes_with_no_memory_store(tmp_path):
         await rec.stop()
 
 
+async def test_reads_with_no_memory_store_answer_from_the_file(tmp_path):
+    rec = _file_recorder(tmp_path)
+    await rec.start()
+    try:
+        rec._record(_event(1))
+        rec._record(_event(2))
+        await rec.flush()
+
+        assert sorted(row['offset'] for row in await rec.get_events()) == [1, 2]
+        assert [row['offset'] for row in await rec.cross_trace(0, 1)] == [1]
+    finally:
+        await rec.stop()
+
+
 async def test_a_rotation_with_no_memory_store_writes_the_rows_to_the_closing_file(tmp_path, monkeypatch):
     names = iter(('first', 'second'))
     real_make_db_path = core_mod.make_db_path
