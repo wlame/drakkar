@@ -2143,7 +2143,7 @@ class TestApiRecentTasksDepthAndWindow:
         db = await aiosqlite.connect(db_path)
         await db.executescript(SCHEMA_EVENTS)
 
-        kwargs = {'enabled': True, 'port': 8080, 'db_dir': str(tmp_path)}
+        kwargs = {'enabled': True, 'port': 8080}
         if timeline is not None:
             kwargs['timeline'] = timeline
         cfg = make_ui_config(**kwargs)

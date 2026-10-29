@@ -843,7 +843,8 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 Special cases:
 
 - **`DK_CONFIG`** -- selects which YAML file to load; not a config field. Excluded from the env→config merge.
-- **Hyphens in map keys** -- `main-db` becomes `MAIN_DB` (single underscore) in the env var. Drakkar lowercases the env path on parse, then matches it against the YAML keys.
+- **Names in map keys** -- a sink or connection named `main-db` is `MAIN_DB` in the env var. A segment takes the name in the YAML whose lower-case form with `-` replaced by `_` equals the lower-case segment. With no such name, the variable declares a name of its own (`main_db`). When two names match, the load fails.
+- **Unknown keys** -- a variable whose path is not a config key fails the load, as a YAML key does (see [Unknown keys](configuration.md#unknown-keys)).
 - **Booleans** -- `true` / `false` (also `1` / `0`, `yes` / `no`).
 - **Nulls** -- omit the env var, or use the literal `null` if the YAML value should be reset.
 

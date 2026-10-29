@@ -260,37 +260,11 @@ def test_env_var_names_for_known_scalar_paths():
 
 
 def test_env_is_none_for_dynamic_instance_paths():
-    """No single fixed env var reaches a `*` (dynamic-instance) path.
-
-    See the _ENV_NONE_FOR_DYNAMIC_PATHS note in drakkar/configmeta.py: env
-    overrides for map keys are matched by literal (post-lowercase) string,
-    with no hyphen/underscore reconciliation, so a hyphenated instance name
-    like `main-db` is not reachable via `DK_..._MAIN_DB_...` at all —
-    reporting a templated env name here would overstate what the loader
-    actually guarantees.
-    """
+    """No single fixed env var reaches a `*` (dynamic-instance) path: the real name embeds the instance name."""
     metadata = build_config_metadata()
     dynamic_entries = [entry for group in metadata.groups for entry in group.entries if '*' in entry.path.split('.')]
     assert dynamic_entries, 'expected at least one dynamic-instance field'
     assert all(entry.env is None for entry in dynamic_entries)
-
-
-def test_env_override_does_not_reach_hyphenated_instance_name(tmp_path, monkeypatch):
-    """Empirical proof behind the env=None-for-`*`-paths decision above."""
-    from drakkar.config import load_config
-
-    config_file = tmp_path / 'drakkar.yaml'
-    config_file.write_text(
-        'sources:\n  kafka:\n    enabled: true\nsinks:\n  postgres:\n    main-db:\n      dsn: "postgresql://orig"\n'
-    )
-    monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN_DB__DSN', 'postgresql://overridden')
-
-    cfg = load_config(str(config_file))
-
-    # The original hyphenated instance is untouched by the env override...
-    assert cfg.sinks.postgres['main-db'].dsn == 'postgresql://orig'
-    # ...and a second, separate instance was created instead of overriding it.
-    assert cfg.sinks.postgres['main_db'].dsn == 'postgresql://overridden'
 
 
 # --- 6. First-sentence extraction ---

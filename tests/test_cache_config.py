@@ -5,8 +5,6 @@ constraints, and confirms the v1 scope of the config — no preload fields, no
 exposed peer-resolution cache TTL.
 """
 
-import re
-
 import pytest
 from pydantic import ValidationError
 
@@ -52,10 +50,6 @@ def test_cache_config_defaults():
     # Default cap prevents unbounded growth under write-heavy workloads;
     # operators can opt into unbounded behavior by setting None explicitly.
     assert cfg.max_memory_entries == 10_000
-    # The cache file lives in storage.dir and exchange settings in
-    # fleet.cache_exchange; neither is a cache.* field any more.
-    assert 'db_dir' not in CacheConfig.model_fields
-    assert 'peer_sync' not in CacheConfig.model_fields
 
 
 def test_cache_config_rejects_invalid_intervals():
@@ -136,14 +130,6 @@ def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyP
     cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
     assert cfg.fleet.cache_exchange.interval_seconds == 60.0
-
-
-def test_cache_config_env_db_dir_fails_the_load(monkeypatch: pytest.MonkeyPatch):
-    """The old cache folder key fails the load: the cache file lives in storage.dir."""
-    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
-    monkeypatch.setenv('DK_CACHE__DB_DIR', '/srv/cache')
-    with pytest.raises(ValidationError, match=re.escape('cache.db_dir: removed, the cache file lives in storage.dir')):
-        DrakkarConfig(sources={'kafka': {'enabled': True}})
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):

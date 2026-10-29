@@ -1106,20 +1106,6 @@ history folder in its `folder` field) says so explicitly; bounding the
 history folder becomes the operator's job (delete old files by hand, or run
 an external job against them).
 
-### Renamed and removed keys
-
-| Old key (removed) | Replaced by | Notes |
-|---|---|---|
-| `rotation_interval_minutes` | `rotation_interval_hours` | Renamed **and** the unit changed: `1` now means 1 hour, not 1 minute. |
-| `retention_hours` | `history.archive.*` | Age-based deletion is gone; archiving replaces it. |
-| `retention_max_events` | *(no replacement)* | Count-based deletion is gone entirely. |
-
-These keys no longer exist, and no migration guard remains for them: a
-config that still sets one is an unknown key inside `ui.recorder` and is
-ignored. Delete them. The later move of the folder and archive keys to
-`storage.dir` and `history.archive.*` does fail the load on the old names;
-see the [upgrade guide](upgrading.md).
-
 ### Copy-pasteable config
 
 ```yaml

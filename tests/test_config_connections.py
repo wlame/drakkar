@@ -264,10 +264,11 @@ def test_a_pool_size_below_one_fails_the_load(load, field):
         load({'connections': {'postgres': {'main': {'dsn': 'postgresql://h/db', field: 0}}}})
 
 
-def test_a_connection_model_can_be_built_by_attribute_name():
-    cfg = PostgresConnectionConfig(dsn='postgresql://h/db', schema_name='audit')
+def test_a_connection_model_takes_only_the_yaml_key():
+    assert PostgresConnectionConfig(dsn='postgresql://h/db', schema='audit').schema_name == 'audit'
 
-    assert cfg.schema_name == 'audit'
+    with pytest.raises(ValidationError, match='schema_name'):
+        PostgresConnectionConfig(dsn='postgresql://h/db', schema_name='audit')
 
 
 def test_the_secret_fields_carry_the_secret_flag():

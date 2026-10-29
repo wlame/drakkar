@@ -7,12 +7,13 @@ when it is enabled; a disabled block reports its problems through
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.config.webapp import WebAppConfig
 
 
-class KafkaSourceConfig(BaseModel):
+class KafkaSourceConfig(ConfigModel):
     """The Kafka consumer as an input source (``sources.kafka``).
 
     Connection settings (brokers, security) live in ``kafka:``; this block
@@ -100,7 +101,7 @@ class KafkaSourceConfig(BaseModel):
         return self
 
 
-class SourcesConfig(BaseModel):
+class SourcesConfig(ConfigModel):
     """The ``sources:`` section.
 
     At least one source must be enabled — enforced by ``DrakkarConfig``,

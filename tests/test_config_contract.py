@@ -1,8 +1,8 @@
 """Config contract cases from ``tests/fixtures/config_contract.json``.
 
 The fixture pins three things byte for byte for any implementation of the
-config format: the load error for moved or removed keys, the summary
-one-liner, and the cross-field validation messages. Every case goes
+config format: the load error for unknown keys, the summary one-liner, and
+the cross-field validation messages. Every case goes
 through the public loader exactly as an operator's file would: its ``yaml``
 is merged over the fixture's ``base`` and written to a real YAML file, and
 its ``env`` entries are set as ``DK_*`` variables.
@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from drakkar.config import DrakkarConfig, _deep_merge, load_config
 
@@ -49,17 +48,9 @@ def value_at_path(config: DrakkarConfig, path: str) -> object:
 
 
 def test_fixture_case_names_are_unique():
-    for section in ('moved_keys', 'summary', 'load_values', 'validation'):
+    for section in ('unknown_keys', 'summary', 'load_values', 'validation'):
         names = _case_ids(FIXTURE[section])
         assert len(names) == len(set(names)), section
-
-
-@pytest.mark.parametrize('case', FIXTURE['moved_keys'], ids=_case_ids(FIXTURE['moved_keys']))
-def test_moved_key_case_fails_the_load_with_the_contract_message(case, tmp_path, monkeypatch):
-    with pytest.raises(ValidationError) as excinfo:
-        _load(case, tmp_path, monkeypatch)
-
-    assert case['message'] in str(excinfo.value)
 
 
 @pytest.mark.parametrize('case', FIXTURE['summary'], ids=_case_ids(FIXTURE['summary']))
@@ -78,7 +69,7 @@ def test_load_value_case_loads_with_the_contract_value(case, tmp_path, monkeypat
 
 @pytest.mark.parametrize('case', FIXTURE['validation'], ids=_case_ids(FIXTURE['validation']))
 def test_validation_case_fails_the_load_naming_the_rule(case, tmp_path, monkeypatch):
-    with pytest.raises(ValidationError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         _load(case, tmp_path, monkeypatch)
 
     assert (case.get('message') or case['path']) in str(excinfo.value)

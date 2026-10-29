@@ -17,7 +17,6 @@ from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig
 from drakkar.config.fleet import CONNECTION_PROVIDERS, FleetConfig
 from drakkar.config.kafka import KafkaConfig
-from drakkar.config.moved_keys import find_moved_keys, moved_keys_message
 from drakkar.config.periodic import PeriodicConfig
 from drakkar.config.runtime import (
     ExecutorConfig,
@@ -30,6 +29,7 @@ from drakkar.config.runtime import (
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
 from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
+from drakkar.config.strict import find_unknown_keys, key_text, resolve_env_map_names, unknown_keys_message
 from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence, UIConfig
 from drakkar.config.webapp import WebAppConfig
 
@@ -37,6 +37,12 @@ PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE = (
     'ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, '
     'or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only'
 )
+
+# The loader passes the whole tree, the ``DK_*`` values already in it with their
+# map names resolved. No variable name can start with NUL, so with this prefix the
+# settings env source finds nothing and cannot add a value a second time under its
+# literal name.
+_NO_ENV_VARIABLE_PREFIX = '\0'
 
 
 class DrakkarConfig(BaseSettings):
@@ -59,19 +65,16 @@ class DrakkarConfig(BaseSettings):
 
     @model_validator(mode='before')
     @classmethod
-    def _reject_moved_keys(cls, values: object) -> object:
-        """Refuse config keys that moved or were removed, listing every one found.
+    def _reject_unknown_keys(cls, values: object) -> object:
+        """Refuse every key the models do not declare, ahead of the field checks.
 
-        The nested sections ignore unknown keys, so without this check an old
-        key would be dropped silently and its value would stop applying. The
-        raw values here are YAML merged with the ``DK_*`` environment on every
-        construction path; the table and the message live in
-        :mod:`drakkar.config.moved_keys`.
+        The raw values here are YAML merged with the ``DK_*`` environment on
+        every construction path. A section passed as a built model is not walked.
         """
         if isinstance(values, Mapping):
-            found = find_moved_keys(values)
+            found = find_unknown_keys(values, cls)
             if found:
-                raise ValueError(moved_keys_message(found))
+                raise ValueError(unknown_keys_message(found))
         return values
 
     @model_validator(mode='before')
@@ -93,19 +96,6 @@ class DrakkarConfig(BaseSettings):
                 "passed through to the handler's own config model, which binds its own env "
                 'prefix (app_env_prefix, default APP_); rename: ' + ', '.join(app_env)
             )
-        return values
-
-    @model_validator(mode='before')
-    @classmethod
-    def _reject_top_level_webapp(cls, values: object) -> object:
-        """Refuse a top-level ``webapp:`` key — the section moved under ``sources.http``.
-
-        A dedicated check rather than relying on ``extra='forbid'`` alone,
-        so the error names the new location instead of pydantic's generic
-        "extra fields not permitted" message.
-        """
-        if isinstance(values, dict) and 'webapp' in values:
-            raise ValueError('webapp: moved to sources.http (see docs/sources.md)')
         return values
 
     worker_name_env: str = Field(
@@ -421,6 +411,7 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     if config_path is None:
         config_path = os.environ.get('DK_CONFIG')
 
+    yaml_data: Any = {}
     if config_path is not None:
         path = Path(config_path)
         if not path.exists():
@@ -429,21 +420,15 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
         with open(path) as f:
             yaml_data = yaml.safe_load(f) or {}
 
-        # pydantic-settings ignores env vars for nested models when init
-        # kwargs are passed. Fix: extract DK_* env vars, parse them
-        # into nested structure, and deep-merge on top of YAML.
-        env_overrides = _parse_env_overrides('DK_', '__')
-        merged = _deep_merge(yaml_data, env_overrides)
-        # Top-level result is always a dict (the env-var prefix is fixed
-        # and never numeric); the assert satisfies static typing without a
-        # runtime branch.
-        assert isinstance(merged, dict)
-        merged = _apply_list_field_defaults(merged)
-        return DrakkarConfig(**merged)
-
-    env_overrides = _parse_env_overrides('DK_', '__')
-    env_overrides = _apply_list_field_defaults(env_overrides)
-    return DrakkarConfig(**env_overrides)
+    env_overrides = resolve_env_map_names(_parse_env_overrides('DK_', '__'), yaml_data, DrakkarConfig)
+    merged = _deep_merge(yaml_data, env_overrides)
+    # Top-level result is always a dict (the env-var prefix is fixed
+    # and never numeric); the assert satisfies static typing without a
+    # runtime branch.
+    assert isinstance(merged, dict)
+    merged = _apply_list_field_defaults(merged)
+    # A top-level key that is no string cannot be a keyword; as text, the strict check reports it.
+    return DrakkarConfig(_env_prefix=_NO_ENV_VARIABLE_PREFIX, **{key_text(key): value for key, value in merged.items()})
 
 
 def _apply_list_field_defaults(merged: dict) -> dict:

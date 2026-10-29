@@ -15,7 +15,6 @@ from typing import Any, Literal, get_origin
 from urllib.parse import urlparse
 
 from pydantic import (
-    BaseModel,
     ConfigDict,
     Field,
     ModelWrapValidatorHandler,
@@ -25,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from drakkar.config.base import ConfigModel
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
 from drakkar.models import MongoOp
 from drakkar.sinks.mql import compile_template
@@ -64,7 +64,7 @@ POLICY_KEYS = ('on_failure', 'max_retries', 'depends_on')
 _WHOLE_NUMBER = TypeAdapter(int)
 
 
-class SinkInstanceConfig(BaseModel):
+class SinkInstanceConfig(ConfigModel):
     """The failure policy, retry budget and dependencies of one sink instance.
 
     Every sink config class inherits these keys; ``SinksConfig`` reads them
@@ -98,7 +98,7 @@ class SinkInstanceConfig(BaseModel):
     )
 
 
-class SinkPolicy(BaseModel):
+class SinkPolicy(ConfigModel):
     """The declared policy of one sink instance, as the delivery reads it."""
 
     model_config = ConfigDict(frozen=True)
@@ -305,7 +305,7 @@ _MONGO_STATEMENT_OPS = frozenset(
 _MONGO_UPDATE_OPS = frozenset({MongoOp.UPDATE_ONE, MongoOp.UPDATE_MANY, MongoOp.UPSERT})
 
 
-class MongoStatementConfig(BaseModel):
+class MongoStatementConfig(ConfigModel):
     """One operator-authored MQL statement.
 
     Unlike the Postgres and Redis escape hatches this is a MODEL rather than
@@ -575,7 +575,7 @@ class FileSinkConfig(SinkInstanceConfig):
     )
 
 
-class CircuitBreakerConfig(BaseModel):
+class CircuitBreakerConfig(ConfigModel):
     """Per-sink circuit breaker settings — shared default across all sinks.
 
     The breaker guards a sink from burning pool slots when its downstream
@@ -611,7 +611,7 @@ class CircuitBreakerConfig(BaseModel):
     )
 
 
-class SinksConfig(BaseModel):
+class SinksConfig(ConfigModel):
     """Container for all configured sink instances, grouped by type.
 
     Each sink type maps sink names to their configuration.
@@ -779,7 +779,7 @@ def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mappin
     return leaves
 
 
-class DLQConfig(BaseModel):
+class DLQConfig(ConfigModel):
     """Dead letter queue configuration.
 
     Failed sink deliveries are written to this Kafka topic.

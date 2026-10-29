@@ -77,30 +77,25 @@ Env vars are parsed into a nested dict structure and deep-merged on top of the Y
 defaults --> YAML file --> environment variables (deep merge)
 ```
 
-### Moved and removed keys
+### Unknown keys
 
-Some keys moved to the `storage`, `history` and `fleet` sections, and a few
-were removed. An old key in the YAML file or in a `DK_*` variable fails the
-load with one message that lists every old key found, for example:
+A key that the config does not declare fails the load, in the YAML file and in a
+`DK_*` variable. One message lists every unknown key, in sorted order. A line
+suggests the closest valid key at the same level when one is close:
 
 ```
-config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
-  ui.recorder.db_dir -> storage.dir
-  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds
-  cache.db_dir: removed, the cache file lives in storage.dir
+config has unknown keys (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/config-reference.md):
+  executor.max_executer (did you mean 'max_executors'?)
+  sinks.kafka.results.max_retires (did you mean 'max_retries'?)
+  ui.timeline.events[2].colour (did you mean 'color'?)
 ```
 
-The [upgrade guide](upgrading.md) has the full table with YAML and env names.
-The newest moves are `fleet.registry.timeout_seconds`, now
-`fleet.registry.resilience.timeout_seconds` (env:
-`DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`), and the archive keys
-that became [`periodic.election`](#periodic), `history.archive.lease_seconds`,
-`history.archive.sweep_after_seconds` and the slot schedule
-`history.archive.interval` or `history.archive.cron` (see
-[Upgrading](upgrading.md#periodic-tasks-and-the-archive)).
+The names you choose yourself (a sink instance, a connection) are not checked,
+but the keys below them are. The free maps `app`, `executor.env` and the HTTP
+sink's `headers` accept any key.
 
-A config error no longer carries the input of the section that failed (the
-cut of the config that the validation library adds to its message). A bad
+A config error does not carry the input of the section that failed (the cut
+of the config that the validation library adds to its message). A bad
 `connections` block, for example, reports the key and the rule, and does not
 print the connection string. The framework's own messages still quote a
 value that is not a secret, such as a schema name.
@@ -283,14 +278,6 @@ reference.
 |---|---|---|---|
 | Kafka consumer | `sources.kafka.enabled` | `false` | Consumer group, poll loop, per-partition processors |
 | HTTP ingress | `sources.http.enabled` | `false` | One POST route on its own server thread |
-
-!!! warning "The top-level `webapp:` block is gone"
-    The HTTP source used to be configured under `webapp:`. A config that
-    still carries that key fails to load with `webapp: moved to
-    sources.http (see docs/sources.md)`. Move the block under
-    `sources.http`; every field keeps its name and its default. Env
-    overrides move with it — `DK_WEBAPP__PORT` becomes
-    `DK_SOURCES__HTTP__PORT`.
 
 ### Kafka source (`sources.kafka`)
 
@@ -1025,7 +1012,7 @@ These checks run after the source check and before the history window check: fir
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table, so every recorder file names the worker and cluster that wrote it (history, merges, archives). |
 | `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is sealed; a background job moves it into `<shared.dir>/history/<cluster>/` (see [Sealing](local-databases.md#sealing-and-the-history-folder)). Every rotation tick also retries failed moves. The archive pass runs at its own [slots](local-databases.md#archive-slots), not at the rotation. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Used only with `sqlite`; with `none` and `postgres` the key loads and is ignored. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
 | `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
@@ -1178,9 +1165,7 @@ The load checks the schedule keys in this order, with the prefix
 [cron messages](periodic-tasks.md#cron-messages),
 `interval must be a whole number of seconds and at least 30`,
 `lease_seconds must be a whole number from 40 to 86400`,
-`sweep_after_seconds must be at least 60`. The archive keys of earlier
-releases fail the load with the [moved-key message](#moved-and-removed-keys);
-see [Upgrading](upgrading.md#periodic-tasks-and-the-archive).
+`sweep_after_seconds must be at least 60`.
 
 ---
 

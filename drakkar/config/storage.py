@@ -10,8 +10,9 @@ results are kept.
 
 import time
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.cronexpr import validate_cron
 from drakkar.periodic import (
     PREFIX_ARCHIVE,
@@ -39,7 +40,7 @@ DEFAULT_SWEEP_AFTER_SECONDS = 7200
 MIN_SWEEP_AFTER_SECONDS = 60
 
 
-class StorageConfig(BaseModel):
+class StorageConfig(ConfigModel):
     """This worker's own files: the live recorder file, its backlog, the cache file, the crash marker."""
 
     dir: str = Field(
@@ -53,7 +54,7 @@ class StorageConfig(BaseModel):
     )
 
 
-class SharedConfig(BaseModel):
+class SharedConfig(ConfigModel):
     """The folder every worker of one fleet sees."""
 
     dir: str = Field(
@@ -66,7 +67,7 @@ class SharedConfig(BaseModel):
     )
 
 
-class HistoryArchiveConfig(BaseModel):
+class HistoryArchiveConfig(ConfigModel):
     """Daily per-cluster archives built from sealed recorder files."""
 
     enabled: bool = Field(
@@ -193,7 +194,7 @@ def _archive_rule(archive: HistoryArchiveConfig, *, now_epoch: int) -> str | Non
     return None
 
 
-class HistoryConfig(BaseModel):
+class HistoryConfig(ConfigModel):
     """What happens to recorder history after a worker is done with a file."""
 
     archive: HistoryArchiveConfig = Field(default_factory=HistoryArchiveConfig)

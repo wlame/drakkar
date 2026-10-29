@@ -4307,8 +4307,6 @@ async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
 
 async def test_cross_trace_by_label_returns_empty_when_no_storage_dir():
     """Without ``storage_dir`` the cross-worker fallback short-circuits to []."""
-    # ``UIConfig`` requires ``db_dir`` for its other validators, so build
-    # a recorder, then null the directory to exercise the early-return.
     config = make_ui_config(enabled=True, flush_interval_seconds=60)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     await rec.start()

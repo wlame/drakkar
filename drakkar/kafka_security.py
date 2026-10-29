@@ -23,7 +23,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal, NamedTuple
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
+
+from drakkar.config.base import ConfigModel
 
 # Field name -> librdkafka property. Kept as data rather than a chain of
 # ``if`` statements so adding a property is a row here, not a new branch in
@@ -79,7 +81,7 @@ SecurityProtocol = Literal['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']
 SaslMechanism = Literal['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512', 'GSSAPI', 'OAUTHBEARER']
 
 
-class KafkaSecurityConfig(BaseModel):
+class KafkaSecurityConfig(ConfigModel):
     """Authentication and encryption settings for one Kafka client.
 
     The default is ``PLAINTEXT`` with everything else empty, which emits no

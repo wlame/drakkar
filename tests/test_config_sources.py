@@ -110,11 +110,6 @@ def test_root_config_has_no_webapp_field():
     assert 'sources' in DrakkarConfig.model_fields
 
 
-def test_top_level_webapp_key_rejected_with_migration_message():
-    with pytest.raises(ValidationError, match=r'webapp: moved to sources\.http \(see docs/sources\.md\)'):
-        _config(webapp={'enabled': True})
-
-
 def _summary_config(**overrides) -> DrakkarConfig:
     base = {
         'ui': {'release': {'enabled': False}, 'port': 8081},

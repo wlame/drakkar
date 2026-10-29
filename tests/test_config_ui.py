@@ -50,27 +50,6 @@ def test_recorder_rotation_interval_hours_rejects_below_one():
         UIRecorderConfig(rotation_interval_hours=0)
 
 
-def test_recorder_has_no_folder_archive_or_stats_fields():
-    """The folder moved to storage.dir, archiving to history.archive, and the stats cache keys are gone."""
-    fields = set(UIRecorderConfig.model_fields)
-    assert not fields & {
-        'db_dir',
-        'archive_enabled',
-        'archive_window_hours',
-        'archive_retention_days',
-        'dbstats_warm_interval_seconds',
-        'dbstats_inline_scan_limit',
-    }
-    assert 'workers_offline_after_seconds' not in UIConfig.model_fields
-
-
-def test_retired_recorder_keys_are_ignored_extras():
-    """The pre-1.0 migration guards are gone: the removed keys are plain unknown keys now."""
-    rec = UIRecorderConfig(rotation_interval_minutes=60, retention_hours=24, retention_max_events=100_000)
-    assert rec.rotation_interval_hours == 1
-    assert not hasattr(rec, 'retention_hours')
-
-
 def test_annotation_defaults():
     rec = UIRecorderConfig()
     assert rec.annotations_enabled is True
@@ -134,16 +113,9 @@ def test_env_nested_override(monkeypatch):
     assert cfg.ui.port == 9001
 
 
-def test_unknown_top_level_section_is_still_fatal():
-    """The bespoke debug.* guard is gone, but the root model forbids unknown sections."""
-    with pytest.raises(ValidationError, match='Extra inputs are not permitted'):
-        DrakkarConfig(debug={'port': 9999})
-
-
-def test_retired_flat_ui_keys_are_ignored_extras():
-    cfg = DrakkarConfig(ui={'release_repo': 'a/b', 'check_update': False}, sources={'kafka': {'enabled': True}})
-    assert cfg.ui.release.repo == 'wlame/drakkar-ui'
-    assert cfg.ui.release.check_update is True
+def test_unknown_top_level_section_fails_with_the_unknown_keys_message():
+    with pytest.raises(ValidationError, match='config has unknown keys'):
+        DrakkarConfig(bogus_section={'port': 9999})
 
 
 def test_config_summary_uses_ui_token():

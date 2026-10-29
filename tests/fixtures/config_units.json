@@ -1,0 +1,166 @@
+{
+  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_refused and sizes_refused: [input, key of messages]; {v} in a message is the input as text. durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar and {v} is that text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the largest binary unit that divides it, else the largest decimal one, else B.",
+  "durations": [
+    ["2h45m", 9900000],
+    ["1.5h", 5400000],
+    ["500ms", 500],
+    ["30d", 2592000000],
+    ["0", 0],
+    [0, 0],
+    ["1.1s", 1100],
+    ["0s", 0],
+    ["1h0m", 3600000],
+    ["1d1h1m1s1ms", 90061001],
+    ["0.001s", 1],
+    ["0.00001m0.4ms", 1],
+    ["007s", 7000],
+    ["106579d", 9208425600000]
+  ],
+  "durations_refused": [
+    [30, "duration_needs_unit"],
+    [1.5, "duration_needs_unit"],
+    [-5, "duration_needs_unit"],
+    ["30", "duration_needs_unit"],
+    ["1.5", "duration_needs_unit"],
+    ["0.0", "duration_needs_unit"],
+    ["00", "duration_needs_unit"],
+    ["-5", "duration_needs_unit"],
+    [true, "duration_invalid"],
+    ["5m2h", "duration_invalid"],
+    ["1h1h", "duration_invalid"],
+    ["1 h", "duration_invalid"],
+    ["1H", "duration_invalid"],
+    ["", "duration_invalid"],
+    ["-1s", "duration_invalid"],
+    ["+1s", "duration_invalid"],
+    ["0.0005s", "duration_invalid"],
+    ["0.5ms", "duration_invalid"],
+    ["300000y", "duration_invalid"],
+    ["110000d", "duration_invalid"],
+    ["106580d", "duration_invalid"],
+    [".5h", "duration_invalid"],
+    ["1.h", "duration_invalid"],
+    ["1s ", "duration_invalid"],
+    ["١s", "duration_invalid"],
+    ["1ms1s", "duration_invalid"],
+    ["h", "duration_invalid"]
+  ],
+  "durations_refused_yaml": [
+    ["30", "duration_needs_unit"],
+    ["1.5", "duration_needs_unit"],
+    ["0.0", "duration_needs_unit"],
+    ["-5", "duration_needs_unit"],
+    ["true", "duration_invalid"],
+    ["false", "duration_invalid"]
+  ],
+  "sizes": [
+    ["64KiB", 65536],
+    ["256MB", 256000000],
+    ["1.5KiB", 1536],
+    ["0", 0],
+    [0, 0],
+    ["0.1KB", 100],
+    ["0B", 0],
+    ["1B", 1],
+    ["1.5GiB", 1610612736],
+    ["2TB", 2000000000000],
+    ["8388607TiB", 9223370937343148032]
+  ],
+  "sizes_refused": [
+    [64, "size_needs_unit"],
+    [1.5, "size_needs_unit"],
+    ["64", "size_needs_unit"],
+    ["0.0", "size_needs_unit"],
+    [true, "size_invalid"],
+    ["64kb", "size_invalid"],
+    ["1kib", "size_invalid"],
+    ["1Kib", "size_invalid"],
+    ["1 MiB", "size_invalid"],
+    ["1.1B", "size_invalid"],
+    ["", "size_invalid"],
+    ["-1B", "size_invalid"],
+    [".5KB", "size_invalid"],
+    ["1.KB", "size_invalid"],
+    ["1KiB1B", "size_invalid"],
+    ["8388608TiB", "size_invalid"]
+  ],
+  "sizes_refused_yaml": [
+    ["64", "size_needs_unit"],
+    ["0.0", "size_needs_unit"],
+    ["true", "size_invalid"]
+  ],
+  "whole_seconds": {
+    "accepted": [
+      ["30s", 30],
+      ["2m", 120],
+      ["1h", 3600],
+      ["1000ms", 1],
+      ["0", 0],
+      [0, 0]
+    ],
+    "refused": [
+      ["1500ms", "whole_seconds"],
+      ["0.5s", "whole_seconds"],
+      [30, "duration_needs_unit"],
+      ["30", "duration_needs_unit"],
+      ["soon", "duration_invalid"]
+    ]
+  },
+  "whole_hours": {
+    "accepted": [
+      ["24h", 24],
+      ["1d", 24],
+      ["120m", 2],
+      ["0", 0]
+    ],
+    "refused": [
+      ["90m", "whole_hours"],
+      ["1.5h", "whole_hours"],
+      [6, "duration_needs_unit"]
+    ]
+  },
+  "whole_days": {
+    "accepted": [
+      ["30d", 30],
+      ["48h", 2],
+      ["0", 0]
+    ],
+    "refused": [
+      ["36h", "whole_days"],
+      ["1.5d", "whole_days"],
+      [30, "duration_needs_unit"]
+    ]
+  },
+  "canonical_durations": [
+    [9900000, "2h45m"],
+    [5400000, "1h30m"],
+    [500, "500ms"],
+    [1100, "1s100ms"],
+    [0, "0"],
+    [86400000, "1d"],
+    [2592000000, "30d"],
+    [90061001, "1d1h1m1s1ms"]
+  ],
+  "canonical_sizes": [
+    [268435456, "256MiB"],
+    [5000000, "5MB"],
+    [1000, "1KB"],
+    [1500, "1500B"],
+    [0, "0"],
+    [65536, "64KiB"],
+    [1024, "1KiB"],
+    [1536, "1536B"],
+    [1, "1B"],
+    [1099511627776, "1TiB"],
+    [256000000, "250000KiB"]
+  ],
+  "messages": {
+    "duration_needs_unit": "needs a unit, for example 30s; got '{v}'",
+    "duration_invalid": "is not a duration, got '{v}'; write for example 30s or 2h45m",
+    "size_needs_unit": "needs a unit, for example 64KiB; got '{v}'",
+    "size_invalid": "is not a size, got '{v}'; write for example 64KiB or 256MB",
+    "whole_seconds": "must be a whole number of seconds, got '{v}'",
+    "whole_hours": "must be a whole number of hours, got '{v}'",
+    "whole_days": "must be a whole number of days, got '{v}'"
+  }
+}

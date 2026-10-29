@@ -5,11 +5,13 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 The models are split per domain across this package — ``kafka``, ``sinks``,
 ``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
-— and assembled by ``root``.
+— and assembled by ``root``. ``base`` holds their base class, ``units`` the types
+for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
+from drakkar.config.base import ConfigModel
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import (
     ConnectionsConfig,
@@ -57,6 +59,7 @@ from drakkar.config.storage import (
     SharedConfig,
     StorageConfig,
 )
+from drakkar.config.strict import UnknownKey, find_unknown_keys, unknown_keys_message
 from drakkar.config.ui import (
     BUILTIN_LINK_BASES,
     TIMELINE_COLOR_NAMES,
@@ -80,6 +83,17 @@ from drakkar.config.ui import (
     UITimelineConfig,
     UITraceConfig,
 )
+from drakkar.config.units import (
+    ByteSize,
+    Duration,
+    WholeDays,
+    WholeHours,
+    WholeSeconds,
+    format_duration,
+    format_size,
+    parse_duration,
+    parse_size,
+)
 from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
 __all__ = [
@@ -91,15 +105,18 @@ __all__ = [
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
     'BreakerConfig',
+    'ByteSize',
     'CacheConfig',
     'CacheExchangeConfig',
     'CircuitBreakerConfig',
+    'ConfigModel',
     'ConnectionsConfig',
     'ConsulConnectionConfig',
     'DLQConfig',
     'DocsAnchor',
     'DocsAnchorMatch',
     'DrakkarConfig',
+    'Duration',
     'ElectionConfig',
     'ExecutorConfig',
     'FileSinkConfig',
@@ -144,10 +161,20 @@ __all__ = [
     'UIReleaseConfig',
     'UITimelineConfig',
     'UITraceConfig',
+    'UnknownKey',
     'WebAppConfig',
     'WebClientConfig',
+    'WholeDays',
+    'WholeHours',
+    'WholeSeconds',
     '_deep_merge',
     '_parse_env_overrides',
+    'find_unknown_keys',
+    'format_duration',
+    'format_size',
     'load_config',
+    'parse_duration',
+    'parse_size',
+    'unknown_keys_message',
     'validate_resilience',
 ]

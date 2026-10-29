@@ -49,7 +49,7 @@ def secret_outside(tmp_path) -> Path:
 def make_docs_app(tmp_path, site_dir: str | None = None, auth_token: str = ''):
     """Build a UI app whose ``ui.docs.site_dir`` is ``site_dir`` (or unset)."""
     docs = UIDocsConfig(site_dir=site_dir) if site_dir is not None else UIDocsConfig()
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token=auth_token, docs=docs)
+    cfg = make_ui_config(enabled=True, port=8080, auth_token=auth_token, docs=docs)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -244,7 +244,7 @@ async def test_docs_unconfigured_keeps_the_hint_404_with_a_bundle_present(tmp_pa
     from tests.test_uihost import BUNDLE_FILES, seed_cache
 
     ui_root = seed_cache(tmp_path, 'v1.0.0')
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -266,7 +266,7 @@ async def test_spa_still_owns_non_docs_paths(tmp_path, docs_site):
 
     ui_root = seed_cache(tmp_path, 'v1.0.0')
     docs = UIDocsConfig(site_dir=str(docs_site))
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), docs=docs)
+    cfg = make_ui_config(enabled=True, port=8080, docs=docs)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()

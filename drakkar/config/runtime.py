@@ -6,12 +6,14 @@ comes from (``kafka``) or goes (``sinks``).
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
+
+from drakkar.config.base import ConfigModel
 
 EXECUTOR_ON_FAILURE_CHOICES = ('skip', 'dlq')
 
 
-class ExecutorConfig(BaseModel):
+class ExecutorConfig(ConfigModel):
     """Subprocess executor pool settings.
 
     ``binary_path`` is optional here — if omitted, each ``ExecutorTask``
@@ -161,7 +163,7 @@ class ExecutorConfig(BaseModel):
         return value
 
 
-class MetricsConfig(BaseModel):
+class MetricsConfig(ConfigModel):
     """Prometheus metrics settings."""
 
     enabled: bool = Field(
@@ -185,7 +187,7 @@ class MetricsConfig(BaseModel):
     )
 
 
-class RuntimeHealthConfig(BaseModel):
+class RuntimeHealthConfig(ConfigModel):
     """Runtime health monitor: event-loop lag tracking and stall introspection.
 
     A heartbeat task measures how late the runtime wakes it (event-loop
@@ -289,7 +291,7 @@ class RuntimeHealthConfig(BaseModel):
     )
 
 
-class IOConfig(BaseModel):
+class IOConfig(ConfigModel):
     """Blocking-I/O thread pool: asyncio's default ``to_thread`` executor.
 
     Every ``asyncio.to_thread(...)`` / ``loop.run_in_executor(None, ...)``
@@ -324,7 +326,7 @@ class IOConfig(BaseModel):
     )
 
 
-class OffloadConfig(BaseModel):
+class OffloadConfig(ConfigModel):
     """Thread pool for CPU-bound work handlers move off the event loop.
 
     Backs ``BaseDrakkarHandler.offload()``: a handler hook that needs to
@@ -355,7 +357,7 @@ class OffloadConfig(BaseModel):
     )
 
 
-class LoggingConfig(BaseModel):
+class LoggingConfig(ConfigModel):
     """Structured logging settings."""
 
     level: str = Field(

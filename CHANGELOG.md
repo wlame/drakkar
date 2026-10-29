@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Unknown config keys fail the load.** One message lists every unknown key
+  from the YAML file and the `DK_*` environment, with a suggestion when a valid
+  key is close. The message for moved keys and the refusal of `webapp:` are gone:
+  those keys are unknown keys now. Every config model refuses an unknown keyword
+  when it is built in code, and `PostgresConnectionConfig` takes only `schema`,
+  not `schema_name`. See `docs/upgrading.md`.
+- **A `DK_` variable reaches the existing map name.** A segment at a sink or
+  connection name takes the YAML name whose lower-case form with `-` replaced by
+  `_` equals it, so `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` changes
+  `sinks.postgres.main-db` and does not make a second instance. Two matches fail
+  the load. `load_config` reads upper-case `DK_` names only.
 - **Plugins are removed.** There are no custom sinks and no custom registry or
   election providers. `sinks.custom`, `CustomPayload` and
   `CollectResult.custom` are gone, and so are `SinkRegistry`, the entry-point
@@ -36,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider settings changed.** `fleet.registry.timeout_seconds` is now
   `fleet.registry.resilience.timeout_seconds` (env
   `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the
-  load with the moved-key message. The value now limits one attempt, and an
+  load as an unknown key. The value now limits one attempt, and an
   operation retries twice by default. The default of
   `fleet.registry.offline_after_seconds` is now 60 (it was 30), and its
   smallest value is 10. A registry provider that fails to start is tried
@@ -65,8 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `history.archive.lock_stale_seconds` is replaced by
   `history.archive.lease_seconds` (the lease, default 60, from 40 to 86400)
   and `history.archive.sweep_after_seconds` (the age of work files to sweep,
-  default 7200, at least 60); the old key fails the load with the moved-key
-  message, and so do `history.archive.election` and
+  default 7200, at least 60); the old key fails the load as an unknown
+  key, and so do `history.archive.election` and
   `history.archive.pass_interval_seconds` in a config written for an older
   build. The `filesystem` lock moved from `history/<cluster>/.archive.lock`
   to `tasks/<cluster>/history.archive.lock` in the shared folder

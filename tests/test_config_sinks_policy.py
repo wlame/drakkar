@@ -197,5 +197,5 @@ def test_config_contract_fixture_has_the_sink_policy_cases():
     assert set(NEW_LOAD_VALUE_CASES) <= load_values
 
 
-def test_sinks_custom_key_is_not_a_field():
+def test_sinks_declares_only_the_built_in_sink_types():
     assert 'custom' not in SinksConfig.model_fields

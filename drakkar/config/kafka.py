@@ -1,11 +1,12 @@
 """Kafka cluster connection configuration, shared by the Kafka source, Kafka sinks and the DLQ."""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
 
 
-class KafkaConfig(BaseModel):
+class KafkaConfig(ConfigModel):
     """Kafka connection settings: brokers, transport security, raw client properties, Kafka-UI links."""
 
     brokers: str = Field(

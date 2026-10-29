@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
+import drakkar.sinks.manager as manager_module
 from drakkar.config import SinkPolicy, UIConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -33,6 +37,23 @@ from drakkar.sinks.manager import (
 )
 
 # --- Helpers ---
+
+
+@pytest.fixture(autouse=True)
+def debug_events_reach_capture_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Let the manager's ``debug`` events reach ``capture_logs``, whatever ran before in this process.
+
+    ``setup_logging`` installs a filtering logger and caches it on first use, so
+    a test that ran earlier can leave the module's logger dropping ``debug`` calls.
+    """
+    saved = structlog.get_config()
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        cache_logger_on_first_use=False,
+    )
+    monkeypatch.setattr(manager_module, 'logger', structlog.get_logger('drakkar.sinks.manager'))
+    yield
+    structlog.configure(**saved)
 
 
 class Data(BaseModel):

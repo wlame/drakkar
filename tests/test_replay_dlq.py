@@ -540,7 +540,7 @@ def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
         '  kafka:\n'
         '    enabled: true\n'
         '    topic: "requests"\n'
-        '  consumer_group: "grp"\n'
+        '    consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "custom-dlq"\n'
         '  brokers: "other-cluster:9092"\n'

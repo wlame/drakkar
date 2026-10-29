@@ -20,7 +20,7 @@ import enum
 import re
 import types
 from pathlib import Path
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, SecretStr
 from pydantic.fields import FieldInfo
@@ -47,6 +47,8 @@ from drakkar.config import (
     StorageConfig,
     UIConfig,
 )
+from drakkar.config.strict import yaml_key
+from drakkar.config.units import UnitKind
 
 # The artifact this module regenerates. Mirrors the vendored-OpenAPI-spec
 # location (``drakkar/uiserver/openapi.yaml``) so both generated contracts
@@ -73,9 +75,9 @@ class ConfigFieldMeta(BaseModel):
 
     env: str | None
     """``DK_``-prefixed environment-variable override, ``__``-joined per
-    nesting level. ``None`` for any path containing a ``*`` segment: see the
-    module-level ``_ENV_NONE_FOR_DYNAMIC_PATHS`` note for why that is the
-    truthful answer rather than a guess at a per-instance name."""
+    nesting level. ``None`` for any path containing a ``*`` segment: the real
+    variable embeds the operator-chosen instance name, so no single fixed
+    name exists."""
 
     description: str
     """First sentence of the field's ``Field(description=...)``, or ``''``
@@ -85,13 +87,15 @@ class ConfigFieldMeta(BaseModel):
     """The complete ``Field(description=...)`` text, or ``''``."""
 
     type: str
-    """Simple JSON-ish type name: string/integer/number/boolean/array/object."""
+    """Simple JSON-ish type name: string/integer/number/boolean/array/object,
+    or ``duration``/``size`` for a value written with a unit."""
 
     default: Any
-    """JSON-safe default value. ``None`` for required fields (no default
-    exists) — indistinguishable from an actual ``None`` default, which is
-    acceptable for a display hint; the schema-level ``required``-ness is not
-    tracked separately here because no consumer needs it yet (YAGNI)."""
+    """JSON-safe default value, as its canonical text for a value with a unit.
+    ``None`` for required fields (no default exists) — indistinguishable from
+    an actual ``None`` default, which is acceptable for a display hint; the
+    schema-level ``required``-ness is not tracked separately here because no
+    consumer needs it yet (YAGNI)."""
 
     secret: bool
     """True when the field was marked ``json_schema_extra={'drakkar_secret': True}``
@@ -168,45 +172,8 @@ def _mkdocs_anchor(heading_text: str) -> str:
     return slug
 
 
-# --- env-var override decision for dynamic-instance (`*`) paths ---------
-#
-# ``load_config`` (drakkar/config/root.py) builds env overrides by lower-casing
-# each `__`-delimited segment and deep-merging the result onto the parsed
-# YAML dict, matched by literal dict key — see `_parse_env_overrides` and
-# `_deep_merge`. There is no key-normalisation step for map keys. That
-# matters for sink/webapp-client instance names containing a hyphen: YAML
-# `sinks.postgres.main-db` and env segment `MAIN_DB` lower-case to
-# different dict keys (`main-db` vs `main_db`), so
-# `DK_SINKS__POSTGRES__MAIN_DB__DSN` does NOT override the `main-db`
-# instance — it silently creates a second, mostly-empty `main_db` instance
-# alongside it (confirmed empirically: see the config-metadata report for
-# the reproduction). docs/config-reference.md's env cheatsheet claims
-# "Drakkar lowercases the env path on parse, then matches it against the
-# YAML keys" for hyphenated map keys, which is not actually implemented on
-# the Python backend.
-#
-# Given that, ConfigFieldMeta.env is `None` for every path containing a
-# `*` segment: there is no single fixed env-var name for a dynamic-instance
-# field (the real var embeds an operator-chosen instance name), and
-# claiming a templated one (e.g. `DK_SINKS__POSTGRES__*__DSN`) would imply
-# a guarantee the loader does not honor for the common case of a hyphenated
-# instance name. `None` is the truthful answer, not a shortcut.
-_ENV_NONE_FOR_DYNAMIC_PATHS = True
-
-
 def _is_basemodel(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, BaseModel)
-
-
-def _yaml_key(name: str, info: FieldInfo) -> str:
-    """The key an operator writes for a field: its alias when it has one, else its name.
-
-    A field cannot always carry the YAML key as its name (``schema`` would
-    shadow a ``BaseModel`` attribute), so it takes an alias. The walker's
-    paths and :func:`dump_by_yaml_key` both use this rule, which is what lets
-    a live value be found under the path of its metadata row.
-    """
-    return info.alias or name
 
 
 def _dict_of_model_value_type(annotation: Any) -> type[BaseModel] | None:
@@ -279,6 +246,39 @@ def _to_jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _to_jsonable(v) for k, v in value.items()}
     return value
+
+
+def _unit_kind_in(annotation: Any) -> UnitKind | None:
+    """The unit marker of an ``Annotated`` type, directly or in a branch of a union."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return next((item for item in get_args(annotation)[1:] if isinstance(item, UnitKind)), None)
+    if origin is Union or origin is types.UnionType:
+        return next(filter(None, map(_unit_kind_in, get_args(annotation))), None)
+    return None
+
+
+def _unit_kind(field_info: FieldInfo) -> UnitKind | None:
+    """The unit marker of a field: pydantic moves a top-level ``Annotated`` into ``metadata``."""
+    marker = next((item for item in field_info.metadata if isinstance(item, UnitKind)), None)
+    return marker or _unit_kind_in(field_info.annotation)
+
+
+def _canonical_items(annotation: Any, value: Any) -> Any:
+    """A default as the metadata shows it: values with a unit as text, also inside a list."""
+    kind = _unit_kind_in(annotation)
+    if kind is not None:
+        return None if value is None else kind.to_text(value)
+    if get_origin(annotation) is list and isinstance(value, list):
+        return [_canonical_items(get_args(annotation)[0], item) for item in value]
+    return _to_jsonable(value)
+
+
+def _canonical_default(field_info: FieldInfo, value: Any) -> Any:
+    kind = _unit_kind(field_info)
+    if kind is not None:
+        return None if value is None else kind.to_text(value)
+    return _canonical_items(field_info.annotation, value)
 
 
 def _json_type(annotation: Any) -> str:
@@ -371,14 +371,15 @@ def _build_leaf(
     description = field_info.description or ''
 
     default_raw = field_info.get_default(call_default_factory=True)
-    default = None if default_raw is PydanticUndefined else _to_jsonable(default_raw)
+    default = None if default_raw is PydanticUndefined else _canonical_default(field_info, default_raw)
+    kind = _unit_kind(field_info)
 
     return ConfigFieldMeta(
         path=path,
         env=env,
         description=_first_sentence(description),
         full_description=description,
-        type=_json_type(field_info.annotation),
+        type=kind.type_name if kind is not None else _json_type(field_info.annotation),
         default=default,
         secret=_is_secret(field_info),
         group=group,
@@ -417,7 +418,7 @@ def _walk(
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation
         # The env name is built from the path, so it follows the YAML key.
-        full_path = [*path_segments, _yaml_key(name, info)]
+        full_path = [*path_segments, yaml_key(name, info)]
 
         if _is_basemodel(annotation):
             _walk(annotation, full_path, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)
@@ -479,7 +480,7 @@ def _rekey_model(model_cls: type[BaseModel], dumped: dict[str, Any]) -> dict[str
         if info is None:
             rekeyed[name] = value
         else:
-            rekeyed[_yaml_key(name, info)] = _rekey_value(info.annotation, value)
+            rekeyed[yaml_key(name, info)] = _rekey_value(info.annotation, value)
     return rekeyed
 
 

@@ -5,12 +5,13 @@ cluster periodic task, the one worker of the cluster that runs it (the
 ``history.archive`` system task included).
 """
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
 
 
-class ElectionConfig(BaseModel):
+class ElectionConfig(ConfigModel):
     """Which provider decides the one worker of a cluster that runs a cluster task slot."""
 
     provider: str = Field(
@@ -44,7 +45,7 @@ class ElectionConfig(BaseModel):
         return self
 
 
-class PeriodicConfig(BaseModel):
+class PeriodicConfig(ConfigModel):
     """The election of cluster periodic tasks."""
 
     election: ElectionConfig = Field(

@@ -6,10 +6,12 @@ breaker, but it counts failed operations and is described for providers, so
 it is a model of its own.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from drakkar.config.base import ConfigModel
 
 
-class BreakerConfig(BaseModel):
+class BreakerConfig(ConfigModel):
     """Circuit breaker of one provider: when it opens and how long it stays open."""
 
     failure_threshold: int = Field(
@@ -29,7 +31,7 @@ class BreakerConfig(BaseModel):
     )
 
 
-class ResilienceConfig(BaseModel):
+class ResilienceConfig(ConfigModel):
     """How one provider is called: attempt time limit, retries with backoff, circuit breaker."""
 
     timeout_seconds: float = Field(

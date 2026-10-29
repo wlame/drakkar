@@ -375,9 +375,7 @@ class TestDynamicExpansion:
 class TestAliasedFields:
     async def test_the_live_schema_of_a_connection_is_answered_under_the_yaml_key(self):
         config = DrakkarConfig(sources={'kafka': {'enabled': True}})
-        config.connections.postgres['main'] = PostgresConnectionConfig(
-            dsn='postgresql://u:pw@h/db', schema_name='audit'
-        )
+        config.connections.postgres['main'] = PostgresConnectionConfig(dsn='postgresql://u:pw@h/db', schema='audit')
         body = await get_config_reference(config)
 
         entry = entries_by_path(body, 'connections.postgres.main.schema')[0]

@@ -1,7 +1,9 @@
 """Handler cache configuration (exchange with peers lives in ``fleet.cache_exchange``)."""
 
 import structlog
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
+
+from drakkar.config.base import ConfigModel
 
 # Module-scope logger for config-time warnings (field/model validators).
 # These fire once per process at config load, so the sync structlog API
@@ -9,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 logger = structlog.get_logger()
 
 
-class CacheConfig(BaseModel):
+class CacheConfig(ConfigModel):
     """Handler-accessible key/value cache, memory-backed with write-behind SQLite.
 
     When ``enabled=true``, every handler gains a ``self.cache`` attribute for

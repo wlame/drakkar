@@ -7,8 +7,9 @@ depth) and the consume-pause presets, which are UI-driven controls.
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.config.resilience import ResilienceConfig
 
 Persistence = Literal['none', 'sqlite', 'postgres']
@@ -26,7 +27,7 @@ TABLE_PREFIX_MESSAGE = (
 )
 
 
-class UIRecorderMemoryConfig(BaseModel):
+class UIRecorderMemoryConfig(ConfigModel):
     """Bounds of the in-memory recorder store (used when ``ui.recorder.store_events`` is on)."""
 
     window_seconds: int = Field(
@@ -57,7 +58,7 @@ class UIRecorderMemoryConfig(BaseModel):
     )
 
 
-class UIRecorderPostgresConfig(BaseModel):
+class UIRecorderPostgresConfig(ConfigModel):
     """Settings of the ``postgres`` recorder mode: the table that holds the history of all workers.
 
     The DSN and the schema come from ``connections.postgres.<connection>``. The keys load and do
@@ -115,7 +116,7 @@ class UIRecorderPostgresConfig(BaseModel):
         return value
 
 
-class UIRecorderConfig(BaseModel):
+class UIRecorderConfig(ConfigModel):
     """Flight-recorder persistence settings — the UI's data store.
 
     With ``persistence: sqlite`` the recorder also writes SQLite files into
@@ -295,7 +296,7 @@ class UIRecorderConfig(BaseModel):
     )
 
 
-class UIReleaseConfig(BaseModel):
+class UIReleaseConfig(ConfigModel):
     """Decoupled drakkar-ui bundle fetching settings.
 
     The UI ships as its own versioned bundle (the separate drakkar-ui repo,
@@ -365,7 +366,7 @@ class UIReleaseConfig(BaseModel):
         return v
 
 
-class UIProbeDetailsConfig(BaseModel):
+class UIProbeDetailsConfig(ConfigModel):
     """Caps for the Message Probe's user-defined details writes.
 
     Both limits guard a single probe run against a handler that writes
@@ -412,10 +413,8 @@ _TIMELINE_NUMERIC_OPS = frozenset({'gt', 'ge', 'lt', 'le'})
 _TIMELINE_HEX_RE = re.compile(r'#[0-9a-fA-F]{6}')
 
 
-class TimelineRuleCondition(BaseModel):
+class TimelineRuleCondition(ConfigModel):
     """One condition of a timeline color rule: a label or task field compared with an operator."""
-
-    model_config = ConfigDict(extra='forbid')
 
     label: str = ''
     field: str = ''
@@ -442,10 +441,8 @@ class TimelineRuleCondition(BaseModel):
         return self
 
 
-class TimelineColorRule(BaseModel):
+class TimelineColorRule(ConfigModel):
     """A first-match-wins bar-coloring rule: all conditions in `when` must hold."""
-
-    model_config = ConfigDict(extra='forbid')
 
     name: str = ''
     when: list[TimelineRuleCondition] = Field(min_length=1)
@@ -464,10 +461,8 @@ class TimelineColorRule(BaseModel):
         raise ValueError(f"timeline color '{value}' must be one of {sorted(TIMELINE_COLOR_NAMES)} or '#rrggbb'")
 
 
-class TimelineLabels(BaseModel):
+class TimelineLabels(ConfigModel):
     """Which task label the UI uses for each special timeline role; empty = role unbound."""
-
-    model_config = ConfigDict(extra='forbid')
 
     tag: str = Field(
         default='',
@@ -505,10 +500,8 @@ class TimelineLabels(BaseModel):
 _TIMELINE_EVENT_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
 
 
-class TimelineEventType(BaseModel):
+class TimelineEventType(ConfigModel):
     """One declared custom timeline event type: its identity, look, and click behavior."""
-
-    model_config = ConfigDict(extra='forbid')
 
     name: str = Field(description='Type identifier handlers emit by; lower_snake_case, unique in the list.')
     kind: Literal['marker', 'range', 'flag'] = Field(
@@ -559,10 +552,8 @@ class TimelineEventType(BaseModel):
         return self
 
 
-class UITimelineConfig(BaseModel):
+class UITimelineConfig(ConfigModel):
     """Timeline history depth, bar color rules, and special label roles."""
-
-    model_config = ConfigDict(extra='forbid')
 
     history_factor: int = Field(
         default=100,
@@ -601,7 +592,7 @@ class UITimelineConfig(BaseModel):
         return value
 
 
-class UIConsumePauseConfig(BaseModel):
+class UIConsumePauseConfig(ConfigModel):
     """Timed debug pause of the pipeline consumer, driven from the Live page.
 
     Opt-in (``enabled: false`` by default) because it directly affects the
@@ -668,10 +659,8 @@ _DOCS_PATH_RE = re.compile(r'^[^/#][^#]*(#[^#]*)?$')
 _DOCS_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*:')
 
 
-class DocsAnchorMatch(BaseModel):
+class DocsAnchorMatch(ConfigModel):
     """Exactly one selector naming the UI context this anchor attaches to."""
-
-    model_config = ConfigDict(extra='forbid')
 
     label: str = Field(
         default='',
@@ -697,10 +686,8 @@ class DocsAnchorMatch(BaseModel):
         return self
 
 
-class DocsAnchor(BaseModel):
+class DocsAnchor(ConfigModel):
     """One contextual link from a UI surface into the operator docs site."""
-
-    model_config = ConfigDict(extra='forbid')
 
     match: DocsAnchorMatch = Field(description='Which UI context shows this anchor; exactly one selector.')
     path: str = Field(
@@ -735,10 +722,8 @@ class DocsAnchor(BaseModel):
         return value
 
 
-class UIDocsConfig(BaseModel):
+class UIDocsConfig(ConfigModel):
     """Operator docs site served at /docs/ plus its contextual anchors."""
-
-    model_config = ConfigDict(extra='forbid')
 
     site_dir: str = Field(
         default='',
@@ -770,7 +755,7 @@ class UIDocsConfig(BaseModel):
         return value
 
 
-class UITraceConfig(BaseModel):
+class UITraceConfig(ConfigModel):
     """Budget of one trace search over sealed history files."""
 
     history_max_files: int = Field(
@@ -791,7 +776,7 @@ class UITraceConfig(BaseModel):
     )
 
 
-class UIConfig(BaseModel):
+class UIConfig(ConfigModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
     One first-class ``ui.*`` section covers the whole surface:

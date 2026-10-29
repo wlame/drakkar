@@ -31,8 +31,8 @@ def make_ui_config(**kwargs) -> UIConfig:
     """Build a ``UIConfig`` from flat kwargs, routing recorder-tier fields.
 
     Test convenience so the many call sites that mix server settings with
-    persistence settings (``make_ui_config(port=8080, db_dir='/tmp')``)
-    stay one-liners after the ``debug.*``→``ui.*`` merge. ``recorder=`` /
+    persistence settings (``make_ui_config(port=8080, max_buffer=10)``)
+    stay one-liners. ``recorder=`` /
     ``release=`` kwargs still pass through for tests that want the nested
     form explicitly.
     """

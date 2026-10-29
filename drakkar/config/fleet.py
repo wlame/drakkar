@@ -7,8 +7,9 @@ peers. Neither is needed for the pipeline itself: sources, executor, sinks
 and offset commits work the same with both switched off.
 """
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from drakkar.config.base import ConfigModel
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
 
 # Providers that reach a shared service through a named entry of ``connections``.
@@ -25,7 +26,7 @@ MIN_OFFLINE_AFTER_SECONDS = 10
 CONSUL_MAX_OFFLINE_AFTER_SECONDS = 86_400
 
 
-class FleetRegistryConfig(BaseModel):
+class FleetRegistryConfig(ConfigModel):
     """The registry of worker cards."""
 
     provider: str = Field(
@@ -107,7 +108,7 @@ class FleetRegistryConfig(BaseModel):
         return self
 
 
-class CacheExchangeConfig(BaseModel):
+class CacheExchangeConfig(ConfigModel):
     """How this worker pulls ``cluster`` and ``global`` cache rows from its peers."""
 
     enabled: bool = Field(
@@ -142,7 +143,7 @@ class CacheExchangeConfig(BaseModel):
         return self
 
 
-class FleetConfig(BaseModel):
+class FleetConfig(ConfigModel):
     """Worker registry and cache exchange."""
 
     registry: FleetRegistryConfig = Field(default_factory=FleetRegistryConfig)

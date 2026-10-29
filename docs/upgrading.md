@@ -179,12 +179,12 @@ volumeMounts:
 ## 7. Check the result
 
 1. Start one worker. If a key is still old, the load fails with one
-   message that lists every old key, for example:
+   message that lists every unknown key, for example:
 
     ```
-    config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
-      ui.recorder.db_dir -> storage.dir
-      cache.db_dir: removed, the cache file lives in storage.dir
+    config has unknown keys (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/config-reference.md):
+      cache.db_dir
+      ui.recorder.db_dir
     ```
 
 2. Read the startup line `drakkar_starting`. Its summary shows
@@ -265,12 +265,7 @@ same peer offline at different times.
 |---|---|---|---|
 | `fleet.registry.timeout_seconds` | `fleet.registry.resilience.timeout_seconds` | `DK_FLEET__REGISTRY__TIMEOUT_SECONDS` | `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS` |
 
-The old key fails the load with the moved-key message, as in step 7 above:
-
-```
-config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
-  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds
-```
+The old key fails the load as an unknown key, as in step 7 above.
 
 The value now limits **one attempt**. By default an operation makes up to
 three attempts (`resilience.retries: 2`) with waits of 0.2 s and 0.4 s
@@ -396,12 +391,7 @@ it runs at archive slots, at the top of each UTC hour by default.
 Release 2.4.0 has only the first of these keys; the other two exist only in
 configs written for an older build of this release.
 
-Each old key fails the load with the moved-key message:
-
-```
-config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/upgrading.md):
-  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)
-```
+Each old key fails the load as an unknown key.
 
 The old `lock_stale_seconds` was both the lease and the sweep age. If you
 set it, set `sweep_after_seconds` to the old value and leave
@@ -596,3 +586,30 @@ Do these steps in order.
     `dlq_send_failed` and `dlq_failure_payloads_dropped` cover those cases.
 11. **Protect the DLQ topic like the source topic.** It now holds the original
     messages; see [Security](security.md#the-dlq-topic-holds-original-messages).
+
+## Config keys are strict {#strict-keys}
+
+Before this release, a nested section dropped a key it did not know, and the
+value stopped applying with no message. Now every unknown key fails the load, in
+the YAML file and in a `DK_*` variable, and one message lists them all:
+
+```
+config has unknown keys (YAML paths; as env vars they are DK_ plus the path with "__"; see docs/config-reference.md):
+  sinks.kafka.results.max_retires (did you mean 'max_retries'?)
+  ui.recorder.db_dir
+```
+
+1. **Delete or correct each key in the message.** A key that was ignored
+   before, for example `rotation_interval_minutes`, must go. This includes the
+   keys that used to give a "moved" message and the top-level `webapp:` section,
+   which is `sources.http`.
+2. **Check variables for hyphenated names.** A variable now reaches the existing
+   name: `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` changes `sinks.postgres.main-db`.
+   Before, it made a second instance `main_db`. If two names in the YAML match one
+   variable (`main-db` and `main_db`), the load fails: rename one.
+3. **Set `schema` of a Postgres connection by that key.** In Python code,
+   `PostgresConnectionConfig(schema='audit')` is the only form; the attribute
+   stays `schema_name`.
+4. **Config models refuse unknown keywords** when you build one in code.
+   `DrakkarConfig(**other.model_dump())` fails with a Postgres connection, because
+   the dump keys it `schema_name`. Use `drakkar.configmeta.dump_by_yaml_key`.

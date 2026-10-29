@@ -891,12 +891,6 @@ byte-level spec. The short version:
   entirely — nothing then deletes sealed recorder files or merge results
   automatically, and a startup log line (`recorder_archiving_disabled`,
   field `folder`) says so.
-- **Renamed key:** `rotation_interval_minutes` is now
-  `rotation_interval_hours`, with a unit change (`1` = 1 hour, not 1
-  minute). `rotation_interval_minutes`, `retention_hours` and
-  `retention_max_events` are gone and are ignored if
-  still present — see [Renamed and removed
-  keys](local-databases.md#renamed-and-removed-keys).
 
 ```yaml
 storage:

@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the moved-key load error, the summary line, and the cross-field validation messages (fleet, history, periodic, election, connections and sinks). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, and the cross-field validation messages (fleet, history, periodic, election, connections and sinks). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "sources": {
       "kafka": {
@@ -12,175 +12,146 @@
       }
     }
   },
-  "moved_keys": [
+  "unknown_keys": [
     {
-      "name": "single_yaml_key",
+      "name": "sink_key_with_suggestion",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "db_dir": "/data"
-          }
-        }
-      },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir"
-    },
-    {
-      "name": "yaml_and_env_keys_in_table_order",
-      "yaml": {
-        "cache": {
-          "db_dir": "/cache"
-        },
-        "ui": {
-          "recorder": {
-            "db_dir": "/data"
-          }
-        }
-      },
-      "env": {
-        "DK_CACHE__PEER_SYNC__INTERVAL_SECONDS": "10"
-      },
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir"
-    },
-    {
-      "name": "null_value_still_reported",
-      "yaml": {
-        "ui": {
-          "workers_offline_after_seconds": null
-        }
-      },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds"
-    },
-    {
-      "name": "empty_string_still_reported",
-      "yaml": {
-        "ui": {
-          "recorder": {
-            "db_dir": ""
-          }
-        }
-      },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir"
-    },
-    {
-      "name": "every_key",
-      "yaml": {
-        "ui": {
-          "recorder": {
-            "db_dir": "/data",
-            "archive_enabled": true,
-            "archive_window_hours": 24,
-            "archive_retention_days": 30,
-            "dbstats_warm_interval_seconds": 60,
-            "dbstats_inline_scan_limit": 4
-          },
-          "workers_offline_after_seconds": 30
-        },
-        "cache": {
-          "peer_sync": {
-            "enabled": true,
-            "interval_seconds": 30,
-            "batch_size": 500,
-            "timeout_seconds": 5,
-            "cycle_deadline_seconds": null
-          },
-          "db_dir": "/cache"
-        },
-        "fleet": {
-          "registry": {
-            "timeout_seconds": 5
-          }
-        },
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "redis"
-            },
-            "lock_stale_seconds": 7200,
-            "pass_interval_seconds": 20
-          }
-        }
-      },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.db_dir -> storage.dir\n  ui.recorder.archive_enabled -> history.archive.enabled\n  ui.recorder.archive_window_hours -> history.archive.window_hours\n  ui.recorder.archive_retention_days -> history.archive.retention_days\n  ui.workers_offline_after_seconds -> fleet.registry.offline_after_seconds\n  cache.peer_sync.enabled -> fleet.cache_exchange.enabled\n  cache.peer_sync.interval_seconds -> fleet.cache_exchange.interval_seconds\n  cache.peer_sync.batch_size -> fleet.cache_exchange.page_size\n  cache.peer_sync.timeout_seconds -> fleet.cache_exchange.timeout_seconds\n  cache.peer_sync.cycle_deadline_seconds -> fleet.cache_exchange.cycle_deadline_seconds\n  cache.db_dir: removed, the cache file lives in storage.dir\n  ui.recorder.dbstats_warm_interval_seconds: removed, database statistics are no longer cached in a shared file\n  ui.recorder.dbstats_inline_scan_limit: removed, database statistics are no longer cached in a shared file\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds\n  history.archive.election -> periodic.election\n  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)\n  history.archive.pass_interval_seconds -> history.archive.interval (a slot schedule; no pass after each rotation)"
-    },
-    {
-      "name": "env_only_old_key",
-      "env_only": true,
-      "yaml": {},
-      "env": {
-        "DK_UI__RECORDER__ARCHIVE_ENABLED": "false",
-        "DK_CACHE__DB_DIR": "/cache"
-      },
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  ui.recorder.archive_enabled -> history.archive.enabled\n  cache.db_dir: removed, the cache file lives in storage.dir"
-    },
-    {
-      "name": "registry_timeout_moved",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "timeout_seconds": 5
-          }
-        }
-      },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
-    },
-    {
-      "name": "registry_timeout_moved_env",
-      "yaml": {},
-      "env": {
-        "DK_FLEET__REGISTRY__TIMEOUT_SECONDS": "5"
-      },
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  fleet.registry.timeout_seconds -> fleet.registry.resilience.timeout_seconds"
-    },
-    {
-      "name": "archive_election_moved",
-      "yaml": {
-        "history": {
-          "archive": {
-            "election": {
-              "provider": "redis"
+        "sinks": {
+          "kafka": {
+            "results": {
+              "max_retires": 3
             }
           }
         }
       },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.election -> periodic.election"
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  sinks.kafka.results.max_retires (did you mean 'max_retries'?)"
     },
     {
-      "name": "archive_election_moved_by_env",
-      "yaml": {},
-      "env": {
-        "DK_HISTORY__ARCHIVE__ELECTION__PROVIDER": "redis"
-      },
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.election -> periodic.election"
-    },
-    {
-      "name": "lock_stale_moved",
+      "name": "top_level_typo",
       "yaml": {
-        "history": {
-          "archive": {
-            "lock_stale_seconds": 7200
+        "executer": {
+          "max_retries": 1
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executer (did you mean 'executor'?)"
+    },
+    {
+      "name": "section_name_typo_with_children",
+      "yaml": {
+        "sinks": {
+          "kafak": {
+            "results": {
+              "topic": "t"
+            }
           }
         }
       },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.lock_stale_seconds -> history.archive.lease_seconds (the lease) and history.archive.sweep_after_seconds (the age of work files to sweep)"
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  sinks.kafak (did you mean 'kafka'?)"
     },
     {
-      "name": "pass_interval_moved",
+      "name": "short_key_no_suggestion_at_distance_2",
       "yaml": {
-        "history": {
-          "archive": {
-            "pass_interval_seconds": 0
+        "metrics": {
+          "pt": 9090
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.pt"
+    },
+    {
+      "name": "short_key_suggestion_at_distance_1",
+      "yaml": {
+        "metrics": {
+          "prt": 9090
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.prt (did you mean 'port'?)"
+    },
+    {
+      "name": "non_ascii_key_counts_characters",
+      "yaml": {
+        "metrics": {
+          "pört": 9090
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.pört (did you mean 'port'?)"
+    },
+    {
+      "name": "long_key_no_suggestion_at_distance_3",
+      "yaml": {
+        "metrics": {
+          "enabledxyz": true
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.enabledxyz"
+    },
+    {
+      "name": "tie_goes_to_the_key_that_sorts_first",
+      "yaml": {
+        "sinks": {
+          "http": {
+            "x": {
+              "x_url": "http://h"
+            }
           }
         }
       },
-      "env": {},
-      "message": "config uses keys that moved or were removed (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/upgrading.md):\n  history.archive.pass_interval_seconds -> history.archive.interval (a slot schedule; no pass after each rotation)"
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  sinks.http.x.x_url (did you mean 'ui_url'?)"
+    },
+    {
+      "name": "list_element_key",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "events": [
+              {},
+              {},
+              {
+                "colour": "red"
+              }
+            ]
+          }
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  ui.timeline.events[2].colour (did you mean 'color'?)"
+    },
+    {
+      "name": "list_indexes_sort_as_text",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "events": [
+              {},
+              {},
+              {
+                "colour": "red"
+              },
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {
+                "colour": "red"
+              }
+            ]
+          }
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  ui.timeline.events[10].colour (did you mean 'color'?)\n  ui.timeline.events[2].colour (did you mean 'color'?)"
+    },
+    {
+      "name": "two_keys_in_sorted_order",
+      "yaml": {
+        "ui": {
+          "bogus_one": 1
+        },
+        "executor": {
+          "bogus_two": 2
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executor.bogus_two\n  ui.bogus_one"
     }
   ],
   "summary": [
@@ -1484,6 +1455,33 @@
         }
       },
       "message": "executor.on_failure must be skip or dlq, got 'retry'"
+    },
+    {
+      "name": "env_segment_matches_two_names",
+      "yaml": {
+        "sinks": {
+          "postgres": {
+            "main-db": {
+              "dsn": "x"
+            },
+            "main_db": {
+              "dsn": "y"
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX": "3"
+      },
+      "message": "the environment name 'main_db' under sinks.postgres matches more than one configured name: main-db, main_db"
+    },
+    {
+      "name": "env_typo_names_the_path",
+      "yaml": {},
+      "env": {
+        "DK_EXECUTOR__MAX_EXECUTER": "8"
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executor.max_executer (did you mean 'max_executors'?)"
     }
   ],
   "load_values": [
@@ -1763,6 +1761,74 @@
       "yaml": {},
       "path": "executor.on_failure",
       "value": "skip"
+    },
+    {
+      "name": "env_segment_takes_the_hyphenated_sink_name",
+      "yaml": {
+        "sinks": {
+          "postgres": {
+            "main-db": {
+              "dsn": "postgresql://h/db"
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX": "3"
+      },
+      "path": "sinks.postgres.main-db.pool_max",
+      "value": 3
+    },
+    {
+      "name": "env_segment_takes_the_mixed_case_sink_name",
+      "yaml": {
+        "sinks": {
+          "postgres": {
+            "MainDB": {
+              "dsn": "postgresql://h/db"
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_SINKS__POSTGRES__MAINDB__POOL_MAX": "3"
+      },
+      "path": "sinks.postgres.MainDB.pool_max",
+      "value": 3
+    },
+    {
+      "name": "env_segment_with_no_match_declares_its_own_name",
+      "yaml": {
+        "sinks": {
+          "postgres": {
+            "main-db": {
+              "dsn": "postgresql://h/db"
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_SINKS__POSTGRES__OTHER_DB__DSN": "postgresql://h/other"
+      },
+      "path": "sinks.postgres.other_db.dsn",
+      "value": "postgresql://h/other"
+    },
+    {
+      "name": "env_segment_takes_the_hyphenated_connection_name",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main-pg": {
+              "dsn": "postgresql://h/db"
+            }
+          }
+        }
+      },
+      "env": {
+        "DK_CONNECTIONS__POSTGRES__MAIN_PG__POOL_MAX": "9"
+      },
+      "path": "connections.postgres.main-pg.pool_max",
+      "value": 9
     }
   ]
 }

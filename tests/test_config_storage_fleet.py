@@ -1,4 +1,4 @@
-"""The storage, shared, history and fleet config sections and the moved-key table."""
+"""The storage, shared, history and fleet config sections."""
 
 import re
 
@@ -18,12 +18,6 @@ from drakkar.config import (
     StorageConfig,
     UITraceConfig,
     load_config,
-)
-from drakkar.config.moved_keys import (
-    MOVED_CONFIG_KEYS,
-    MOVED_KEYS_HEADER,
-    find_moved_keys,
-    moved_keys_message,
 )
 
 
@@ -81,12 +75,13 @@ def test_fleet_registry_fields_are_the_provider_choice_the_timings_and_the_resil
     }
 
 
-def test_the_old_offline_default_still_loads_with_the_default_heartbeat():
+def test_offline_after_seconds_of_30_loads_with_the_default_heartbeat():
     assert FleetRegistryConfig(offline_after_seconds=30).heartbeat_seconds == 10
 
 
-def test_timeout_seconds_is_no_longer_a_registry_field():
+def test_the_registry_time_limit_lives_in_its_resilience_block():
     assert 'timeout_seconds' not in FleetRegistryConfig.model_fields
+    assert 'timeout_seconds' in FleetRegistryConfig.model_fields['resilience'].annotation.model_fields
 
 
 def test_offline_after_seconds_of_zero_fails_at_the_field():
@@ -116,60 +111,6 @@ def test_ui_trace_defaults():
 
     assert trace.history_max_files == 256
     assert trace.history_max_seconds == 10.0
-
-
-# --- moved-key table -----------------------------------------------------
-
-
-def test_find_moved_keys_returns_table_order_whatever_the_tree_order():
-    tree = {'cache': {'db_dir': '/c', 'peer_sync': {'batch_size': 1}}, 'ui': {'recorder': {'db_dir': '/d'}}}
-
-    found = [key.path for key in find_moved_keys(tree)]
-
-    assert found == ['ui.recorder.db_dir', 'cache.peer_sync.batch_size', 'cache.db_dir']
-
-
-def test_find_moved_keys_reports_a_key_whose_value_is_none():
-    assert [key.path for key in find_moved_keys({'ui': {'workers_offline_after_seconds': None}})] == [
-        'ui.workers_offline_after_seconds'
-    ]
-
-
-def test_find_moved_keys_ignores_a_parent_that_is_not_a_mapping():
-    assert find_moved_keys({'cache': 'not-a-section', 'ui': None}) == []
-
-
-def test_find_moved_keys_ignores_the_new_keys():
-    tree = {'storage': {'dir': '/s'}, 'fleet': {'cache_exchange': {'page_size': 10}}, 'cache': {'enabled': True}}
-
-    assert find_moved_keys(tree) == []
-
-
-def test_moved_keys_message_is_the_header_then_one_indented_line_per_key():
-    found = [MOVED_CONFIG_KEYS[0], MOVED_CONFIG_KEYS[-1]]
-
-    assert moved_keys_message(found) == '\n'.join(
-        [MOVED_KEYS_HEADER, f'  {MOVED_CONFIG_KEYS[0].line}', f'  {MOVED_CONFIG_KEYS[-1].line}']
-    )
-
-
-def test_every_moved_key_line_starts_with_its_path():
-    for key in MOVED_CONFIG_KEYS:
-        assert key.line.startswith(f'{key.path} -> ') or key.line.startswith(f'{key.path}: removed, ')
-
-
-def test_direct_construction_rejects_a_moved_key():
-    with pytest.raises(ValueError, match=re.escape('ui.recorder.db_dir -> storage.dir')):
-        _config(ui={'recorder': {'db_dir': '/data'}})
-
-
-def test_the_archive_keys_are_the_last_moved_keys():
-    assert [key.path for key in MOVED_CONFIG_KEYS[-4:]] == [
-        'fleet.registry.timeout_seconds',
-        'history.archive.election',
-        'history.archive.lock_stale_seconds',
-        'history.archive.pass_interval_seconds',
-    ]
 
 
 # --- derived values ------------------------------------------------------

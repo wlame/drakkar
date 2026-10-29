@@ -1,9 +1,11 @@
 """Synchronous HTTP ingress (webapp) configuration."""
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
+
+from drakkar.config.base import ConfigModel
 
 
-class WebClientConfig(BaseModel):
+class WebClientConfig(ConfigModel):
     """Configuration for a single webapp client (tenant).
 
     Each client has a name (used in metrics labels and recorder rows), an
@@ -47,7 +49,7 @@ class WebClientConfig(BaseModel):
         return v
 
 
-class WebAppConfig(BaseModel):
+class WebAppConfig(ConfigModel):
     """Configuration for the HTTP input source (``sources.http``), served by the webapp server.
 
     When ``enabled=true``, Drakkar starts a FastAPI server on its own thread

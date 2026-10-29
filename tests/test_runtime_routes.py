@@ -30,7 +30,7 @@ def mock_app():
 
 @pytest.fixture
 async def client(mock_app):
-    fastapi_app = create_ui_app(make_ui_config(enabled=True, port=8080, db_dir='/tmp'), MagicMock(), mock_app)
+    fastapi_app = create_ui_app(make_ui_config(enabled=True, port=8080), MagicMock(), mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c

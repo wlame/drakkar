@@ -12,7 +12,9 @@ operator wrote it and its text is part of the config format.
 
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
+
+from drakkar.config.base import ConfigModel
 
 CONSUL_PREFIX_RE = r'^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
 CONSUL_DATACENTER_RE = r'^[A-Za-z0-9_.-]*$'
@@ -41,7 +43,7 @@ def is_consul_key_prefix(prefix: str) -> bool:
     return not has_dot_segment(prefix)
 
 
-class ConsulConnectionConfig(BaseModel):
+class ConsulConnectionConfig(ConfigModel):
     """A Consul agent and the key prefix a feature may use on it."""
 
     address: str = Field(
@@ -71,7 +73,7 @@ class ConsulConnectionConfig(BaseModel):
     )
 
 
-class RedisConnectionConfig(BaseModel):
+class RedisConnectionConfig(ConfigModel):
     """A Redis server and the key prefix a feature may use on it."""
 
     url: str = Field(
@@ -85,18 +87,16 @@ class RedisConnectionConfig(BaseModel):
     )
 
 
-class PostgresConnectionConfig(BaseModel):
+class PostgresConnectionConfig(ConfigModel):
     """A Postgres database and the schema a feature may use in it."""
-
-    # ``schema`` is the YAML key, but a field of that name would shadow
-    # ``BaseModel.schema``; the alias keeps the key and the attribute is
-    # ``schema_name``. ``populate_by_name`` also accepts the attribute name.
-    model_config = ConfigDict(populate_by_name=True)
 
     dsn: str = Field(
         description='Postgres connection string (asyncpg-compatible), typically embedding user and password.',
         json_schema_extra={'drakkar_secret': True},
     )
+    # ``schema`` is the YAML key, but a field of that name would shadow
+    # ``BaseModel.schema``; the alias keeps the key and the attribute is
+    # ``schema_name``. Only the key is accepted.
     schema_name: str = Field(
         default='drakkar',
         alias='schema',
@@ -110,7 +110,7 @@ class PostgresConnectionConfig(BaseModel):
     pool_max: int = Field(default=4, ge=1, description='Maximum connections in the pool. Must be >= pool_min.')
 
 
-class ConnectionsConfig(BaseModel):
+class ConnectionsConfig(ConfigModel):
     """Named connections, grouped by service type.
 
     Example YAML::
