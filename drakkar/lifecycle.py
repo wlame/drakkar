@@ -35,7 +35,7 @@ import asyncio
 import os
 import signal
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -76,7 +76,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.periodic import STARTUP_NO_SHARED_FOLDER, SYSTEM_CLOCK, Clock, run_periodic_task
+from drakkar.periodic import STARTUP_NO_AUTODISCOVER, SYSTEM_CLOCK, Clock, run_periodic_task
 from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import ResilientCaller, describe_error
@@ -89,7 +89,7 @@ from drakkar.recorder.election import (
 )
 from drakkar.recorder.history import history_dir
 from drakkar.recorder.postgres import RecorderPostgresSettings
-from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
+from drakkar.schedule import DEFAULT_CLUSTER
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -97,28 +97,9 @@ from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
-    from drakkar.config import DrakkarConfig, ElectionConfig, FleetRegistryConfig
+    from drakkar.config import AutodiscoverConfig, DrakkarConfig
 
 logger = structlog.get_logger()
-
-
-class UnknownProviderError(ValueError):
-    """A configured provider name is not one of the built-in providers of its feature."""
-
-
-def _builtin_factory[F](table: Mapping[str, F], name: str, *, config_path: str) -> F:
-    """Return the factory of provider ``name`` from ``table``.
-
-    ``config_path`` is the config key that named the provider, for the error.
-
-    Raises:
-        UnknownProviderError: the table has no such name; the message names
-            the config key and lists the names that exist.
-    """
-    factory = table.get(name)
-    if factory is None:
-        raise UnknownProviderError(f"{config_path} '{name}' is not known; known providers: {', '.join(sorted(table))}")
-    return factory
 
 
 # Startup refuses a worker whose results go to sinks when it has none.
@@ -128,54 +109,35 @@ NO_SINKS_ERROR = (
 )
 
 
-def _connection_and_prune(registry: FleetRegistryConfig) -> dict[str, Any]:
+def _connection_and_prune(autodiscover: AutodiscoverConfig) -> dict[str, Any]:
     """The registry options of a provider that keeps its cards in a shared database: connection and prune age."""
-    return {'connection': registry.connection, 'prune_after_seconds': registry.prune_after_seconds}
-
-
-def _connection_only(election: ElectionConfig) -> dict[str, Any]:
-    """The election options of a provider that keeps its lock in a shared database: the connection."""
-    return {'connection': election.connection}
+    return {'connection': autodiscover.connection, 'prune_after_seconds': autodiscover.prune_after}
 
 
 def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
-    """The options mapping the configured registry provider's factory receives.
+    """The options mapping the registry side of the configured provider receives.
 
     Each provider takes its settings from its own config keys.
-
-    Raises:
-        KeyError: ``config.fleet.registry.provider`` is not a built-in name.
     """
-    registry = config.fleet.registry
+    autodiscover = config.autodiscover
     builders = {
-        'filesystem': lambda: {
-            'dir': config.resolved_registry_dir,
-            'prune_after_seconds': registry.prune_after_seconds,
-        },
-        'postgres': lambda: _connection_and_prune(registry),
-        'redis': lambda: _connection_and_prune(registry),
+        'filesystem': lambda: {'dir': config.resolved_registry_dir, 'prune_after_seconds': autodiscover.prune_after},
+        'postgres': lambda: _connection_and_prune(autodiscover),
+        'redis': lambda: _connection_and_prune(autodiscover),
         # A consul card lives as long as its session, whose TTL comes from the offline limit; it is never pruned.
-        'consul': lambda: {'connection': registry.connection, 'offline_after_seconds': registry.offline_after_seconds},
+        'consul': lambda: {'connection': autodiscover.connection, 'offline_after_seconds': autodiscover.offline_after},
     }
-    return builders[registry.provider]()
+    return builders[autodiscover.provider]()
 
 
 def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
-    """The options mapping the configured election provider's factory receives.
+    """The options mapping the election side of the configured provider receives.
 
-    Each provider takes its settings from its own config keys.
-
-    Raises:
-        KeyError: ``config.periodic.election.provider`` is not a built-in name.
+    The filesystem election finds its folder in the start context; the others
+    keep their lock in the service of the named connection.
     """
-    election = config.periodic.election
-    builders = {
-        'filesystem': dict,
-        'postgres': lambda: _connection_only(election),
-        'redis': lambda: _connection_only(election),
-        'consul': lambda: _connection_only(election),
-    }
-    return builders[election.provider]()
+    autodiscover = config.autodiscover
+    return {} if autodiscover.provider == 'filesystem' else {'connection': autodiscover.connection}
 
 
 def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSettings | None:
@@ -680,33 +642,41 @@ class AppLifecycle:
         registry starts or a sink connects, so the registry card carries the
         definition hash from its first publish. The election serves every
         cluster task, ``history.archive`` included when the worker runs it.
+
+        ``on_startup`` may have changed the ``autodiscover`` keys, so they are
+        checked again here with the messages of the load.
+
+        Raises:
+            ValueError: ``autodiscover`` cannot run as configured, or a cluster
+                task is declared while it is off.
         """
         app = self._app
+        app._config.check_autodiscover()
+        if app._config.autodiscover.enabled and not app._cluster_name:
+            logger.warning(
+                'cluster_name_empty',
+                category='lifecycle',
+                scope=DEFAULT_CLUSTER,
+            )
         app._periodic_roster = resolve_periodic_roster(app._handler, app._config)
         app._cluster_election = self._build_cluster_election(app._periodic_roster.cluster_task_names)
 
     def _build_cluster_election(self, cluster_task_names: Sequence[str]) -> ClusterElection | None:
         """The election service of ``cluster_task_names``; ``None`` when the worker runs no cluster task.
 
-        With at least one task the configured provider is resolved, so an
-        unknown name fails startup; with none, any name is accepted, as the
-        registry accepts any name while it is off. The ``filesystem``
-        provider needs a shared folder; without one startup fails, naming
-        the first task in sorted order. The provider is made here and starts
-        at the first slot that needs it.
+        The provider is made here and starts at the first slot that needs it.
 
         Raises:
-            UnknownProviderError: no built-in election has the configured name.
-            ValueError: the ``filesystem`` provider and no shared folder.
+            ValueError: a cluster task with ``autodiscover`` off, naming the
+                first task in sorted order.
         """
         if not cluster_task_names:
             return None
         app = self._app
         config = app._config
-        election = config.periodic.election
-        factory = _builtin_factory(BUILTIN_ELECTIONS, election.provider, config_path='periodic.election.provider')
-        if election.provider == FILESYSTEM_PROVIDER and not config.resolved_shared_dir:
-            raise ValueError(STARTUP_NO_SHARED_FOLDER.format(name=sorted(cluster_task_names)[0]))
+        autodiscover = config.autodiscover
+        if not autodiscover.enabled:
+            raise ValueError(STARTUP_NO_AUTODISCOVER.format(name=sorted(cluster_task_names)[0]))
         options = election_provider_options(config)
         context = ElectionContext(
             worker=app._worker_id,
@@ -718,15 +688,15 @@ class AppLifecycle:
             connections=app._connections,
         )
         caller = ResilientCaller(
-            election.resilience,
+            autodiscover.resilience,
             feature=ELECTION_FEATURE,
-            provider=election.provider,
+            provider=autodiscover.provider,
             category='periodic',
         )
         return ClusterElection(
-            factory(options),
+            BUILTIN_ELECTIONS[autodiscover.provider](options),
             caller,
-            provider_name=election.provider,
+            provider_name=autodiscover.provider,
             context=context,
             clock=self._clock,
         )
@@ -742,54 +712,31 @@ class AppLifecycle:
         app._connections = Connections(app._config.connections)
 
     async def _start_fleet(self) -> None:
-        """Start the worker registry, or say once why it stays off.
+        """Start the worker registry when ``autodiscover`` is on, or leave ``app._fleet`` unset.
 
         Runs right after the UI server listens: peers reach this worker
         through the URL its card publishes. The service starts its loops in
         the background and returns at once; nothing later in startup, and
-        nothing in the pipeline, waits on a registry call. Without a
-        registry no peer's cluster task hash can be compared, and a worker
-        with cluster tasks says so once.
+        nothing in the pipeline, waits on a registry call.
         """
-        await self._start_registry()
-        app = self._app
-        roster = app._periodic_roster
-        if app._fleet is None and roster is not None and roster.cluster_task_count:
-            await logger.ainfo(
-                'periodic_cluster_check_off',
-                category='periodic',
-                cluster_tasks=roster.cluster_task_count,
-                reason='the worker registry is off',
-            )
-
-    async def _start_registry(self) -> None:
-        """Start the registry service, or log why it stays off and leave ``app._fleet`` unset."""
         app = self._app
         config = app._config
-        registry = config.fleet.registry
-        log = logger.bind(worker_id=app._worker_id)
+        autodiscover = config.autodiscover
+        if not autodiscover.enabled:
+            return
         if not config.ui.enabled:
-            await log.awarning(
+            await logger.bind(worker_id=app._worker_id).awarning(
                 'fleet_registry_disabled_no_ui',
                 category='fleet',
-                provider=registry.provider,
+                provider=autodiscover.provider,
                 hint='the registry needs ui.enabled: peers reach a worker through its UI server',
             )
             return
-        if registry.provider == 'filesystem' and not config.resolved_registry_dir:
-            await log.awarning(
-                'fleet_registry_disabled_no_dir',
-                category='fleet',
-                hint='set storage.dir or storage.shared_dir for the card folder',
-            )
-            return
-        factory = _builtin_factory(BUILTIN_PROVIDERS, registry.provider, config_path='fleet.registry.provider')
         options = registry_provider_options(config)
-        provider = factory(options)
         app._fleet = FleetRegistry(
-            provider,
-            provider_name=registry.provider,
-            config=registry,
+            BUILTIN_PROVIDERS[autodiscover.provider](options),
+            provider_name=autodiscover.provider,
+            config=autodiscover,
             identity=app.worker_identity,
             provider_options=options,
             features=self._card_features,
@@ -934,7 +881,6 @@ class AppLifecycle:
         if app._config.cache.enabled:
             app._cache_engine = CacheEngine(
                 config=app._config.cache,
-                exchange=app._config.fleet.cache_exchange,
                 storage_dir=app._config.storage.dir,
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
@@ -1481,7 +1427,7 @@ class AppLifecycle:
         app = self._app
         if app._fleet is None:
             return 0.0
-        return app._config.fleet.registry.resilience.timeout
+        return app._config.autodiscover.resilience.timeout
 
     async def _drain_sources(self, sources: list[Source], deadline: float) -> None:
         """Wait for every source's in-flight work, all against one ``deadline``.

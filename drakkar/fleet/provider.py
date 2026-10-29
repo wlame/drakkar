@@ -28,7 +28,7 @@ class PeerCard:
     ``online`` is ``None`` unless the provider's service decides liveness
     itself (for example a card that exists only while its owner's session
     lives). When it is set, the registry service uses it instead of judging
-    ``age_seconds`` against ``offline_after_seconds``.
+    ``age_seconds`` against ``autodiscover.offline_after``.
     """
 
     card: dict[str, Any]

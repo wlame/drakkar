@@ -795,3 +795,61 @@ constructor keywords `archive` and `merged_retention_days` are gone: both come f
 `config.archive`. `UIConfig.recorder`, `UIRecorderConfig`, `UITraceConfig`,
 `SharedConfig`, `HistoryConfig` and `BreakerConfig` are gone; `HistoryArchiveConfig` is
 `RecorderArchiveConfig`.
+
+## Autodiscover {#autodiscover}
+
+The worker registry and the election of cluster tasks are now one optional
+feature, `autodiscover`, with one provider. It is **off by default**. The root
+sections `fleet` and `periodic` are gone; a config that uses them fails the load.
+
+**What to do:**
+
+1. If your workers use the workers list, the cache exchange or a cluster task,
+   turn the feature on: `autodiscover.enabled: true` and `autodiscover.provider`.
+   A worker with it off publishes no card, reads no peers, runs no election and
+   pulls no cache rows, and the workers list shows only this worker.
+2. Choose one provider. You can no longer run the registry on one provider and the
+   election on another. If your two providers differed, move both to the one
+   whose service every worker reaches.
+3. With `filesystem`, set `storage.shared_dir`. It no longer falls back to
+   `storage.dir`: `autodiscover.provider filesystem needs storage.shared_dir` fails
+   the load. Set `storage.shared_dir` to the folder you used before, and the card
+   files and locks stay where they are.
+4. A handler with `@periodic(..., scope='cluster')` needs the feature on, or the
+   worker does not start. Turn the feature on, or give the task `scope='worker'`.
+5. An empty `cluster_name` with the feature on logs `cluster_name_empty` once at
+   startup. It changes nothing else: the lock scope stays `default`.
+6. Move the keys:
+
+| Before | Now |
+|---|---|
+| `fleet.registry.provider`, `periodic.election.provider` | `autodiscover.provider`, default `''`, required when enabled |
+| `fleet.registry.connection`, `periodic.election.connection` | `autodiscover.connection` |
+| `fleet.registry.heartbeat_seconds: 10` | `autodiscover.heartbeat: 10s` |
+| `fleet.registry.refresh_seconds: 15` | `autodiscover.refresh: 15s` |
+| `fleet.registry.offline_after_seconds: 60` | `autodiscover.offline_after: 1m` |
+| `fleet.registry.prune_after_seconds: 86400` | `autodiscover.prune_after: 24h` |
+| `fleet.registry.resilience.*`, `periodic.election.resilience.*` | `autodiscover.resilience.*`, one block; the registry and the election keep separate breakers |
+| `fleet.cache_exchange.*` | `cache.exchange.*`, the same keys under the `cache` section |
+| `periodic.tasks.*` | Removed. Change the `@periodic` declaration in code. |
+| `fleet.registry.static.*`, `fleet.registry.filesystem.dir`, `fleet.registry.consul.*`, `fleet.registry.redis`, `fleet.registry.postgres`, `*.plugin_options` | Removed. |
+
+As environment variables: `DK_FLEET__REGISTRY__*` and `DK_PERIODIC__ELECTION__*`
+become `DK_AUTODISCOVER__*`, and `DK_FLEET__CACHE_EXCHANGE__*` becomes
+`DK_CACHE__EXCHANGE__*`.
+
+**What stays the same:** the `fleet_workers` and `task_locks` tables, the Redis
+keys, the Consul paths, the card, the lock body, and the metrics and their labels
+`feature="registry"` and `feature="election"`. A cluster keeps its cards and leases
+through this change when it keeps its provider and its folder or connection.
+
+**Messages and events:**
+
+- A provider name outside the four now fails the load, with or without `enabled`:
+  `autodiscover.provider must be one of consul, filesystem, postgres, redis, got '<v>'`.
+- The log events `periodic_cluster_check_off` and `fleet_registry_disabled_no_dir`
+  are gone. Both states now stop the worker with a message.
+- With `autodiscover` off, an enabled `cache.exchange` logs
+  `cache_exchange_off_no_autodiscover` once, and the peer route answers as it does
+  for a switched-off exchange.
+- A worker with `autodiscover` off runs no `history.archive` task.

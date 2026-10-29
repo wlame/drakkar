@@ -15,7 +15,6 @@ from drakkar import partition as partition_module
 from drakkar.cache.changes import parse_changes_query
 from drakkar.cache.models import _now_ms
 from drakkar.cache.sql import CHANGES_FIELDS, OWN_MARK_SQL, SCHEMA_CACHE_ENTRIES, changes_query
-from drakkar.config import CacheExchangeConfig
 from drakkar.fleet.service import PeerView
 from drakkar.models import (
     ExecutorError,
@@ -35,22 +34,6 @@ def kafka_connections(**settings: Any) -> dict[str, Any]:
     connection and fails to load without it.
     """
     return {'kafka': {'main': settings}}
-
-
-def split_cache_overrides(overrides: dict | None) -> tuple[dict, CacheExchangeConfig]:
-    """Split a test's cache overrides into ``CacheConfig`` fields and exchange settings.
-
-    Cache-engine tests pass one ``cache_overrides`` dict; its ``'exchange'``
-    entry (a ``CacheExchangeConfig`` or a plain dict) becomes the engine's
-    ``fleet.cache_exchange`` settings and the rest builds the ``CacheConfig``.
-    """
-    remaining = dict(overrides or {})
-    exchange = remaining.pop('exchange', None)
-    if exchange is None:
-        exchange = CacheExchangeConfig()
-    elif isinstance(exchange, dict):
-        exchange = CacheExchangeConfig(**exchange)
-    return remaining, exchange
 
 
 # Default ceiling for wait_for. It is a safety net that turns a stuck test

@@ -28,7 +28,7 @@ from drakkar.periodic import (
     RULE_SCOPE,
     RULE_SWEEP_AFTER,
     RULE_WORKER_INTERVAL,
-    STARTUP_NO_SHARED_FOLDER,
+    STARTUP_NO_AUTODISCOVER,
     PeriodicRuleError,
     periodic,
 )
@@ -69,7 +69,7 @@ MESSAGE_CONSTANTS = {
     'rule_archive_interval': RULE_ARCHIVE_INTERVAL,
     'rule_archive_lease': RULE_ARCHIVE_LEASE,
     'rule_sweep_after': RULE_SWEEP_AFTER,
-    'startup_no_shared_folder': STARTUP_NO_SHARED_FOLDER,
+    'startup_no_autodiscover': STARTUP_NO_AUTODISCOVER,
 }
 
 

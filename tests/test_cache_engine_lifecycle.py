@@ -21,8 +21,7 @@ import aiosqlite
 from structlog.testing import capture_logs
 
 from drakkar.cache import Cache, CacheEngine, CacheScope
-from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides
+from drakkar.config import CacheConfig
 
 
 def make_cache_config(**overrides) -> CacheConfig:
@@ -38,10 +37,8 @@ async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides
     No recorder wired in — lifecycle tests don't need one. The recorder
     hook path is exercised in later tasks.
     """
-    cache_fields, exchange = split_cache_overrides(cfg_overrides)
     return CacheEngine(
-        config=make_cache_config(**cache_fields),
-        exchange=exchange,
+        config=make_cache_config(**cfg_overrides),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
@@ -236,7 +233,6 @@ async def test_start_with_empty_storage_dir_disables_engine(tmp_path):
     marks the engine as effectively disabled (no file, no connection)."""
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir='',
         worker_id='w1',
         cluster_name='',
@@ -257,7 +253,6 @@ async def test_start_with_empty_storage_dir_disables_engine(tmp_path):
 def _memory_only_engine(max_memory_entries: int) -> CacheEngine:
     return CacheEngine(
         config=CacheConfig(enabled=True, max_memory_entries=max_memory_entries),
-        exchange=CacheExchangeConfig(),
         storage_dir='',
         worker_id='w1',
         cluster_name='',
@@ -309,7 +304,6 @@ async def test_start_puts_the_cache_file_in_storage_dir(tmp_path):
     storage.mkdir()
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(storage),
         worker_id='w1',
         cluster_name='',
@@ -326,7 +320,6 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
     """When `cache.enabled=false`, start() is a no-op even with a storage folder."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',

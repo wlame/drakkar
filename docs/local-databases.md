@@ -44,9 +44,9 @@ A worker uses two folders:
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | A **sealed** recorder file: rollback journal, no sidecars, never changes again. |
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json` | The [meta file](#the-meta-file) of that sealed file: its statistics, written once by the owner. |
 | `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
-| `tasks/<cluster>/<task>.lock` | The [task lock](#the-task-lock) of a cluster periodic task (the archive's is `history.archive.lock`), made by the default `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster holds the slot. The same folder holds the clock markers `.clock.<instance>`. |
+| `tasks/<cluster>/<task>.lock` | The [task lock](#the-task-lock) of a cluster periodic task (the archive's is `history.archive.lock`), made by the `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster holds the slot. The same folder holds the clock markers `.clock.<instance>`. |
 | `merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` | The result of a merge started from the UI. Deleted after `history.merged_retention_days`; see [Merge results expire](#merge-results-expire). |
-| `fleet/workers/<worker>.json` | Registry card of the default `filesystem` provider. See [Fleet registry](fleet.md). |
+| `fleet/workers/<worker>.json` | Registry card of the `filesystem` provider. See [Fleet registry](fleet.md). |
 
 `<cluster>` is the sanitized cluster name: every character outside
 `[a-zA-Z0-9_-]` becomes `_`, and an empty name becomes `default`. A worker
@@ -582,7 +582,7 @@ expiry and pruning; the windows left stay due for the next pass of any
 worker. At a clean stop the recorder lets the pass in progress end its
 window. A pass ends only between windows, so the wait has no fixed limit.
 While a worker registry runs, the wait keeps
-`fleet.registry.resilience.timeout_seconds` of the time left for the card
+`autodiscover.resilience.timeout_seconds` of the time left for the card
 withdraw that comes after the recorder: it ends when the time left is down
 to that value, or at once when less is left. Without a registry it can use
 all the time left. A pass that is still running then is left to end on its
@@ -653,7 +653,7 @@ files are never candidates either.
 
 ### The task lock {#the-task-lock}
 
-The task lock is the lease of the default election provider, `filesystem`
+The task lock is the lease of the election provider `filesystem`
 (see [The election provider](#the-election-provider)). It serves every
 cluster periodic task, the archive included. The lock of task `<task>` of a
 cluster is the file `<shared.dir>/tasks/<cluster>/<task>.lock`, so the
@@ -716,11 +716,11 @@ run and the minimum hold. The archive pass also checks it right before each
 publish and each delete.
 
 ```yaml
-periodic:
-  election:
-    provider: filesystem       # the default: the task lock above; or postgres, redis, consul
-    # connection: main         # read by the postgres, redis and consul providers
-    # resilience: {}           # time limit, retries and breaker; same keys as fleet.registry.resilience
+autodiscover:
+  enabled: true
+  provider: filesystem     # the task lock above; or postgres, redis, consul
+  # connection: main       # read by the postgres, redis and consul providers
+  # resilience: {}         # time limit, retries and breaker
 history:
   archive:
     lease_seconds: 60          # the lease length of the archive slot, for every provider
@@ -737,12 +737,9 @@ history:
   the scope at the next slot.
 - **Providers.** `filesystem`, `postgres`, `redis` and `consul` are built in.
   The last three keep the lease in a service reached through a [named
-  connection](fleet.md#connections). An unknown name
-  fails startup with a message that lists the providers that exist, for
-  example
-  `periodic.election.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
-  The name is checked only when the worker runs at least one cluster task
-  (the archive counts when it runs). With none, any name is accepted.
+  connection](fleet.md#connections). The load fails for any other name:
+  `autodiscover.provider must be one of consul, filesystem, postgres, redis, got 'etcd'`.
+  One provider serves the election and the [worker registry](fleet.md).
 - **Start and stop.** The provider starts at the first slot that needs it,
   not at worker start (so with the `postgres` provider the tables are first
   checked or created then, with the `redis` provider the server is first
@@ -756,7 +753,7 @@ history:
   the shutdown time left.
 - **Bounded calls.** The archive pass runs in a thread of its own, and
   every provider call runs on the event loop under the
-  [`resilience`](fleet.md#resilience) block of `periodic.election`. The
+  [`resilience`](fleet.md#resilience) block of `autodiscover`. The
   thread waits for one check at most as long as the longest the call can
   take (every attempt and every wait) plus one second. A hung provider
   therefore holds up the archive thread for a bounded time and never the
@@ -770,7 +767,7 @@ history:
 #### The `postgres` election provider {#the-postgres-election-provider}
 
 The lease is a row of `<schema>.task_locks`, in the schema of the
-connection that `periodic.election.connection` names. It fits a
+connection that `autodiscover.connection` names. It fits a
 deployment that already runs Postgres. The sealed history folder
 (`shared.dir`) is still a shared folder; only the choice of the worker that
 runs a slot moves to the database.
@@ -782,10 +779,10 @@ connections:
   postgres:
     main:
       schema: drakkar
-periodic:
-  election:
-    provider: postgres
-    connection: main
+autodiscover:
+  enabled: true
+  provider: postgres
+  connection: main
 ```
 
 The connection string comes from the environment:
@@ -826,7 +823,7 @@ The connection string comes from the environment:
   worker of that build runs, drop it:
   `DROP TABLE IF EXISTS <schema>.archive_locks;`.
 - **An outage** is handled as for the registry: transient Postgres errors
-  are retried under `periodic.election.resilience`, and the breaker
+  are retried under `autodiscover.resilience`, and the breaker
   opens after `failure_threshold` failed operations. Slots during an outage
   are skipped as `election_failed`. A lease that cannot be confirmed counts
   as lost (see above), so an archive pass during an outage stops without
@@ -837,7 +834,7 @@ The connection string comes from the environment:
 #### The `redis` election provider {#the-redis-election-provider}
 
 The lease is a key of the Redis database that the connection named by
-`periodic.election.connection` points at. It fits a deployment that
+`autodiscover.connection` points at. It fits a deployment that
 already runs Redis. The sealed history folder (`shared.dir`) is still a shared
 folder; only the choice of the worker that runs a slot moves to Redis.
 
@@ -848,10 +845,10 @@ connections:
   redis:
     main:
       key_prefix: "drakkar:"
-periodic:
-  election:
-    provider: redis
-    connection: main
+autodiscover:
+  enabled: true
+  provider: redis
+  connection: main
 ```
 
 The URL comes from the environment: `DK_CONNECTIONS__REDIS__MAIN__URL`. The
@@ -909,7 +906,7 @@ redis](fleet.md#redis) and [Security](security.md#provider-credentials).
   as a failed operation for the breaker.
 - **An outage** is handled as for the registry: connection errors and the
   server replies `BUSY`, `LOADING`, `MASTERDOWN` and `TRYAGAIN` are retried
-  under `periodic.election.resilience`, and the breaker opens after
+  under `autodiscover.resilience`, and the breaker opens after
   `failure_threshold` failed operations. Any other reply, such as `WRONGPASS`
   or `NOPERM`, is final. Slots during an outage are skipped as
   `election_failed`. A lease that cannot be confirmed counts as lost (see
@@ -920,7 +917,7 @@ redis](fleet.md#redis) and [Security](security.md#provider-credentials).
 #### The `consul` election provider {#the-consul-election-provider}
 
 The lease is a key of the Consul agent that the connection named by
-`periodic.election.connection` points at, held by a session of the slot.
+`autodiscover.connection` points at, held by a session of the slot.
 It fits a deployment that already runs Consul. The sealed history folder
 (`shared.dir`) is still a shared folder; only the choice of the worker that
 runs a slot moves to Consul.
@@ -933,10 +930,10 @@ connections:
     main:
       address: http://127.0.0.1:8500
       key_prefix: drakkar
-periodic:
-  election:
-    provider: consul
-    connection: main
+autodiscover:
+  enabled: true
+  provider: consul
+  connection: main
 ```
 
 The ACL token comes from the environment: `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`.
@@ -1005,7 +1002,7 @@ consul](fleet.md#consul) and [Security](security.md#provider-credentials).
   the lease. The next slot takes the scope.
 - **An outage** is handled as for the registry: timeouts, connection errors and
   the statuses `429`, `500`, `502`, `503` and `504` are retried under
-  `periodic.election.resilience`, and the breaker opens after
+  `autodiscover.resilience`, and the breaker opens after
   `failure_threshold` failed operations. Any other status, such as a `403`
   from a token without the rights, is final. Slots during an outage are
   skipped as `election_failed`. A lease that cannot be confirmed counts as
@@ -1124,9 +1121,9 @@ recorder:
     lease_seconds: 60                # the lease of a dead archiver ends this long after its last refresh
     sweep_after_seconds: 7200        # archive work files older than this belong to a dead archiver
   merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
-periodic:
-  election:
-    provider: filesystem             # which worker runs each slot: the task lock, or postgres, redis, consul
+autodiscover:
+  enabled: true
+  provider: filesystem             # which worker runs each slot: the task lock, or postgres, redis, consul
 ```
 
 ### Downloading archives
@@ -1247,13 +1244,12 @@ additive-only by contract.
 ## Worker autodiscovery
 
 Workers find each other through the [fleet registry](fleet.md), not
-through these database files. With the default `filesystem` provider each
-worker writes a small JSON card to `<shared.dir>/fleet/workers/<worker>.json`
-(`<storage.dir>/fleet/...` when `shared.dir` is empty) and reads the cards
-of its peers every `fleet.registry.refresh_seconds`. The workers list
+through these database files. With the `filesystem` provider each
+worker writes a small JSON card to `<storage.shared_dir>/fleet/workers/<worker>.json`
+and reads the cards of its peers every `autodiscover.refresh`. The workers list
 answers from that in-memory snapshot. Liveness comes from the card's age on
 the file server's clock: a peer is `online` while its card is no older than
-`fleet.registry.offline_after_seconds` (default 60). See
+`autodiscover.offline_after` (default 60). See
 [Fleet registry](fleet.md) for the card format and the rules.
 
 **Message trace** (`GET /api/v1/debug/trace`) searches this worker's own
@@ -1279,7 +1275,7 @@ worker opens another worker's live file.
 ## Cache exchange
 
 No worker opens another worker's cache file. Every
-`fleet.cache_exchange.interval_seconds` (default 30) a worker pulls the
+`cache.exchange.interval_seconds` (default 30) a worker pulls the
 `cluster` and `global` rows that other workers originated, over HTTP, from
 `GET /api/v1/peer/cache/changes` at the URL on each peer's
 [registry card](fleet.md#the-card). This section is the wire rule. Which
@@ -1325,7 +1321,7 @@ index in the cursor order, which stops at the page size, so a page costs
 about its own size however many rows the cache holds.
 
 `404` `{"error": "The cache exchange is off on this worker"}` when the
-cache, `storage.dir` or `fleet.cache_exchange` is off, or the cache engine
+cache, `storage.dir` or `cache.exchange` is off, or the cache engine
 has stopped. The parameter checks run first, so a bad request answers
 `400` even on such a worker. `503`
 `{"error": "The cache did not answer in time"}` when the read does not
@@ -1341,7 +1337,7 @@ A scope with no such row is absent, so `{"cache": {}}` means "the exchange
 is on, nothing to pull yet". `features` is `{}` when the worker does not
 serve. The worker reads the marks from its file at start and raises them
 after every committed flush. The card carries the new marks at its next
-publish (every `fleet.registry.heartbeat_seconds`, default 10). A peer
+publish (every `autodiscover.heartbeat`, default 10). A peer
 asks for a page only when a mark is past its cursor for that worker.
 
 The **LWW conflict rule** is one shared SQL statement used by both the

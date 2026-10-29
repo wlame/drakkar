@@ -24,13 +24,13 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Recorder archiving | `history.archive.enabled` | **on** | Fold the sealed files of each cluster history folder into per-cluster `.db.gz` window archives; off = sealed files and merge results are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
-| Worker registry | `fleet.registry.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `ui.enabled` |
+| Worker registry | `autodiscover.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `ui.enabled` |
 | Cross-worker fleet view | a `shared.dir` every worker mounts (or one shared `storage.dir`) | — | History trace over the cluster's sealed files, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
 | Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
-| Cache exchange | `fleet.cache_exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence: each worker pulls the `cluster`/`global` rows of its registry peers over HTTP |
+| Cache exchange | `cache.exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence: each worker pulls the `cluster`/`global` rows of its registry peers over HTTP |
 | Kafka input source | `sources.kafka.enabled` | **off** | Consumer group, poll loop, `arrange()`, offset commits |
 | HTTP input source | `sources.http.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
 | Aligned startup | `sources.kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
@@ -78,9 +78,9 @@ the failure mode so you can decide what your deployment needs.
    internal mirror.
 5. **The workers list needs the registry; cross-tracing needs a SHARED
    folder.** Workers find each other through the
-   [fleet registry](fleet.md), which needs `ui.enabled` and, for the
-   default `filesystem` provider, a card folder all workers see
-   (`shared.dir`, else `storage.dir`). Every worker seals its finished
+   [fleet registry](fleet.md), part of the optional `autodiscover` feature.
+   It needs `ui.enabled` and, for the `filesystem` provider, a
+   `storage.shared_dir` all workers see. Every worker seals its finished
    recorder files into `<shared.dir>/history/<cluster>/`, and a history
    trace reads the sealed files there (see
    [Local Databases](local-databases.md#sealing-and-the-history-folder));

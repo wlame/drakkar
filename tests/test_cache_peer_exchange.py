@@ -29,11 +29,16 @@ from tests.conftest import fake_peers, set_peer_cluster
 async def _engine(tmp_path: Path, *, worker_id: str = 'me', cluster: str = 'prod', **exchange: Any) -> CacheEngine:
     settings: dict[str, Any] = {'interval_seconds': 3600, **exchange}
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, flush_interval_seconds=3600, cleanup_interval_seconds=3600),
-        exchange=CacheExchangeConfig(**settings),
+        config=CacheConfig(
+            enabled=True,
+            flush_interval_seconds=3600,
+            cleanup_interval_seconds=3600,
+            exchange=CacheExchangeConfig(**settings),
+        ),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster,
+        peer_views=lambda: [],
     )
     engine.attach_cache(Cache(origin_worker_id=worker_id))
     await engine.start()
@@ -115,15 +120,6 @@ async def test_a_peer_the_registry_does_not_list_is_never_asked(engine):
     await engine._sync_once()
 
     assert peers.requests == []
-
-
-async def test_no_registry_means_no_pull(tmp_path):
-    engine = await _engine(tmp_path)
-    try:
-        assert engine._peer_views is None
-        assert await engine._sync_once() == {}
-    finally:
-        await engine.stop()
 
 
 async def test_a_peer_with_nothing_new_is_not_asked_again(engine):

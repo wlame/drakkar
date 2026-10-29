@@ -227,7 +227,7 @@ drakkar-ui *args:
 integration-up provider='filesystem' profile='full':
     #!/usr/bin/env bash
     set -euo pipefail
-    # The main cluster's registry and periodic-election provider; read by
+    # The main cluster's autodiscover provider; read by
     # docker-compose.yml. just passes `provider=postgres` through as it is,
     # so the prefix is stripped and the value is checked.
     provider="{{ provider }}"

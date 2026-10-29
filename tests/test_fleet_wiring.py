@@ -18,7 +18,7 @@ from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_t
 from drakkar.config import DrakkarConfig
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry
-from drakkar.lifecycle import UnknownProviderError, election_provider_options, registry_provider_options
+from drakkar.lifecycle import election_provider_options, registry_provider_options
 from drakkar.models import SourceMessage
 from drakkar.periodic import periodic
 from drakkar.providers.connections import Connections
@@ -45,7 +45,8 @@ from tests.test_sources_validation import KafkaOnlyHandler
 
 def _config(tmp_path, **overrides) -> DrakkarConfig:
     values = {
-        'storage': {'dir': str(tmp_path / 'storage')},
+        'autodiscover': {'enabled': True, 'provider': 'filesystem'},
+        'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
         'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
@@ -104,11 +105,11 @@ class _FixedPeersRegistry:
 # --- which provider runs ---
 
 
-async def test_the_default_registry_is_the_filesystem_provider_under_storage_dir(tmp_path):
+async def test_the_filesystem_provider_keeps_the_cards_under_the_shared_folder(tmp_path):
     app = _app(tmp_path)
 
     await app._lifecycle._start_fleet()
-    card_path = tmp_path / 'storage' / 'fleet' / 'workers' / 'w-1.json'
+    card_path = tmp_path / 'shared' / 'fleet' / 'workers' / 'w-1.json'
     await wait_for(card_path.exists)
     await app._fleet.stop()
 
@@ -124,7 +125,7 @@ async def test_the_card_carries_the_worker_identity(tmp_path):
     )
 
     await app._lifecycle._start_fleet()
-    card_path = tmp_path / 'storage' / 'fleet' / 'workers' / 'w-1.json'
+    card_path = tmp_path / 'shared' / 'fleet' / 'workers' / 'w-1.json'
     await wait_for(card_path.exists)
     card = json.loads(card_path.read_bytes())
     await app._fleet.stop()
@@ -148,14 +149,6 @@ def test_the_ui_url_without_public_url_is_the_outbound_address(tmp_path, monkeyp
 
 def test_every_process_gets_a_new_instance(tmp_path):
     assert _app(tmp_path).worker_identity.instance != _app(tmp_path).worker_identity.instance
-
-
-async def test_a_shared_dir_holds_the_card_folder(tmp_path):
-    app = _app(tmp_path, storage={'shared_dir': str(tmp_path / 'shared')})
-
-    await app._lifecycle._start_fleet()
-    await wait_for((tmp_path / 'shared' / 'fleet' / 'workers' / 'w-1.json').exists)
-    await app._fleet.stop()
 
 
 async def test_the_registry_factory_gets_the_provider_options_and_the_worker_context(tmp_path, monkeypatch):
@@ -185,7 +178,7 @@ def test_registry_provider_options_for_postgres_names_the_connection_and_prune(t
     config = _config(
         tmp_path,
         connections={'postgres': {'main': {'dsn': 'postgresql://user:secret@db/x'}}},
-        fleet={'registry': {'provider': 'postgres'}},
+        autodiscover={'enabled': True, 'provider': 'postgres'},
     )
 
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
@@ -195,7 +188,7 @@ def test_registry_provider_options_for_redis_names_the_connection_and_prune(tmp_
     config = _config(
         tmp_path,
         connections={'redis': {'main': {'url': 'redis://user:secret@cache:6379/0'}}},
-        fleet={'registry': {'provider': 'redis'}},
+        autodiscover={'enabled': True, 'provider': 'redis'},
     )
 
     assert registry_provider_options(config) == {'connection': 'main', 'prune_after_seconds': 86_400}
@@ -205,7 +198,7 @@ def test_registry_provider_options_for_consul_names_the_connection_and_the_offli
     config = _config(
         tmp_path,
         connections={'consul': {'agents': {}}},
-        fleet={'registry': {'provider': 'consul', 'connection': 'agents', 'offline_after_seconds': 90}},
+        autodiscover={'enabled': True, 'provider': 'consul', 'connection': 'agents', 'offline_after': '90s'},
     )
 
     assert registry_provider_options(config) == {'connection': 'agents', 'offline_after_seconds': 90}
@@ -215,7 +208,7 @@ def test_election_provider_options_for_redis_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'redis': {'locks': {'url': 'redis://user:secret@cache:6379/0'}}},
-        periodic={'election': {'provider': 'redis', 'connection': 'locks'}},
+        autodiscover={'enabled': True, 'provider': 'redis', 'connection': 'locks'},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
@@ -225,7 +218,7 @@ def test_election_provider_options_for_consul_names_the_connection(tmp_path):
     config = _config(
         tmp_path,
         connections={'consul': {'locks': {}}},
-        periodic={'election': {'provider': 'consul', 'connection': 'locks'}},
+        autodiscover={'enabled': True, 'provider': 'consul', 'connection': 'locks'},
     )
 
     assert election_provider_options(config) == {'connection': 'locks'}
@@ -235,7 +228,7 @@ def test_the_cluster_election_passes_the_connection_to_the_postgres_factory(tmp_
     app = _app(
         tmp_path,
         connections={'postgres': {'reports_db': {'dsn': 'postgresql://user:secret@db/x'}}},
-        periodic={'election': {'provider': 'postgres', 'connection': 'reports_db'}},
+        autodiscover={'enabled': True, 'provider': 'postgres', 'connection': 'reports_db'},
     )
 
     election = app._lifecycle._build_cluster_election([ARCHIVE_TASK_NAME])
@@ -259,9 +252,12 @@ def test_the_cluster_election_gives_the_filesystem_factory_no_options(tmp_path):
 def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(tmp_path):
     app = _app(
         tmp_path,
-        storage={'shared_dir': str(tmp_path / 'shared')},
         cluster_name=CLUSTER,
-        periodic={'election': {'resilience': {'timeout': '1500ms', 'max_retries': 0}}},
+        autodiscover={
+            'enabled': True,
+            'provider': 'filesystem',
+            'resilience': {'timeout': '1500ms', 'max_retries': 0},
+        },
     )
     app._lifecycle._create_connections()
 
@@ -276,62 +272,28 @@ def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(t
     assert election.caller._category == 'periodic'
 
 
-def test_no_cluster_task_builds_no_election(tmp_path, monkeypatch):
-    app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}})
+def test_no_cluster_task_builds_no_election(tmp_path):
+    app = _app(tmp_path)
 
     assert app._lifecycle._build_cluster_election([]) is None
-
-
-def test_the_filesystem_election_without_a_shared_folder_fails_startup_naming_the_first_task(tmp_path, monkeypatch):
-    app = _app(tmp_path)
-    monkeypatch.setattr(type(app._config), 'resolved_shared_dir', property(lambda self: ''))
-
-    with pytest.raises(ValueError) as raised:
-        app._lifecycle._build_cluster_election(['refresh_rates', 'zz_last'])
-
-    assert str(raised.value) == (
-        "periodic task 'refresh_rates' has scope cluster, but the filesystem election needs a shared folder "
-        '(storage.shared_dir or storage.dir)'
-    )
 
 
 @pytest.mark.parametrize(
     'overrides',
     [
+        {'autodiscover': {'enabled': False}},
         {'recorder': {'enabled': False}},
-        {'storage': {'dir': ''}, 'recorder': {'enabled': False}},
+        {'storage': {'dir': '', 'shared_dir': 'shared'}, 'recorder': {'enabled': False}},
         {'recorder': {'archive': {'enabled': False}}},
     ],
-    ids=['recorder-off', 'memory-only', 'archiving-off'],
+    ids=['autodiscover-off', 'recorder-off', 'memory-only', 'archiving-off'],
 )
-def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, overrides):
-    app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}}, **overrides)
+def test_election_is_built_only_when_the_archive_runs(tmp_path, overrides):
+    app = _app(tmp_path, **overrides)
 
     app._lifecycle._build_periodic_roster()
 
     assert not archive_task_runs(app._config)
-    assert app._cluster_election is None
-
-
-@pytest.mark.parametrize('name', ['etcd', 'static', 'none'])
-async def test_a_registry_provider_outside_the_four_built_in_ones_fails_startup(tmp_path, name):
-    app = _app(tmp_path, fleet={'registry': {'provider': name}})
-
-    with pytest.raises(UnknownProviderError) as raised:
-        await app._lifecycle._start_fleet()
-
-    assert str(raised.value) == (
-        f"fleet.registry.provider '{name}' is not known; known providers: consul, filesystem, postgres, redis"
-    )
-
-
-async def test_unknown_election_provider_fails_startup_when_the_archive_runs(tmp_path, monkeypatch):
-    app = _app(tmp_path, periodic={'election': {'provider': 'etcd'}})
-
-    assert archive_task_runs(app._config)
-    with pytest.raises(UnknownProviderError, match=re.escape("periodic.election.provider 'etcd' is not known")):
-        app._lifecycle._build_periodic_roster()
-
     assert app._cluster_election is None
 
 
@@ -348,16 +310,6 @@ async def test_the_ui_off_turns_the_registry_off_with_one_warning(tmp_path):
     assert [entry['event'] for entry in logs] == ['fleet_registry_disabled_no_ui']
 
 
-async def test_no_folder_turns_the_filesystem_registry_off_with_one_warning(tmp_path):
-    app = _app(tmp_path, storage={'dir': ''}, recorder={'enabled': False})
-
-    with capture_logs() as logs:
-        await app._lifecycle._start_fleet()
-
-    assert app.fleet is None
-    assert [entry['event'] for entry in logs] == ['fleet_registry_disabled_no_dir']
-
-
 # --- the card folder ---
 
 
@@ -365,7 +317,7 @@ async def test_a_derived_folder_that_cannot_be_created_only_fails_publishes(tmp_
     """The derived folder is best effort: the worker runs, the registry counts errors and retries."""
     blocker = tmp_path / 'blocker'
     blocker.write_text('a file where the folder should be')
-    app = _app(tmp_path, storage={'shared_dir': str(blocker)})
+    app = _app(tmp_path, storage={'dir': str(tmp_path / 'storage'), 'shared_dir': str(blocker)})
 
     await app._lifecycle._start_fleet()
     await app._fleet.stop()
@@ -449,14 +401,19 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     assert order.index('recorder.stop') < order.index('fleet.stop') < order.index('ui_server.stop')
 
 
-@pytest.mark.parametrize(('ui_enabled', 'reserve'), [(True, 0.7), (False, 0.0)], ids=['registry', 'no-registry'])
+@pytest.mark.parametrize(
+    ('switch', 'reserve'),
+    [('none', 0.7), ('ui', 0.0), ('autodiscover', 0.0)],
+    ids=['registry', 'ui-off', 'autodiscover-off'],
+)
 async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_runs(
-    tmp_path, monkeypatch, ui_enabled, reserve
+    tmp_path, monkeypatch, switch, reserve
 ):
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
     # The registry needs the UI server, so a worker with the UI off runs none.
-    app._config.ui.enabled = ui_enabled
-    app._config.fleet.registry.resilience.timeout = 0.7
+    app._config.ui.enabled = switch != 'ui'
+    app._config.autodiscover.enabled = switch != 'autodiscover'
+    app._config.autodiscover.resilience.timeout = 0.7
 
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
@@ -599,7 +556,7 @@ class _BlockedRegistry:
 async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypatch):
     """Core isolation: the sources start and run, and shutdown ends, while every registry call hangs."""
     app, source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _BlockedRegistry())
-    app._config.fleet.registry.resilience.timeout = 0.05
+    app._config.autodiscover.resilience.timeout = 0.05
 
     run = asyncio.create_task(app._lifecycle._async_run())
     # Readiness comes before the lifecycle calls ``run``; wait for both, or
@@ -729,7 +686,7 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     app, consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
-        periodic={'election': {'provider': 'filesystem', 'resilience': resilience}},
+        autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': resilience},
     )
     due_source = make_sealed_db(history_folder(tmp_path), 'w-2', due_start(time.time()))
     timeouts_before = election_calls('filesystem', 'start', 'timeout')
@@ -763,8 +720,8 @@ async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp
     _install_registry_factory(monkeypatch, lambda _options: provider)
     # The reserve (0.5 s) is shorter than the drain budget (1 s), which is
     # shorter than the stuck window.
-    registry = {'provider': 'filesystem', 'resilience': {'timeout': '500ms'}}
-    app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': registry})
+    autodiscover = {'enabled': True, 'provider': 'filesystem', 'resilience': {'timeout': '500ms'}}
+    app, _consumers = _pipeline_app(tmp_path, monkeypatch, autodiscover=autodiscover)
     in_window = threading.Event()
     window_may_end = threading.Event()
 
@@ -840,7 +797,7 @@ async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_regi
         tmp_path,
         monkeypatch,
         executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': WAIT_FOR_TIMEOUT_SECONDS},
-        fleet={'registry': {'resilience': {'timeout': '500ms'}}},
+        autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': {'timeout': '500ms'}},
     )
     in_window = threading.Event()
 
@@ -978,45 +935,6 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
     assert order[:5] == ['connections', 'roster', 'ui_and_recorder', 'fleet', 'sinks']
 
 
-@pytest.mark.parametrize(
-    ('handler', 'ui_enabled', 'logged'),
-    [
-        (_ClusterTaskHandler, False, True),
-        (KafkaOnlyHandler, False, False),
-        (_ClusterTaskHandler, True, False),
-    ],
-    ids=['registry-off', 'no-cluster-task', 'registry-on'],
-)
-async def test_check_off_logged_once_when_the_registry_is_off_and_cluster_tasks_exist(
-    tmp_path, handler, ui_enabled, logged
-):
-    app = _app(
-        tmp_path,
-        handler=handler(),
-        ui={'enabled': ui_enabled, 'release': {'enabled': False}},
-        recorder={'archive': {'enabled': False}},
-    )
-    app._lifecycle._build_periodic_roster()
-
-    with capture_logs() as logs:
-        await app._lifecycle._start_fleet()
-    if app._fleet is not None:
-        await app._fleet.stop()
-
-    lines = [entry for entry in logs if entry['event'] == 'periodic_cluster_check_off']
-    expected = [
-        {
-            'event': 'periodic_cluster_check_off',
-            'log_level': 'info',
-            'category': 'periodic',
-            # The archive needs the UI server too, so only the handler's own task counts.
-            'cluster_tasks': 1,
-            'reason': 'the worker registry is off',
-        }
-    ]
-    assert lines == (expected if logged else [])
-
-
 class _PipelineGuardHandler(KafkaOnlyHandler):
     @periodic(30, scope='cluster')
     async def pipeline_guard(self) -> None:
@@ -1038,7 +956,7 @@ async def test_startup_with_failing_election_start_still_runs_the_pipeline(tmp_p
         tmp_path, monkeypatch, lambda _options: registry, handler=_PipelineGuardHandler()
     )
     _install_election_factory(monkeypatch, lambda _options: _DownElection(ElectionStore()))
-    app._config.periodic.election.resilience.max_retries = 0
+    app._config.autodiscover.resilience.max_retries = 0
     clock = VirtualClock(NOW)
     # Two slots of the task, SLOT and SLOT + 30, both within one minute.
     clock.limit = SLOT + 45

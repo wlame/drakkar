@@ -248,10 +248,10 @@ async def _start_live_engine(tmp_path) -> CacheEngine:
         enabled=True,
         flush_interval_seconds=60.0,
         cleanup_interval_seconds=60.0,
+        exchange=CacheExchangeConfig(enabled=False),
     )
     engine = CacheEngine(
         config=cache_cfg,
-        exchange=CacheExchangeConfig(enabled=False),
         storage_dir=str(tmp_path),
         worker_id='test-worker',
         cluster_name='',

@@ -1107,8 +1107,34 @@ cache:
   max_memory_entries: 10000           # null = unbounded (warns)
 ```
 
-Exchange of `cluster` and `global` rows with other workers is configured
-under [`fleet.cache_exchange`](#fleet-cache-exchange).
+### Cache exchange (`cache.exchange:`) {#cache-exchange}
+
+How this worker pulls `cluster` and `global` cache rows from its peers over
+HTTP (`GET /api/v1/peer/cache/changes`, last-write-wins by `updated_at_ms`),
+and whether it serves its own rows to them. The peers come from
+[`autodiscover`](#autodiscover): with it off the exchange does nothing and the
+worker logs `cache_exchange_off_no_autodiscover` once at startup. See
+[Cache](cache.md#cache-exchange).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation: the worker pulls nothing, its card carries no `features.cache`, and its peer route answers `404`. Flush and cleanup loops still run. Needs `cache.enabled` and a non-empty `storage.dir`. |
+| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between exchange cycles. |
+| `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. A pull asks for pages until the peer answers `more: false`. |
+| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer; the connect timeout is 2 seconds. One slow peer cannot block the rest. |
+| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. Peers still pulling or waiting when it fires are cut, and are not counted as failures. |
+| `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. The others wait for a free slot within the same cycle. |
+
+```yaml
+cache:
+  exchange:
+    enabled: true
+    interval_seconds: 30.0
+    page_size: 500
+    timeout_seconds: 5.0
+    cycle_deadline_seconds: null      # null = interval_seconds * 0.9
+    max_concurrent_peers: 4
+```
 
 ---
 
@@ -1169,107 +1195,62 @@ The load checks the schedule keys in this order, with the prefix
 
 ---
 
-## Periodic tasks (`periodic:`) {#periodic}
+## Autodiscover (`autodiscover:`) {#autodiscover}
 
-The election of cluster periodic tasks (the archive included). See
+How workers find each other, and which worker of a cluster runs each slot of a
+cluster periodic task (the archive included). One provider serves both jobs. The
+feature is optional and off by default; the pipeline (sources, executor, sinks,
+offset commits) does not depend on it. See [Fleet registry](fleet.md) and
 [Periodic Tasks](periodic-tasks.md).
 
+A worker with it off publishes no card, reads no peers, runs no election and
+pulls no cache rows. A declared `scope='cluster'` task then fails startup.
+
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster runs each slot of a cluster task: `filesystem` (a lock file in `<shared.dir>/tasks/<cluster>/`), `postgres` (a row in a table of the database named by `election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)). Every worker of one cluster must use the same provider. The name is resolved only when the worker runs at least one cluster task; an unknown name then fails startup. |
-| `election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
-| `election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
-
-From the environment: `DK_PERIODIC__ELECTION__PROVIDER`.
+| `enabled` | `bool` | `false` | | Turn on the registry and the election. |
+| `provider` | `str` | `''` | `consul`, `filesystem`, `postgres`, `redis`; required when enabled | `filesystem` (cards in `<storage.shared_dir>/fleet/workers`, locks in `<storage.shared_dir>/tasks/<cluster>`; needs `storage.shared_dir`), `postgres` (tables of the database named by `connection`; see [Fleet registry](fleet.md#postgres) and [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (keys of the Redis server named by `connection`), `consul` (keys of the Consul agent named by `connection`, each held by a session). Every worker of a cluster must use the same provider. |
+| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these providers enabled, the entry must be declared. The `filesystem` provider ignores it. |
+| `heartbeat` | duration | `10s` | whole seconds, >= `1s` | Time between card publishes. |
+| `refresh` | duration | `15s` | whole seconds, >= `1s` | Time between reads of the peer cards. |
+| `offline_after` | duration | `1m` | whole seconds, >= `10s`, and >= `2 * heartbeat`; at most `24h` when `provider` is `consul` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. The `consul` provider decides it by the session of the card and uses this value for the session's time to live. |
+| `prune_after` | duration | `24h` | whole seconds, >= `offline_after` | Cards older than this are deleted. Not used by the `consul` provider: Consul deletes a card when its session ends. |
+| `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the provider. The registry and the election each build their own caller from this block, so each has its own breaker. |
 
 ```yaml
-periodic:
-  election:
-    provider: filesystem
+autodiscover:
+  enabled: true
+  provider: redis
+  connection: main
+  heartbeat: 10s
+  refresh: 15s
+  offline_after: 1m
 ```
-
----
-
-## Fleet (`fleet:`) {#fleet}
-
-How workers find each other and exchange cache rows. The pipeline (sources,
-executor, sinks, offset commits) does not depend on it.
-
-### Registry (`fleet.registry:`) {#fleet-registry}
-
-How the registry works, the card format and liveness are on
-[Fleet registry](fleet.md).
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in `<shared.dir>/fleet`, or `<storage.dir>/fleet` when `shared.dir` is empty), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)). Needs `ui.enabled: true`; with the UI off the registry is off. |
-| `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
-| `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
-| `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
-| `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds`; at most `86400` when `provider` is `consul` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. The `consul` provider decides it: its card is online while a session holds the key, and this value sets the session's time to live (half of it, at least 10 seconds). |
-| `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. Not used by the `consul` provider: Consul deletes a card when its session ends. |
-| `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
 
 How the worker calls a provider: a time limit per attempt, retries with
-doubling waits, and a circuit breaker. The same block sits at
-`fleet.registry.resilience` and at `periodic.election.resilience`.
-The meaning of each part, the outcomes and the metrics are on
-[Fleet registry](fleet.md#resilience).
+doubling waits, and a circuit breaker. The meaning of each part, the outcomes and
+the metrics are on [Fleet registry](fleet.md#resilience).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one attempt of an operation. A retry gets its own limit. |
-| `retries` | `int` | `2` | >= 0 | Attempts after the first one, made only after a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. `0` means one attempt. |
-| `backoff_seconds` | `float` | `0.2` | >= 0 | Wait before the first retry. The wait doubles for each further retry. |
-| `backoff_max_seconds` | `float` | `5.0` | >= 0, and >= `backoff_seconds` | Longest wait between two attempts. |
-| `breaker.failure_threshold` | `int` | `5` | >= 1 | Failed operations in a row that open the breaker. While it is open, operations are skipped without a call. |
-| `breaker.cooldown_seconds` | `float` | `30.0` | >= 0 | Time the breaker stays open before one operation may probe the provider. A probe that succeeds closes the breaker; one that fails reopens it with a fresh cooldown. |
+| `timeout` | duration | `5s` | > 0 | Time limit for one attempt of an operation. A retry gets its own limit. |
+| `max_retries` | `int` | `2` | >= 0 | Attempts after the first one, made only after a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. `0` means one attempt. |
+| `backoff` | duration | `200ms` | >= 0 | Wait before the first retry. The wait doubles for each further retry. |
+| `max_backoff` | duration | `5s` | >= 0, and >= `backoff` | Longest wait between two attempts. |
+| `breaker_failures` | `int` | `5` | >= 1 | Failed operations in a row that open the breaker. While it is open, operations are skipped without a call. |
+| `breaker_cooldown` | duration | `30s` | >= 0 | Time the breaker stays open before one operation may probe the provider. A probe that succeeds closes the breaker; one that fails reopens it with a fresh cooldown. |
 
 ```yaml
-fleet:
-  registry:
-    resilience:
-      timeout_seconds: 5.0
-      retries: 2
-      backoff_seconds: 0.2
-      backoff_max_seconds: 5.0
-      breaker:
-        failure_threshold: 5
-        cooldown_seconds: 30.0
-```
-
-### Cache exchange (`fleet.cache_exchange:`) {#fleet-cache-exchange}
-
-How this worker pulls `cluster` and `global` cache rows from its peers over
-HTTP (`GET /api/v1/peer/cache/changes`, last-write-wins by `updated_at_ms`),
-and whether it serves its own rows to them. The peers come from the
-[fleet registry](#fleet-registry). See [Cache](cache.md#cache-exchange).
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation: the worker pulls nothing, its card carries no `features.cache`, and its peer route answers `404`. Flush and cleanup loops still run. Needs `cache.enabled` and a non-empty `storage.dir`. |
-| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between exchange cycles. |
-| `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. A pull asks for pages until the peer answers `more: false`. |
-| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer; the connect timeout is 2 seconds. One slow peer cannot block the rest. |
-| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. Peers still pulling or waiting when it fires are cut, and are not counted as failures. |
-| `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. The others wait for a free slot within the same cycle. |
-
-```yaml
-fleet:
-  registry:
-    provider: filesystem
-    heartbeat_seconds: 10
-    refresh_seconds: 15
-    offline_after_seconds: 60
-  cache_exchange:
-    enabled: true
-    interval_seconds: 30.0
-    page_size: 500
-    timeout_seconds: 5.0
-    cycle_deadline_seconds: null      # null = interval_seconds * 0.9
-    max_concurrent_peers: 4
+autodiscover:
+  resilience:
+    timeout: 5s
+    max_retries: 2
+    backoff: 200ms
+    max_backoff: 5s
+    breaker_failures: 5
+    breaker_cooldown: 30s
 ```
 
 ---
@@ -1287,8 +1268,8 @@ release ships the `postgres`, `redis` and `consul` registry and election
 providers, which read `connections.postgres.<name>`, `connections.redis.<name>`
 and `connections.consul.<name>`.
 
-Which feature names which entry: `fleet.registry.connection` and
-`periodic.election.connection`.
+Which feature names which entry: `autodiscover.connection` and
+`autodiscover.connection`.
 
 ### Consul (`connections.consul.<name>`)
 
@@ -1301,7 +1282,7 @@ Which feature names which entry: `fleet.registry.connection` and
 
 The `consul` providers talk to the HTTP API of a Consul agent. Each card or
 lease is a key that a session holds. The session's time to live is half of
-`fleet.registry.offline_after_seconds` (cards) or of the task's
+`autodiscover.offline_after` (cards) or of the task's
 `lease_seconds` (leases), at least 10 seconds, and Consul
 ends a session at most twice its time to live after the last renew.
 
@@ -1321,7 +1302,7 @@ The config load checks the rest, with the path and the rule in the message:
 
 - `connections.consul.<name>.key_prefix '<value>' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'`
 - `connections.consul.<name>.datacenter '<value>' may only contain letters, digits, '_', '.' and '-'`
-- `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`
+- `autodiscover.offline_after (<n>) must be <= 86400 when autodiscover.provider is consul`
 
 The client does no retrying of its own: the [`resilience`
 block](#resilience-block) of the feature is the only retry and the only time

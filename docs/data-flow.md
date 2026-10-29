@@ -36,7 +36,7 @@ After `on_startup`, the framework builds all components in this order:
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
 
-4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `periodic.election`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
+4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `autodiscover`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
 
 5. **If `ui.enabled`** (default: `True`):
    - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
@@ -45,7 +45,7 @@ After `on_startup`, the framework builds all components in this order:
      Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
    - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
    - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
-   - Starts the [fleet registry](fleet.md) service (when `ui.enabled`, and with the `filesystem` provider when a card folder resolves): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. Without a registry, a worker with cluster tasks logs `periodic_cluster_check_off` once. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
+   - Starts the [fleet registry](fleet.md) service (when `autodiscover.enabled` and `ui.enabled`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
 
 6. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
@@ -739,7 +739,7 @@ follow describe what the **Kafka** source does inside its share of it.
 
 ### Step 7: Stop the Flight Recorder
 - If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout_seconds` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
-- An archive pass still running is asked to stop after its current window; the recorder waits for it until only `fleet.registry.resilience.timeout_seconds` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
+- An archive pass still running is asked to stop after its current window; the recorder waits for it until only `autodiscover.resilience.timeout_seconds` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
 - Then the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
 
 ### Step 8: Stop the UI Server
@@ -949,10 +949,10 @@ Each sink type is a dict mapping instance names to their config:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `postgres`, `redis`, `consul` |
-| `fleet.registry.offline_after_seconds` | int | `60` | A peer card older than this is offline |
-| `fleet.cache_exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
-| `fleet.cache_exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |
+| `autodiscover.provider` | str | `'filesystem'` | `filesystem`, `postgres`, `redis`, `consul` |
+| `autodiscover.offline_after` | int | `60` | A peer card older than this is offline |
+| `cache.exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
+| `cache.exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |
 
 ### Root-Level Settings
 

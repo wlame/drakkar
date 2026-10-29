@@ -136,11 +136,11 @@ the rows that worker originated, never `local` rows, and nothing else of the
 worker's state.
 
 A worker serves the route while the cache, `storage.dir` and
-`fleet.cache_exchange` are on; otherwise it answers `404`. To keep cache
+`cache.exchange` are on; otherwise it answers `404`. To keep cache
 values private:
 
 - keep them in the `local` scope, which is never served;
-- set `fleet.cache_exchange.enabled: false` on workers that need no
+- set `cache.exchange.enabled: false` on workers that need no
   exchange;
 - let only the workers and the operators reach the UI port.
 

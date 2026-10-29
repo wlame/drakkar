@@ -128,7 +128,7 @@ def test_config_summary_ui_off():
 def test_config_summary_storage_and_fleet_tokens_follow_ui():
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off ' in summary
+    assert ' ui=on:8080 storage=/tmp/drakkar fleet=off cache=off ' in summary
 
 
 def test_probe_and_merge_default_to_enabled():

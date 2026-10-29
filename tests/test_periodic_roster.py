@@ -48,6 +48,8 @@ def _config(*, archive: bool = False, **values) -> DrakkarConfig:
         sources={'kafka': {'enabled': True}},
         ui={'release': {'enabled': False}},
         recorder=recorder,
+        autodiscover={'enabled': True, 'provider': 'filesystem'},
+        storage={'dir': '/data', 'shared_dir': '/mnt/shared'},
         **values,
     )
 
@@ -129,19 +131,19 @@ def _kafka_app(tmp_path, handler: object | None = None) -> DrakkarApp:
     return DrakkarApp(handler=handler if handler is not None else RatesKafkaHandler(), config=config, worker_id='w-1')
 
 
-def test_roster_filesystem_without_shared_folder_fails_for_an_enabled_cluster_task(tmp_path):
+def test_roster_with_autodiscover_off_fails_for_a_declared_cluster_task(tmp_path):
     app = _kafka_app(tmp_path)
 
     with pytest.raises(ValueError) as raised:
         app._lifecycle._build_periodic_roster()
 
     assert str(raised.value) == (
-        "periodic task 'rebuild_index' has scope cluster, but the filesystem election needs a shared folder "
-        '(storage.shared_dir or storage.dir)'
+        "periodic task 'rebuild_index' has scope cluster, but autodiscover is off; "
+        'set autodiscover.enabled and autodiscover.provider, or give the task scope worker'
     )
 
 
-def test_roster_filesystem_without_shared_folder_starts_when_the_handler_declares_no_cluster_task(tmp_path):
+def test_roster_with_autodiscover_off_starts_when_the_handler_declares_no_cluster_task(tmp_path):
     app = _kafka_app(tmp_path, handler=KafkaOnlyHandler())
 
     app._lifecycle._build_periodic_roster()
@@ -156,7 +158,8 @@ def test_roster_build_sets_the_app_hash_and_an_election_for_every_cluster_task(t
         config=DrakkarConfig(
             connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
-            storage={'dir': str(tmp_path)},
+            autodiscover={'enabled': True, 'provider': 'filesystem'},
+            storage={'dir': str(tmp_path), 'shared_dir': str(tmp_path / 'shared')},
             ui={'enabled': False, 'release': {'enabled': False}},
         ),
         worker_id='w-1',
@@ -218,7 +221,8 @@ async def test_cluster_loop_that_raises_outside_a_run_logs_periodic_loop_ended(t
         config=DrakkarConfig(
             connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
-            storage={'dir': str(tmp_path)},
+            autodiscover={'enabled': True, 'provider': 'filesystem'},
+            storage={'dir': str(tmp_path), 'shared_dir': str(tmp_path / 'shared')},
             ui={'enabled': False, 'release': {'enabled': False}},
         ),
         worker_id='w-1',
@@ -283,7 +287,8 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
         config=DrakkarConfig(
             connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
-            storage={'dir': str(tmp_path) if storage else ''},
+            autodiscover={'enabled': True, 'provider': 'filesystem'},
+            storage={'dir': str(tmp_path) if storage else '', 'shared_dir': str(tmp_path / 'shared')},
             ui={'enabled': True, 'release': {'enabled': False}},
             recorder={'enabled': storage, 'archive': {'enabled': archive}},
         ),
@@ -304,14 +309,16 @@ def test_cluster_hash_of_a_none_worker_equals_the_hash_with_archive_disabled():
     none_worker = DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
-        storage={'dir': '/data'},
+        autodiscover={'enabled': True, 'provider': 'filesystem'},
+        storage={'dir': '/data', 'shared_dir': '/mnt/shared'},
         ui={'enabled': True, 'release': {'enabled': False}},
         recorder={'enabled': False},
     )
     archive_off = DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
-        storage={'dir': '/data'},
+        autodiscover={'enabled': True, 'provider': 'filesystem'},
+        storage={'dir': '/data', 'shared_dir': '/mnt/shared'},
         ui={'enabled': True, 'release': {'enabled': False}},
         recorder={'archive': {'enabled': False}},
     )

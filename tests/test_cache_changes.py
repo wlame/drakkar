@@ -39,11 +39,16 @@ def _seed_tuple(row: dict) -> tuple:
 
 def _engine(tmp_path: Path, *, worker_id: str = 'w-a', exchange: bool = True) -> CacheEngine:
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, flush_interval_seconds=3600, cleanup_interval_seconds=3600),
-        exchange=CacheExchangeConfig(enabled=exchange, interval_seconds=3600),
+        config=CacheConfig(
+            enabled=True,
+            flush_interval_seconds=3600,
+            cleanup_interval_seconds=3600,
+            exchange=CacheExchangeConfig(enabled=exchange, interval_seconds=3600),
+        ),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='search',
+        peer_views=lambda: [],
     )
     engine.attach_cache(Cache(origin_worker_id=worker_id))
     return engine

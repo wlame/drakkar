@@ -23,6 +23,7 @@ DRAIN_TIMEOUT_SECONDS = 4
 
 def _app(tmp_path, **overrides) -> DrakkarApp:
     values = {
+        'autodiscover': {'enabled': True, 'provider': 'filesystem'},
         'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
         'cluster_name': 'search',
         'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
@@ -65,8 +66,8 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
     monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: received.update(kwargs))
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
-    election_config = {'resilience': {'timeout': '1500ms', 'max_retries': 0}}
-    app = _app(tmp_path, periodic={'election': election_config})
+    resilience = {'timeout': '1500ms', 'max_retries': 0}
+    app = _app(tmp_path, autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': resilience})
     (tmp_path / 'storage').mkdir()
     started_ok = provider_calls.labels(feature='election', provider='filesystem', op='start', outcome='ok')
     started_before = started_ok._value.get()
@@ -237,7 +238,7 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
     monkeypatch.setattr(postgres_providers, 'open_pool', fake.open_pool)
     app = _app(
         tmp_path,
-        storage={'dir': ''},
+        storage={'dir': '', 'shared_dir': str(tmp_path / 'shared')},
         recorder={
             'provider': 'postgres',
             'flush_interval': '1s',

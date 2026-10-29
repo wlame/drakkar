@@ -24,8 +24,8 @@ import structlog
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
+from drakkar.config import AutodiscoverConfig
 from drakkar.config.connections import ConnectionsConfig, ConsulConnectionConfig
-from drakkar.config.fleet import FleetRegistryConfig
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.fleet.card import WorkerIdentity, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import RegistryContext
@@ -182,7 +182,7 @@ def _service(fake: FakeConsul, resilience: ResilienceConfig, now: list[float]) -
     return FleetRegistry(
         _provider(fake),
         provider_name='consul',
-        config=FleetRegistryConfig(provider='consul', resilience=resilience),
+        config=AutodiscoverConfig(provider='consul', resilience=resilience),
         identity=IDENTITY,
         now_monotonic=lambda: now[0],
         now_epoch=lambda: 1_760_000_000.0,

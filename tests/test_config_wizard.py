@@ -22,7 +22,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from drakkar.config import DrakkarConfig, load_config
+from drakkar.config import AUTODISCOVER_PROVIDERS, DrakkarConfig, load_config
 from drakkar.configmeta import build_config_metadata, dump_by_yaml_key
 
 REPO = Path(__file__).resolve().parent.parent
@@ -31,8 +31,7 @@ TABLE_PATH = DOCS / 'data' / 'config-wizard.json'
 PAGE_PATH = DOCS / 'calculator.md'
 URL_CASES_PATH = Path(__file__).parent / 'fixtures' / 'config_wizard_url_cases.json'
 
-KNOWN_REGISTRY_PROVIDERS = {'filesystem', 'postgres', 'redis', 'consul'}
-KNOWN_ELECTION_PROVIDERS = {'filesystem', 'postgres', 'redis', 'consul'}
+OFF = 'off'
 STEPS = ('workload', 'disk', 'history', 'hosts', 'services', 'choose', 'result')
 ENV_PLACEHOLDERS = {
     'DK_CONNECTIONS__POSTGRES__MAIN__DSN': 'postgresql://u:p@placeholder/db',
@@ -119,15 +118,13 @@ class RuleWhen(Strict):
 
 
 class NoteWhen(RuleWhen):
-    registry: Match | None = None
-    election: Match | None = None
+    autodiscover: Match | None = None
 
 
 class Rule(Strict):
     when: RuleWhen
-    registry: list[str]
-    election: list[str]
-    shared: Literal['none', 'folder']
+    autodiscover: list[str]
+    shared: Literal['none', 'host', 'folder']
 
 
 class Note(Strict):
@@ -149,10 +146,10 @@ class Table(Strict):
     schema_version: Literal[1]
     inputs: dict[str, NumberInput]
     choices: dict[Literal['disk', 'history', 'hosts', 'services'], Choice]
-    features: dict[Literal['registry', 'election'], Feature]
-    providers: dict[Literal['registry', 'election'], dict[str, Provider]]
+    features: dict[Literal['autodiscover'], Feature]
+    providers: dict[Literal['autodiscover'], dict[str, Provider]]
     connections: dict[Literal['postgres', 'redis', 'consul'], Connection]
-    shared: dict[Literal['none', 'folder'], SharedEntry]
+    shared: dict[Literal['none', 'host', 'folder'], SharedEntry]
     rules: list[Rule]
     notes: list[Note]
     section_order: list[str]
@@ -173,13 +170,12 @@ TABLE = load_table()
 
 @dataclass(frozen=True)
 class Answers:
-    """Every answer of the wizard; ``reg`` and ``elect`` are ``None`` for the recommended provider."""
+    """Every answer of the wizard; ``discover`` is ``None`` for the recommended provider."""
 
     numbers: dict[str, int]
     hosts: str
     services: frozenset[str]
-    reg: str | None = None
-    elect: str | None = None
+    discover: str | None = None
     step: str = 'workload'
     disk: str = 'yes'
     history: str = 'files'
@@ -189,10 +185,8 @@ class Answers:
 class Resolution:
     """What the answers resolve to: the providers, the printed fleet part and the secrets to set."""
 
-    registry_allowed: list[str]
-    election_allowed: list[str]
-    registry: str
-    election: str
+    autodiscover_allowed: list[str]
+    autodiscover: str
     notes: list[dict[str, Any]]
     fleet: dict[str, Any]
     env: list[str] = field(default_factory=list)
@@ -213,9 +207,7 @@ def effective(answers: Answers) -> Answers:
     """Reset the answers of skipped questions: one worker asks no hosts, one host asks no services."""
     hosts = answers.hosts if answers.numbers['workers'] >= 2 else 'one'
     services = answers.services if hosts == 'many' else frozenset()
-    return Answers(
-        answers.numbers, hosts, services, answers.reg, answers.elect, answers.step, answers.disk, answers.history
-    )
+    return Answers(answers.numbers, hosts, services, answers.discover, answers.step, answers.disk, answers.history)
 
 
 def as_list(value: Match) -> list[str]:
@@ -252,9 +244,9 @@ def matching_rule(table: dict[str, Any], answers: Answers) -> dict[str, Any]:
     return next(rule for rule in table['rules'] if when_matches(rule['when'], answers, {}))
 
 
-def allowed_providers(table: dict[str, Any], feature: str, preferences: list[str], services: frozenset[str]) -> list:
+def allowed_providers(table: dict[str, Any], preferences: list[str], services: frozenset[str]) -> list:
     """The providers of a preference list whose services are all checked, in preference order."""
-    providers = table['providers'][feature]
+    providers = table['providers']['autodiscover']
     return [name for name in preferences if set(providers[name]['needs']) <= services]
 
 
@@ -286,17 +278,13 @@ def resolve(table: dict[str, Any], raw_answers: Answers) -> Resolution:
     """Resolve the answers to providers, the fleet part of the YAML and the env names."""
     answers = effective(raw_answers)
     rule = matching_rule(table, answers)
-    registry_allowed = allowed_providers(table, 'registry', rule['registry'], answers.services)
-    election_allowed = allowed_providers(table, 'election', rule['election'], answers.services)
-    registry = answers.reg if answers.reg in registry_allowed else registry_allowed[0]
-    election = answers.elect if answers.elect in election_allowed else election_allowed[0]
-    resolved = {'registry': registry, 'election': election}
+    allowed = allowed_providers(table, rule['autodiscover'], answers.services)
+    autodiscover = answers.discover if answers.discover in allowed else allowed[0]
+    resolved = {'autodiscover': autodiscover}
     notes = [note for note in table['notes'] if when_matches(note['when'], answers, resolved)]
 
-    needed = (
-        set(table['providers']['registry'][registry]['needs'])
-        | set(table['providers']['election'][election]['needs'])
-        | set(choice_value(table, 'history', answers.history).get('needs', []))
+    needed = set(table['providers']['autodiscover'][autodiscover]['needs']) | set(
+        choice_value(table, 'history', answers.history).get('needs', [])
     )
     kinds = [kind for kind in table['connections'] if kind in needed]
 
@@ -306,12 +294,11 @@ def resolve(table: dict[str, Any], raw_answers: Answers) -> Resolution:
     merge_fragment(fleet, table['shared'][rule['shared']]['fragment'])
     for kind in kinds:
         merge_fragment(fleet, table['connections'][kind]['fragment'])
-    merge_fragment(fleet, table['providers']['registry'][registry]['fragment'])
-    merge_fragment(fleet, table['providers']['election'][election]['fragment'])
+    merge_fragment(fleet, table['providers']['autodiscover'][autodiscover]['fragment'])
     for note in notes:
         merge_fragment(fleet, note.get('fragment', {}))
     env = [entry['name'] for kind in kinds for entry in table['connections'][kind]['env']]
-    return Resolution(registry_allowed, election_allowed, registry, election, notes, fleet, env)
+    return Resolution(allowed, autodiscover, notes, fleet, env)
 
 
 def choice_value(table: dict[str, Any], choice: str, value: str) -> dict[str, Any]:
@@ -383,7 +370,7 @@ def shown_steps(table: dict[str, Any], raw_answers: Answers) -> list[str]:
         'history': True,
         'hosts': answers.numbers['workers'] >= 2,
         'services': answers.hosts == 'many',
-        'choose': len(resolution.registry_allowed) > 1 or len(resolution.election_allowed) > 1,
+        'choose': len(resolution.autodiscover_allowed) > 1,
         'result': True,
     }
     return [step for step in STEPS if shown[step]]
@@ -441,16 +428,14 @@ def parse_query(table: dict[str, Any], query: str) -> tuple[Answers, list[str]]:
 
     answers = Answers(numbers, hosts, services, disk=disk, history=history)
     resolution = resolve(table, answers)
-    picks: dict[str, str | None] = {}
-    for key, allowed in (('reg', resolution.registry_allowed), ('elect', resolution.election_allowed)):
-        picks[key] = None
-        raw = params.get(key)
-        if len(allowed) < 2 or raw is None:
-            continue
-        if raw in allowed:
-            picks[key] = None if raw == allowed[0] else raw
+    allowed = resolution.autodiscover_allowed
+    discover: str | None = None
+    raw_provider = params.get('discover')
+    if len(allowed) >= 2 and raw_provider is not None:
+        if raw_provider in allowed:
+            discover = None if raw_provider == allowed[0] else raw_provider
         else:
-            invalid.add(key)
+            invalid.add('discover')
 
     step = 'workload'
     raw_step = params.get('step')
@@ -462,13 +447,13 @@ def parse_query(table: dict[str, Any], query: str) -> tuple[Answers, list[str]]:
             invalid.add('step')
 
     order = query_key_order(table)
-    answers = Answers(numbers, hosts, services, picks['reg'], picks['elect'], step, disk, history)
+    answers = Answers(numbers, hosts, services, discover, step, disk, history)
     return answers, [k for k in order if k in invalid]
 
 
 def query_key_order(table: dict[str, Any]) -> list[str]:
     """The keys of the query, in the order the canonical query writes them."""
-    return ['v', 'step', *table['inputs'], 'disk', 'history', 'hosts', 'svc', 'reg', 'elect']
+    return ['v', 'step', *table['inputs'], 'disk', 'history', 'hosts', 'svc', 'discover']
 
 
 def canonical_query(table: dict[str, Any], raw_answers: Answers) -> str:
@@ -491,10 +476,8 @@ def canonical_query(table: dict[str, Any], raw_answers: Answers) -> str:
         service_values = [item['value'] for item in table['choices']['services']['values']]
         parts.append('svc=' + ','.join(value for value in service_values if value in answers.services))
     resolution = resolve(table, answers)
-    if answers.reg in resolution.registry_allowed[1:]:
-        parts.append(f'reg={answers.reg}')
-    if answers.elect in resolution.election_allowed[1:]:
-        parts.append(f'elect={answers.elect}')
+    if answers.discover in resolution.autodiscover_allowed[1:]:
+        parts.append(f'discover={answers.discover}')
     return '&'.join(parts)
 
 
@@ -514,23 +497,23 @@ def all_combinations(table: dict[str, Any]) -> dict[str, Answers]:
                 numbers = {**defaults.numbers, 'workers': workers}
                 answers = effective(Answers(numbers, hosts, frozenset(subset), disk=disk, history=history))
                 resolution = resolve(table, answers)
-                for reg, elect in itertools.product(resolution.registry_allowed, resolution.election_allowed):
+                for provider in resolution.autodiscover_allowed:
                     picked = Answers(
-                        answers.numbers, answers.hosts, answers.services, reg, elect, disk=disk, history=history
+                        answers.numbers, answers.hosts, answers.services, provider, disk=disk, history=history
                     )
                     combinations.setdefault(combination_id(picked), picked)
     return combinations
 
 
 def combination_id(answers: Answers) -> str:
-    """An id such as ``disk=yes-history=files-w2-many-folder+redis-reg=redis-elect=filesystem``."""
+    """An id such as ``disk=yes-history=files-w2-many-folder+redis-discover=redis``."""
     if answers.numbers['workers'] == 1:
         head = 'w1'
     elif answers.hosts == 'one':
         head = 'w2-one'
     else:
         head = 'w2-many-' + ('+'.join(sorted(answers.services)) or 'none')
-    return f'disk={answers.disk}-history={answers.history}-{head}-reg={answers.reg}-elect={answers.elect}'
+    return f'disk={answers.disk}-history={answers.history}-{head}-discover={answers.discover}'
 
 
 COMBINATIONS = all_combinations(TABLE)
@@ -582,12 +565,11 @@ def test_table_loads_into_the_shape_models():
 
 
 def test_every_rule_names_known_providers_and_ends_with_one_that_needs_nothing():
+    providers = TABLE['providers']['autodiscover']
     for rule in TABLE['rules']:
-        for feature in ('registry', 'election'):
-            providers = TABLE['providers'][feature]
-            assert rule[feature], f'empty {feature} list in {rule}'
-            assert all(name in providers for name in rule[feature]), rule
-            assert providers[rule[feature][-1]]['needs'] == [], rule
+        assert rule['autodiscover'], f'empty autodiscover list in {rule}'
+        assert all(name in providers for name in rule['autodiscover']), rule
+        assert providers[rule['autodiscover'][-1]]['needs'] == [], rule
 
 
 def test_the_last_rule_matches_anything():
@@ -595,8 +577,7 @@ def test_the_last_rule_matches_anything():
 
 
 def test_provider_names_exist_in_the_config_model():
-    assert set(TABLE['providers']['registry']) <= KNOWN_REGISTRY_PROVIDERS
-    assert set(TABLE['providers']['election']) <= KNOWN_ELECTION_PROVIDERS
+    assert set(TABLE['providers']['autodiscover']) == {*AUTODISCOVER_PROVIDERS, OFF}
 
 
 def test_every_when_value_and_every_need_is_a_known_value():
@@ -609,16 +590,14 @@ def test_every_when_value_and_every_need_is_a_known_value():
         'hosts': hosts,
         'services_include': services,
         'services_exclude': services,
-        'registry': set(TABLE['providers']['registry']),
-        'election': set(TABLE['providers']['election']),
+        'autodiscover': set(TABLE['providers']['autodiscover']),
     }
     for row in [*TABLE['rules'], *TABLE['notes']]:
         for key, value in row['when'].items():
             assert set(as_list(value)) <= known[key], (key, value)
-    for feature in ('registry', 'election'):
-        for name, provider in TABLE['providers'][feature].items():
-            assert set(provider['needs']) <= services, name
-            assert set(provider['needs']) <= set(TABLE['connections']) | {'folder'}, name
+    for name, provider in TABLE['providers']['autodiscover'].items():
+        assert set(provider['needs']) <= services, name
+        assert set(provider['needs']) <= set(TABLE['connections']) | {'folder'}, name
     for choice in TABLE['choices'].values():
         for item in choice['values']:
             assert set(item.get('needs', [])) <= set(TABLE['connections']), item['value']
@@ -685,10 +664,7 @@ def test_page_inputs_match_the_table():
 
 
 def test_combinations_cover_every_provider():
-    registries = {answers.reg for answers in COMBINATIONS.values()}
-    elections = {answers.elect for answers in COMBINATIONS.values()}
-    assert registries == set(TABLE['providers']['registry'])
-    assert elections == set(TABLE['providers']['election'])
+    assert {answers.discover for answers in COMBINATIONS.values()} == set(TABLE['providers']['autodiscover'])
 
 
 @pytest.mark.parametrize('answers', list(COMBINATIONS.values()), ids=list(COMBINATIONS))
@@ -710,16 +686,15 @@ def test_every_combination_prints_a_config_that_loads(answers, tmp_path, clean_e
         assert value_at(config, env_paths[name]) == ENV_PLACEHOLDERS[name], name
     expected_mode = 'postgres' if answers.history == 'postgres' else 'none' if answers.disk == 'no' else 'sqlite'
     assert config.resolved_persistence == expected_mode
-    assert config.fleet.registry.provider == answers.reg
-    assert config.periodic.election.provider == answers.elect
+    assert config.autodiscover.enabled is (answers.discover != OFF)
+    assert config.autodiscover.provider == ('' if answers.discover == OFF else answers.discover)
     summary = config.config_summary()
-    registry_has_no_folder = answers.reg == 'filesystem' and not config.resolved_registry_dir
-    assert re.search(r' fleet=(\S+)', summary).group(1) == ('off' if registry_has_no_folder else answers.reg)
+    assert re.search(r' fleet=(\S+)', summary).group(1) == answers.discover
     election_token = re.search(r' election=(\S+)', summary)
-    if answers.elect == 'filesystem':
+    if answers.discover in (OFF, 'filesystem'):
         assert election_token is None, summary
     else:
-        assert election_token.group(1) == answers.elect
+        assert election_token.group(1) == answers.discover
 
 
 def test_fragment_leaves_are_never_secret_and_every_secret_has_an_env_entry():
@@ -756,7 +731,7 @@ def test_fragment_leaves_are_never_secret_and_every_secret_has_an_env_entry():
 
 
 def test_a_postgres_combination_without_its_dsn_fails_the_load(tmp_path, clean_environment):
-    answers = next(a for a in COMBINATIONS.values() if a.reg == 'postgres' and a.elect == 'postgres')
+    answers = next(a for a in COMBINATIONS.values() if a.discover == 'postgres')
     document = document_for(TABLE, resolve(TABLE, answers))
 
     with pytest.raises(ValidationError, match='dsn'):
@@ -765,12 +740,12 @@ def test_a_postgres_combination_without_its_dsn_fails_the_load(tmp_path, clean_e
 
 def test_merging_the_same_leaf_twice_is_an_error():
     target: dict[str, Any] = {}
-    merge_fragment(target, {'fleet': {'registry': {'provider': 'filesystem'}}})
+    merge_fragment(target, {'recorder': {'archive': {'enabled': True}}})
 
-    with pytest.raises(ValueError, match=r'^two fragments set fleet\.registry\.provider$'):
-        merge_fragment(target, {'fleet': {'registry': {'provider': 'redis'}}})
-    with pytest.raises(ValueError, match=r'^two fragments set fleet\.registry$'):
-        merge_fragment(target, {'fleet': {'registry': {}}})
+    with pytest.raises(ValueError, match=r'^two fragments set recorder\.archive\.enabled$'):
+        merge_fragment(target, {'recorder': {'archive': {'enabled': False}}})
+    with pytest.raises(ValueError, match=r'^two fragments set recorder\.archive$'):
+        merge_fragment(target, {'recorder': {'archive': {}}})
 
 
 @pytest.mark.parametrize(
@@ -876,19 +851,51 @@ def test_wizard_disk_yes_prints_no_storage_fragment():
     assert 'storage' not in document_for(TABLE, resolution)
 
 
-@pytest.mark.parametrize('query', ['v=1&disk=no', 'v=1&disk=no&workers=3', 'v=1&disk=no&workers=3&hosts=many'])
-def test_wizard_disk_no_with_no_shared_folder_offers_only_the_filesystem_registry_and_says_it_stays_off(query):
+@pytest.mark.parametrize(
+    ('query', 'note_id'),
+    [
+        ('v=1&disk=no&workers=3', 'autodiscover_off_no_disk'),
+        ('v=1&disk=no&workers=3&hosts=many', 'autodiscover_off_several_hosts'),
+    ],
+)
+def test_wizard_disk_no_with_no_service_leaves_autodiscover_off_and_says_what_that_means(query, note_id):
     resolution = resolve(TABLE, parse_query(TABLE, query)[0])
 
-    assert resolution.registry_allowed == ['filesystem']
-    assert resolution.fleet['fleet'] == {'registry': {'provider': 'filesystem'}}
-    assert 'registry_no_folder' in [note['id'] for note in resolution.notes]
+    assert resolution.autodiscover_allowed == [OFF]
+    assert 'autodiscover' not in resolution.fleet
+    note = next(note for note in resolution.notes if note['id'] == note_id)
+    assert 'cluster task does not start' in note['text']
 
 
-def test_wizard_disk_no_with_a_shared_folder_keeps_the_filesystem_registry():
+def test_wizard_one_worker_leaves_autodiscover_off_with_no_note():
+    resolution = resolve(TABLE, parse_query(TABLE, 'v=1')[0])
+
+    assert resolution.autodiscover_allowed == [OFF]
+    assert 'autodiscover' not in resolution.fleet
+    assert not [note for note in resolution.notes if 'autodiscover' in note['id']]
+
+
+def test_wizard_several_hosts_with_no_service_leaves_autodiscover_off_and_says_what_that_means():
+    resolution = resolve(TABLE, parse_query(TABLE, 'v=1&workers=2&hosts=many')[0])
+
+    assert resolution.autodiscover == OFF
+    assert 'autodiscover' not in resolution.fleet
+    note = next(note for note in resolution.notes if note['id'] == 'autodiscover_off_several_hosts')
+    assert 'each worker runs on its own' in note['text']
+
+
+def test_wizard_several_workers_on_one_host_share_a_folder_on_that_host():
+    resolution = resolve(TABLE, parse_query(TABLE, 'v=1&workers=3')[0])
+
+    assert resolution.autodiscover == 'filesystem'
+    assert resolution.fleet['autodiscover'] == {'enabled': True, 'provider': 'filesystem'}
+    assert resolution.fleet['storage'] == {'shared_dir': '/tmp/drakkar'}
+
+
+def test_wizard_disk_no_with_a_shared_folder_keeps_the_filesystem_provider():
     resolution = resolve(TABLE, parse_query(TABLE, 'v=1&disk=no&workers=3&hosts=many&svc=folder')[0])
 
-    assert resolution.registry == 'filesystem'
+    assert resolution.autodiscover == 'filesystem'
     assert resolution.fleet['storage'] == {'dir': '', 'shared_dir': '/mnt/drakkar-shared'}
 
 
@@ -913,9 +920,9 @@ def test_wizard_golden_disk_no():
     loaded = yaml.safe_load(example['yaml'])
 
     assert example['query'] == 'v=1&disk=no'
-    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'recorder', 'connections', 'fleet', 'periodic']
+    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'recorder', 'connections']
     assert loaded['storage'] == {'dir': ''}
-    assert loaded['fleet'] == {'registry': {'provider': 'filesystem'}}
+    assert 'autodiscover' not in loaded
 
 
 def test_history_choice_defaults_to_files_with_no_fragment():
@@ -949,7 +956,7 @@ def test_history_postgres_with_the_postgres_providers_merges_the_connection_once
     query = 'v=1&workers=3&hosts=many&svc=postgres&history=postgres'
     resolution = resolve(TABLE, parse_query(TABLE, query)[0])
 
-    assert resolution.registry == 'postgres'
+    assert resolution.autodiscover == 'postgres'
     assert resolution.fleet['connections'] == {'postgres': {'main': {'schema': 'drakkar'}}}
     assert resolution.env == ['DK_CONNECTIONS__POSTGRES__MAIN__DSN']
 

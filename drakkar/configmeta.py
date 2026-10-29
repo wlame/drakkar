@@ -27,17 +27,16 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from drakkar.config import (
+    AutodiscoverConfig,
     CacheConfig,
     ConnectionsConfig,
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
-    FleetConfig,
     IOConfig,
     LoggingConfig,
     MetricsConfig,
     OffloadConfig,
-    PeriodicConfig,
     RecorderConfig,
     RuntimeHealthConfig,
     SinksConfig,
@@ -148,8 +147,7 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
     ('storage', 'Own storage (storage:)', 'own-storage-storage', StorageConfig),
     ('recorder', 'Flight recorder (recorder:)', 'flight-recorder-recorder', RecorderConfig),
-    ('periodic', 'Periodic tasks (periodic:)', 'periodic-tasks-periodic', PeriodicConfig),
-    ('fleet', 'Fleet registry and cache exchange (fleet:)', 'fleet-registry-and-cache-exchange-fleet', FleetConfig),
+    ('autodiscover', 'Autodiscover (autodiscover:)', 'autodiscover-autodiscover', AutodiscoverConfig),
     ('connections', 'Connections (connections:)', 'connections-connections', ConnectionsConfig),
 ]
 

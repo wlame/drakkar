@@ -31,7 +31,7 @@ shared folder is `/shared` too. The directory holds:
 
 No worker opens another worker's files at the top level. The cache
 exchange propagates cluster/global-scope entries over HTTP: every
-`fleet.cache_exchange.interval_seconds` each worker reads the registry
+`cache.exchange.interval_seconds` each worker reads the registry
 cards and pulls new rows from the other workers with
 `GET /api/v1/peer/cache/changes` at the URL on their card. The Message
 Trace reads the sealed files in the history folder.

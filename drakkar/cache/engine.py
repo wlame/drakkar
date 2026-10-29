@@ -59,7 +59,7 @@ from drakkar.dbfiles import DB_DIR_MODE, WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.periodic import run_periodic_task
 
 if TYPE_CHECKING:
-    from drakkar.config import CacheConfig, CacheExchangeConfig
+    from drakkar.config import CacheConfig
     from drakkar.fleet.service import PeerView
     from drakkar.recorder import EventRecorder
 
@@ -92,7 +92,6 @@ class CacheEngine:
     def __init__(
         self,
         config: CacheConfig,
-        exchange: CacheExchangeConfig,
         storage_dir: str,
         worker_id: str,
         cluster_name: str,
@@ -104,9 +103,8 @@ class CacheEngine:
 
         Args:
             config: cache-specific settings (enabled flag, intervals,
-                memory cap).
-            exchange: ``fleet.cache_exchange`` — whether and how often
-                ``cluster``/``global`` rows are pulled from peers.
+                memory cap, and ``exchange``: whether and how often
+                ``cluster``/``global`` rows are pulled from peers).
             storage_dir: the worker's own folder (``storage.dir``); the
                 cache file lives here. Empty means memory-only: the engine
                 warns at start and stays disabled.
@@ -123,13 +121,13 @@ class CacheEngine:
                 can avoid requiring the recorder's presence.
             peer_views: the worker registry's peers (cards with each
                 peer's URL, cluster, state and ``features.cache`` marks),
-                read every sync cycle. ``None`` (no registry) means no peer
-                is ever pulled.
+                read every sync cycle. ``None`` (no registry) turns the
+                exchange off: no sync loop runs and nothing is served.
             peer_transport: the HTTP transport for peer requests; ``None``
                 uses httpx's own. A seam for tests (``httpx.MockTransport``).
         """
         self._config = config
-        self._exchange = exchange
+        self._exchange = config.exchange
         self._storage_dir = storage_dir
         # True once start() found no storage folder: nothing is persisted,
         # so an attached Cache keeps no pending writes.
@@ -188,7 +186,7 @@ class CacheEngine:
         self._cleanup_task: asyncio.Task | None = None
         # Task reference for the periodic peer-sync loop. Same lifecycle
         # as flush/cleanup; only scheduled when peer sync is effectively
-        # enabled (``fleet.cache_exchange.enabled`` and a writable local
+        # enabled (``cache.exchange.enabled`` and a writable local
         # DB). None when disabled so there's no wakeup cost.
         self._sync_task: asyncio.Task | None = None
         # Whether peer-sync is *effectively* enabled — the config flag is
@@ -422,17 +420,24 @@ class CacheEngine:
         if self._cache is not None:
             self._cache.attach_reader_db(self._reader_db)
 
-        # Peer-sync runs whenever ``fleet.cache_exchange.enabled`` is on: the
-        # writer connection it applies pulled rows into is open by now.
-        # Logged once at startup so the effective state is visible without
-        # spamming the sync loop.
+        # Peer-sync runs when ``cache.exchange.enabled`` is on and a registry
+        # gives the peers: the writer connection it applies pulled rows into
+        # is open by now. Logged once at startup so the effective state is
+        # visible without spamming the sync loop.
         if not self._exchange.enabled:
             self._peer_sync_enabled = False
             await logger.ainfo(
                 'cache_peer_sync_disabled_by_config',
                 category='cache',
                 worker_id=self._worker_id,
-                reason='fleet.cache_exchange.enabled=false in config',
+                reason='cache.exchange.enabled=false in config',
+            )
+        elif self._peer_views is None:
+            self._peer_sync_enabled = False
+            await logger.ainfo(
+                'cache_exchange_off_no_autodiscover',
+                category='cache',
+                worker_id=self._worker_id,
             )
         else:
             self._peer_sync_enabled = True
@@ -1016,7 +1021,7 @@ class CacheEngine:
         task.
 
         Deadline resolution:
-        - ``fleet.cache_exchange.cycle_deadline_seconds`` when set explicitly.
+        - ``cache.exchange.cycle_deadline_seconds`` when set explicitly.
         - Otherwise ``interval_seconds * 0.9`` — strictly less than the
           gap between invocations so the periodic loop always has slack
           to schedule the next cycle even if this one hit the cap.

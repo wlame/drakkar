@@ -598,7 +598,7 @@ cache_bytes_in_db = Gauge(
 
 # --- Fleet registry ---
 # One provider call is one operation (start, publish, list, withdraw, stop)
-# with its retries, each attempt under fleet.registry.resilience.timeout_seconds;
+# with its retries, each attempt under autodiscover.resilience.timeout;
 # a timeout counts as an error, an operation skipped without a call does not.
 # A loop iteration that raises counts under its operation. The snapshot
 # age grows while refreshes fail, so an alert can tell a stale workers list

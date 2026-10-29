@@ -1,4 +1,4 @@
-"""The storage, recorder archive and fleet config sections."""
+"""The storage, recorder archive and autodiscover config sections."""
 
 import re
 
@@ -7,11 +7,10 @@ import pytest
 from drakkar.config import (
     CONNECTION_PROVIDERS,
     DEFAULT_ARCHIVE_RETENTION_DAYS,
+    AutodiscoverConfig,
     CacheExchangeConfig,
     ConnectionsConfig,
     DrakkarConfig,
-    FleetRegistryConfig,
-    PeriodicConfig,
     RecorderArchiveConfig,
     RecorderConfig,
     StorageConfig,
@@ -51,48 +50,40 @@ def test_archive_defaults():
     assert archive.sweep_after == 7200
 
 
-def test_fleet_registry_defaults():
-    registry = FleetRegistryConfig()
+def test_autodiscover_defaults():
+    autodiscover = AutodiscoverConfig()
 
-    assert registry.provider == 'filesystem'
-    assert registry.heartbeat_seconds == 10
-    assert registry.refresh_seconds == 15
-    assert registry.connection == 'main'
-    assert registry.offline_after_seconds == 60
-    assert registry.prune_after_seconds == 86400
-    assert registry.resilience.timeout == 5.0
+    assert autodiscover.enabled is False
+    assert autodiscover.provider == ''
+    assert autodiscover.connection == 'main'
+    assert autodiscover.heartbeat == 10
+    assert autodiscover.refresh == 15
+    assert autodiscover.offline_after == 60
+    assert autodiscover.prune_after == 86400
+    assert autodiscover.resilience.timeout == 5.0
+    assert autodiscover.resilience.max_retries == 2
 
 
-def test_fleet_registry_fields_are_the_provider_choice_the_timings_and_the_resilience_block():
-    assert set(FleetRegistryConfig.model_fields) == {
+def test_autodiscover_fields_are_the_switch_the_provider_choice_the_timings_and_the_resilience_block():
+    assert set(AutodiscoverConfig.model_fields) == {
+        'enabled',
         'provider',
         'connection',
-        'heartbeat_seconds',
-        'refresh_seconds',
-        'offline_after_seconds',
-        'prune_after_seconds',
+        'heartbeat',
+        'refresh',
+        'offline_after',
+        'prune_after',
         'resilience',
     }
 
 
-def test_offline_after_seconds_of_30_loads_with_the_default_heartbeat():
-    assert FleetRegistryConfig(offline_after_seconds=30).heartbeat_seconds == 10
+def test_offline_after_of_30s_loads_with_the_default_heartbeat():
+    assert AutodiscoverConfig(offline_after='30s').heartbeat == 10
 
 
-def test_the_registry_time_limit_lives_in_its_resilience_block():
-    assert 'timeout_seconds' not in FleetRegistryConfig.model_fields
-    assert 'timeout' in FleetRegistryConfig.model_fields['resilience'].annotation.model_fields
-
-
-def test_offline_after_seconds_of_zero_fails_at_the_field():
-    with pytest.raises(ValueError, match='offline_after_seconds'):
-        FleetRegistryConfig(offline_after_seconds=0)
-
-
-def test_election_defaults():
-    election = PeriodicConfig().election
-
-    assert (election.provider, election.connection, election.resilience.max_retries) == ('filesystem', 'main', 2)
+def test_offline_after_of_zero_fails_at_the_field():
+    with pytest.raises(ValueError, match='offline_after'):
+        AutodiscoverConfig(offline_after=0)
 
 
 def test_cache_exchange_defaults():
@@ -132,49 +123,48 @@ def test_resolved_shared_dir_falls_back_to_storage_dir(storage_dir, shared_dir, 
 
 
 @pytest.mark.parametrize(
-    ('storage_dir', 'expected'),
+    ('shared_dir', 'expected'),
     [
-        ('/var/lib/drakkar', '/var/lib/drakkar/fleet'),
+        ('/mnt/shared', '/mnt/shared/fleet'),
         # The folder is a clean path, the same on every backend.
         ('./data/', 'data/fleet'),
-        ('/var/lib//drakkar/', '/var/lib/drakkar/fleet'),
-        ('', ''),
+        ('/mnt//shared/', '/mnt/shared/fleet'),
     ],
 )
-def test_resolved_registry_dir(storage_dir, expected):
-    config = _config(storage={'dir': storage_dir}, recorder={'enabled': bool(storage_dir)})
+def test_resolved_registry_dir(shared_dir, expected):
+    assert _config(storage={'shared_dir': shared_dir}).resolved_registry_dir == expected
 
-    assert config.resolved_registry_dir == expected
+
+_CONSUL_ON = {'enabled': True, 'provider': 'consul'}
 
 
 @pytest.mark.parametrize(
     ('sections', 'expected'),
     [
-        ({}, 'filesystem'),
-        ({'ui': {'enabled': False}}, 'off'),
-        ({'storage': {'dir': ''}, 'recorder': {'enabled': False}}, 'off'),
-        ({'fleet': {'registry': {'provider': 'consul'}}, 'connections': {'consul': {'main': {}}}}, 'consul'),
-        (
-            {
-                'ui': {'enabled': False},
-                'fleet': {'registry': {'provider': 'redis'}},
-                'connections': {'redis': {'main': {}}},
-            },
-            'off',
-        ),
+        ({}, 'off'),
+        ({'autodiscover': {'provider': 'consul'}}, 'off'),
+        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}}, 'consul'),
+        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}, 'ui': {'enabled': False}}, 'off'),
     ],
+    ids=['default', 'off-with-provider', 'on', 'ui-off'],
 )
 def test_fleet_summary(sections, expected):
     assert _config(**sections).fleet_summary == expected
 
 
 @pytest.mark.parametrize(
-    ('provider', 'expected'),
-    [('filesystem', ''), ('consul', ' election=consul')],
+    ('enabled', 'provider', 'expected'),
+    [
+        (True, 'filesystem', ''),
+        (True, 'consul', ' election=consul'),
+        (False, 'consul', ''),
+    ],
+    ids=['filesystem', 'consul', 'off'],
 )
-def test_election_summary_is_silent_for_the_filesystem_provider(provider, expected):
+def test_election_summary_names_a_provider_other_than_filesystem_when_on(enabled, provider, expected):
     config = _config(
-        periodic={'election': {'provider': provider}},
+        autodiscover={'enabled': enabled, 'provider': provider},
+        storage={'shared_dir': '/mnt/shared'},
         connections={'consul': {'main': {}}},
     )
 
@@ -185,7 +175,7 @@ def test_election_summary_is_silent_for_the_filesystem_provider(provider, expect
 
 
 @pytest.mark.parametrize('provider', ['consul', 'redis', 'postgres'])
-def test_registry_and_election_load_when_the_named_connection_is_declared(provider):
+def test_autodiscover_loads_when_the_named_connection_is_declared(provider):
     connections = {
         'consul': {'cluster-a': {}},
         'redis': {'cluster-a': {}},
@@ -193,18 +183,20 @@ def test_registry_and_election_load_when_the_named_connection_is_declared(provid
     }
 
     config = _config(
-        fleet={'registry': {'provider': provider, 'connection': 'cluster-a'}},
-        periodic={'election': {'provider': provider, 'connection': 'cluster-a'}},
+        autodiscover={'enabled': True, 'provider': provider, 'connection': 'cluster-a'},
         connections=connections,
     )
 
-    assert config.fleet.registry.connection == 'cluster-a'
+    assert config.autodiscover.connection == 'cluster-a'
 
 
 def test_the_filesystem_provider_ignores_the_connection_name():
-    config = _config(fleet={'registry': {'provider': 'filesystem', 'connection': 'not-declared'}})
+    config = _config(
+        autodiscover={'enabled': True, 'provider': 'filesystem', 'connection': 'not-declared'},
+        storage={'shared_dir': '/mnt/shared'},
+    )
 
-    assert config.fleet.registry.connection == 'not-declared'
+    assert config.autodiscover.connection == 'not-declared'
 
 
 def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():
@@ -212,62 +204,61 @@ def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():
     assert set(CONNECTION_PROVIDERS) <= set(ConnectionsConfig.model_fields)
 
 
-def test_registry_names_a_connection_of_its_own_kind_only():
+def test_autodiscover_names_a_connection_of_its_own_kind_only():
     with pytest.raises(
-        ValueError, match=re.escape("fleet.registry.connection 'main' is not defined under connections.consul")
+        ValueError, match=re.escape("autodiscover.connection 'main' is not defined under connections.consul")
     ):
-        _config(fleet={'registry': {'provider': 'consul'}}, connections={'redis': {'main': {}}})
+        _config(autodiscover=_CONSUL_ON, connections={'redis': {'main': {}}})
 
 
-def _consul_registry(**registry) -> DrakkarConfig:
-    """A config whose registry is the consul provider, with ``registry`` merged over it."""
+def _consul_autodiscover(**autodiscover) -> DrakkarConfig:
+    """A config with autodiscover on through the consul provider, with ``autodiscover`` merged over it."""
     return _config(
-        fleet={'registry': {'provider': 'consul', **registry}},
+        autodiscover={**_CONSUL_ON, **autodiscover},
         connections={'consul': {'main': {}}},
     )
 
 
-def test_consul_offline_after_seconds_at_the_cap_loads():
-    config = _consul_registry(offline_after_seconds=86_400)
+def test_consul_offline_after_at_the_cap_loads():
+    config = _consul_autodiscover(offline_after='24h')
 
-    assert config.fleet.registry.offline_after_seconds == 86_400
+    assert config.autodiscover.offline_after == 86_400
 
 
-def test_consul_offline_after_seconds_over_the_cap_fails_the_load():
+def test_consul_offline_after_over_the_cap_fails_the_load():
     with pytest.raises(ValueError) as excinfo:
-        _consul_registry(offline_after_seconds=86_401, prune_after_seconds=86_401)
+        _consul_autodiscover(offline_after='86401s', prune_after='86401s')
 
-    assert (
-        'fleet.registry.offline_after_seconds (86401) must be <= 86400 when fleet.registry.provider is consul'
-        in str(excinfo.value)
-    )
+    assert 'autodiscover.offline_after (1d1s) must be <= 1d when autodiscover.provider is consul' in str(excinfo.value)
 
 
 @pytest.mark.parametrize('provider', ['filesystem', 'redis', 'postgres'])
-def test_offline_after_seconds_over_the_consul_cap_loads_for_other_providers(provider):
+def test_offline_after_over_the_consul_cap_loads_for_other_providers(provider):
     config = _config(
-        fleet={'registry': {'provider': provider, 'offline_after_seconds': 86_401, 'prune_after_seconds': 86_401}},
+        autodiscover={'enabled': True, 'provider': provider, 'offline_after': '86401s', 'prune_after': '86401s'},
+        storage={'shared_dir': '/mnt/shared'},
         connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
     )
 
-    assert config.fleet.registry.offline_after_seconds == 86_401
+    assert config.autodiscover.offline_after == 86_401
 
 
-def test_consul_registry_checks_the_prune_limit_before_the_offline_cap():
+def test_consul_autodiscover_checks_the_prune_limit_before_the_offline_cap():
     # The prune check runs before the consul cap.
     with pytest.raises(ValueError) as excinfo:
-        _consul_registry(offline_after_seconds=86_401)
+        _consul_autodiscover(offline_after='86401s')
 
     text = str(excinfo.value)
-    assert 'fleet.registry.prune_after_seconds (86400) must be >= fleet.registry.offline_after_seconds (86401)' in text
-    assert 'must be <= 86400' not in text
+    assert 'autodiscover.prune_after (1d) must be >= autodiscover.offline_after (1d1s)' in text
+    assert 'must be <= 1d' not in text
 
 
 @pytest.mark.parametrize('provider', ['filesystem', 'consul', 'redis', 'postgres'])
 def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider):
     config = _config(
         recorder={'archive': {'lease': '24h'}},
-        periodic={'election': {'provider': provider}},
+        autodiscover={'enabled': True, 'provider': provider},
+        storage={'shared_dir': '/mnt/shared'},
         connections={
             'consul': {'main': {}},
             'redis': {'main': {}},
@@ -278,44 +269,46 @@ def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider)
     assert config.recorder.archive.lease == 86_400
 
 
-def test_resilience_blocks_load_from_env_names(monkeypatch):
+def test_the_resilience_block_loads_from_env_names(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
-    monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT', '2500ms')
-    monkeypatch.setenv('DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES', '0')
+    monkeypatch.setenv('DK_AUTODISCOVER__RESILIENCE__TIMEOUT', '2500ms')
+    monkeypatch.setenv('DK_AUTODISCOVER__RESILIENCE__MAX_RETRIES', '0')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
     config = load_config(None)
 
-    assert config.fleet.registry.resilience.timeout == 2.5
-    assert config.periodic.election.resilience.max_retries == 0
+    assert config.autodiscover.resilience.timeout == 2.5
+    assert config.autodiscover.resilience.max_retries == 0
 
 
 # --- env names -----------------------------------------------------------
 
 
-def test_env_names_load_into_the_new_sections(monkeypatch):
+def test_env_names_load_into_their_sections(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
     monkeypatch.setenv('DK_STORAGE__DIR', '/var/lib/drakkar')
-    monkeypatch.setenv('DK_STORAGE__SHARED_DIR', '/mnt/fleet')
+    monkeypatch.setenv('DK_STORAGE__SHARED_DIR', '/mnt/shared')
     monkeypatch.setenv('DK_RECORDER__ARCHIVE__DUE_AFTER', '72h')
     monkeypatch.setenv('DK_RECORDER__ARCHIVE__MERGED_RETENTION', '0')
-    monkeypatch.setenv('DK_FLEET__REGISTRY__PROVIDER', 'filesystem')
-    monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '12.5')
+    monkeypatch.setenv('DK_AUTODISCOVER__ENABLED', 'true')
+    monkeypatch.setenv('DK_AUTODISCOVER__PROVIDER', 'filesystem')
+    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL_SECONDS', '12.5')
     monkeypatch.setenv('DK_RECORDER__SEARCH__MAX_FILES', '64')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
     config = load_config(None)
 
     assert config.storage.dir == '/var/lib/drakkar'
-    assert config.storage.shared_dir == '/mnt/fleet'
+    assert config.storage.shared_dir == '/mnt/shared'
     assert config.recorder.archive.due_after == 72
     assert config.recorder.archive.merged_retention == 0
-    assert config.fleet.registry.provider == 'filesystem'
-    assert config.fleet.cache_exchange.interval_seconds == 12.5
+    assert config.autodiscover.enabled is True
+    assert config.autodiscover.provider == 'filesystem'
+    assert config.cache.exchange.interval_seconds == 12.5
     assert config.recorder.search.max_files == 64
 
 

@@ -578,9 +578,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         """This worker plus the peers of the last registry snapshot.
 
         Answered from memory: the registry service refreshes the snapshot in
-        the background, so this route does no storage I/O. Without a
-        registry (UI off, no card folder) only this
-        worker is listed. Sorted clustered first (by cluster, then name),
+        the background, so this route does no storage I/O. With
+        ``autodiscover`` off only this worker is listed. Sorted clustered first (by cluster, then name),
         unclustered last (by name).
         """
         fleet = drakkar_app.fleet

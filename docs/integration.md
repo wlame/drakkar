@@ -468,8 +468,8 @@ just integration-up provider=consul      # consul: cards in the KV store of cons
 ```
 
 The argument sets `HARNESS_PROVIDER`, which `docker-compose.yml` passes to
-the three workers as `DK_FLEET__REGISTRY__PROVIDER` and
-`DK_PERIODIC__ELECTION__PROVIDER`. The periodic election decides which
+the three workers as `DK_AUTODISCOVER__PROVIDER` and
+`DK_AUTODISCOVER__PROVIDER`. The periodic election decides which
 worker runs each slot of a cluster task: the archive and the handler's
 `harness_cluster_tick`. With `postgres`, both use the
 [connection](fleet.md#connections) `connections.postgres.main`: its DSN in
@@ -514,7 +514,7 @@ card has a TTL of 10 s, and Consul deletes the card with the session about
 20 s after the last publish. Each call to the provider has 2 s and one
 retry, and three failed operations open the
 [circuit breaker](fleet.md#resilience) for 10 s. The periodic election
-uses the same resilience block (`periodic.election.resilience`).
+uses the same resilience block (`autodiscover.resilience`).
 
 ---
 

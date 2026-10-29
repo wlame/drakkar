@@ -1,8 +1,7 @@
-"""The ``periodic`` config section and the schedule keys of ``recorder.archive``.
+"""The schedule keys of ``recorder.archive``.
 
 The shared cases live in ``tests/fixtures/config_contract.json``; these tests
-cover what the fixture cannot pin: the fields of the section and the
-effective archive schedule.
+cover what the fixture cannot pin: the effective archive schedule.
 """
 
 import json
@@ -12,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from drakkar.config import DrakkarConfig, PeriodicConfig, RecorderArchiveConfig
+from drakkar.config import DrakkarConfig, RecorderArchiveConfig
 
 MESSAGES = json.loads((Path(__file__).parent / 'fixtures' / 'periodic_contract.json').read_text(encoding='utf-8'))[
     'messages'
@@ -25,10 +24,6 @@ def _config(**sections) -> DrakkarConfig:
     ui = sections.setdefault('ui', {})
     ui.setdefault('release', {'enabled': False})
     return DrakkarConfig(**sections)
-
-
-def test_periodic_section_holds_only_the_election():
-    assert set(PeriodicConfig.model_fields) == {'election'}
 
 
 def test_archive_effective_interval_defaults_to_3600_and_is_none_with_cron():

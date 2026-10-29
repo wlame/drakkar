@@ -26,7 +26,7 @@ import aiosqlite
 import pytest
 
 from drakkar.cache import Cache, CacheEngine, CacheScope
-from drakkar.config import CacheConfig, CacheExchangeConfig
+from drakkar.config import CacheConfig
 
 # --- helpers ----------------------------------------------------------------
 
@@ -36,7 +36,6 @@ async def _make_started_engine(tmp_path: Path, *, worker_id: str = 'w1') -> Cach
     cache = Cache(origin_worker_id=worker_id)
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',

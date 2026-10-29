@@ -978,13 +978,10 @@ class TestConfigSummary:
         assert 'cache=on:f=0.5s/s=30s/c=60s' in summary
 
     def test_summary_cache_on_with_cache_exchange_disabled(self):
-        """fleet.cache_exchange.enabled=false renders the sync slot as 'off' instead of an interval."""
-        from drakkar.config import CacheConfig, CacheExchangeConfig, FleetConfig
+        """cache.exchange.enabled=false renders the sync slot as 'off' instead of an interval."""
+        from drakkar.config import CacheConfig, CacheExchangeConfig
 
-        cfg = make_config(
-            cache=CacheConfig(enabled=True),
-            fleet=FleetConfig(cache_exchange=CacheExchangeConfig(enabled=False)),
-        )
+        cfg = make_config(cache=CacheConfig(enabled=True, exchange=CacheExchangeConfig(enabled=False)))
         summary = cfg.config_summary(worker_id='w')
         assert 'cache=on:f=3s/s=off/c=60s' in summary
 

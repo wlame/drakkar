@@ -524,7 +524,15 @@ cache:
   flush_interval_seconds: 3.0      # write-behind flush cadence. env: DK_CACHE__FLUSH_INTERVAL_SECONDS
   cleanup_interval_seconds: 60.0   # expired-row cleanup cadence. env: DK_CACHE__CLEANUP_INTERVAL_SECONDS
   max_memory_entries: 10000        # in-memory LRU cap; null = unbounded (warns). env: DK_CACHE__MAX_MEMORY_ENTRIES
-                                   # Exchange of cluster/global rows with peers: fleet.cache_exchange below.
+  exchange:                        # cluster/global rows pulled from peers over HTTP; the peers come from autodiscover,
+                                   # so with autodiscover off this does nothing and logs one info line at startup.
+    enabled: true                  # env: DK_CACHE__EXCHANGE__ENABLED
+    interval_seconds: 30           # cycle period. env: DK_CACHE__EXCHANGE__INTERVAL_SECONDS
+    page_size: 500                 # 1-1000 rows per page; pages until the peer says more=false. env: DK_CACHE__EXCHANGE__PAGE_SIZE
+    timeout_seconds: 5             # time limit for one request to a peer (connect: 2 s). env: DK_CACHE__EXCHANGE__TIMEOUT_SECONDS
+    cycle_deadline_seconds: null   # hard cap on one cycle; null = interval x 0.9; must be < interval_seconds.
+                                   # env: DK_CACHE__EXCHANGE__CYCLE_DEADLINE_SECONDS
+    max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_CACHE__EXCHANGE__MAX_CONCURRENT_PEERS
 ```
 
 ---
@@ -648,78 +656,50 @@ recorder:
 
 ---
 
-## Periodic tasks (`periodic:`)
+## Autodiscover (`autodiscover:`)
 
-📚 [Periodic tasks](periodic-tasks.md)
+📚 [Fleet registry](fleet.md) · [Periodic tasks](periodic-tasks.md) · [Upgrading](upgrading.md)
 
-```yaml
-periodic:
-  election:                        # which worker of a cluster runs each slot of a cluster task (history.archive
-                                   # included); see "Resilience block" below
-    provider: filesystem           # filesystem | postgres | redis | consul.
-                                   # Every worker of one cluster uses the same provider. env: DK_PERIODIC__ELECTION__PROVIDER
-    connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
-                                   # env: DK_PERIODIC__ELECTION__CONNECTION
-    resilience:                    # same keys and defaults as fleet.registry.resilience
-      timeout: 5s                  # env: DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT
-      max_retries: 2               # env: DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES
-      backoff: 200ms               # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF
-      max_backoff: 5s              # env: DK_PERIODIC__ELECTION__RESILIENCE__MAX_BACKOFF
-      breaker_failures: 5          # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_FAILURES
-      breaker_cooldown: 30s        # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_COOLDOWN
-```
+How workers find each other and elect the one worker that runs each slot of a cluster task. One provider serves both jobs. **Off by default**: a worker with it off publishes no card, reads no peers, runs no election and pulls no cache rows, `/api/v1/workers` lists only this worker, and a declared `scope='cluster'` task fails startup. The pipeline itself does not depend on it.
 
----
-
-## Fleet registry and cache exchange (`fleet:`)
-
-📚 [Upgrading](upgrading.md) · [Cache page](cache.md)
-
-How workers find each other and exchange cache rows. Peers pull `cluster`/`global` cache rows over HTTP from the URL on each registry card. The pipeline itself does not depend on it.
-
-**Resilience block.** `fleet.registry.resilience` and `periodic.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff` up to `max_backoff`), and a circuit breaker that skips the provider after `breaker_failures` failed operations in a row and lets one probe through after `breaker_cooldown`. The semantics are on [Fleet registry](fleet.md#resilience).
+**Resilience block.** A time limit per attempt, retries with doubling waits (`backoff` up to `max_backoff`), and a circuit breaker that skips the provider after `breaker_failures` failed operations in a row and lets one probe through after `breaker_cooldown`. The registry and the election each build their own caller from this one block, so each has its own breaker. The semantics are on [Fleet registry](fleet.md#resilience).
 
 ```yaml
-fleet:
-  registry:
-    provider: filesystem           # filesystem | postgres | redis | consul;
-                                   # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>;
+autodiscover:
+  enabled: false                   # env: DK_AUTODISCOVER__ENABLED
+  provider: ''                     # consul | filesystem | postgres | redis; required when enabled.
+                                   # filesystem needs storage.shared_dir: cards in <storage.shared_dir>/fleet/workers/,
+                                   # locks in <storage.shared_dir>/tasks/<cluster>/;
+                                   # postgres keeps the cards in the table fleet_workers and the locks in the table
+                                   # task_locks of connections.postgres.<connection>;
                                    # redis keeps them in keys of connections.redis.<connection>, with an index of the workers;
-                                   # consul keeps them in keys of connections.consul.<connection>, each held by a session of its worker.
-                                   # needs ui.enabled. env: DK_FLEET__REGISTRY__PROVIDER
-    connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
-                                   # env: DK_FLEET__REGISTRY__CONNECTION
-    heartbeat_seconds: 10          # card publish period. env: DK_FLEET__REGISTRY__HEARTBEAT_SECONDS
-    refresh_seconds: 15            # peer card read period. env: DK_FLEET__REGISTRY__REFRESH_SECONDS
-    offline_after_seconds: 60      # card older than this = offline; must be >= 2 x heartbeat_seconds and >= 10.
-                                   # consul: sets the session's time to live (half of this, at least 10 s); <= 86400.
-                                   # env: DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS
-    prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds. Not used by consul.
-                                   # env: DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS
-    resilience:                    # see "Resilience block" below
-      timeout: 5s                  # time limit for one attempt. env: DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT
-      max_retries: 2               # extra attempts after a transient error. env: DK_FLEET__REGISTRY__RESILIENCE__MAX_RETRIES
-      backoff: 200ms               # wait before the first retry, doubling. env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF
-      max_backoff: 5s              # longest wait between attempts; >= backoff. env: DK_FLEET__REGISTRY__RESILIENCE__MAX_BACKOFF
-      breaker_failures: 5          # failed operations in a row that open the breaker.
-                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER_FAILURES
-      breaker_cooldown: 30s        # open time before one probe operation.
-                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER_COOLDOWN
-  cache_exchange:
-    enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
-    interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
-    page_size: 500                 # 1-1000 rows per page; pages until the peer says more=false. env: DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE
-    timeout_seconds: 5             # time limit for one request to a peer (connect: 2 s). env: DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS
-    cycle_deadline_seconds: null   # hard cap on one cycle; null = interval x 0.9; must be < interval_seconds.
-                                   # env: DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS
-    max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS
+                                   # consul keeps them in keys of connections.consul.<connection>, each held by a session.
+                                   # Every worker of one cluster uses the same provider. env: DK_AUTODISCOVER__PROVIDER
+  connection: main                 # entry of connections.<provider>; read by postgres, redis and consul.
+                                   # env: DK_AUTODISCOVER__CONNECTION
+  heartbeat: 10s                   # card publish period. env: DK_AUTODISCOVER__HEARTBEAT
+  refresh: 15s                     # peer card read period. env: DK_AUTODISCOVER__REFRESH
+  offline_after: 1m                # card older than this = offline; at least 2 x heartbeat and at least 10s.
+                                   # consul: sets the session's time to live (half of this, at least 10 s); at most 24h.
+                                   # env: DK_AUTODISCOVER__OFFLINE_AFTER
+  prune_after: 24h                 # delete cards older than this; at least offline_after. Not used by consul.
+                                   # env: DK_AUTODISCOVER__PRUNE_AFTER
+  resilience:
+    timeout: 5s                    # time limit for one attempt. env: DK_AUTODISCOVER__RESILIENCE__TIMEOUT
+    max_retries: 2                 # extra attempts after a transient error. env: DK_AUTODISCOVER__RESILIENCE__MAX_RETRIES
+    backoff: 200ms                 # wait before the first retry, doubling. env: DK_AUTODISCOVER__RESILIENCE__BACKOFF
+    max_backoff: 5s                # longest wait between attempts; >= backoff. env: DK_AUTODISCOVER__RESILIENCE__MAX_BACKOFF
+    breaker_failures: 5            # failed operations in a row that open the breaker.
+                                   # env: DK_AUTODISCOVER__RESILIENCE__BREAKER_FAILURES
+    breaker_cooldown: 30s          # open time before one probe operation.
+                                   # env: DK_AUTODISCOVER__RESILIENCE__BREAKER_COOLDOWN
 ```
 
 ## Connections (`connections:`)
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-A service is declared once. `connections.<kind>.<name>` says how to reach it and log in; a consumer says `connection: <name>` (default `main`), and the entry must be declared. A consumer in use that names an entry not declared fails the load with `<path>.connection '<name>' is not defined under connections.<kind>`. In use means: an enabled Kafka source, every configured sink of a connection kind, the DLQ when it has a destination, the recorder's Postgres table, and a registry or election provider that uses a connection. A different login to one server is a different connection. The names are user-chosen and written in lower case. Set the secret fields (`sasl_password`, `ssl_key_password`, `token`, `url`, `uri`, `dsn`) from the environment; see [Security](security.md#provider-credentials).
+A service is declared once. `connections.<kind>.<name>` says how to reach it and log in; a consumer says `connection: <name>` (default `main`), and the entry must be declared. A consumer in use that names an entry not declared fails the load with `<path>.connection '<name>' is not defined under connections.<kind>`. In use means: an enabled Kafka source, every configured sink of a connection kind, the DLQ when it has a destination, the recorder's Postgres table, and `autodiscover` when enabled with provider `consul`, `postgres` or `redis`. A different login to one server is a different connection. The names are user-chosen and written in lower case. Set the secret fields (`sasl_password`, `ssl_key_password`, `token`, `url`, `uri`, `dsn`) from the environment; see [Security](security.md#provider-credentials).
 
 ```yaml
 connections:
@@ -805,7 +785,7 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 | Top-level | `cluster_name` → `DK_CLUSTER_NAME` |
 | One level deep | `metrics.port` → `DK_METRICS__PORT` |
 | Section, sub-section, field | `sources.kafka.topic` → `DK_SOURCES__KAFKA__TOPIC` |
-| Two levels deep | `fleet.cache_exchange.interval_seconds` → `DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS` |
+| Two levels deep | `cache.exchange.interval_seconds` → `DK_CACHE__EXCHANGE__INTERVAL_SECONDS` |
 | Map key (sink instance) | `sinks.postgres.main-db.pool_max` → `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` |
 | Map key (connection) | `connections.kafka.main.brokers` → `DK_CONNECTIONS__KAFKA__MAIN__BROKERS` |
 | List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |

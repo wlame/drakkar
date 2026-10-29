@@ -23,8 +23,8 @@ from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
+from drakkar.config import AutodiscoverConfig
 from drakkar.config.connections import ConnectionsConfig, RedisConnectionConfig
-from drakkar.config.fleet import FleetRegistryConfig
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.fleet.card import WorkerIdentity, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import RegistryContext
@@ -570,7 +570,7 @@ async def test_a_dead_server_opens_the_breaker_and_a_live_one_closes_it(clock, s
     service = FleetRegistry(
         _provider(server, client=recorder),
         provider_name='redis',
-        config=FleetRegistryConfig(provider='redis', resilience=resilience),
+        config=AutodiscoverConfig(provider='redis', resilience=resilience),
         identity=IDENTITY,
         now_monotonic=lambda: now[0],
         now_epoch=lambda: 1_760_000_000.0,

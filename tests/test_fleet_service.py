@@ -15,7 +15,7 @@ import pytest
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
-from drakkar.config import FleetRegistryConfig, ResilienceConfig
+from drakkar.config import AutodiscoverConfig, ResilienceConfig
 from drakkar.config.connections import ConnectionsConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
@@ -36,17 +36,18 @@ OWN = WorkerIdentity(
 )
 
 
-def _config(timeout_seconds: float = 1.0, retries: int = 0, **overrides) -> FleetRegistryConfig:
+def _config(timeout_seconds: float = 1.0, retries: int = 0, **overrides) -> AutodiscoverConfig:
     values = {
+        'enabled': True,
         'provider': 'memory',
-        'heartbeat_seconds': 3600,
-        'refresh_seconds': 3600,
-        'offline_after_seconds': 30,
-        'prune_after_seconds': 86_400,
+        'heartbeat': 3600,
+        'refresh': 3600,
+        'offline_after': 30,
+        'prune_after': 86_400,
         'resilience': ResilienceConfig(timeout=f'{timeout_seconds}s', max_retries=retries),
     }
     values.update(overrides)
-    return FleetRegistryConfig.model_construct(**values)
+    return AutodiscoverConfig.model_construct(**values)
 
 
 async def _no_backoff(_seconds: float) -> None:
@@ -250,7 +251,7 @@ async def test_every_publish_reads_the_features_supplier_at_that_moment():
     service = FleetRegistry(
         MemoryRegistry(store),
         provider_name='memory',
-        config=_config(heartbeat_seconds=0.02),
+        config=_config(heartbeat=0.02),
         identity=OWN,
         features=lambda: dict(features),
     )
@@ -264,7 +265,7 @@ async def test_every_publish_reads_the_features_supplier_at_that_moment():
 
 async def test_heartbeats_republish_the_card():
     provider = _Recording(MemoryStore())
-    service = _service(provider, heartbeat_seconds=0.02)
+    service = _service(provider, heartbeat=0.02)
 
     await service.start()
     await wait_for(lambda: len([call for call in provider.calls if call[0] == 'publish']) >= 3)
@@ -618,7 +619,7 @@ async def test_the_snapshot_age_grows_from_the_service_start_while_the_provider_
 
 async def test_nothing_is_listed_before_the_provider_starts():
     provider = _StartsWhenAllowed(MemoryStore())
-    service = _service(provider, heartbeat_seconds=0.01, refresh_seconds=0.01, resilience=_never_opening_breaker())
+    service = _service(provider, heartbeat=0.01, refresh=0.01, resilience=_never_opening_breaker())
     skipped_before = _calls('publish', 'not_started')
 
     await service.start()
@@ -662,7 +663,7 @@ async def test_an_exception_in_the_features_callback_does_not_stop_the_loops():
             raise ValueError('features supplier broke')
         return {}
 
-    service = _service(MemoryRegistry(store), features=features, heartbeat_seconds=0.01)
+    service = _service(MemoryRegistry(store), features=features, heartbeat=0.01)
     errors_before = _sample('drakkar_fleet_registry_errors_total', {'op': 'publish'})
 
     with capture_logs() as logs:
@@ -678,7 +679,7 @@ async def test_an_exception_in_the_features_callback_does_not_stop_the_loops():
 
 async def test_an_exception_while_building_the_snapshot_does_not_stop_the_refresh_loop(monkeypatch):
     provider = _Listing([PeerCard(card=_peer('w-2'), age_seconds=1.0)])
-    service = _service(provider, refresh_seconds=0.01)
+    service = _service(provider, refresh=0.01)
     original_peers_from = service._peers_from
     raised = []
 
@@ -727,7 +728,7 @@ async def test_a_publish_iteration_that_keeps_raising_does_not_stop_the_refresh_
         raise ValueError('features supplier broke')
 
     provider = _Recording(MemoryStore())
-    service = _service(provider, features=features, heartbeat_seconds=0.01, refresh_seconds=0.01)
+    service = _service(provider, features=features, heartbeat=0.01, refresh=0.01)
 
     await service.start()
     await wait_for(lambda: provider.calls.count(('list',)) >= 3)
@@ -937,7 +938,7 @@ async def test_listed_entries_that_are_not_cards_are_skipped_as_invalid():
 
 async def test_the_loops_keep_running_and_stop_withdraws_after_a_malformed_listing():
     provider = _BadListing(MemoryStore(), None)
-    service = _service(provider, heartbeat_seconds=0.02, refresh_seconds=0.02)
+    service = _service(provider, heartbeat=0.02, refresh=0.02)
 
     await service.start()
     await wait_for(lambda: len([call for call in provider.calls if call[0] == 'publish']) >= 3)

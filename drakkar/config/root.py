@@ -13,10 +13,9 @@ import yaml
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from drakkar.config.autodiscover import CONNECTION_PROVIDERS, FILESYSTEM_PROVIDER, AutodiscoverConfig
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
-from drakkar.config.fleet import CONNECTION_PROVIDERS, FleetConfig
-from drakkar.config.periodic import PeriodicConfig
 from drakkar.config.recorder import (
     PERSISTENCE_NONE,
     PERSISTENCE_POSTGRES,
@@ -51,6 +50,8 @@ SQLITE_WITHOUT_DIR_MESSAGE = (
     'recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, '
     'or set recorder.enabled to false'
 )
+
+FILESYSTEM_WITHOUT_SHARED_DIR_MESSAGE = 'autodiscover.provider filesystem needs storage.shared_dir'
 
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
 # map names resolved. No variable name can start with NUL, so with this prefix the
@@ -139,8 +140,7 @@ class DrakkarConfig(BaseSettings):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     recorder: RecorderConfig = Field(default_factory=RecorderConfig)
-    periodic: PeriodicConfig = Field(default_factory=PeriodicConfig)
-    fleet: FleetConfig = Field(default_factory=FleetConfig)
+    autodiscover: AutodiscoverConfig = Field(default_factory=AutodiscoverConfig)
     connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     app: dict[str, Any] = Field(
@@ -209,21 +209,9 @@ class DrakkarConfig(BaseSettings):
         return self
 
     @model_validator(mode='after')
-    def _validate_registry_connection(self) -> 'DrakkarConfig':
-        """A registry provider that uses a connection needs that connection declared."""
-        registry = self.fleet.registry
-        _require_provider_connection(
-            'fleet.registry.connection', registry.provider, registry.connection, self.connections
-        )
-        return self
-
-    @model_validator(mode='after')
-    def _validate_election_connection(self) -> 'DrakkarConfig':
-        """An election provider that uses a connection needs that connection declared."""
-        election = self.periodic.election
-        _require_provider_connection(
-            'periodic.election.connection', election.provider, election.connection, self.connections
-        )
+    def _validate_autodiscover(self) -> 'DrakkarConfig':
+        """What an enabled ``autodiscover`` needs from the rest of the config."""
+        self.check_autodiscover()
         return self
 
     @model_validator(mode='after')
@@ -270,32 +258,34 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def resolved_registry_dir(self) -> str:
-        """Card folder of the filesystem registry: ``<shared folder>/fleet``; ``''`` when no folder resolves."""
-        shared_dir = self.resolved_shared_dir
-        # normpath so the derived folder is the same clean path on every
-        # backend ('./data/' -> 'data/fleet').
-        return os.path.normpath(os.path.join(shared_dir, 'fleet')) if shared_dir else ''
+        """Card folder of the filesystem registry: ``<storage.shared_dir>/fleet``.
+
+        ``normpath`` makes the derived folder the same clean path on every
+        backend (``./data/`` gives ``data/fleet``).
+        """
+        return os.path.normpath(os.path.join(self.storage.shared_dir, 'fleet'))
 
     @property
     def fleet_summary(self) -> str:
         """The registry the worker will run: the provider name, or ``off``.
 
-        ``off`` when the registry cannot run: it needs the UI server (peers
-        reach a worker through it), and the filesystem provider needs a folder.
+        ``off`` with ``autodiscover`` off, and with the UI off, because peers
+        reach a worker through the UI server.
         """
-        provider = self.fleet.registry.provider
-        if not self.ui.enabled or (provider == 'filesystem' and not self.resolved_registry_dir):
+        if not self.autodiscover.enabled or not self.ui.enabled:
             return 'off'
-        return provider
+        return self.autodiscover.provider
 
     @property
     def election_summary(self) -> str:
-        """The summary token of the periodic election provider, with its leading space.
+        """The summary token of the election provider, with its leading space.
 
-        Empty for ``filesystem``, the default provider.
+        Empty with ``autodiscover`` off and for the ``filesystem`` provider.
         """
-        provider = self.periodic.election.provider
-        return '' if provider == 'filesystem' else f' election={provider}'
+        autodiscover = self.autodiscover
+        if not autodiscover.enabled or autodiscover.provider == FILESYSTEM_PROVIDER:
+            return ''
+        return f' election={autodiscover.provider}'
 
     @property
     def dlq_enabled(self) -> bool:
@@ -325,6 +315,27 @@ class DrakkarConfig(BaseSettings):
         if not self.dlq_enabled:
             return None
         return self.declared_connection('dlq.connection', self.dlq.provider, self.dlq.connection)
+
+    def check_autodiscover(self) -> None:
+        """Refuse an ``autodiscover`` section that cannot run.
+
+        The load calls this, and so does the startup after ``on_startup``, which
+        may have changed the keys: both give the same messages.
+
+        Raises:
+            ValueError: the provider name is not valid, or the enabled provider
+                lacks its shared folder or its connection.
+        """
+        autodiscover = self.autodiscover
+        autodiscover.check_provider()
+        if not autodiscover.enabled:
+            return
+        if autodiscover.provider == FILESYSTEM_PROVIDER and not self.storage.shared_dir:
+            raise ValueError(FILESYSTEM_WITHOUT_SHARED_DIR_MESSAGE)
+        if autodiscover.provider in CONNECTION_PROVIDERS:
+            _require_declared_connection(
+                'autodiscover.connection', autodiscover.provider, autodiscover.connection, self.connections
+            )
 
     def declared_connection(self, path: str, kind: str, name: str) -> Any:
         """The connection ``name`` of the service ``kind``, read at run time.
@@ -362,7 +373,7 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul election=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
         (kafka, then http). The ``ui`` token reports the UI server state;
@@ -371,8 +382,9 @@ class DrakkarConfig(BaseSettings):
         folder (``mem`` for memory-only), ``shared`` appears only when the
         shared folder differs from it, and ``fleet`` names the registry the
         worker runs (see :attr:`fleet_summary`). ``election`` follows it
-        only when the periodic election provider is not ``filesystem`` (see
-        :attr:`election_summary`). The exact bytes are contractual.
+        only when ``autodiscover`` is on with a provider other than
+        ``filesystem`` (see :attr:`election_summary`). The exact bytes are
+        contractual.
         """
         identity = worker_id or '?'
         if cluster_name:
@@ -398,7 +410,7 @@ class DrakkarConfig(BaseSettings):
             cache_part = 'off'
         else:
             flush = f'{self.cache.flush_interval_seconds:g}s'
-            exchange = self.fleet.cache_exchange
+            exchange = self.cache.exchange
             sync = f'{exchange.interval_seconds:g}s' if exchange.enabled else 'off'
             cleanup = f'{self.cache.cleanup_interval_seconds:g}s'
             cache_tokens = [f'f={flush}', f's={sync}', f'c={cleanup}']
@@ -470,16 +482,6 @@ def _require_declared_connection(path: str, kind: str, name: str, connections: C
     if name not in declared:
         raise ValueError(f"{path} '{name}' is not defined under connections.{kind}")
     return declared[name]
-
-
-def _require_provider_connection(path: str, provider: str, name: str, connections: ConnectionsConfig) -> None:
-    """Fail when ``provider`` uses a named connection and ``connections`` does not declare ``name``.
-
-    The check goes by the provider name alone: a name in ``CONNECTION_PROVIDERS``
-    (``consul``, ``redis``, ``postgres``) is checked; any other name is not.
-    """
-    if provider in CONNECTION_PROVIDERS:
-        _require_declared_connection(path, provider, name, connections)
 
 
 class _ConfigYamlLoader(yaml.SafeLoader):

@@ -23,7 +23,6 @@ from drakkar.cache.engine import FLUSH_FAILURE_ESCALATION_THRESHOLD, CacheEngine
 from drakkar.cache.memory import Cache
 from drakkar.config import (
     CacheConfig,
-    CacheExchangeConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConnectionConfig,
@@ -190,7 +189,6 @@ async def test_drain_all_processors_uses_snapshot_not_live_dict(app_config):
 def _make_engine() -> CacheEngine:
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir='',
         worker_id='w-test',
         cluster_name='',

@@ -38,7 +38,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import FakePeers, set_peer_cluster, split_cache_overrides, wait_for
+from tests.conftest import FakePeers, set_peer_cluster, wait_for
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
 
@@ -59,14 +59,13 @@ async def _make_engine(
 ) -> CacheEngine:
     """Spin up a started CacheEngine for peer-sync deadline testing."""
     cache = Cache(origin_worker_id=worker_id)
-    cache_fields, exchange = split_cache_overrides(cache_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**cache_fields),
-        exchange=exchange,
+        config=make_cache_config(**(cache_overrides or {})),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,
+        peer_views=lambda: [],
     )
     engine.attach_cache(cache)
     await engine.start()

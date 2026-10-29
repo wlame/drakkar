@@ -4,15 +4,16 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
 The models are split per domain across this package — ``sinks``,
-``sources``, ``runtime``, ``ui``, ``recorder``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
+``sources``, ``runtime``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
+from drakkar.config.autodiscover import AUTODISCOVER_PROVIDERS, CONNECTION_PROVIDERS, AutodiscoverConfig
 from drakkar.config.base import ConfigModel
-from drakkar.config.cache import CacheConfig
+from drakkar.config.cache import CacheConfig, CacheExchangeConfig
 from drakkar.config.connections import (
     ConnectionsConfig,
     ConsulConnectionConfig,
@@ -21,13 +22,6 @@ from drakkar.config.connections import (
     PostgresConnectionConfig,
     RedisConnectionConfig,
 )
-from drakkar.config.fleet import (
-    CONNECTION_PROVIDERS,
-    CacheExchangeConfig,
-    FleetConfig,
-    FleetRegistryConfig,
-)
-from drakkar.config.periodic import ElectionConfig, PeriodicConfig
 from drakkar.config.recorder import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     RecorderAnnotationsConfig,
@@ -99,6 +93,7 @@ from drakkar.config.units import (
 from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
 __all__ = [
+    'AUTODISCOVER_PROVIDERS',
     'BUILTIN_LINK_BASES',
     'CONNECTION_PROVIDERS',
     'DEFAULT_ARCHIVE_RETENTION_DAYS',
@@ -106,6 +101,7 @@ __all__ = [
     'TIMELINE_NUMERIC_FIELDS',
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
+    'AutodiscoverConfig',
     'ByteSize',
     'CacheConfig',
     'CacheExchangeConfig',
@@ -117,11 +113,8 @@ __all__ = [
     'DocsAnchorMatch',
     'DrakkarConfig',
     'Duration',
-    'ElectionConfig',
     'ExecutorConfig',
     'FileSinkConfig',
-    'FleetConfig',
-    'FleetRegistryConfig',
     'HttpSinkConfig',
     'IOConfig',
     'KafkaConnectionConfig',
@@ -133,7 +126,6 @@ __all__ = [
     'MongoSinkConfig',
     'MongoStatementConfig',
     'OffloadConfig',
-    'PeriodicConfig',
     'PostgresConnectionConfig',
     'PostgresSinkConfig',
     'RecorderAnnotationsConfig',

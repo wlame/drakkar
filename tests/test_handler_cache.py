@@ -166,9 +166,9 @@ def _make_config_with_cache(
             enabled=cache_enabled,
             flush_interval_seconds=60.0,  # slow — tests manually flush
             cleanup_interval_seconds=60.0,
+            exchange={'enabled': False},
         ),
         storage={'dir': str(tmp_path)},
-        fleet={'cache_exchange': {'enabled': False}},
     )
 
 
@@ -266,8 +266,7 @@ async def test_pydantic_roundtrip_via_handler_cache(tmp_path) -> None:
     through the handler's ``self.cache`` interface using ``PrecomputedResult``
     (a real framework model, not a test-only toy)."""
     engine = CacheEngine(
-        config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(enabled=False),
+        config=CacheConfig(enabled=True, exchange=CacheExchangeConfig(enabled=False)),
         storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',

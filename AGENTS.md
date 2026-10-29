@@ -135,7 +135,8 @@ parametrize).
      `Message.error()`, it is not raised.
 6. Errors are explicit, never silently swallowed. Structured logging via
    structlog, ECS-compatible.
-7. Cluster periodic tasks (`drakkar/cluster_tasks.py`): the acquire window
+7. Cluster periodic tasks (`drakkar/cluster_tasks.py`) need `autodiscover`, whose
+   one provider serves the registry and the election: the acquire window
    (10 s) and the minimum hold (20 s) are constants, the same on every
    worker whatever the task settings; together they keep a slot from running
    twice while clocks differ by less than 10 s. Do not make them

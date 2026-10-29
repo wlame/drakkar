@@ -152,14 +152,14 @@ def test_summary_kafka_only():
     )
     assert cfg.config_summary('worker-1', 'analytics-prod') == (
         '[worker-1/analytics-prod] sources=[kafka:search-requests/grp/50poll] exec=4w/10win retries=3/120s '
-        'ui=on:8081 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO'
+        'ui=on:8081 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO'
     )
 
 
 def test_summary_http_only_dlq_off():
     cfg = _summary_config(sources={'http': {'enabled': True, 'port': 8091}})
     assert cfg.config_summary('w', '') == (
-        '[w] sources=[http:8091] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=filesystem '
+        '[w] sources=[http:8091] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=off '
         'cache=off metrics=9090 dlq=off '
         'sinks=[kf:a,b pg:main] log=INFO'
     )
@@ -175,7 +175,7 @@ def test_summary_mixed_with_explicit_dlq_topic():
     )
     assert cfg.config_summary('w', '') == (
         '[w] sources=[kafka:in/g/100poll http:8091] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar '
-        'fleet=filesystem cache=off '
+        'fleet=off cache=off '
         'metrics=9090 dlq=my-dlq sinks=[kf:a,b pg:main] log=INFO'
     )
 
@@ -183,7 +183,7 @@ def test_summary_mixed_with_explicit_dlq_topic():
 def test_summary_http_only_with_explicit_dlq_topic_shows_topic():
     cfg = _summary_config(sources={'http': {'enabled': True}}, dlq={'topic': 'my-dlq'})
     assert cfg.config_summary('w', '') == (
-        '[w] sources=[http:8090] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=filesystem '
+        '[w] sources=[http:8090] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=off '
         'cache=off metrics=9090 '
         'dlq=my-dlq sinks=[kf:a,b pg:main] log=INFO'
     )

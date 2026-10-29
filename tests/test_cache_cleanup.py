@@ -46,8 +46,7 @@ from drakkar.cache import (
     DirtyOp,
     Op,
 )
-from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides
+from drakkar.config import CacheConfig
 
 # --- helpers ----------------------------------------------------------------
 
@@ -60,10 +59,8 @@ def make_cache_config(**overrides) -> CacheConfig:
 
 async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides) -> CacheEngine:
     cache = Cache(origin_worker_id=worker_id)
-    cache_fields, exchange = split_cache_overrides(cfg_overrides)
     engine = CacheEngine(
-        config=make_cache_config(**cache_fields),
-        exchange=exchange,
+        config=make_cache_config(**cfg_overrides),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
@@ -499,7 +496,6 @@ async def test_cleanup_on_disabled_engine_is_noop(tmp_path):
     be a no-op — not raise, not touch anything."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',

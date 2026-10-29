@@ -27,7 +27,7 @@ import pytest
 
 import drakkar.recorder.core as recorder_core
 from drakkar.cache import CacheEngine
-from drakkar.config import CacheConfig, CacheExchangeConfig, RecorderConfig
+from drakkar.config import CacheConfig, RecorderConfig
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE, secure_db_file
 from drakkar.recorder import EventRecorder
 
@@ -177,7 +177,6 @@ async def test_cache_db_and_wal_sidecars_are_owner_only(tmp_path):
     db_dir = tmp_path / 'cachedir'
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
@@ -195,7 +194,6 @@ async def test_cache_creates_its_storage_dir_owner_only(tmp_path):
     db_dir = tmp_path / 'created-by-drakkar'
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
@@ -221,7 +219,6 @@ async def test_cache_leaves_an_operator_owned_storage_dir_alone(tmp_path, pre_ex
     os.chmod(db_dir, pre_existing_mode)
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',
@@ -291,7 +288,6 @@ async def test_cache_writer_uses_normal_synchronous(tmp_path):
     db_dir.mkdir()
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(db_dir),
         worker_id='w1',
         cluster_name='',

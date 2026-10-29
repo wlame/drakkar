@@ -118,8 +118,7 @@ class TestShape:
             'cache',
             'storage',
             'recorder',
-            'periodic',
-            'fleet',
+            'autodiscover',
             'connections',
         ]
 

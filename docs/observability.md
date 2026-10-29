@@ -221,7 +221,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer over HTTP ([cache exchange](cache.md#cache-exchange)) and accepted, per peer. Counted after the page commits. Rows the worker rejected are not counted here; they go to `drakkar_cache_sync_errors_total`. |
 | `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows from a peer passed to the LWW upsert of the local DB, per peer. Counted with the same rows as `sync_entries_fetched_total`, so the two are equal; rows that LWW keeps unchanged are still counted. |
 | `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer exchange errors: one per failed request (timeout, refused connection, a status other than 200, an answer that is not the expected JSON), one per page that could not be applied locally, and one per rejected row (wrong scope or not the peer's own origin). The loop keeps running. |
-| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of exchange cycles that hit `fleet.cache_exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline; the cut peers are not counted as failures. A sustained non-zero rate signals slow peers, or more peers than one interval can pull — raise the deadline and the interval, or raise `max_concurrent_peers`. |
+| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of exchange cycles that hit `cache.exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline; the cut peers are not counted as failures. A sustained non-zero rate signals slow peers, or more peers than one interval can pull — raise the deadline and the interval, or raise `max_concurrent_peers`. |
 | `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
 | `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
 | `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |
@@ -872,7 +872,7 @@ byte-level spec. The short version:
   lease is still its own; if another worker took it over, the pass
   publishes and deletes nothing (`recorder_archive_fenced`, with the fields
   `provider` and `reason`: `taken_over`, or `unconfirmed` when the election
-  provider could not confirm the lease). `periodic.election` selects
+  provider could not confirm the lease). `autodiscover` selects
   another provider (`postgres`, `redis` and `consul` are built in), and every
   worker of a cluster must use the same. With `redis` or `consul` an expired
   lease is a deleted key, so no `periodic_lock_taken_over` line is written;
@@ -1168,12 +1168,11 @@ Workers find each other through the [fleet registry](fleet.md):
 1. Each worker publishes a small card -- worker name, cluster, the URL of
    its UI server, state (`starting`, `running`, `draining`), release --
    right after its UI server starts, at every state change, and every
-   `fleet.registry.heartbeat_seconds` (default 10).
-2. With the default `filesystem` provider the card is a file in
-   `<shared.dir>/fleet/workers/` (`<storage.dir>/fleet/workers/` when
-   `shared.dir` is empty), so workers that mount the same folder see each
-   other.
-3. Every `fleet.registry.refresh_seconds` (default 15) a worker reads the
+   `autodiscover.heartbeat` (default 10).
+2. With the `filesystem` provider the card is a file in
+   `<storage.shared_dir>/fleet/workers/`, so workers that mount the same folder
+   see each other.
+3. Every `autodiscover.refresh` (default 15) a worker reads the
    other cards into memory. `GET /api/v1/workers` answers from that
    snapshot; it never opens a peer's database.
 4. Workers are grouped by cluster name -- only workers in the same cluster
@@ -1183,12 +1182,12 @@ Workers find each other through the [fleet registry](fleet.md):
 ### Liveness
 
 A crashed or OOM-killed worker never deletes its card, so it stays listed
-until the card is pruned (`fleet.registry.prune_after_seconds`, default one
+until the card is pruned (`autodiscover.prune_after`, default one
 day). To tell such workers apart from healthy ones, every row of
 `/api/v1/workers` carries two liveness fields:
 
 - `online` -- `true` when the peer's card is no older than
-  `fleet.registry.offline_after_seconds` (default 60), `false` when it is
+  `autodiscover.offline_after` (default 60), `false` when it is
   older, and `null` when the provider cannot tell (a worker whose own first card
   write has not succeeded yet). The worker
   serving the request always reports itself online. A provider whose
@@ -1223,8 +1222,6 @@ shared:
 cluster_name: "my-cluster"
 ```
 
-Without `shared.dir`, workers that share one `storage.dir` see each other
-too (the cards then live in `<storage.dir>/fleet/workers/`).
 
 In Kubernetes, use a shared PVC:
 
@@ -1361,7 +1358,6 @@ All in category `periodic`.
 | `periodic_lease_refresh_failed` | error | The lease refresher of a running slot raised outside a provider call. Field `scope`. |
 | `periodic_skip_hook_failed` | error | The framework's hook for a skipped slot raised (for the archive: starting the footprint update). Fields `name`, `slot`, `outcome`. The slot is skipped either way. |
 | `periodic_cluster_mismatch` | warning | An online peer of this worker's cluster has another [definition hash](periodic-tasks.md#definition-hash). Fields `peer`, `own_hash`, `peer_hash`. Once per peer and hash; again when the peer leaves the registry listing and comes back. |
-| `periodic_cluster_check_off` | info | The worker has cluster tasks but no worker registry, so it cannot compare definitions. Fields `cluster_tasks` (count), `reason`. Once at startup. |
 | `periodic_lock_taken_over` | warning | A worker took over the lease of a cluster task (the archive included) whose holder died. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. Written by the `filesystem` and `postgres` election providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server deleted. |
 | `periodic_lock_put_back_failed` | warning | Two workers took over one `filesystem` lock at once, and a third worker's lock came first, so the lock moved aside could not be put back. Fields `scope`, `folder`, `error`. The holder of the moved lock is fenced at its next check. |
 | `periodic_election_stop_failed` | warning | Stopping the election at shutdown raised. Field `error`. The rest of the shutdown still runs. |

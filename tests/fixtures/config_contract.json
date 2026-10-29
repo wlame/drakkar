@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (fleet, recorder, periodic, election, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (autodiscover, cache exchange, recorder, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -200,7 +200,7 @@
       "yaml": {},
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "memory_only_no_shared",
@@ -226,7 +226,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar shared=/mnt/fleet fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_equal_to_storage",
@@ -238,7 +238,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_set_with_memory_only_storage",
@@ -253,7 +253,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem shared=/mnt/fleet fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "ui_off",
@@ -267,174 +267,39 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "election_consul",
-      "yaml": {
-        "periodic": {
-          "election": {
-            "provider": "consul"
-          }
-        },
-        "connections": {
-          "consul": {
-            "main": {}
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "election_postgres",
-      "yaml": {
-        "periodic": {
-          "election": {
-            "provider": "postgres"
-          }
-        },
-        "connections": {
-          "postgres": {
-            "main": {
-              "dsn": "postgresql://u:p@h/d"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "election_redis",
-      "yaml": {
-        "periodic": {
-          "election": {
-            "provider": "redis"
-          }
-        },
-        "connections": {
-          "redis": {
-            "main": {
-              "url": "redis://localhost:6379/0"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem election=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "registry_postgres_loads",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "postgres"
-          }
-        },
-        "connections": {
-          "postgres": {
-            "main": {
-              "dsn": "postgresql://u:p@h/d"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "registry_redis_loads",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "redis"
-          }
-        },
-        "connections": {
-          "redis": {
-            "main": {
-              "url": "redis://localhost:6379/0"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "registry_consul_loads",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "consul"
-          }
-        },
-        "connections": {
-          "consul": {
-            "main": {
-              "address": "http://127.0.0.1:8500"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "election_filesystem_is_silent",
-      "yaml": {
-        "periodic": {
-          "election": {
-            "provider": "filesystem"
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
       "name": "cache_exchange_off",
       "yaml": {
         "cache": {
-          "enabled": true
-        },
-        "fleet": {
-          "cache_exchange": {
+          "enabled": true,
+          "exchange": {
             "enabled": false
           }
         }
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_fractional_interval",
       "yaml": {
         "cache": {
-          "enabled": true
-        },
-        "fleet": {
-          "cache_exchange": {
+          "enabled": true,
+          "exchange": {
             "interval_seconds": 12.5
           }
         }
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "no_cluster",
       "yaml": {},
       "worker": "w-1",
       "cluster": "",
-      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_with_storage_dir",
@@ -448,7 +313,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=none fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=none fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_memory_only",
@@ -476,7 +341,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_postgres_memory_only",
@@ -518,7 +383,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=postgres fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=postgres fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "dlq_switched_off",
@@ -529,7 +394,88 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+    },
+    {
+      "name": "autodiscover_consul",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "consul"
+        },
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul election=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "autodiscover_postgres",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "postgres"
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://u:p@h/d"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=postgres election=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "autodiscover_redis",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "redis"
+        },
+        "connections": {
+          "redis": {
+            "main": {
+              "url": "redis://localhost:6379/0"
+            }
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=redis election=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "autodiscover_filesystem_has_no_election_token",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        },
+        "storage": {
+          "shared_dir": "/mnt/fleet"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "autodiscover_off_with_a_provider_named",
+      "yaml": {
+        "autodiscover": {
+          "provider": "consul"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -586,116 +532,112 @@
     {
       "name": "offline_below_two_heartbeats",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "heartbeat_seconds": 20,
-            "offline_after_seconds": 30
-          }
+        "autodiscover": {
+          "heartbeat": "20s",
+          "offline_after": "30s"
         }
       },
-      "message": "fleet.registry.offline_after_seconds (30) must be >= 2 * fleet.registry.heartbeat_seconds (20)"
+      "message": "autodiscover.offline_after (30s) must be >= 2 * autodiscover.heartbeat (20s)"
     },
     {
       "name": "prune_below_offline",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "prune_after_seconds": 10,
-            "offline_after_seconds": 30
-          }
+        "autodiscover": {
+          "prune_after": "10s",
+          "offline_after": "30s"
         }
       },
-      "message": "fleet.registry.prune_after_seconds (10) must be >= fleet.registry.offline_after_seconds (30)"
+      "message": "autodiscover.prune_after (10s) must be >= autodiscover.offline_after (30s)"
     },
     {
       "name": "deadline_not_below_interval",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "interval_seconds": 10,
             "cycle_deadline_seconds": 10
           }
         }
       },
-      "message": "fleet.cache_exchange.cycle_deadline_seconds (10) must be strictly less than fleet.cache_exchange.interval_seconds (10) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline_seconds (10) must be strictly less than cache.exchange.interval_seconds (10) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "deadline_fractional_values",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "interval_seconds": 2.5,
             "cycle_deadline_seconds": 3.5
           }
         }
       },
-      "message": "fleet.cache_exchange.cycle_deadline_seconds (3.5) must be strictly less than fleet.cache_exchange.interval_seconds (2.5) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline_seconds (3.5) must be strictly less than cache.exchange.interval_seconds (2.5) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "page_size_over_limit",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "page_size": 1001
           }
         }
       },
-      "path": "fleet.cache_exchange.page_size"
+      "path": "cache.exchange.page_size"
     },
     {
       "name": "page_size_zero",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "page_size": 0
           }
         }
       },
-      "path": "fleet.cache_exchange.page_size"
+      "path": "cache.exchange.page_size"
     },
     {
       "name": "exchange_interval_zero",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "interval_seconds": 0
           }
         }
       },
-      "path": "fleet.cache_exchange.interval_seconds"
+      "path": "cache.exchange.interval_seconds"
     },
     {
       "name": "exchange_timeout_zero",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "timeout_seconds": 0
           }
         }
       },
-      "path": "fleet.cache_exchange.timeout_seconds"
+      "path": "cache.exchange.timeout_seconds"
     },
     {
       "name": "deadline_below_floor",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "cycle_deadline_seconds": 0.05
           }
         }
       },
-      "path": "fleet.cache_exchange.cycle_deadline_seconds"
+      "path": "cache.exchange.cycle_deadline_seconds"
     },
     {
       "name": "max_concurrent_peers_zero",
       "yaml": {
-        "fleet": {
-          "cache_exchange": {
+        "cache": {
+          "exchange": {
             "max_concurrent_peers": 0
           }
         }
       },
-      "path": "fleet.cache_exchange.max_concurrent_peers"
+      "path": "cache.exchange.max_concurrent_peers"
     },
     {
       "name": "search_max_files_zero",
@@ -766,128 +708,153 @@
     {
       "name": "heartbeat_zero",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "heartbeat_seconds": 0
-          }
+        "autodiscover": {
+          "heartbeat": 0
         }
       },
-      "path": "fleet.registry.heartbeat_seconds"
+      "path": "autodiscover.heartbeat"
     },
     {
       "name": "refresh_zero",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "refresh_seconds": 0
-          }
+        "autodiscover": {
+          "refresh": 0
         }
       },
-      "path": "fleet.registry.refresh_seconds"
+      "path": "autodiscover.refresh"
     },
     {
-      "name": "registry_resilience_timeout_zero",
+      "name": "autodiscover_resilience_timeout_zero",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "resilience": {
-              "timeout": 0
-            }
+        "autodiscover": {
+          "resilience": {
+            "timeout": 0
           }
         }
       },
-      "path": "fleet.registry.resilience.timeout"
+      "path": "autodiscover.resilience.timeout"
     },
     {
-      "name": "empty_provider",
+      "name": "autodiscover_enabled_with_no_provider",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": ""
-          }
+        "autodiscover": {
+          "enabled": true
         }
       },
-      "path": "fleet.registry.provider"
+      "message": "autodiscover.enabled is true but autodiscover.provider is empty; choose one of consul, filesystem, postgres, redis"
+    },
+    {
+      "name": "autodiscover_unknown_provider",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "etcd"
+        }
+      },
+      "message": "autodiscover.provider must be one of consul, filesystem, postgres, redis, got 'etcd'"
+    },
+    {
+      "name": "autodiscover_unknown_provider_while_off",
+      "yaml": {
+        "autodiscover": {
+          "provider": "static"
+        }
+      },
+      "message": "autodiscover.provider must be one of consul, filesystem, postgres, redis, got 'static'"
+    },
+    {
+      "name": "autodiscover_filesystem_needs_shared_dir",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        }
+      },
+      "message": "autodiscover.provider filesystem needs storage.shared_dir"
+    },
+    {
+      "name": "autodiscover_heartbeat_with_a_fraction",
+      "yaml": {
+        "autodiscover": {
+          "heartbeat": "1.5s"
+        }
+      },
+      "message": "must be a whole number of seconds, got '1.5s'",
+      "path": "autodiscover.heartbeat"
+    },
+    {
+      "name": "autodiscover_refresh_needs_a_unit",
+      "yaml": {
+        "autodiscover": {
+          "refresh": 15
+        }
+      },
+      "message": "needs a unit, for example 30s; got '15'",
+      "path": "autodiscover.refresh"
     },
     {
       "name": "offline_below_floor",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "offline_after_seconds": 5,
-            "heartbeat_seconds": 1
-          }
+        "autodiscover": {
+          "offline_after": "5s",
+          "heartbeat": "1s"
         }
       },
-      "message": "fleet.registry.offline_after_seconds (5) must be >= 10"
+      "message": "autodiscover.offline_after (5s) must be >= 10s"
     },
     {
-      "name": "registry_connection_missing",
+      "name": "autodiscover_connection_missing_redis",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "redis"
-          }
+        "autodiscover": {
+          "enabled": true,
+          "provider": "redis"
         }
       },
-      "message": "fleet.registry.connection 'main' is not defined under connections.redis"
+      "message": "autodiscover.connection 'main' is not defined under connections.redis"
     },
     {
-      "name": "election_connection_missing",
+      "name": "autodiscover_connection_missing_postgres",
       "yaml": {
-        "periodic": {
-          "election": {
-            "provider": "redis"
-          }
+        "autodiscover": {
+          "enabled": true,
+          "provider": "postgres",
+          "connection": "locks"
         }
       },
-      "message": "periodic.election.connection 'main' is not defined under connections.redis"
+      "message": "autodiscover.connection 'locks' is not defined under connections.postgres"
+    },
+    {
+      "name": "autodiscover_connection_missing_consul",
+      "yaml": {
+        "autodiscover": {
+          "enabled": true,
+          "provider": "consul"
+        }
+      },
+      "message": "autodiscover.connection 'main' is not defined under connections.consul"
     },
     {
       "name": "consul_offline_after_too_long",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "consul",
-            "offline_after_seconds": 86401,
-            "prune_after_seconds": 86401
-          }
-        },
-        "connections": {
-          "consul": {
-            "main": {}
-          }
+        "autodiscover": {
+          "provider": "consul",
+          "offline_after": "86401s",
+          "prune_after": "86401s"
         }
       },
-      "message": "fleet.registry.offline_after_seconds (86401) must be <= 86400 when fleet.registry.provider is consul"
+      "message": "autodiscover.offline_after (1d1s) must be <= 1d when autodiscover.provider is consul"
     },
     {
-      "name": "registry_resilience_max_backoff_below_backoff",
+      "name": "autodiscover_resilience_max_backoff_below_backoff",
       "yaml": {
-        "fleet": {
-          "registry": {
-            "resilience": {
-              "backoff": "2s",
-              "max_backoff": "1s"
-            }
+        "autodiscover": {
+          "resilience": {
+            "backoff": "2s",
+            "max_backoff": "1s"
           }
         }
       },
-      "message": "fleet.registry.resilience.max_backoff (1s) must be >= fleet.registry.resilience.backoff (2s)"
-    },
-    {
-      "name": "election_resilience_max_backoff_below_backoff",
-      "yaml": {
-        "periodic": {
-          "election": {
-            "resilience": {
-              "backoff": "2s",
-              "max_backoff": "1s"
-            }
-          }
-        }
-      },
-      "message": "periodic.election.resilience.max_backoff (1s) must be >= periodic.election.resilience.backoff (2s)"
+      "message": "autodiscover.resilience.max_backoff (1s) must be >= autodiscover.resilience.backoff (2s)"
     },
     {
       "name": "recorder_resilience_max_backoff_below_backoff",
@@ -1901,27 +1868,6 @@
       "value": "0 * * * *"
     },
     {
-      "name": "election_provider_default_filesystem",
-      "yaml": {},
-      "path": "periodic.election.provider",
-      "value": "filesystem"
-    },
-    {
-      "name": "election_provider_by_env",
-      "yaml": {
-        "connections": {
-          "redis": {
-            "main": {}
-          }
-        }
-      },
-      "env": {
-        "DK_PERIODIC__ELECTION__PROVIDER": "redis"
-      },
-      "path": "periodic.election.provider",
-      "value": "redis"
-    },
-    {
       "name": "recorder_defaults",
       "yaml": {},
       "path": "recorder.enabled",
@@ -2668,28 +2614,141 @@
       "value": 2
     },
     {
-      "name": "resilience_defaults_backoff",
+      "name": "autodiscover_defaults_to_off",
       "yaml": {},
-      "path": "fleet.registry.resilience.backoff",
-      "value": 0.2
+      "path": "autodiscover.enabled",
+      "value": false
     },
     {
-      "name": "resilience_defaults_max_backoff",
+      "name": "autodiscover_provider_default_empty",
       "yaml": {},
-      "path": "fleet.registry.resilience.max_backoff",
+      "path": "autodiscover.provider",
+      "value": ""
+    },
+    {
+      "name": "autodiscover_connection_default_main",
+      "yaml": {},
+      "path": "autodiscover.connection",
+      "value": "main"
+    },
+    {
+      "name": "autodiscover_heartbeat_default",
+      "yaml": {},
+      "path": "autodiscover.heartbeat",
+      "value": 10
+    },
+    {
+      "name": "autodiscover_refresh_default",
+      "yaml": {},
+      "path": "autodiscover.refresh",
+      "value": 15
+    },
+    {
+      "name": "autodiscover_offline_after_default",
+      "yaml": {},
+      "path": "autodiscover.offline_after",
+      "value": 60
+    },
+    {
+      "name": "autodiscover_prune_after_default",
+      "yaml": {},
+      "path": "autodiscover.prune_after",
+      "value": 86400
+    },
+    {
+      "name": "autodiscover_offline_after_with_a_unit",
+      "yaml": {
+        "autodiscover": {
+          "offline_after": "2m"
+        }
+      },
+      "path": "autodiscover.offline_after",
+      "value": 120
+    },
+    {
+      "name": "autodiscover_heartbeat_by_env_with_a_unit",
+      "yaml": {
+        "autodiscover": {
+          "offline_after": "1m"
+        }
+      },
+      "env": {
+        "DK_AUTODISCOVER__HEARTBEAT": "30s"
+      },
+      "path": "autodiscover.heartbeat",
+      "value": 30
+    },
+    {
+      "name": "autodiscover_provider_by_env",
+      "yaml": {
+        "connections": {
+          "redis": {
+            "main": {}
+          }
+        },
+        "autodiscover": {
+          "enabled": true
+        }
+      },
+      "env": {
+        "DK_AUTODISCOVER__PROVIDER": "redis"
+      },
+      "path": "autodiscover.provider",
+      "value": "redis"
+    },
+    {
+      "name": "autodiscover_resilience_defaults_timeout",
+      "yaml": {},
+      "path": "autodiscover.resilience.timeout",
       "value": 5.0
     },
     {
-      "name": "resilience_defaults_breaker_failures",
+      "name": "autodiscover_resilience_defaults_max_retries",
       "yaml": {},
-      "path": "periodic.election.resilience.breaker_failures",
+      "path": "autodiscover.resilience.max_retries",
+      "value": 2
+    },
+    {
+      "name": "autodiscover_resilience_defaults_backoff",
+      "yaml": {},
+      "path": "autodiscover.resilience.backoff",
+      "value": 0.2
+    },
+    {
+      "name": "autodiscover_resilience_defaults_max_backoff",
+      "yaml": {},
+      "path": "autodiscover.resilience.max_backoff",
+      "value": 5.0
+    },
+    {
+      "name": "autodiscover_resilience_defaults_breaker_failures",
+      "yaml": {},
+      "path": "autodiscover.resilience.breaker_failures",
       "value": 5
     },
     {
-      "name": "resilience_defaults_breaker_cooldown",
+      "name": "autodiscover_resilience_defaults_breaker_cooldown",
       "yaml": {},
-      "path": "periodic.election.resilience.breaker_cooldown",
+      "path": "autodiscover.resilience.breaker_cooldown",
       "value": 30.0
+    },
+    {
+      "name": "cache_exchange_default_enabled",
+      "yaml": {},
+      "path": "cache.exchange.enabled",
+      "value": true
+    },
+    {
+      "name": "cache_exchange_default_interval",
+      "yaml": {},
+      "path": "cache.exchange.interval_seconds",
+      "value": 30.0
+    },
+    {
+      "name": "cache_exchange_default_page_size",
+      "yaml": {},
+      "path": "cache.exchange.page_size",
+      "value": 500
     }
   ],
   "sink_policies": [

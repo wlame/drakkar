@@ -36,8 +36,7 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine, CacheScope, DirtyOp, Op
-from drakkar.config import CacheConfig, CacheExchangeConfig
-from tests.conftest import split_cache_overrides
+from drakkar.config import CacheConfig
 
 
 def _make_cache(*, max_memory_entries: int | None = None) -> Cache:
@@ -525,10 +524,8 @@ async def _make_started_engine(
     the writer and reader connections are open against a real on-disk DB.
     """
     cache = Cache(origin_worker_id=worker_id, max_memory_entries=max_memory_entries)
-    cache_fields, exchange = split_cache_overrides(cfg_overrides)
     engine = CacheEngine(
-        config=_make_cache_config(**cache_fields),
-        exchange=exchange,
+        config=_make_cache_config(**cfg_overrides),
         storage_dir=str(tmp_path),
         worker_id=worker_id,
         cluster_name='',
@@ -937,7 +934,6 @@ async def test_reader_connection_not_opened_when_engine_disabled(tmp_path):
     stays None — matches the writer's effectively-disabled behavior."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',
@@ -956,7 +952,6 @@ async def test_get_on_disabled_engine_returns_none(tmp_path):
     cache = Cache(origin_worker_id='w1')
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        exchange=CacheExchangeConfig(),
         storage_dir=str(tmp_path),
         worker_id='w1',
         cluster_name='',

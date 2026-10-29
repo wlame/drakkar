@@ -370,12 +370,23 @@ cache:
   # on an evicted key falls through to the DB. Leave unset for
   # unbounded growth (fine for small workers; set a cap in production).
   max_memory_entries: 10000
+  # Cache exchange: pulls new cluster/global rows from the other workers
+  # over HTTP, at the URL on their registry card (ui.host 0.0.0.0 above
+  # makes this worker reachable to them), LWW-merges them into our local
+  # DB, and invalidates overlapping memory entries so the next read sees
+  # the newer value.
+  exchange:
+    enabled: true
+    interval_seconds: 30.0
+    page_size: 500
+    timeout_seconds: 5.0
 
 # This worker's own files (recorder, cache, crash marker). The harness
 # mounts one host folder at /shared in every container, so it doubles as
-# the cluster's shared folder (storage.shared_dir empty = storage.dir).
+# the cluster's shared folder.
 storage:
   dir: "/shared"
+  shared_dir: "/shared"
 
 # Shared connections that the providers below name. The DSN and the URL
 # here have no password, and the Consul entry has no token:
@@ -425,38 +436,31 @@ connections:
       address: "http://consul-fleet:8500"
       state_prefix: "drakkar"
 
-fleet:
-  # Worker registry. The provider is filesystem (cards in storage.dir),
-  # postgres (cards in the database of connections.postgres.main), redis
-  # (cards in the Redis of connections.redis.main) or consul (cards in the
-  # KV store of connections.consul.main), chosen by
-  # DK_FLEET__REGISTRY__PROVIDER in docker-compose.yml. The timings are
-  # short so the outage scenarios finish in minutes: a card missing for
-  # 10 s is offline, and one missing for 30 s is deleted. With consul a
-  # card leaves the list instead: its session has a 10 s TTL, and Consul
-  # deletes the card about 20 s after the last publish.
-  registry:
-    heartbeat_seconds: 2
-    refresh_seconds: 3
-    offline_after_seconds: 10
-    prune_after_seconds: 30
-    # Each call gets 2 s and one retry; three failed operations open the
-    # breaker, which lets one probe through after 10 s.
-    resilience:
-      timeout: 2s
-      max_retries: 1
-      breaker_failures: 3
-      breaker_cooldown: 10s
-  # Cache exchange: pulls new cluster/global rows from the other workers
-  # over HTTP, at the URL on their registry card (ui.host 0.0.0.0 above
-  # makes this worker reachable to them), LWW-merges them into our local
-  # DB, and invalidates overlapping memory entries so the next read sees
-  # the newer value.
-  cache_exchange:
-    enabled: true
-    interval_seconds: 30.0
-    page_size: 500
-    timeout_seconds: 5.0
+# Autodiscover: the worker registry and the election of cluster tasks (the
+# archive and the handler's harness_cluster_tick). The provider is filesystem
+# (cards and locks in storage.shared_dir), postgres (the database of
+# connections.postgres.main), redis (the Redis of connections.redis.main) or
+# consul (the KV store of connections.consul.main), chosen by
+# DK_AUTODISCOVER__PROVIDER in docker-compose.yml. The timings are short so
+# the outage scenarios finish in minutes: a card missing for 10 s is offline,
+# and one missing for 30 s is deleted. With consul a card leaves the list
+# instead: its session has a 10 s TTL, and Consul deletes the card about 20 s
+# after the last publish.
+autodiscover:
+  enabled: true
+  provider: filesystem
+  heartbeat: 2s
+  refresh: 3s
+  offline_after: 10s
+  prune_after: 30s
+  # Each call gets 2 s and one retry; three failed operations open the
+  # breaker, which lets one probe through after 10 s. The registry and the
+  # election each have a breaker of their own.
+  resilience:
+    timeout: 2s
+    max_retries: 1
+    breaker_failures: 3
+    breaker_cooldown: 10s
 
 # Archive: one-hour windows, due one hour after they end, so a window that
 # integration/plant_history.py writes twelve hours back is due at once.
@@ -467,12 +471,6 @@ fleet:
 # worker-1 turns the archive off in docker-compose.yml
 # (DK_RECORDER__ARCHIVE__ENABLED), so only worker-2 and worker-3 win archive
 # slots.
-#
-# Periodic election: which worker of the cluster runs each slot of a cluster
-# task (the archive and the handler's harness_cluster_tick).
-# DK_PERIODIC__ELECTION__PROVIDER in docker-compose.yml sets the provider to
-# the same value as the registry's, and the resilience block is the same as
-# the registry's.
 recorder:
   flush_interval: 3s
   max_buffer_rows: 50000
@@ -494,10 +492,3 @@ recorder:
     interval: 30s
     lease: 40s
 
-periodic:
-  election:
-    resilience:
-      timeout: 2s
-      max_retries: 1
-      breaker_failures: 3
-      breaker_cooldown: 10s

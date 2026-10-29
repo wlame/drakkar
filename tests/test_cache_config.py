@@ -1,4 +1,4 @@
-"""Tests for CacheConfig and the cache exchange settings (fleet.cache_exchange).
+"""Tests for CacheConfig and the cache exchange settings (cache.exchange).
 
 Validates defaults, environment-variable overrides (nested delimiter), field
 constraints, and confirms the v1 scope of the config — no preload fields, no
@@ -125,16 +125,16 @@ def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyPatch):
-    """DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS=60 should set the nested
-    fleet.cache_exchange.interval_seconds field. Exercises the two-level
+    """DK_CACHE__EXCHANGE__INTERVAL_SECONDS=60 should set the nested
+    cache.exchange.interval_seconds field. Exercises the two-level
     nested delimiter.
     """
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
-    monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '60')
+    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL_SECONDS', '60')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
-    assert cfg.fleet.cache_exchange.interval_seconds == 60.0
+    assert cfg.cache.exchange.interval_seconds == 60.0
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):

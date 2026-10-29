@@ -50,68 +50,44 @@
     }
   },
   "features": {
-    "registry": {"label": "Registry", "help": "How the workers find each other. The workers list and the cache exchange use it."},
-    "election": {"label": "Election", "help": "Which worker runs a cluster task, the archive included, in each slot."}
+    "autodiscover": {"label": "Autodiscover", "help": "How the workers find each other, and which worker runs a cluster task in each slot. The workers list, the cache exchange and the cluster tasks use it."}
   },
   "providers": {
-    "registry": {
+    "autodiscover": {
+      "off": {
+        "label": "Off",
+        "needs": [],
+        "fragment": {},
+        "explain": "Each worker runs on its own: it publishes no card, sees no peers and takes part in no election. The workers list shows only the current worker, the cache exchange pulls nothing, and a worker that declares a cluster task does not start.",
+        "docs": "fleet.md#what-you-get-with-the-defaults"
+      },
       "filesystem": {
         "label": "Files in the shared folder",
         "needs": [],
-        "fragment": {"fleet": {"registry": {"provider": "filesystem"}}},
-        "explain": "One card file per worker in <storage.shared_dir>/fleet/workers/, or in <storage.dir>/fleet/workers/ when storage.shared_dir is empty. Workers that see the same folder see each other.",
+        "fragment": {"autodiscover": {"enabled": true, "provider": "filesystem"}},
+        "explain": "One card file per worker in <storage.shared_dir>/fleet/workers/, and one lock file per cluster task in <storage.shared_dir>/tasks/<cluster>/. Workers that see the same folder see each other and take part in one election.",
         "docs": "fleet.md#filesystem"
       },
       "postgres": {
         "label": "Postgres",
         "needs": ["postgres"],
-        "fragment": {"fleet": {"registry": {"provider": "postgres", "connection": "main"}}},
-        "explain": "One row per worker in the table fleet_workers of the schema of the connection. The age of a card comes from the clock of the database server.",
+        "fragment": {"autodiscover": {"enabled": true, "provider": "postgres", "connection": "main"}},
+        "explain": "One row per worker in the table fleet_workers, and one row per cluster task in the table task_locks, in the schema of the connection. The age of a card comes from the clock of the database server.",
         "docs": "fleet.md#postgres"
       },
       "redis": {
         "label": "Redis",
         "needs": ["redis"],
-        "fragment": {"fleet": {"registry": {"provider": "redis", "connection": "main"}}},
-        "explain": "One key per worker and an index of the workers, under the state prefix of the connection. The age of a card comes from the clock of the Redis server.",
+        "fragment": {"autodiscover": {"enabled": true, "provider": "redis", "connection": "main"}},
+        "explain": "One key per worker with an index of the workers, and one key per cluster task, under the state prefix of the connection. The age of a card comes from the clock of the Redis server.",
         "docs": "fleet.md#redis"
       },
       "consul": {
         "label": "Consul",
         "needs": ["consul"],
-        "fragment": {"fleet": {"registry": {"provider": "consul", "connection": "main"}}},
-        "explain": "One key per worker under the state prefix of the connection, held by a session of the worker. A worker is online while its key has a session.",
+        "fragment": {"autodiscover": {"enabled": true, "provider": "consul", "connection": "main"}},
+        "explain": "One key per worker and one key per cluster task under the state prefix of the connection, each held by a session. A worker is online while its key has a session.",
         "docs": "fleet.md#consul"
-      }
-    },
-    "election": {
-      "filesystem": {
-        "label": "Lock files in the shared folder",
-        "needs": [],
-        "fragment": {"periodic": {"election": {"provider": "filesystem"}}},
-        "explain": "One lock file per cluster task in <storage.shared_dir>/tasks/<cluster>/, or under storage.dir when storage.shared_dir is empty. Only the workers that see the same folder take part in one election.",
-        "docs": "local-databases.md#the-task-lock"
-      },
-      "postgres": {
-        "label": "Postgres",
-        "needs": ["postgres"],
-        "fragment": {"periodic": {"election": {"provider": "postgres", "connection": "main"}}},
-        "explain": "One row per cluster task in the table task_locks of the schema of the connection.",
-        "docs": "local-databases.md#the-postgres-election-provider"
-      },
-      "redis": {
-        "label": "Redis",
-        "needs": ["redis"],
-        "fragment": {"periodic": {"election": {"provider": "redis", "connection": "main"}}},
-        "explain": "One key per cluster task under the state prefix of the connection.",
-        "docs": "local-databases.md#the-redis-election-provider"
-      },
-      "consul": {
-        "label": "Consul",
-        "needs": ["consul"],
-        "fragment": {"periodic": {"election": {"provider": "consul", "connection": "main"}}},
-        "explain": "One key per cluster task under the state prefix of the connection, held by a session.",
-        "docs": "local-databases.md#the-consul-election-provider"
       }
     }
   },
@@ -143,38 +119,33 @@
   },
   "shared": {
     "none": {"fragment": {}},
+    "host": {
+      "fragment": {"storage": {"shared_dir": "/tmp/drakkar"}},
+      "explain": "A folder on this host that every worker of the cluster uses. The registry cards, the lock files, the sealed history and the archives go there.",
+      "docs": "local-databases.md#sharing-folders-across-workers"
+    },
     "folder": {
       "fragment": {"storage": {"shared_dir": "/mnt/drakkar-shared"}},
-      "explain": "Change the path to where every worker mounts the folder. The registry cards, the sealed history and the archives go there.",
+      "explain": "Change the path to where every worker mounts the folder. The registry cards, the lock files, the sealed history and the archives go there.",
       "docs": "local-databases.md#sharing-folders-across-workers"
     }
   },
   "rules": [
-    {"when": {"workers": "one"}, "registry": ["filesystem"], "election": ["filesystem"], "shared": "none"},
-    {"when": {"hosts": "one"}, "registry": ["filesystem"], "election": ["filesystem"], "shared": "none"},
-    {
-      "when": {"services_include": "folder"},
-      "registry": ["consul", "redis", "postgres", "filesystem"],
-      "election": ["consul", "redis", "postgres", "filesystem"],
-      "shared": "folder"
-    },
-    {
-      "when": {},
-      "registry": ["consul", "redis", "postgres", "filesystem"],
-      "election": ["consul", "redis", "postgres", "filesystem"],
-      "shared": "none"
-    }
+    {"when": {"workers": "one"}, "autodiscover": ["off"], "shared": "none"},
+    {"when": {"services_include": "folder"}, "autodiscover": ["consul", "redis", "postgres", "filesystem"], "shared": "folder"},
+    {"when": {"hosts": "one", "disk": "yes"}, "autodiscover": ["filesystem"], "shared": "host"},
+    {"when": {}, "autodiscover": ["consul", "redis", "postgres", "off"], "shared": "none"}
   ],
   "notes": [
     {
-      "id": "election_per_host",
-      "when": {"disk": "yes", "hosts": "many", "services_exclude": "folder", "election": "filesystem"},
-      "text": "Without a shared folder or a service, each host elects its own worker. A cluster task runs once per host, not once per cluster.",
+      "id": "autodiscover_off_several_hosts",
+      "when": {"hosts": "many", "services_exclude": "folder", "autodiscover": "off"},
+      "text": "Without a shared folder or a service, this config leaves autodiscover off, so each worker runs on its own. The workers list shows only the current worker, the cache exchange pulls nothing, and a worker that declares a cluster task does not start: give the task scope worker, or add a folder that every worker mounts or a service that every worker reaches.",
       "docs": "periodic-tasks.md#the-election"
     },
     {
       "id": "archive_one_host_only",
-      "when": {"disk": "yes", "history": "files", "hosts": "many", "services_exclude": "folder", "election": ["postgres", "redis", "consul"]},
+      "when": {"disk": "yes", "history": "files", "hosts": "many", "services_exclude": "folder", "autodiscover": ["postgres", "redis", "consul"]},
       "text": "Without a shared folder, the archive pass reads only the history folder of the host that holds the lease. The sealed files of the other hosts are never archived. So this config turns the archive off with recorder.archive.enabled: false, and nothing deletes the sealed files. Add a folder that every worker mounts to keep the archive on.",
       "docs": "local-databases.md#opting-out",
       "fragment": {"recorder": {"archive": {"enabled": false}}}
@@ -193,34 +164,28 @@
       "docs": "recorder-postgres.md#what-the-mode-does"
     },
     {
-      "id": "election_no_folder",
-      "when": {"disk": "no", "services_exclude": "folder", "election": "filesystem"},
-      "text": "With no local disk and no shared folder, the filesystem election has no folder for its lock files. A worker that declares a cluster task does not start. Declare no cluster task, or add a shared folder or a service for the election.",
+      "id": "autodiscover_off_no_disk",
+      "when": {"workers": "many", "hosts": "one", "disk": "no"},
+      "text": "With no local disk and no shared folder, the workers have no folder for card files, so this config leaves autodiscover off. The workers list shows only the current worker, the cache exchange pulls nothing, and a worker that declares a cluster task does not start: give the task scope worker, or add a shared folder.",
       "docs": "periodic-tasks.md#the-election"
     },
     {
-      "id": "registry_no_folder",
-      "when": {"disk": "no", "services_exclude": "folder", "registry": "filesystem"},
-      "text": "With no local disk and no shared folder, the filesystem registry has no card folder and stays off. The workers list shows only the current worker, and the cache exchange pulls nothing.",
-      "docs": "fleet.md#providers"
-    },
-    {
       "id": "ui_needed",
-      "when": {"registry": ["filesystem", "postgres", "redis", "consul"]},
-      "text": "The registry needs the UI server. Keep ui.enabled: true, the default.",
+      "when": {"autodiscover": ["filesystem", "postgres", "redis", "consul"]},
+      "text": "Autodiscover needs the UI server. Keep ui.enabled: true, the default.",
       "docs": "fleet.md#what-you-get-with-the-defaults"
     }
   ],
-  "section_order": ["sources", "executor", "ui", "storage", "recorder", "connections", "fleet", "periodic"],
+  "section_order": ["sources", "executor", "ui", "storage", "recorder", "connections", "autodiscover"],
   "base": {"connections": {"kafka": {"main": {"brokers": "localhost:9092"}}}, "sources": {"kafka": {"enabled": true}}},
   "examples": [
-    {"name": "defaults", "query": "v=1", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": []},
-    {"name": "one host", "query": "v=1&workers=3", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": []},
-    {"name": "several hosts with a folder", "query": "v=1&workers=3&hosts=many&svc=folder", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nstorage:\n  shared_dir: /mnt/drakkar-shared\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": []},
-    {"name": "several hosts with every service", "query": "v=1&cpu=16&p80=40&workers=4&partitions=120&hosts=many&svc=folder,postgres,redis,consul&reg=redis&elect=postgres", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 1000\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 15m\nexecutor:\n  max_executors: 12\n  window_size: 125\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 8\n  backpressure_low_multiplier: 2\nui:\n  ws_min_duration_ms: 120\n  log_min_duration_ms: 80\nstorage:\n  shared_dir: /mnt/drakkar-shared\nrecorder:\n  capture:\n    min_event_duration: 20ms\n    min_output_duration: 80ms\n    output: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  postgres:\n    main:\n      schema: drakkar\n  redis:\n    main:\n      state_prefix: \"drakkar:\"\nfleet:\n  registry:\n    provider: redis\n    connection: main\nperiodic:\n  election:\n    provider: postgres\n    connection: main\n", "env": ["DK_CONNECTIONS__POSTGRES__MAIN__DSN", "DK_CONNECTIONS__REDIS__MAIN__URL"]},
-    {"name": "several hosts with no service", "query": "v=1&workers=2&hosts=many", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": []},
-    {"name": "several hosts without a folder", "query": "v=1&workers=3&hosts=many&svc=postgres", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  archive:\n    enabled: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  postgres:\n    main:\n      schema: drakkar\nfleet:\n  registry:\n    provider: postgres\n    connection: main\nperiodic:\n  election:\n    provider: postgres\n    connection: main\n", "env": ["DK_CONNECTIONS__POSTGRES__MAIN__DSN"]},
-    {"name": "no local disk", "query": "v=1&disk=no", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nstorage:\n  dir: \"\"\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  enabled: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": []},
-    {"name": "history in postgres", "query": "v=1&history=postgres", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  provider: postgres\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  postgres:\n    main:\n      schema: drakkar\nfleet:\n  registry:\n    provider: filesystem\nperiodic:\n  election:\n    provider: filesystem\n", "env": ["DK_CONNECTIONS__POSTGRES__MAIN__DSN"]}
+    {"name": "defaults", "query": "v=1", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n", "env": []},
+    {"name": "one host", "query": "v=1&workers=3", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nstorage:\n  shared_dir: /tmp/drakkar\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nautodiscover:\n  enabled: true\n  provider: filesystem\n", "env": []},
+    {"name": "several hosts with a folder", "query": "v=1&workers=3&hosts=many&svc=folder", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nstorage:\n  shared_dir: /mnt/drakkar-shared\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\nautodiscover:\n  enabled: true\n  provider: filesystem\n", "env": []},
+    {"name": "several hosts with every service", "query": "v=1&cpu=16&p80=40&workers=4&partitions=120&hosts=many&svc=folder,postgres,redis,consul&discover=redis", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 1000\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 15m\nexecutor:\n  max_executors: 12\n  window_size: 125\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 8\n  backpressure_low_multiplier: 2\nui:\n  ws_min_duration_ms: 120\n  log_min_duration_ms: 80\nstorage:\n  shared_dir: /mnt/drakkar-shared\nrecorder:\n  capture:\n    min_event_duration: 20ms\n    min_output_duration: 80ms\n    output: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  redis:\n    main:\n      state_prefix: \"drakkar:\"\nautodiscover:\n  enabled: true\n  provider: redis\n  connection: main\n", "env": ["DK_CONNECTIONS__REDIS__MAIN__URL"]},
+    {"name": "several hosts with no service", "query": "v=1&workers=2&hosts=many", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n", "env": []},
+    {"name": "several hosts without a folder", "query": "v=1&workers=3&hosts=many&svc=postgres", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  archive:\n    enabled: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  postgres:\n    main:\n      schema: drakkar\nautodiscover:\n  enabled: true\n  provider: postgres\n  connection: main\n", "env": ["DK_CONNECTIONS__POSTGRES__MAIN__DSN"]},
+    {"name": "no local disk", "query": "v=1&disk=no", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nstorage:\n  dir: \"\"\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  enabled: false\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n", "env": []},
+    {"name": "history in postgres", "query": "v=1&history=postgres", "yaml": "sources:\n  kafka:\n    enabled: true\n    max_poll_records: 60\n    session_timeout: 10s\n    heartbeat_interval: 2s\n    max_poll_interval: 6m\nexecutor:\n  max_executors: 6\n  window_size: 6\n  task_timeout_seconds: 30\n  max_retries: 2\n  drain_timeout_seconds: 30\n  backpressure_high_multiplier: 16\n  backpressure_low_multiplier: 4\nui:\n  ws_min_duration_ms: 0\n  log_min_duration_ms: 0\nrecorder:\n  capture:\n    min_event_duration: 0\n    min_output_duration: 0\n    output: true\n  provider: postgres\nconnections:\n  kafka:\n    main:\n      brokers: localhost:9092\n  postgres:\n    main:\n      schema: drakkar\n", "env": ["DK_CONNECTIONS__POSTGRES__MAIN__DSN"]}
   ]
 }

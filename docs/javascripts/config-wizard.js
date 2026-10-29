@@ -213,8 +213,7 @@
       history: hasRules(table) ? table.choices.history['default'] : 'files',
       hosts: hasRules(table) ? table.choices.hosts['default'] : 'one',
       services: hasRules(table) ? table.choices.services['default'].slice() : [],
-      reg: null,
-      elect: null,
+      discover: null,
       step: 'workload'
     };
   }
@@ -228,8 +227,7 @@
       history: answers.history,
       hosts: hosts,
       services: hosts === 'many' ? answers.services : [],
-      reg: answers.reg,
-      elect: answers.elect,
+      discover: answers.discover,
       step: answers.step
     };
   }
@@ -289,14 +287,12 @@
   function resolve(table, rawAnswers) {
     var answers = effective(rawAnswers);
     var rule = table.rules.filter(function (row) { return whenMatches(row.when, answers, {}); })[0];
-    var registryAllowed = allowedProviders(table, 'registry', rule.registry, answers.services);
-    var electionAllowed = allowedProviders(table, 'election', rule.election, answers.services);
-    var registry = registryAllowed.indexOf(answers.reg) >= 0 ? answers.reg : registryAllowed[0];
-    var election = electionAllowed.indexOf(answers.elect) >= 0 ? answers.elect : electionAllowed[0];
-    var resolved = { registry: registry, election: election };
+    var allowed = allowedProviders(table, 'autodiscover', rule.autodiscover, answers.services);
+    var autodiscover = allowed.indexOf(answers.discover) >= 0 ? answers.discover : allowed[0];
+    var resolved = { autodiscover: autodiscover };
     var notes = table.notes.filter(function (note) { return whenMatches(note.when, answers, resolved); });
     var history = choiceValue(table, 'history', answers.history);
-    var needed = table.providers.registry[registry].needs.concat(table.providers.election[election].needs, history.needs || []);
+    var needed = table.providers.autodiscover[autodiscover].needs.concat(history.needs || []);
     var kinds = Object.keys(table.connections).filter(function (kind) { return needed.indexOf(kind) >= 0; });
 
     var fleet = {};
@@ -304,16 +300,13 @@
     mergeFragment(fleet, history.fragment || {}, '');
     mergeFragment(fleet, table.shared[rule.shared].fragment, '');
     kinds.forEach(function (kind) { mergeFragment(fleet, table.connections[kind].fragment, ''); });
-    mergeFragment(fleet, table.providers.registry[registry].fragment, '');
-    mergeFragment(fleet, table.providers.election[election].fragment, '');
+    mergeFragment(fleet, table.providers.autodiscover[autodiscover].fragment, '');
     notes.forEach(function (note) { mergeFragment(fleet, note.fragment || {}, ''); });
     var env = [];
     kinds.forEach(function (kind) { table.connections[kind].env.forEach(function (entry) { env.push(entry); }); });
     return {
-      registryAllowed: registryAllowed,
-      electionAllowed: electionAllowed,
-      registry: registry,
-      election: election,
+      autodiscoverAllowed: allowed,
+      autodiscover: autodiscover,
       shared: rule.shared,
       kinds: kinds,
       notes: notes,
@@ -333,7 +326,7 @@
       history: true,
       hosts: answers.numbers.workers >= 2,
       services: answers.hosts === 'many',
-      choose: resolution.registryAllowed.length > 1 || resolution.electionAllowed.length > 1,
+      choose: resolution.autodiscoverAllowed.length > 1,
       result: true
     };
     return STEPS.filter(function (step) { return shown[step]; });
@@ -400,7 +393,7 @@
   // ------------------------------------------------------------ URL
 
   function queryKeyOrder(table) {
-    return ['v', 'step'].concat(Object.keys(table.inputs), ['disk', 'history', 'hosts', 'svc', 'reg', 'elect']);
+    return ['v', 'step'].concat(Object.keys(table.inputs), ['disk', 'history', 'hosts', 'svc', 'discover']);
   }
 
   /** Read the answers from a query string; return them with the keys whose values were refused. */
@@ -424,7 +417,7 @@
 
     var answers = {
       numbers: numbers, disk: defaults.disk, history: defaults.history, hosts: defaults.hosts, services: defaults.services,
-      reg: null, elect: null, step: 'workload'
+      discover: null, step: 'workload'
     };
     if (hasRules(table)) {
       if (params.has('disk')) {
@@ -449,13 +442,12 @@
         }
       }
       var resolution = resolve(table, answers);
-      [['reg', resolution.registryAllowed], ['elect', resolution.electionAllowed]].forEach(function (pair) {
-        var key = pair[0], allowed = pair[1];
-        if (allowed.length < 2 || !params.has(key)) { return; }
-        var raw = params.get(key);
-        if (allowed.indexOf(raw) >= 0) { answers[key] = raw === allowed[0] ? null : raw; }
-        else { invalid[key] = true; }
-      });
+      var allowed = resolution.autodiscoverAllowed;
+      if (allowed.length >= 2 && params.has('discover')) {
+        var rawProvider = params.get('discover');
+        if (allowed.indexOf(rawProvider) >= 0) { answers.discover = rawProvider === allowed[0] ? null : rawProvider; }
+        else { invalid.discover = true; }
+      }
     }
     if (params.has('step')) {
       var rawStep = params.get('step');
@@ -486,8 +478,7 @@
       parts.push('svc=' + choiceValues(table, 'services').filter(function (v) { return answers.services.indexOf(v) >= 0; }).join(','));
     }
     var resolution = resolve(table, answers);
-    if (resolution.registryAllowed.indexOf(answers.reg) > 0) { parts.push('reg=' + answers.reg); }
-    if (resolution.electionAllowed.indexOf(answers.elect) > 0) { parts.push('elect=' + answers.elect); }
+    if (resolution.autodiscoverAllowed.indexOf(answers.discover) > 0) { parts.push('discover=' + answers.discover); }
     return parts.join('&');
   }
 
@@ -600,8 +591,7 @@
     function dropPicksNotAllowed() {
       if (!hasRules(table)) { return; }
       var resolution = resolve(table, state);
-      if (resolution.registryAllowed.indexOf(state.reg) < 0) { state.reg = null; }
-      if (resolution.electionAllowed.indexOf(state.elect) < 0) { state.elect = null; }
+      if (resolution.autodiscoverAllowed.indexOf(state.discover) < 0) { state.discover = null; }
     }
 
     function updateNavigation() {
@@ -694,23 +684,20 @@
       target.appendChild(fieldset);
     }
 
-    function providerOptions(feature, allowed) {
+    function providerOptions(allowed) {
       return allowed.map(function (name, index) {
-        var provider = table.providers[feature][name];
+        var provider = table.providers.autodiscover[name];
         return { value: name, label: provider.label + (index === 0 ? ' (recommended)' : ''), help: provider.explain };
       });
     }
 
     function buildChoose() {
       var resolution = resolve(table, state);
-      [['registry', 'reg', resolution.registryAllowed, resolution.registry],
-        ['election', 'elect', resolution.electionAllowed, resolution.election]].forEach(function (group) {
-        var feature = table.features[group[0]];
-        var key = group[1];
-        radioGroup(byId('wizard-' + key), 'wizard-' + key, feature.label, feature.help,
-          providerOptions(group[0], group[2]), group[3],
-          function (value) { state[key] = value === group[2][0] ? null : value; changed(); });
-      });
+      var feature = table.features.autodiscover;
+      var allowed = resolution.autodiscoverAllowed;
+      radioGroup(byId('wizard-discover'), 'wizard-discover', feature.label, feature.help,
+        providerOptions(allowed), resolution.autodiscover,
+        function (value) { state.discover = value === allowed[0] ? null : value; changed(); });
     }
 
     // --- result step
@@ -742,10 +729,9 @@
         var connection = table.connections[kind];
         items.push({ term: 'connections.' + kind + '.main', text: connection.explain, docs: connection.docs });
       });
-      var registry = table.providers.registry[resolution.registry];
-      var election = table.providers.election[resolution.election];
-      items.push({ term: 'fleet.registry.provider: ' + resolution.registry, text: registry.explain, docs: registry.docs });
-      items.push({ term: 'periodic.election.provider: ' + resolution.election, text: election.explain, docs: election.docs });
+      var provider = table.providers.autodiscover[resolution.autodiscover];
+      var term = resolution.autodiscover === 'off' ? 'autodiscover.enabled: false' : 'autodiscover.provider: ' + resolution.autodiscover;
+      items.push({ term: term, text: provider.explain, docs: provider.docs });
       resolution.env.forEach(function (entry) { items.push({ term: entry.name, text: entry.explain }); });
       return items;
     }

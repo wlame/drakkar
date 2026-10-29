@@ -70,7 +70,7 @@ services:
       timeout: 5s
       retries: 10
 
-  # Database of the main cluster's worker registry and periodic election
+  # Database of the main cluster's autodiscover provider
   # (the archive and the cluster tick) when the harness runs with `just integration-up provider=postgres`.
   # Separate from the sinks' database so that pausing it (the
   # service-outage scenario) touches the providers and nothing else.
@@ -88,7 +88,7 @@ services:
       timeout: 5s
       retries: 10
 
-  # Redis of the main cluster's worker registry and periodic election (the
+  # Redis of the main cluster's autodiscover provider (the
   # archive and the cluster tick) when the harness runs with `just integration-up provider=redis`. Separate
   # from the sinks' Redis so that pausing it (the service-outage scenario)
   # touches the providers and nothing else. The default user is off, and
@@ -120,7 +120,7 @@ services:
       timeout: 3s
       retries: 10
 
-  # Consul agent of the main cluster's worker registry and periodic election
+  # Consul agent of the main cluster's autodiscover provider
   # (the archive and the cluster tick) when the harness runs with `just integration-up provider=consul`. A
   # single dev agent: its state lives in memory, so a new container starts
   # empty and consul-fleet-init sets it up again. ACLs are on and deny by
@@ -270,13 +270,12 @@ services:
       DK_METRICS__PORT: "9090"
       DK_UI__PORT: "8081"
       DK_UI__PUBLIC_URL: "http://localhost:8081/"
-      # Registry and periodic-election provider of the main cluster:
+      # Autodiscover provider of the main cluster:
       # filesystem (the default), postgres, redis or consul, chosen with
       # `just integration-up provider=<name>`. The DSN and the Redis URL
       # carry the password, and the Consul token is a credential, so they
       # live here and not in drakkar.yaml.
-      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
-      DK_PERIODIC__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
@@ -365,8 +364,7 @@ services:
       DK_UI__PORT: "8082"
       DK_UI__PUBLIC_URL: "http://localhost:8082/"
       # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
-      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
-      DK_PERIODIC__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
@@ -415,8 +413,7 @@ services:
       DK_UI__PORT: "8083"
       DK_UI__PUBLIC_URL: "http://localhost:8083/"
       # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
-      DK_FLEET__REGISTRY__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
-      DK_PERIODIC__ELECTION__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"

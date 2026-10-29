@@ -1259,7 +1259,8 @@ def _archive_config(**recorder):
     return DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
-        storage={'dir': '/data'},
+        autodiscover={'enabled': True, 'provider': 'filesystem'},
+        storage={'dir': '/data', 'shared_dir': '/mnt/shared'},
         ui={'enabled': True, 'release': {'enabled': False}},
         recorder=recorder,
     )

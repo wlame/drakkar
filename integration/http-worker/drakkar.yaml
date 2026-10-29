@@ -89,7 +89,13 @@ recorder:
 # This worker's own files (recorder, cache, crash marker). Same folder as
 # the main cluster's workers, so the Debug UI's workers page lists this one
 # alongside them: the harness mounts one host folder at /shared in every
-# container, so it doubles as the cluster's shared folder
-# (storage.shared_dir empty = storage.dir).
+# container, so it doubles as the cluster's shared folder.
 storage:
   dir: "/shared"
+  shared_dir: "/shared"
+
+# The workers of this cluster find each other through card files in the
+# shared folder.
+autodiscover:
+  enabled: true
+  provider: filesystem

@@ -2,12 +2,12 @@
 
 Two background loops, both started by :meth:`FleetRegistry.start`:
 
-- publish: the card every ``heartbeat_seconds`` and at once on every state
+- publish: the card every ``heartbeat`` and at once on every state
   change (``starting``, ``running``, ``draining``). Each tick first starts
   the provider if it has not started yet: a ``start`` that fails is tried
   again at the next tick, and the card goes out in the same tick as the
   ``start`` that succeeds.
-- refresh: ``list()`` every ``refresh_seconds`` into an immutable snapshot.
+- refresh: ``list()`` every ``refresh`` into an immutable snapshot.
   The first refresh waits for the first publish attempt after the provider
   started, because a file folder learns the server clock from its own write.
   After each refresh that succeeded, the optional ``on_refresh`` callback
@@ -33,7 +33,7 @@ from typing import Any
 
 import structlog
 
-from drakkar.config import FleetRegistryConfig
+from drakkar.config import AutodiscoverConfig
 from drakkar.fleet.card import WorkerIdentity, build_card, validate_card
 from drakkar.fleet.provider import PeerCardList, RegistryContext, RegistryProvider
 from drakkar.metrics import (
@@ -96,7 +96,7 @@ class PeerView:
     ``age_seconds`` is the listed age plus the time since the list, so a slow
     refresh never makes a card look younger. ``online`` is the provider's
     verdict when it gives one, else that age against
-    ``offline_after_seconds``, else ``None``. ``last_seen_ts`` is ``None``
+    ``autodiscover.offline_after``, else ``None``. ``last_seen_ts`` is ``None``
     when the provider knows no age.
     """
 
@@ -114,7 +114,7 @@ class FleetRegistry:
         provider: RegistryProvider,
         *,
         provider_name: str,
-        config: FleetRegistryConfig,
+        config: AutodiscoverConfig,
         identity: WorkerIdentity,
         provider_options: Mapping[str, Any] | None = None,
         features: Callable[[], dict[str, Any]] | None = None,
@@ -193,8 +193,8 @@ class FleetRegistry:
             instance=self._identity.instance,
             cluster=self._identity.cluster,
             url=self._identity.url,
-            heartbeat_seconds=self._config.heartbeat_seconds,
-            refresh_seconds=self._config.refresh_seconds,
+            heartbeat_seconds=self._config.heartbeat,
+            refresh_seconds=self._config.refresh,
         )
         # The first publish tick gets the state current now, even if the
         # worker moves on before that tick runs. Once the provider has
@@ -223,7 +223,7 @@ class FleetRegistry:
                 PeerView(
                     card=entry.card,
                     age_seconds=age,
-                    online=_liveness(entry.online, age, self._config.offline_after_seconds),
+                    online=_liveness(entry.online, age, self._config.offline_after),
                     last_seen_ts=None if age is None else now_epoch - age,
                 )
             )
@@ -292,7 +292,7 @@ class FleetRegistry:
             if self._provider_started.is_set():
                 self._first_publish_done.set()
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._state_changed.wait(), timeout=self._config.heartbeat_seconds)
+                await asyncio.wait_for(self._state_changed.wait(), timeout=self._config.heartbeat)
             # Cleared before reading the state: a change after this point
             # sets the event again and wakes the next wait at once.
             self._state_changed.clear()
@@ -304,7 +304,7 @@ class FleetRegistry:
         await self._first_publish_done.wait()
         while True:
             await self._refresh_tick()
-            await asyncio.sleep(self._config.refresh_seconds)
+            await asyncio.sleep(self._config.refresh)
 
     async def _publish_tick(self, state: str) -> None:
         """One publish iteration: start the provider if it has not started, then publish ``state``."""
@@ -401,7 +401,7 @@ class FleetRegistry:
                 await self._report_invalid_card(card, reason)
                 continue
             if card['worker'] == self._identity.worker:
-                await self._check_duplicate(card, _liveness(online, age_seconds, self._config.offline_after_seconds))
+                await self._check_duplicate(card, _liveness(online, age_seconds, self._config.offline_after))
                 continue
             peers.append(SnapshotEntry(card=card, age_seconds=age_seconds, listed_at=listed_at, online=online))
         return peers
@@ -409,7 +409,7 @@ class FleetRegistry:
     def _set_peer_gauge(self, peers: list[SnapshotEntry]) -> None:
         counts = dict.fromkeys(PEER_STATE_BY_VERDICT.values(), 0)
         for entry in peers:
-            verdict = _liveness(entry.online, entry.age_seconds, self._config.offline_after_seconds)
+            verdict = _liveness(entry.online, entry.age_seconds, self._config.offline_after)
             counts[PEER_STATE_BY_VERDICT[verdict]] += 1
         for state, count in counts.items():
             fleet_peers.labels(state=state).set(count)

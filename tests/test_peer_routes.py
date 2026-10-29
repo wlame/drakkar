@@ -29,11 +29,16 @@ ROUTE = '/api/v1/peer/cache/changes'
 
 async def _engine(tmp_path: Path, *, exchange: bool = True) -> CacheEngine:
     engine = CacheEngine(
-        config=CacheConfig(enabled=True, flush_interval_seconds=3600, cleanup_interval_seconds=3600),
-        exchange=CacheExchangeConfig(enabled=exchange, interval_seconds=3600),
+        config=CacheConfig(
+            enabled=True,
+            flush_interval_seconds=3600,
+            cleanup_interval_seconds=3600,
+            exchange=CacheExchangeConfig(enabled=exchange, interval_seconds=3600),
+        ),
         storage_dir=str(tmp_path),
         worker_id='w-a',
         cluster_name='search',
+        peer_views=lambda: [],
     )
     engine.attach_cache(Cache(origin_worker_id='w-a'))
     await engine.start()

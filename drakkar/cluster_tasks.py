@@ -85,12 +85,13 @@ _STOPPED = CallResult(ok=False, value=None, outcome=OUTCOME_NOT_STARTED, attempt
 def archive_task_runs(config: DrakkarConfig) -> bool:
     """Whether this worker runs the system cluster task ``history.archive``.
 
-    It needs archiving on, the recorder enabled with provider ``sqlite`` (only
-    then are files sealed), and a storage folder whose sealed files reach the
-    shared history folder.
+    It needs autodiscover on (the task has an election), archiving on, the
+    recorder enabled with provider ``sqlite`` (only then are files sealed), and a
+    storage folder whose sealed files reach the shared history folder.
     """
     return (
-        config.resolved_persistence == PERSISTENCE_SQLITE
+        config.autodiscover.enabled
+        and config.resolved_persistence == PERSISTENCE_SQLITE
         and config.recorder.archive.enabled
         and bool(config.storage.dir)
     )

@@ -31,7 +31,7 @@
     "rule_archive_interval": "interval must be a whole number of seconds and at least 30",
     "rule_archive_lease": "lease must be a whole number of seconds from 40 to 86400",
     "rule_sweep_after": "sweep_after must be at least 60 seconds",
-    "startup_no_shared_folder": "periodic task '{name}' has scope cluster, but the filesystem election needs a shared folder (storage.shared_dir or storage.dir)",
+    "startup_no_autodiscover": "periodic task '{name}' has scope cluster, but autodiscover is off; set autodiscover.enabled and autodiscover.provider, or give the task scope worker",
     "cron_fields": "cron '{expr}' must have 5 fields separated by single spaces",
     "cron_day_rule": "cron '{expr}' restricts both the day of month and the day of week; make one of them *",
     "cron_element": "cron '{expr}': {field} element '{item}' is not one of *, */s, v, a-b, a-b/s",

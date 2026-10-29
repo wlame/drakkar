@@ -104,9 +104,8 @@ password or a token. Set those in the worker's environment.
 <div id="wizard-services"></div>
 </section>
 <section data-step="choose" hidden>
-<h3 tabindex="-1">Providers</h3>
-<div id="wizard-reg"></div>
-<div id="wizard-elect"></div>
+<h3 tabindex="-1">Autodiscover</h3>
+<div id="wizard-discover"></div>
 </section>
 <section data-step="result" hidden>
 <h3 tabindex="-1">Result</h3>

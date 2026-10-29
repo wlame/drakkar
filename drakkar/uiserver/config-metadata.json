@@ -1862,6 +1862,66 @@
           "default": 10000,
           "secret": false,
           "group": "cache"
+        },
+        {
+          "path": "cache.exchange.enabled",
+          "env": "DK_CACHE__EXCHANGE__ENABLED",
+          "description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing.",
+          "full_description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing. Off, flush and cleanup still run but nothing propagates across workers.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.interval_seconds",
+          "env": "DK_CACHE__EXCHANGE__INTERVAL_SECONDS",
+          "description": "Seconds between exchange cycles.",
+          "full_description": "Seconds between exchange cycles.",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.page_size",
+          "env": "DK_CACHE__EXCHANGE__PAGE_SIZE",
+          "description": "Maximum rows in one page pulled from a peer.",
+          "full_description": "Maximum rows in one page pulled from a peer.",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.timeout_seconds",
+          "env": "DK_CACHE__EXCHANGE__TIMEOUT_SECONDS",
+          "description": "Time limit for one request to a peer.",
+          "full_description": "Time limit for one request to a peer.",
+          "type": "number",
+          "default": 5.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.cycle_deadline_seconds",
+          "env": "DK_CACHE__EXCHANGE__CYCLE_DEADLINE_SECONDS",
+          "description": "Hard time limit for one exchange cycle.",
+          "full_description": "Hard time limit for one exchange cycle. Empty means 0.9 x interval_seconds.",
+          "type": "number",
+          "default": null,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.max_concurrent_peers",
+          "env": "DK_CACHE__EXCHANGE__MAX_CONCURRENT_PEERS",
+          "description": "Peers pulled from in parallel.",
+          "full_description": "Peers pulled from in parallel.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "cache"
         }
       ]
     },
@@ -2380,276 +2440,139 @@
       ]
     },
     {
-      "key": "periodic",
-      "title": "Periodic tasks (periodic:)",
-      "doc_anchor": "periodic-tasks-periodic",
+      "key": "autodiscover",
+      "title": "Autodiscover (autodiscover:)",
+      "doc_anchor": "autodiscover-autodiscover",
       "entries": [
         {
-          "path": "periodic.election.provider",
-          "env": "DK_PERIODIC__ELECTION__PROVIDER",
-          "description": "Election provider: filesystem (a lock file in storage.shared_dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session).",
-          "full_description": "Election provider: filesystem (a lock file in storage.shared_dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session). Every worker of a cluster must use the same provider.",
-          "type": "string",
-          "default": "filesystem",
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.connection",
-          "env": "DK_PERIODIC__ELECTION__CONNECTION",
-          "description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use.",
-          "full_description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use. The other providers ignore it.",
-          "type": "string",
-          "default": "main",
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.timeout",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT",
-          "description": "Time limit for one attempt of a provider operation.",
-          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "duration",
-          "default": "5s",
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.max_retries",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES",
-          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
-          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
-          "type": "integer",
-          "default": 2,
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.backoff",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF",
-          "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
-          "type": "duration",
-          "default": "200ms",
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.max_backoff",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__MAX_BACKOFF",
-          "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff.",
-          "type": "duration",
-          "default": "5s",
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.breaker_failures",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_FAILURES",
-          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.election.resilience.breaker_cooldown",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_COOLDOWN",
-          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "duration",
-          "default": "30s",
-          "secret": false,
-          "group": "periodic"
-        }
-      ]
-    },
-    {
-      "key": "fleet",
-      "title": "Fleet registry and cache exchange (fleet:)",
-      "doc_anchor": "fleet-registry-and-cache-exchange-fleet",
-      "entries": [
-        {
-          "path": "fleet.registry.provider",
-          "env": "DK_FLEET__REGISTRY__PROVIDER",
-          "description": "Registry provider: filesystem (cards in <storage.shared_dir>/fleet, or <storage.dir>/fleet when storage.shared_dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker).",
-          "full_description": "Registry provider: filesystem (cards in <storage.shared_dir>/fleet, or <storage.dir>/fleet when storage.shared_dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.",
-          "type": "string",
-          "default": "filesystem",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.connection",
-          "env": "DK_FLEET__REGISTRY__CONNECTION",
-          "description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use.",
-          "full_description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use. The other providers ignore it.",
-          "type": "string",
-          "default": "main",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.heartbeat_seconds",
-          "env": "DK_FLEET__REGISTRY__HEARTBEAT_SECONDS",
-          "description": "Seconds between card publishes.",
-          "full_description": "Seconds between card publishes.",
-          "type": "integer",
-          "default": 10,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.refresh_seconds",
-          "env": "DK_FLEET__REGISTRY__REFRESH_SECONDS",
-          "description": "Seconds between reads of the peer cards.",
-          "full_description": "Seconds between reads of the peer cards.",
-          "type": "integer",
-          "default": 15,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.offline_after_seconds",
-          "env": "DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS",
-          "description": "A peer whose card is older than this many seconds (on the provider clock) is offline.",
-          "full_description": "A peer whose card is older than this many seconds (on the provider clock) is offline. Must be >= 2 * heartbeat_seconds and >= 10. With the consul provider it must also be <= 86400.",
-          "type": "integer",
-          "default": 60,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.prune_after_seconds",
-          "env": "DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS",
-          "description": "Cards older than this many seconds are deleted.",
-          "full_description": "Cards older than this many seconds are deleted. Must be >= offline_after_seconds.",
-          "type": "integer",
-          "default": 86400,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.timeout",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT",
-          "description": "Time limit for one attempt of a provider operation.",
-          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "duration",
-          "default": "5s",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.max_retries",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__MAX_RETRIES",
-          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
-          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
-          "type": "integer",
-          "default": 2,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.backoff",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BACKOFF",
-          "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
-          "type": "duration",
-          "default": "200ms",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.max_backoff",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__MAX_BACKOFF",
-          "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff.",
-          "type": "duration",
-          "default": "5s",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.breaker_failures",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER_FAILURES",
-          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.resilience.breaker_cooldown",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER_COOLDOWN",
-          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "duration",
-          "default": "30s",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.cache_exchange.enabled",
-          "env": "DK_FLEET__CACHE_EXCHANGE__ENABLED",
-          "description": "Pull cluster and global cache rows from peers.",
-          "full_description": "Pull cluster and global cache rows from peers. Off, flush and cleanup still run but nothing propagates across workers.",
+          "path": "autodiscover.enabled",
+          "env": "DK_AUTODISCOVER__ENABLED",
+          "description": "Publish this worker in the registry, read its peers and take part in the election of cluster tasks.",
+          "full_description": "Publish this worker in the registry, read its peers and take part in the election of cluster tasks. Off, the workers list shows only this worker, the cache exchange pulls nothing, and a declared cluster task fails startup.",
           "type": "boolean",
-          "default": true,
+          "default": false,
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
         },
         {
-          "path": "fleet.cache_exchange.interval_seconds",
-          "env": "DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS",
-          "description": "Seconds between exchange cycles.",
-          "full_description": "Seconds between exchange cycles.",
-          "type": "number",
-          "default": 30.0,
+          "path": "autodiscover.provider",
+          "env": "DK_AUTODISCOVER__PROVIDER",
+          "description": "The provider of both the registry and the election, required when enabled: filesystem (cards in <storage.shared_dir>/fleet/workers, locks in <storage.shared_dir>/tasks/<cluster>; needs storage.shared_dir), postgres (tables of the database named by autodiscover.connection), redis (keys of the Redis server named by autodiscover.connection), consul (keys of the Consul agent named by autodiscover.connection, each held by a session).",
+          "full_description": "The provider of both the registry and the election, required when enabled: filesystem (cards in <storage.shared_dir>/fleet/workers, locks in <storage.shared_dir>/tasks/<cluster>; needs storage.shared_dir), postgres (tables of the database named by autodiscover.connection), redis (keys of the Redis server named by autodiscover.connection), consul (keys of the Consul agent named by autodiscover.connection, each held by a session). Every worker of a cluster must use the same provider.",
+          "type": "string",
+          "default": "",
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
         },
         {
-          "path": "fleet.cache_exchange.page_size",
-          "env": "DK_FLEET__CACHE_EXCHANGE__PAGE_SIZE",
-          "description": "Maximum rows in one page pulled from a peer.",
-          "full_description": "Maximum rows in one page pulled from a peer.",
+          "path": "autodiscover.connection",
+          "env": "DK_AUTODISCOVER__CONNECTION",
+          "description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use.",
+          "full_description": "Name of the entry under connections.<provider> that the consul, postgres and redis providers use. The filesystem provider ignores it.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.heartbeat",
+          "env": "DK_AUTODISCOVER__HEARTBEAT",
+          "description": "Time between card publishes.",
+          "full_description": "Time between card publishes.",
+          "type": "duration",
+          "default": "10s",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.refresh",
+          "env": "DK_AUTODISCOVER__REFRESH",
+          "description": "Time between reads of the peer cards.",
+          "full_description": "Time between reads of the peer cards.",
+          "type": "duration",
+          "default": "15s",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.offline_after",
+          "env": "DK_AUTODISCOVER__OFFLINE_AFTER",
+          "description": "A peer whose card is older than this (on the provider clock) is offline.",
+          "full_description": "A peer whose card is older than this (on the provider clock) is offline. Must be at least 2 x heartbeat and at least 10s. With the consul provider it must also be at most 1d.",
+          "type": "duration",
+          "default": "1m",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.prune_after",
+          "env": "DK_AUTODISCOVER__PRUNE_AFTER",
+          "description": "Cards older than this are deleted.",
+          "full_description": "Cards older than this are deleted. Must be at least offline_after.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.resilience.timeout",
+          "env": "DK_AUTODISCOVER__RESILIENCE__TIMEOUT",
+          "description": "Time limit for one attempt of a provider operation.",
+          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
+          "type": "duration",
+          "default": "5s",
+          "secret": false,
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.resilience.max_retries",
+          "env": "DK_AUTODISCOVER__RESILIENCE__MAX_RETRIES",
+          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
+          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
           "type": "integer",
-          "default": 500,
+          "default": 2,
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
         },
         {
-          "path": "fleet.cache_exchange.timeout_seconds",
-          "env": "DK_FLEET__CACHE_EXCHANGE__TIMEOUT_SECONDS",
-          "description": "Time limit for one request to a peer.",
-          "full_description": "Time limit for one request to a peer.",
-          "type": "number",
-          "default": 5.0,
+          "path": "autodiscover.resilience.backoff",
+          "env": "DK_AUTODISCOVER__RESILIENCE__BACKOFF",
+          "description": "Wait before the first retry.",
+          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
+          "type": "duration",
+          "default": "200ms",
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
         },
         {
-          "path": "fleet.cache_exchange.cycle_deadline_seconds",
-          "env": "DK_FLEET__CACHE_EXCHANGE__CYCLE_DEADLINE_SECONDS",
-          "description": "Hard time limit for one exchange cycle.",
-          "full_description": "Hard time limit for one exchange cycle. Empty means 0.9 x interval_seconds.",
-          "type": "number",
-          "default": null,
+          "path": "autodiscover.resilience.max_backoff",
+          "env": "DK_AUTODISCOVER__RESILIENCE__MAX_BACKOFF",
+          "description": "Longest wait between two attempts.",
+          "full_description": "Longest wait between two attempts. Must be >= backoff.",
+          "type": "duration",
+          "default": "5s",
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
         },
         {
-          "path": "fleet.cache_exchange.max_concurrent_peers",
-          "env": "DK_FLEET__CACHE_EXCHANGE__MAX_CONCURRENT_PEERS",
-          "description": "Peers pulled from in parallel.",
-          "full_description": "Peers pulled from in parallel.",
+          "path": "autodiscover.resilience.breaker_failures",
+          "env": "DK_AUTODISCOVER__RESILIENCE__BREAKER_FAILURES",
+          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
+          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
           "type": "integer",
-          "default": 4,
+          "default": 5,
           "secret": false,
-          "group": "fleet"
+          "group": "autodiscover"
+        },
+        {
+          "path": "autodiscover.resilience.breaker_cooldown",
+          "env": "DK_AUTODISCOVER__RESILIENCE__BREAKER_COOLDOWN",
+          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "type": "duration",
+          "default": "30s",
+          "secret": false,
+          "group": "autodiscover"
         }
       ]
     },

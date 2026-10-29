@@ -16,42 +16,34 @@ off, slow, or broken: no step of the pipeline waits for a registry call.
 
 ## What you get with the defaults
 
-With nothing configured, a worker uses the **filesystem** provider and keeps
-the cards in `<shared.dir>/fleet/workers/` (or `<storage.dir>/fleet/workers/`
-when `shared.dir` is empty). Workers that see the same folder see each
-other. The workers list shows each peer with its state, version and
-liveness, and the cache exchange knows where each peer answers and what
-it has to pull.
+The registry is part of the optional feature `autodiscover`, and it is **off
+by default**. A worker with it off publishes no card, reads no peers, runs no
+election and pulls no cache rows. The workers list shows only this worker, and
+a declared `scope='cluster'` periodic task fails startup.
 
-The registry needs the UI server (`ui.enabled: true`), because peers and
-browsers reach a worker through the URL on its card. With the UI off, the
-registry is off and the worker logs `fleet_registry_disabled_no_ui` once.
+To turn it on, set `autodiscover.enabled: true` and choose one provider. The
+registry needs the UI server (`ui.enabled: true`), because peers and browsers
+reach a worker through the URL on its card. With the UI off, the registry is
+off and the worker logs `fleet_registry_disabled_no_ui` once.
 
 ## Providers
 
-A **provider** is the part of a feature that talks to a store or a
-service. Two features have one, and each is chosen on its own:
-
-| Feature | Key | Default |
-|---|---|---|
-| Worker registry (this page) | `fleet.registry.provider` | `filesystem` |
-| [Election of cluster periodic tasks](local-databases.md#the-election-provider) (the archive included) | `periodic.election.provider` | `filesystem` |
-
-Each feature has its own `connection` and [`resilience`](#resilience) block.
+A **provider** is the part of the feature that talks to a store or a service.
+One provider serves both the registry (this page) and the
+[election of cluster periodic tasks](local-databases.md#the-election-provider),
+the archive included. Each has its own caller with its own circuit breaker, and
+both take their settings from one [`autodiscover.resilience`](#resilience)
+block. The metrics keep the labels `feature="registry"` and `feature="election"`.
 The rest of this page is about the registry.
 
-`fleet.registry.provider` selects where cards live:
+`autodiscover.provider` selects where cards live:
 
 | Provider | Where the cards are | Liveness |
 |---|---|---|
-| `filesystem` (default) | one JSON file per worker in a shared folder | from the file times on the file server |
+| `filesystem` | one JSON file per worker in `storage.shared_dir` | from the file times on the file server |
 | `postgres` | one row per worker in the table `fleet_workers` of a Postgres schema | from the database server's clock (`heartbeat_at` against `now()`) |
-| `redis` | one key per worker plus an index of workers, under the key prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
-| `consul` | one key per worker under the key prefix of a Consul connection, held by a session of the worker | the session's time to live (online while the key has a session; no age) |
-
-With the UI off, or with `filesystem` and no card folder, the registry is
-off: the workers list shows only the current worker, and the cache exchange
-pulls nothing.
+| `redis` | one key per worker plus an index of workers, under the state prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
+| `consul` | one key per worker under the state prefix of a Consul connection, held by a session of the worker | the session's time to live (online while the key has a session; no age) |
 
 `postgres`, `redis` and `consul` are built in; see [`postgres`](#postgres),
 [`redis`](#redis) and [`consul`](#consul). Each keeps its data in a service
@@ -60,32 +52,27 @@ reached through a [named connection](#connections).
 A name that uses a connection (`consul`, `redis` and `postgres`) is checked
 when the config loads: the connection it uses must be declared. Without
 `connections.consul.main`, for example, the load fails with
-`fleet.registry.connection 'main' is not defined under connections.consul`.
+`autodiscover.connection 'main' is not defined under connections.consul`.
 
-A worker starts with the name only when a provider of that name exists. For a
-name that is not built in, startup fails (with the UI on, which the registry needs) with a message that lists the providers that
-exist, for example
-`fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
+The load fails for any other provider name, with or without `enabled`:
+`autodiscover.provider must be one of consul, filesystem, postgres, redis, got 'etcd'`.
+It also fails when the feature is enabled with no provider:
+`autodiscover.enabled is true but autodiscover.provider is empty; choose one of consul, filesystem, postgres, redis`.
 
 ### `filesystem`
 
 ```yaml
 storage:
   dir: /var/lib/drakkar          # this worker's own files
-shared:
-  dir: /mnt/fleet                # seen by every worker of the fleet
-fleet:
-  registry:
-    provider: filesystem         # the default
+  shared_dir: /mnt/fleet         # seen by every worker of the fleet
+autodiscover:
+  enabled: true
+  provider: filesystem
 ```
 
-The folder is `<shared.dir>/fleet`, else `<storage.dir>/fleet`. When neither
-resolves (memory-only `storage.dir: ''` and no `shared.dir`), the registry
-is off and the worker logs `fleet_registry_disabled_no_dir` once. An empty
-`storage.dir` also makes the recorder derive `persistence: none` (see
-[Recent Events in Memory](recent-events.md)); with a `shared.dir` such a
-worker still keeps its card there and reads the sealed history of its
-cluster.
+The cards go to `<storage.shared_dir>/fleet/workers/`. An enabled `filesystem`
+provider with an empty `storage.shared_dir` fails the load:
+`autodiscover.provider filesystem needs storage.shared_dir`.
 
 The folder is best effort: if it cannot be written, the worker runs anyway,
 counts each failed publish in
@@ -101,7 +88,7 @@ Layout and rules:
 - A card is written to `workers/.<worker>.json.<instance>.tmp` and renamed
   over the card, so a reader never sees half a card. A temp file that a
   crashed writer left behind is deleted once it is older than
-  `prune_after_seconds`.
+  `prune_after`.
 - The folder is created with mode 0700 and each card with mode 0600. A card
   holds no secrets; who may read the folder is decided by the folder's own
   permissions on the file server.
@@ -117,7 +104,7 @@ Layout and rules:
   for that file name, and the other cards are still listed. Cards are
   written with mode 0600, so workers that run as different users and share
   the folder cannot read each other's cards; run them as one user.
-- A card older than `prune_after_seconds` (default 86400, one day) is
+- A card older than `prune_after` (default `24h`) is
   deleted by the next worker that lists the folder.
 - At a clean stop the worker deletes its own card, but only while the card
   still holds this process's instance: if another process with the same
@@ -136,10 +123,10 @@ connections:
       schema: drakkar            # the schema that holds the tables
       manage_schema: true        # create the schema and the tables when missing
       # dsn: set from the environment, see below
-fleet:
-  registry:
-    provider: postgres
-    connection: main             # the default
+autodiscover:
+  enabled: true
+  provider: postgres
+  connection: main             # the default
 ```
 
 Set the connection string in the environment, not in the YAML file:
@@ -164,12 +151,12 @@ What it keeps and does:
   card and sets `heartbeat_at = now()`, with `now()` taken by the database
   server.
 - **List.** First it deletes the rows whose `heartbeat_at` is older than
-  `prune_after_seconds`, then it reads every row with its age. Both steps
+  `prune_after`, then it reads every row with its age. Both steps
   use the server's `now()`, so a worker that lists also prunes. The age is
   `now() - heartbeat_at`, computed by the server in the same query.
 - **Liveness.** The provider gives no `online` verdict. The
   [liveness rule](#liveness) applies: a peer is online while its age is at
-  most `offline_after_seconds`. No worker's wall clock enters an age, so
+  most `offline_after`. No worker's wall clock enters an age, so
   clock skew between worker hosts, or between a worker and the database, does
   not matter.
 - **Duplicate names.** The worker name is the primary key, so two processes
@@ -257,7 +244,7 @@ partitions (see
 
 **During an outage.** A connection that is refused or lost, a server that
 restarts and a transaction that must be run again are transient errors. They
-are retried under `fleet.registry.resilience` (see [Resilience](#resilience)).
+are retried under `autodiscover.resilience` (see [Resilience](#resilience)).
 When operations keep failing, the breaker opens after `failure_threshold`
 failed operations and the provider is skipped until the cooldown has passed.
 The workers list keeps its last snapshot, and
@@ -278,10 +265,10 @@ connections:
     main:
       key_prefix: "drakkar:"     # the default; every key starts with it
       # url: set from the environment, see below
-fleet:
-  registry:
-    provider: redis
-    connection: main             # the default
+autodiscover:
+  enabled: true
+  provider: redis
+  connection: main             # the default
 ```
 
 Set the URL in the environment, not in the YAML file:
@@ -305,7 +292,7 @@ What it keeps and does:
   index member, characters of the worker name outside `[a-zA-Z0-9_-]` become
   `_`.
 - **Publish.** One script per heartbeat and per state change. It stores the
-  card with a time to live of `prune_after_seconds`, adds the worker to the
+  card with a time to live of `prune_after`, adds the worker to the
   index with the server's `TIME` as its score, and gives the index the same
   time to live.
 - **List.** One script, so a database full of other keys costs nothing
@@ -314,7 +301,7 @@ What it keeps and does:
   is the server's time now minus the stored time of its last publish, floored
   at 0.
 - **Pruning.** Redis deletes a card when its time to live ends, so the card
-  of a dead worker leaves the list `prune_after_seconds` after its last
+  of a dead worker leaves the list `prune_after` after its last
   publish. The index gets the time to live of the last publish too. When no
   worker publishes for that long, the index goes as well, and cards that are
   still alive at that moment are not listed until their workers publish
@@ -333,9 +320,9 @@ What it keeps and does:
   provider](local-databases.md#the-redis-election-provider)).
 - **Liveness.** The provider gives no `online` verdict. The
   [liveness rule](#liveness) applies: a peer is online while its age is at
-  most `offline_after_seconds`. No worker's wall clock enters an age, and the
-  `prune_after_seconds` of the reading worker does not either, so workers with
-  different `prune_after_seconds` values can share one server.
+  most `offline_after`. No worker's wall clock enters an age, and the
+  `prune_after` of the reading worker does not either, so workers with
+  different `prune_after` values can share one server.
 - **Duplicate names.** The card key comes from the sanitized worker name, so
   two processes with one name overwrite each other's card: the last writer
   wins. Names that differ only in characters outside `[a-zA-Z0-9_-]` share
@@ -451,11 +438,11 @@ connections:
       address: http://127.0.0.1:8500   # the HTTP API of a Consul agent; the default
       key_prefix: drakkar              # the default; every key starts with it
       # token: set from the environment, see below
-fleet:
-  registry:
-    provider: consul
-    connection: main             # the default
-    offline_after_seconds: 60    # the default; it also sets the session's time to live
+autodiscover:
+  enabled: true
+  provider: consul
+  connection: main             # the default
+  offline_after: 1m    # the default; it also sets the session's time to live
 ```
 
 Set the ACL token in the environment, not in the YAML file:
@@ -488,24 +475,24 @@ What it keeps and does:
   answers with `404` (the session ended), creates a new session first. The
   session that already holds the key writes it again, so a republish is the
   same call.
-- **The session's time to live.** It is half of `offline_after_seconds`,
+- **The session's time to live.** It is half of `offline_after`,
   rounded up, and at least 10 seconds, which is the least that Consul
   accepts. With the default of 60 it is 30 seconds. Consul ends a session no
   earlier than its time to live after the last renew, and at most twice its
   time to live after it. So the card of a dead worker leaves the list by
-  `offline_after_seconds`, one second later when that value is odd (the time
+  `offline_after`, one second later when that value is odd (the time
   to live is rounded up), and by 20 seconds when the value is below 20 (this
   also holds for an odd value below 20). A live worker renews at every
   heartbeat. If a session ends under a live worker (a heartbeat came late, or
   the agent lost its state), the next publish meets `404` on the renew, creates
   a new session and writes the card again. With this provider
-  `offline_after_seconds` is at most 86400; a larger value fails the load
-  with `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`.
-- **Heartbeat margin.** With this provider, keep `offline_after_seconds` at
-  least `4 * heartbeat_seconds`; the defaults (10 and 60) do. The time to live
+  `offline_after` is at most 86400; a larger value fails the load
+  with `autodiscover.offline_after (<n>) must be <= 86400 when autodiscover.provider is consul`.
+- **Heartbeat margin.** With this provider, keep `offline_after` at
+  least `4 * heartbeat`; the defaults (10 and 60) do. The time to live
   is then at least twice the heartbeat, so a heartbeat that comes a little
   late still renews the session in time. The load accepts
-  `offline_after_seconds = 2 * heartbeat_seconds`, but then the time to live
+  `offline_after = 2 * heartbeat`, but then the time to live
   equals the heartbeat (for a heartbeat of 10 seconds or more), and Consul
   may end a session as early as its time to live after the last renew: a
   renew that comes a little late can find the session ended, and the card
@@ -517,7 +504,7 @@ What it keeps and does:
   online while its key has a session, and the workers list shows it with no
   age, so its `last_seen_ts` is `null`. A key that no session holds was
   written by something other than the provider. It is listed offline, and
-  nothing deletes it: `prune_after_seconds` is not used with `consul`, because
+  nothing deletes it: `prune_after` is not used with `consul`, because
   Consul deletes a card when its session ends. Remove such a key in Consul.
 - **Liveness.** The provider gives its own `online` verdict, so no worker's
   wall clock and no age enter it. See [Liveness](#liveness).
@@ -665,7 +652,7 @@ A card is a JSON object, at most 4096 bytes:
 | `version` | no | The worker's release, as `/api/v1/identity` reports it. |
 | `state` | no | `starting`, `running` or `draining`. |
 | `started_at`, `heartbeat_at` | no | Process start and the time of this publish, on the writer's clock. Informational only: liveness never uses them. |
-| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `fleet.cache_exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. `features.periodic` is on every card from the first publish: `{"cluster_hash": "<16 hex>"}`, the hash of the worker's cluster periodic task definitions (see [Definition hash](periodic-tasks.md#definition-hash)). Peers of the same cluster compare it after each refresh and warn on a difference; a hash in any other form counts as unknown. |
+| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `cache.exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. `features.periodic` is on every card from the first publish: `{"cluster_hash": "<16 hex>"}`, the hash of the worker's cluster periodic task definitions (see [Definition hash](periodic-tasks.md#definition-hash)). Peers of the same cluster compare it after each refresh and warn on a difference; a hash in any other form counts as unknown. |
 
 A card whose required field is missing, empty (`worker`, `url`) or of the
 wrong type, or whose optional field has the wrong type, is skipped; the
@@ -683,7 +670,7 @@ A worker publishes its card:
 - with `starting` right after its UI server listens;
 - with `running` once its sources have started;
 - with `draining` as soon as shutdown begins;
-- again every `heartbeat_seconds` (default 10) with the current state.
+- again every `heartbeat` (default 10) with the current state.
 
 A state change is published at once, not at the next heartbeat. At the end
 of a clean stop, after the recorder's last write and before the UI server
@@ -693,9 +680,9 @@ does not).
 ## Liveness
 
 The workers list shows a peer as **online** when its card is no older than
-`fleet.registry.offline_after_seconds` (default 60), and as **offline**
-when it is older. `offline_after_seconds` must be at least twice
-`heartbeat_seconds`, so one late heartbeat never marks a worker offline, and
+`autodiscover.offline_after` (default 60), and as **offline**
+when it is older. `offline_after` must be at least twice
+`heartbeat`, so one late heartbeat never marks a worker offline, and
 at least 10, whichever provider is used.
 
 A provider whose service decides liveness itself can say so. It sets
@@ -703,9 +690,9 @@ A provider whose service decides liveness itself can say so. It sets
 while a session of its owner lives). The rule is applied in this order:
 
 1. `online` is `true` or `false`: that is the answer. The age is not
-   compared with `offline_after_seconds`.
+   compared with `offline_after`.
 2. `online` is not set and the age is known: online while the age is at most
-   `offline_after_seconds`.
+   `offline_after`.
 3. Neither is known: the peer is neither online nor offline (`null` in the
    workers list, `unknown` in `drakkar_fleet_peers`).
 
@@ -734,11 +721,11 @@ the age is that time minus the server's `TIME` at the card's last publish.
 The `consul` provider gives an `online` verdict and no age. A card is online
 while a session holds its key and offline when its key has no session. Consul
 ends the session of a worker that stopped renewing, and the card goes with it.
-So `offline_after_seconds` is compared with no age for these cards: it sets the
+So `offline_after` is compared with no age for these cards: it sets the
 time to live of the session (see [`consul`](#consul)), and with this provider
-it should be at least four times `heartbeat_seconds`, not only twice.
+it should be at least four times `heartbeat`, not only twice.
 
-Each refresh (every `refresh_seconds`, default 15) keeps the age of every
+Each refresh (every `refresh`, default 15) keeps the age of every
 card at the moment it was listed. The workers list adds the time since that
 refresh, so a peer never looks younger because a refresh is slow or failed.
 
@@ -780,10 +767,10 @@ connections:
     fleet_database:
       schema: drakkar_fleet
       manage_schema: false
-fleet:
-  registry:
-    provider: postgres
-    connection: fleet_database             # default: main
+autodiscover:
+  enabled: true
+  provider: postgres
+  connection: fleet_database             # default: main
 ```
 
 Each `postgres` entry also needs its `dsn`, set from the environment, for
@@ -794,12 +781,12 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
 
 - `connections` has one map per service type: `consul`, `redis` and
   `postgres`. You choose the names. A feature that names none uses `main`.
-- `fleet.registry.connection` and `periodic.election.connection` name
+- `autodiscover.connection` and `autodiscover.connection` name
   an entry. The `postgres`, `redis` and `consul` providers read it.
   `filesystem` ignores it. The config load checks the key by
   provider name, so a provider named `consul`, `redis` or `postgres` needs its
   connection declared; otherwise the load fails with
-  `fleet.registry.connection 'main' is not defined under connections.consul`.
+  `autodiscover.connection 'main' is not defined under connections.consul`.
 - Features that name the same connection share one client. The first
   feature that needs it opens it; nothing opens at startup.
 - At shutdown the worker closes the clients after the last provider has
@@ -820,8 +807,8 @@ Every key is in [Configuration](configuration.md#connections).
 Every call from the worker to a provider is an **operation**. The registry
 makes five: `start`, `publish`, `list`, `withdraw` and `stop`. The election
 of cluster periodic tasks has its own. An operation runs under the
-`resilience` block of its feature: `fleet.registry.resilience` and
-`periodic.election.resilience`.
+`resilience` block of its feature: `autodiscover.resilience` and
+`autodiscover.resilience`.
 Both have the same keys:
 
 | Key | Default | Meaning |
@@ -850,7 +837,7 @@ and `504`; a client timeout counts as a timeout. Every other status, such as
 `403`, ends the operation at once. With the defaults one operation takes at
 most 3 × 5 s plus the waits of 0.2 s and 0.4 s, which is 15.6 s. The
 registry publishes the next card only after the previous publish ended, so
-keep the longest operation well below `offline_after_seconds`.
+keep the longest operation well below `offline_after`.
 
 **Breaker.** It counts failed operations, not attempts: an operation fails
 when its last attempt fails. One breaker serves all operations of a feature.
@@ -897,10 +884,10 @@ one attempt, both inside the time that is left of
 provider that never started gets neither call (both count as `not_started`);
 with the breaker open both are skipped at once. A stuck provider cannot hold
 the shutdown longer than that budget. A card that was not withdrawn stays
-in the store until `prune_after_seconds`, and peers show the worker as
-offline once the card is older than `offline_after_seconds`. With `consul`, the
+in the store until `prune_after`, and peers show the worker as
+offline once the card is older than `offline_after`. With `consul`, the
 session ends by its time to live and Consul deletes the card with it, so the
-card leaves the list by `offline_after_seconds` (one second later for an odd
+card leaves the list by `offline_after` (one second later for an odd
 value, and by 20 seconds for a value below 20; see [`consul`](#consul)).
 
 ## Failures
@@ -977,7 +964,6 @@ also counted by the three provider metrics:
 |---|---|---|
 | `fleet_registry_started` | info | The registry service started; names the provider, instance and URL. |
 | `fleet_registry_disabled_no_ui` | warning | The UI is off, so the registry is off. |
-| `fleet_registry_disabled_no_dir` | warning | The filesystem provider has no folder, so the registry is off. |
 | `provider_started` | info | A provider started (fields `feature`, `provider`). After failed starts it is logged once, when a start succeeds. |
 | `provider_call_failed` | warning | A provider operation failed after its retries (fields `feature`, `provider`, `op`, `error`, `attempts`, `suppressed`); at most once a minute per operation. `suppressed` counts the failures the line stands for. |
 | `provider_breaker_opened` | warning | A closed breaker opened (fields `feature`, `provider`, `failure_threshold`, `cooldown_seconds`). A failed probe does not log it again. |
@@ -999,18 +985,19 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul). |
-| `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. |
-| `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
-| `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
-| `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. With `consul` it sets the time to live of the worker's session (half of it, at least 10 seconds) and is at most `86400`. |
-| `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. At least `offline_after_seconds`. The `consul` provider does not use it: Consul deletes a card when its session ends. |
-| `fleet.registry.resilience.*` | see [Resilience](#resilience) | Time limit, retries, backoff and breaker for the registry's provider operations. |
+| `autodiscover.enabled` | `false` | Turn on the registry and the election of cluster tasks. |
+| `autodiscover.provider` | `''` | [`filesystem`](#filesystem), [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul). Required when enabled. |
+| `autodiscover.connection` | `main` | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. |
+| `autodiscover.heartbeat` | `10s` | Time between card publishes. |
+| `autodiscover.refresh` | `15s` | Time between reads of the peer cards. |
+| `autodiscover.offline_after` | `1m` | A card older than this is offline. At least `2 * heartbeat` and at least `10s`. With `consul` it sets the time to live of the worker's session (half of it, at least 10 seconds) and is at most `24h`. |
+| `autodiscover.prune_after` | `24h` | Cards older than this are deleted. At least `offline_after`. The `consul` provider does not use it: Consul deletes a card when its session ends. |
+| `autodiscover.resilience.*` | see [Resilience](#resilience) | Time limit, retries, backoff and breaker for the provider operations of the registry and the election. |
 | `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `consul` providers read `connections.consul.*`, the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
-`DK_FLEET__REGISTRY__PROVIDER=redis`. The full table with constraints is in
-[Configuration](configuration.md#fleet-registry).
+`DK_AUTODISCOVER__PROVIDER=redis`. The full table with constraints is in
+[Configuration](configuration.md#autodiscover).
 
 ## What the registry does not do
 

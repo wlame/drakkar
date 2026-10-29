@@ -223,7 +223,7 @@ slot again.
 **The provider is down.** A cluster task never blocks the message pipeline.
 When the provider does not answer, each slot is `election_failed` and the
 worker goes on processing messages. The calls follow the
-[`resilience` block](fleet.md#resilience) of `periodic.election`: retries,
+[`resilience` block](fleet.md#resilience) of `autodiscover`: retries,
 and a circuit breaker that skips the provider for a cooldown after repeated
 failures (those slots show `error: start skipped_open` or
 `acquire skipped_open`). The first slot after the provider answers again
@@ -231,15 +231,16 @@ runs normally, with no restart.
 
 ## The election
 
-One election provider serves every cluster task of a worker, the archive
-included. It is configured once, under `periodic.election`:
+One provider serves every cluster task of a worker, the archive included, and
+the [worker registry](fleet.md). It is configured once, under `autodiscover`,
+and it is off by default:
 
 ```yaml
-periodic:
-  election:
-    provider: filesystem   # filesystem | postgres | redis | consul
-    connection: main       # entry of connections.<provider>; read by postgres, redis and consul
-    # resilience: {}       # time limit, retries and breaker; same keys as fleet.registry.resilience
+autodiscover:
+  enabled: true
+  provider: filesystem   # filesystem | postgres | redis | consul
+  connection: main       # entry of connections.<provider>; read by postgres, redis and consul
+  # resilience: {}       # time limit, retries and breaker
 ```
 
 Every worker of a cluster must use the same provider. Where each provider
@@ -247,7 +248,7 @@ keeps the lock of task `<task>` of cluster `<cluster>`:
 
 | Provider | Lock |
 |---|---|
-| `filesystem` (default) | The file `<shared.dir>/tasks/<cluster>/<task>.lock` |
+| `filesystem` | The file `<storage.shared_dir>/tasks/<cluster>/<task>.lock` |
 | `postgres` | A row of the table `task_locks` (key column `scope`) in the schema of the connection |
 | `redis` | The key `<key_prefix>task-locks:<cluster>/<task>` |
 | `consul` | The key `<key_prefix>/task-locks/<cluster>/<task>`, held by a session named `drakkar/task-lock/<cluster>/<task>/<token>` |
@@ -269,19 +270,18 @@ The worker finds the handler's periodic tasks once at startup: after
 and the sources start. The loops start after `on_ready`, before the sources
 take input.
 
-Startup also fails when the worker runs at least one cluster task and
-cannot elect:
+Startup fails when a declared cluster task runs on a worker with `autodiscover`
+off. The message names the first such task in sorted order:
+`periodic task '<name>' has scope cluster, but autodiscover is off; set autodiscover.enabled and autodiscover.provider, or give the task scope worker`.
 
-- The provider is `filesystem` and there is no shared folder (`shared.dir`
-  and `storage.dir` are both empty):
-  `periodic task '<name>' has scope cluster, but the filesystem election needs a shared folder (shared.dir or storage.dir)`
-  (it names the first such task in sorted order).
-- The provider name is not known:
-  `periodic.election.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
+`on_startup` may change the `autodiscover` keys, so they are checked again after
+it, with the messages of the config load. A provider that is configured but down
+at startup is not a startup failure: its slots are `election_failed` until it
+answers.
 
-A worker that runs no cluster task accepts any provider name. A provider
-that is configured but down at startup is not a startup failure: its slots
-are `election_failed` until it answers.
+With `autodiscover` on and an empty cluster name, the worker logs
+`cluster_name_empty` (warning; field `scope`, the value `default`) once at
+startup: such workers share the lock scope `default`.
 
 ## Definition hash
 
@@ -313,12 +313,6 @@ mismatch. For each peer with another hash the worker logs
 comes back with the same hash, the line is logged again. The gauge
 `drakkar_periodic_cluster_mismatch_peers` counts the online peers with
 another hash. The worker keeps running either way.
-
-Without a [worker registry](fleet.md) (the UI off, or the
-`filesystem` provider with no folder for the cards) there is nothing to
-compare. A worker with at least one cluster task then logs
-`periodic_cluster_check_off` (info; fields `cluster_tasks`, the count of its
-cluster tasks, and `reason`) once at startup.
 
 **The API.** Each row of `GET /api/v1/workers` has two more fields:
 

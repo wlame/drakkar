@@ -49,10 +49,10 @@ RULE_AT_MOST_ONE = 'give at most one of interval and cron'
 RULE_ARCHIVE_INTERVAL = 'interval must be a whole number of seconds and at least 30'
 RULE_ARCHIVE_LEASE = 'lease must be a whole number of seconds from 40 to 86400'
 RULE_SWEEP_AFTER = 'sweep_after must be at least 60 seconds'
-# The startup check of a cluster task with the filesystem election and no shared folder.
-STARTUP_NO_SHARED_FOLDER = (
-    "periodic task '{name}' has scope cluster, but the filesystem election needs a shared folder "
-    '(storage.shared_dir or storage.dir)'
+# The startup check of a declared cluster task on a worker with autodiscover off.
+STARTUP_NO_AUTODISCOVER = (
+    "periodic task '{name}' has scope cluster, but autodiscover is off; "
+    'set autodiscover.enabled and autodiscover.provider, or give the task scope worker'
 )
 
 _TASK_NAME = re.compile(TASK_NAME_PATTERN)

@@ -16,8 +16,8 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
+from drakkar.config import AutodiscoverConfig
 from drakkar.config.connections import ConnectionsConfig, PostgresConnectionConfig
-from drakkar.config.fleet import FleetRegistryConfig
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.fleet.card import WorkerIdentity, serialize_card
 from drakkar.fleet.provider import RegistryContext
@@ -434,7 +434,7 @@ async def test_a_dead_server_opens_the_breaker_and_a_live_one_closes_it(fake):
     service = FleetRegistry(
         _provider(fake),
         provider_name='postgres',
-        config=FleetRegistryConfig(provider='postgres', resilience=resilience),
+        config=AutodiscoverConfig(provider='postgres', resilience=resilience),
         identity=IDENTITY,
         now_monotonic=lambda: now[0],
         now_epoch=lambda: 1_760_000_000.0,

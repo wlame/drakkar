@@ -2274,7 +2274,7 @@ async def test_start_consumer_schedules_declared_periodic_tasks(test_config):
         await asyncio.gather(*app._periodic_tasks, return_exceptions=True)
 
 
-async def test_start_consumer_starts_worker_cron_tasks_and_cluster_task_slot_loops(test_config):
+async def test_start_consumer_starts_worker_cron_tasks_and_cluster_task_slot_loops(test_config, tmp_path):
     """A worker-scope cron task is scheduled like an interval task; a
     cluster-scope task gets its slot loop."""
     from drakkar.periodic import periodic
@@ -2288,7 +2288,11 @@ async def test_start_consumer_starts_worker_cron_tasks_and_cluster_task_slot_loo
         async def shared_refresh(self) -> None:
             pass
 
-    app = DrakkarApp(handler=MixedHandler(), config=test_config)
+    cfg = test_config.model_copy(deep=True)
+    cfg.autodiscover.enabled = True
+    cfg.autodiscover.provider = 'filesystem'
+    cfg.storage.shared_dir = str(tmp_path)
+    app = DrakkarApp(handler=MixedHandler(), config=cfg)
     _setup_app_sinks(app)
 
     app._lifecycle._build_periodic_roster()
@@ -2329,6 +2333,7 @@ async def test_start_cache_enables_peer_sync_without_capturing_config(test_confi
     cfg.storage.dir = str(tmp_path)
     cfg.recorder.capture.config = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+    app._fleet = MagicMock()
 
     await app._lifecycle._start_cache()
 
@@ -2339,11 +2344,11 @@ async def test_start_cache_enables_peer_sync_without_capturing_config(test_confi
 
 
 async def test_start_cache_wires_the_exchange_settings(test_config, tmp_path):
-    """fleet.cache_exchange reaches the engine: switching it off disables peer sync."""
+    """cache.exchange reaches the engine: switching it off disables peer sync."""
     cfg = test_config.model_copy(deep=True)
     cfg.cache.enabled = True
     cfg.storage.dir = str(tmp_path)
-    cfg.fleet.cache_exchange.enabled = False
+    cfg.cache.exchange.enabled = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     await app._lifecycle._start_cache()
