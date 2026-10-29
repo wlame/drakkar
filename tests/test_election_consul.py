@@ -27,7 +27,7 @@ from drakkar.fleet.provider import RegistryContext
 from drakkar.fleet.providers_consul import ConsulRegistry
 from drakkar.providers.connections import Connections
 from drakkar.providers.consul import (
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     NO_LEADER_MESSAGE,
     PATHS,
     REFRESH_BEFORE_ACQUIRE_MESSAGE,
@@ -55,8 +55,8 @@ FIRST, SECOND = INPUTS['sessions']['first'], INPUTS['sessions']['second']
 LEASE_SECONDS = 600.0
 SESSION_TTL_SECONDS = 300
 SCOPE = 'search-fleet/history.archive'
-LOCK_KEY = f'{DEFAULT_KEY_PREFIX}/task-locks/{SCOPE}'
-LOCK_PATH = path('election_lock', prefix=DEFAULT_KEY_PREFIX, scope=SCOPE)
+LOCK_KEY = f'{DEFAULT_STATE_PREFIX}/task-locks/{SCOPE}'
+LOCK_PATH = path('election_lock', prefix=DEFAULT_STATE_PREFIX, scope=SCOPE)
 FOREIGN_SESSION = '00000000-0000-4000-8000-0000000000f0'
 CANONICAL_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
 
@@ -177,7 +177,7 @@ async def test_requests_match_the_fixture_example(fake, monkeypatch):
     provider = ConsulElection(
         connection='main',
         client=fake_client(fake, datacenter=INPUTS['datacenter']),
-        key_prefix=INPUTS['prefix'],
+        state_prefix=INPUTS['prefix'],
     )
     card = INPUTS['card']
     scope, token = INPUTS['scope'], INPUTS['token']
@@ -215,7 +215,7 @@ async def test_the_session_name_and_ttl_follow_the_scope_the_token_and_the_lease
 
 
 async def test_a_preset_prefix_goes_into_the_lock_path(fake):
-    provider = _provider(fake, key_prefix='ops/fleet')
+    provider = _provider(fake, state_prefix='ops/fleet')
     await provider.start(_context())
 
     await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
@@ -528,13 +528,13 @@ async def test_release_by_a_token_that_was_taken_over_leaves_the_new_holder_alon
     'prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n', '.', '..', 'a/../b', 'a/./b']
 )
 def test_a_preset_prefix_outside_the_allowed_shape_is_refused(prefix, fake):
-    with pytest.raises(ValueError, match='key_prefix'):
-        _provider(fake, key_prefix=prefix)
+    with pytest.raises(ValueError, match='state_prefix'):
+        _provider(fake, state_prefix=prefix)
 
 
 @pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'v1.2'])
 def test_a_preset_prefix_inside_the_allowed_shape_is_accepted(prefix, fake):
-    assert _provider(fake, key_prefix=prefix) is not None
+    assert _provider(fake, state_prefix=prefix) is not None
 
 
 # --- Start ---
@@ -572,7 +572,7 @@ async def test_start_through_the_connections_takes_the_prefix_of_the_entry(fake)
     opener = AsyncMock(return_value=fake_client(fake))
     provider = ConsulElection(connection='main', open_client=opener)
 
-    await provider.start(_context(_connections(key_prefix='ops/fleet')))
+    await provider.start(_context(_connections(state_prefix='ops/fleet')))
     await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
 
     opener.assert_awaited_once()
@@ -692,7 +692,7 @@ async def test_consul_election_factory_builds_a_provider_from_the_options(fake, 
         return await fake.transport().handle_async_request(request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', answer_from_the_fake)
-    connections = Connections(ConnectionsConfig(consul={'locks': ConsulConnectionConfig(key_prefix='ops')}))
+    connections = Connections(ConnectionsConfig(consul={'locks': ConsulConnectionConfig(state_prefix='ops')}))
     provider = consul_election_factory({'connection': 'locks'})
 
     await provider.start(_context(connections))

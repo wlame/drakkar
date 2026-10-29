@@ -1,9 +1,11 @@
 """The ``connections`` section: defaults, env-created entries, shape rules, secret flags."""
 
 import os
+import re
 import traceback
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -14,6 +16,7 @@ from drakkar.config import (
     ConnectionsConfig,
     ConsulConnectionConfig,
     DrakkarConfig,
+    KafkaConnectionConfig,
     PostgresConnectionConfig,
     RedisConnectionConfig,
     deep_merge,
@@ -21,18 +24,25 @@ from drakkar.config import (
 )
 from drakkar.configmeta import walk_model_fields
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.providers.connections import Connections
+from drakkar.providers.consul import resolve_client as resolve_consul_client
+from drakkar.providers.redis import resolve_client as resolve_redis_client
 
-BASE_YAML = {'sources': {'kafka': {'enabled': True}}, 'ui': {'release': {'enabled': False}}}
+BASE_YAML = {
+    'connections': {'kafka': {'main': {}}},
+    'sources': {'kafka': {'enabled': True}},
+    'ui': {'release': {'enabled': False}},
+}
 
 CONSUL_PREFIX_MESSAGE = (
-    "connections.consul.{name}.key_prefix '{value}' must be segments of letters, digits, '_', '.' and '-' "
+    "connections.consul.{name}.state_prefix '{value}' must be segments of letters, digits, '_', '.' and '-' "
     "joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
 )
 CONSUL_DATACENTER_MESSAGE = (
     "connections.consul.{name}.datacenter '{value}' may only contain letters, digits, '_', '.' and '-'"
 )
 REDIS_PREFIX_MESSAGE = (
-    "connections.redis.{name}.key_prefix '{value}' may only contain letters, digits, '_', ':', '.' and '-'"
+    "connections.redis.{name}.state_prefix '{value}' may only contain letters, digits, '_', ':', '.' and '-'"
 )
 SCHEMA_MESSAGE = "connections.postgres.{name}.schema '{value}' must be a lower-case identifier ([a-z_][a-z0-9_]*)"
 
@@ -92,33 +102,30 @@ def test_the_schema_key_loads_from_yaml_and_from_the_environment(load):
 
 def test_an_environment_value_overrides_one_field_of_a_yaml_connection(load):
     cfg = load(
-        {'connections': {'redis': {'main': {'url': 'redis://yaml-host/1', 'key_prefix': 'app:'}}}},
+        {'connections': {'redis': {'main': {'url': 'redis://yaml-host/1', 'state_prefix': 'app:'}}}},
         env={'DK_CONNECTIONS__REDIS__MAIN__URL': 'redis://env-host/2'},
     )
 
     main = cfg.connections.redis['main']
-    assert (main.url, main.key_prefix) == ('redis://env-host/2', 'app:')
+    assert (main.url, main.state_prefix) == ('redis://env-host/2', 'app:')
 
 
 def test_no_connections_are_defined_by_default(load):
-    cfg = load()
-
-    assert cfg.connections == ConnectionsConfig()
-    assert (cfg.connections.consul, cfg.connections.redis, cfg.connections.postgres) == ({}, {}, {})
+    assert ConnectionsConfig() == ConnectionsConfig(kafka={}, postgres={}, redis={}, mongo={}, consul={})
 
 
 def test_consul_and_redis_entries_take_their_defaults(load):
     cfg = load({'connections': {'consul': {'main': {}}, 'redis': {'main': {}}}})
 
     consul = cfg.connections.consul['main']
-    assert (consul.address, consul.token, consul.datacenter, consul.key_prefix) == (
+    assert (consul.address, consul.token, consul.datacenter, consul.state_prefix) == (
         'http://127.0.0.1:8500',
         '',
         '',
         'drakkar',
     )
     redis = cfg.connections.redis['main']
-    assert (redis.url, redis.key_prefix) == ('redis://localhost:6379/0', 'drakkar:')
+    assert (redis.url, redis.state_prefix) == ('redis://localhost:6379/0', 'drakkar:')
 
 
 def test_a_postgres_connection_without_a_dsn_fails_the_load(load):
@@ -129,23 +136,23 @@ def test_a_postgres_connection_without_a_dsn_fails_the_load(load):
 @pytest.mark.parametrize(
     'kind, field, value, message',
     [
-        ('consul', 'key_prefix', '/drakkar', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'drakkar/', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'a//b', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', '', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'bad prefix', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', '.', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', '..', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'drakkar/../other', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'a/./b', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', './a', CONSUL_PREFIX_MESSAGE),
-        ('consul', 'key_prefix', 'a/..', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', '/drakkar', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'drakkar/', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'a//b', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', '', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'bad prefix', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', '.', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', '..', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'drakkar/../other', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'a/./b', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', './a', CONSUL_PREFIX_MESSAGE),
+        ('consul', 'state_prefix', 'a/..', CONSUL_PREFIX_MESSAGE),
         ('consul', 'datacenter', 'dc 1', CONSUL_DATACENTER_MESSAGE),
         ('consul', 'datacenter', 'dc/1', CONSUL_DATACENTER_MESSAGE),
         ('consul', 'datacenter', 'dc1\n', CONSUL_DATACENTER_MESSAGE),
         ('consul', 'datacenter', 'd\u00e7', CONSUL_DATACENTER_MESSAGE),
-        ('redis', 'key_prefix', 'bad prefix', REDIS_PREFIX_MESSAGE),
-        ('redis', 'key_prefix', 'a/b', REDIS_PREFIX_MESSAGE),
+        ('redis', 'state_prefix', 'bad prefix', REDIS_PREFIX_MESSAGE),
+        ('redis', 'state_prefix', 'a/b', REDIS_PREFIX_MESSAGE),
         ('postgres', 'schema', 'Drakkar', SCHEMA_MESSAGE),
         ('postgres', 'schema', '1abc', SCHEMA_MESSAGE),
         ('postgres', 'schema', 'a-b', SCHEMA_MESSAGE),
@@ -164,16 +171,16 @@ def test_an_invalid_field_fails_the_load_with_the_contract_message(load, kind, f
 @pytest.mark.parametrize(
     'kind, field, value',
     [
-        ('consul', 'key_prefix', 'drakkar'),
-        ('consul', 'key_prefix', 'team-a/drakkar_1.v2'),
-        ('consul', 'key_prefix', '..x'),
-        ('consul', 'key_prefix', 'a/...'),
-        ('consul', 'key_prefix', 'v1.2/x..'),
+        ('consul', 'state_prefix', 'drakkar'),
+        ('consul', 'state_prefix', 'team-a/drakkar_1.v2'),
+        ('consul', 'state_prefix', '..x'),
+        ('consul', 'state_prefix', 'a/...'),
+        ('consul', 'state_prefix', 'v1.2/x..'),
         ('consul', 'datacenter', ''),
         ('consul', 'datacenter', 'dc1'),
         ('consul', 'datacenter', 'eu-west_1.prod'),
-        ('redis', 'key_prefix', ''),
-        ('redis', 'key_prefix', 'team-a:drakkar.v2_'),
+        ('redis', 'state_prefix', ''),
+        ('redis', 'state_prefix', 'team-a:drakkar.v2_'),
         ('postgres', 'schema', '_private'),
         ('postgres', 'schema', 'drakkar_2'),
     ],
@@ -194,20 +201,20 @@ def test_a_value_with_a_trailing_newline_is_not_a_valid_schema(load):
 
 def test_the_message_names_the_connection_that_is_wrong(load):
     with pytest.raises(ValidationError) as excinfo:
-        load({'connections': {'redis': {'main': {}, 'cache-2': {'key_prefix': 'x y'}}}})
+        load({'connections': {'redis': {'main': {}, 'cache-2': {'state_prefix': 'x y'}}}})
 
     assert REDIS_PREFIX_MESSAGE.format(name='cache-2', value='x y') in str(excinfo.value)
 
 
 def test_with_several_wrong_connections_the_first_by_name_is_reported(load):
     with pytest.raises(ValidationError) as excinfo:
-        load({'connections': {'redis': {'b': {'key_prefix': 'x y'}, 'a': {'key_prefix': 'x y'}}}})
+        load({'connections': {'redis': {'b': {'state_prefix': 'x y'}, 'a': {'state_prefix': 'x y'}}}})
 
     assert REDIS_PREFIX_MESSAGE.format(name='a', value='x y') in str(excinfo.value)
 
 
 def test_an_entry_with_a_wrong_prefix_and_a_wrong_datacenter_reports_the_prefix(load):
-    entry = {'key_prefix': '/drakkar', 'datacenter': 'dc 1'}
+    entry = {'state_prefix': '/drakkar', 'datacenter': 'dc 1'}
 
     with pytest.raises(ValidationError) as excinfo:
         load({'connections': {'consul': {'main': entry}}})
@@ -218,14 +225,14 @@ def test_an_entry_with_a_wrong_prefix_and_a_wrong_datacenter_reports_the_prefix(
 
 
 def test_the_datacenter_of_an_earlier_entry_is_reported_before_the_prefix_of_a_later_one(load):
-    connections = {'consul': {'a': {'datacenter': 'dc 1'}, 'b': {'key_prefix': '/drakkar'}}}
+    connections = {'consul': {'a': {'datacenter': 'dc 1'}, 'b': {'state_prefix': '/drakkar'}}}
 
     with pytest.raises(ValidationError) as excinfo:
         load({'connections': connections})
 
     text = str(excinfo.value)
     assert CONSUL_DATACENTER_MESSAGE.format(name='a', value='dc 1') in text
-    assert 'key_prefix' not in text
+    assert 'state_prefix' not in text
 
 
 def test_a_datacenter_error_does_not_echo_the_token(load):
@@ -329,3 +336,115 @@ def test_the_startup_path_prints_no_dsn_for_an_invalid_connection(tmp_path, clea
     printed = ''.join(traceback.format_exception(excinfo.value))
     assert SCHEMA_MESSAGE.format(name='main', value='Bad') in printed
     assert 'hunter2' not in printed
+
+
+@pytest.mark.parametrize(
+    'sections, message',
+    [
+        (
+            {'sources': {'kafka': {'enabled': True, 'connection': 'other'}}},
+            "sources.kafka.connection 'other' is not defined under connections.kafka",
+        ),
+        (
+            {'sinks': {'kafka': {'results': {'connection': 'other', 'topic': 'out'}}}},
+            "sinks.kafka.results.connection 'other' is not defined under connections.kafka",
+        ),
+        (
+            {'sinks': {'postgres': {'main-db': {'connection': 'other'}}}},
+            "sinks.postgres.main-db.connection 'other' is not defined under connections.postgres",
+        ),
+        (
+            {'sinks': {'mongo': {'docs': {'database': 'drakkar'}}}},
+            "sinks.mongo.docs.connection 'main' is not defined under connections.mongo",
+        ),
+        (
+            {'sinks': {'redis': {'cache': {}}}},
+            "sinks.redis.cache.connection 'main' is not defined under connections.redis",
+        ),
+        (
+            {'dlq': {'connection': 'other'}},
+            "dlq.connection 'other' is not defined under connections.kafka",
+        ),
+    ],
+    ids=['kafka-source', 'kafka-sink', 'postgres-sink', 'mongo-sink', 'redis-sink', 'dlq'],
+)
+def test_undeclared_connection_fails_with_the_message(sections, message, load):
+    with pytest.raises(ValidationError) as excinfo:
+        load(sections)
+
+    assert message in str(excinfo.value)
+
+
+def test_kafka_connection_is_required_with_the_kafka_source_on(clean_environment, tmp_path):
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(yaml.safe_dump({'sources': {'kafka': {'enabled': True}}}), encoding='utf-8')
+
+    with pytest.raises(
+        ValidationError, match=re.escape("sources.kafka.connection 'main' is not defined under connections.kafka")
+    ):
+        load_config(path)
+
+
+def test_a_consumer_not_in_use_needs_no_connection(load):
+    config = load(
+        {
+            'connections': {'kafka': {}},
+            'sources': {'kafka': {'enabled': False, 'connection': 'other'}, 'http': {'enabled': True}},
+            'dlq': {'enabled': False, 'connection': 'other', 'topic': 'named-dlq'},
+        }
+    )
+
+    assert config.kafka_source_connection is None
+    assert config.dlq_connection is None
+
+
+def test_dlq_with_a_topic_names_a_connection_on_an_http_only_worker(clean_environment, tmp_path):
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(
+        yaml.safe_dump({'sources': {'http': {'enabled': True}}, 'dlq': {'topic': 'named-dlq'}}),
+        encoding='utf-8',
+    )
+
+    with pytest.raises(
+        ValidationError, match=re.escape("dlq.connection 'main' is not defined under connections.kafka")
+    ):
+        load_config(path)
+
+
+def test_dlq_provider_other_than_kafka_fails(load):
+    with pytest.raises(ValidationError) as excinfo:
+        load({'dlq': {'provider': 'sqs'}})
+
+    assert "dlq.provider must be kafka, got 'sqs'" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    'kind, resolve_client, prefix',
+    [('redis', resolve_redis_client, 'ops:'), ('consul', resolve_consul_client, 'ops/fleet')],
+    ids=['redis', 'consul'],
+)
+async def test_state_prefix_is_used_by_providers(kind, resolve_client, prefix, load):
+    config = load({'connections': {kind: {'main': {'state_prefix': prefix}}}})
+
+    _, used_prefix = await resolve_client(
+        connections=Connections(config.connections),
+        connection='main',
+        preset_client=None,
+        preset_prefix='ignored',
+        open_client=AsyncMock(return_value=object()),
+        close_client=AsyncMock(),
+        who='registry',
+    )
+
+    assert used_prefix == prefix
+
+
+def test_client_config_of_a_connection_refuses_the_reserved_keys():
+    with pytest.raises(ValidationError, match='client_config may not set'):
+        KafkaConnectionConfig(client_config={'bootstrap.servers': 'other:9092'})
+
+
+def test_a_connection_client_config_gives_way_to_the_consumer_on_a_shared_key():
+    connection = KafkaConnectionConfig(client_config={'acks': '1', 'linger.ms': '5'})
+
+    assert connection.client_config_with({'acks': 'all'}) == {'acks': 'all', 'linger.ms': '5'}

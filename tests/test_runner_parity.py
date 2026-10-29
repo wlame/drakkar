@@ -30,7 +30,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.uiserver.runner import DebugRunner
 from drakkar.uiserver.runner_models import ProbeInput
-from tests.conftest import wait_for
+from tests.conftest import kafka_connections, wait_for
 
 BOGUS_BINARY = '/nonexistent/binary/should-never-run'
 
@@ -112,7 +112,8 @@ async def run_in_probe(handler, *, max_retries: int):
         handler=handler,
         executor_pool=make_pool(),
         app_config=DrakkarConfig(
-            sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
+            connections=kafka_connections(),
+            sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
             executor=ExecutorConfig(
                 binary_path=BOGUS_BINARY,
                 task_timeout_seconds=5,

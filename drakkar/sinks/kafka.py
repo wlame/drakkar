@@ -7,13 +7,12 @@ and produces it with the payload's key to the configured topic.
 
 import asyncio
 import time
-from collections.abc import Mapping
 
 import structlog
 from confluent_kafka.aio import AIOProducer
 
-from drakkar.config import KafkaSinkConfig
-from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config, resolve_client
+from drakkar.config import KafkaConnectionConfig, KafkaSinkConfig
+from drakkar.kafka_security import merge_client_config
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import KafkaPayload
 from drakkar.sinks.base import BaseSink
@@ -34,8 +33,9 @@ class KafkaSink(BaseSink[KafkaPayload]):
         - value = payload.data.model_dump_json().encode()
         - key = payload.key (passthrough bytes)
 
-    If the sink config has empty brokers, falls back to the
-    shared kafka.brokers from the main Kafka config.
+    The brokers and the security come from the connection the sink names, and
+    each sink owns its producer: two sinks may share one connection, each with
+    its own topic.
     """
 
     sink_type = 'kafka'
@@ -55,25 +55,13 @@ class KafkaSink(BaseSink[KafkaPayload]):
         self,
         name: str,
         config: KafkaSinkConfig,
-        brokers_fallback: str = '',
-        security_fallback: KafkaSecurityConfig | None = None,
-        client_config_fallback: Mapping[str, str] | None = None,
+        connection: KafkaConnectionConfig,
     ) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
-        # An empty ``brokers`` means "the consumer's cluster", so the
-        # consumer's credentials come with it — see ``resolve_client``.
-        resolved = resolve_client(
-            config.brokers,
-            config.security,
-            config.client_config,
-            fallback_brokers=brokers_fallback,
-            fallback_security=security_fallback or KafkaSecurityConfig(),
-            fallback_client_config=client_config_fallback or {},
-        )
-        self._brokers = resolved.brokers
-        self._security = resolved.security
-        self._client_config = resolved.client_config
+        self._brokers = connection.brokers
+        self._security = connection.security
+        self._client_config = connection.client_config_with(config.client_config)
         self._producer: AIOProducer | None = None
 
     @property
@@ -142,8 +130,8 @@ class KafkaSink(BaseSink[KafkaPayload]):
             # handful of stuck deliveries starve every other delivery on the
             # same producer. The outer delivery timeout cannot rescue this:
             # cancelling the await does not stop the thread.
-            deadline = time.monotonic() + self._config.flush_timeout_seconds
-            remaining = await self._producer.flush(self._config.flush_timeout_seconds)
+            deadline = time.monotonic() + self._config.flush_timeout
+            remaining = await self._producer.flush(self._config.flush_timeout)
 
             # ``remaining`` is NOT the verdict for this batch. librdkafka's
             # flush is producer-wide and this producer is shared by every
@@ -161,7 +149,7 @@ class KafkaSink(BaseSink[KafkaPayload]):
                 # as transient, so the breaker sees the outage and an
                 # idempotent sink gets its fast-retry.
                 raise TimeoutError(
-                    f'Kafka delivery not acknowledged within {self._config.flush_timeout_seconds}s: '
+                    f'Kafka delivery not acknowledged within {self._config.flush_timeout}s: '
                     f'{len(pending)} of {len(futures)} message(s) in this batch are still unconfirmed '
                     f'(producer-wide queue: {remaining}, topic={self._config.topic!r}, sink={self._name!r})'
                 )

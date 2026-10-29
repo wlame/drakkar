@@ -7,14 +7,14 @@ import pytest
 from confluent_kafka import OFFSET_INVALID, KafkaError, TopicPartition
 from structlog.testing import capture_logs
 
-from drakkar.config import KafkaConfig, KafkaSourceConfig
+from drakkar.config import KafkaConnectionConfig, KafkaSourceConfig
 from drakkar.consumer import CONSUMER_MAX_WORKERS, LAG_QUERY_TIMEOUT_SECONDS, KafkaConsumer
 from drakkar.metrics import consumer_errors
 
 
 @pytest.fixture
-def kafka_config() -> KafkaConfig:
-    return KafkaConfig(brokers='localhost:9092')
+def kafka_config() -> KafkaConnectionConfig:
+    return KafkaConnectionConfig(brokers='localhost:9092')
 
 
 @pytest.fixture
@@ -441,7 +441,7 @@ async def test_get_partition_lag_without_committed_offset_counts_from_reset_posi
     mock_cls, kafka_source_config, reset_policy, expected_lag
 ):
     """With no committed offset, lag counts from where auto.offset.reset starts reading."""
-    connection = KafkaConfig(brokers='localhost:9092', client_config={'auto.offset.reset': reset_policy})
+    connection = KafkaConnectionConfig(brokers='localhost:9092', client_config={'auto.offset.reset': reset_policy})
     consumer = make_lag_consumer(
         mock_cls, connection, kafka_source_config, [TopicPartition(kafka_source_config.topic, 0, OFFSET_INVALID)]
     )
@@ -564,7 +564,7 @@ async def test_on_revoke_without_callback(mock_cls, kafka_config, kafka_source_c
 @patch('drakkar.consumer.AIOConsumer')
 def test_consumer_reads_group_and_topic_from_source_config(mock_cls):
     consumer = KafkaConsumer(
-        connection=KafkaConfig(brokers='b:9092'),
+        connection=KafkaConnectionConfig(brokers='b:9092'),
         source=KafkaSourceConfig(enabled=True, topic='t', consumer_group='g', max_poll_records=7),
     )
     assert consumer.source_topic == 't'

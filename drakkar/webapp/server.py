@@ -51,7 +51,7 @@ Timeout + cancellation
 ----------------------
 
 Each dispatch is wrapped in ``asyncio.wait_for(...,
-timeout=request_timeout_seconds)``. On ``TimeoutError``:
+timeout=request_timeout)``. On ``TimeoutError``:
 
 1. signal cancellation to T1 via
    ``main_loop.call_soon_threadsafe(ctx.cancelled.set)`` so the runner
@@ -135,7 +135,7 @@ _SEMAPHORE_ACQUIRE_PROBE_SECONDS = 0.001
 #
 # Constants rather than config: there is nothing here for an operator to
 # trade off, and the one dimension that IS deployment-specific — how large
-# a body to accept — is already ``sources.http.max_body_bytes``.
+# a body to accept — is already ``sources.http.max_body``.
 
 # Reaps keep-alive connections idle between requests, so abandoned clients
 # cannot pin connections (and file descriptors) forever.
@@ -146,11 +146,11 @@ KEEP_ALIVE_TIMEOUT_SECONDS = 120
 # request-id header.
 MAX_HEADER_BYTES = 64 * 1024
 
-# Added on top of the configurable ``request_timeout_seconds`` to bound the
+# Added on top of the configurable ``request_timeout`` to bound the
 # BODY READ. Uvicorn has no timeout spanning the body read, so it is
 # wrapped explicitly. Without it the body cap
 # alone is not a slow-loris defence: a client can stay under
-# ``max_body_bytes`` forever by sending one byte a minute.
+# ``max_body`` forever by sending one byte a minute.
 BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
 
 
@@ -288,7 +288,7 @@ class WebApp:
             port=self._config.port,
             path=self._config.path,
             clients_count=len(self._config.clients),
-            sinks_enabled=self._config.sinks_enabled,
+            sinks_enabled=self._config.deliver_to_sinks,
         )
         if unauth:
             # Emit a distinct warning when every
@@ -659,8 +659,8 @@ class WebApp:
             # worker memory with one huge POST, answering 413. Counting
             # streamed bytes (not trusting Content-Length) means a lying
             # or absent header cannot bypass the cap; exactly
-            # ``max_body_bytes`` is still accepted.
-            max_body = self._config.max_body_bytes
+            # ``max_body`` is still accepted.
+            max_body = self._config.max_body
             chunks: list[bytes] = []
             received = 0
             too_large = False
@@ -668,7 +668,7 @@ class WebApp:
             # stay under it indefinitely by sending one byte at a time — so
             # the read is also bounded in TIME (uvicorn has no such
             # timeout of its own).
-            read_budget = self._config.request_timeout_seconds + BODY_READ_TIMEOUT_MARGIN_SECONDS
+            read_budget = self._config.request_timeout + BODY_READ_TIMEOUT_MARGIN_SECONDS
             try:
                 async with asyncio.timeout(read_budget):
                     async for chunk in request.stream():
@@ -705,7 +705,7 @@ class WebApp:
                     content={
                         'error': 'request_too_large',
                         'request_id': gate_request_id,
-                        'details': f'request body exceeds sources.http.max_body_bytes ({max_body} bytes)',
+                        'details': f'request body exceeds sources.http.max_body ({max_body} bytes)',
                     },
                 )
 
@@ -834,7 +834,7 @@ class WebApp:
                             self._runner.run(ctx),
                             target_loop=self._app.main_loop,
                         ),
-                        timeout=self._config.request_timeout_seconds,
+                        timeout=self._config.request_timeout,
                     )
                 except TimeoutError:
                     # Schedule the cancellation flag flip on T1's loop.
@@ -850,7 +850,7 @@ class WebApp:
                         category='webapp',
                         request_id=ctx.request_id,
                         client=ctx.client_name,
-                        timeout_seconds=self._config.request_timeout_seconds,
+                        timeout_seconds=self._config.request_timeout,
                         duration_ms=duration_ms,
                     )
                     # Recorder: timeout event lives on T2 because that's
@@ -863,7 +863,7 @@ class WebApp:
                         status_code=504,
                         content={
                             'status': 'timeout',
-                            'error': (f'request exceeded {self._config.request_timeout_seconds} seconds'),
+                            'error': (f'request exceeded {self._config.request_timeout} seconds'),
                             'request_id': ctx.request_id,
                             'duration_ms': duration_ms,
                             'hint': KAFKA_FALLBACK_HINT,

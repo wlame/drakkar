@@ -14,9 +14,8 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.config.cache import CacheConfig
-from drakkar.config.connections import ConnectionsConfig
+from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
 from drakkar.config.fleet import CONNECTION_PROVIDERS, FleetConfig
-from drakkar.config.kafka import KafkaConfig
 from drakkar.config.periodic import PeriodicConfig
 from drakkar.config.runtime import (
     ExecutorConfig,
@@ -50,12 +49,15 @@ PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE = (
 # literal name.
 _NO_ENV_VARIABLE_PREFIX = '\0'
 
+# The sink types whose instances name a connection; each is a field of ``ConnectionsConfig`` too.
+SINK_CONNECTION_KINDS = ('kafka', 'mongo', 'postgres', 'redis')
+
 
 class DrakkarConfig(BaseSettings):
     """Root configuration for a Drakkar worker.
 
-    Combines Kafka source settings, executor pool settings,
-    sink definitions, and operational configs (metrics, logging, debug).
+    Combines the named service connections, the input sources, executor pool
+    settings, sink definitions, and operational configs (metrics, logging, debug).
     """
 
     # A config error must not echo the input it rejected: pydantic prints a
@@ -116,7 +118,6 @@ class DrakkarConfig(BaseSettings):
         default='',
         description='Environment variable that holds the cluster name (overrides cluster_name if set)',
     )
-    kafka: KafkaConfig = Field(default_factory=KafkaConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     sinks: SinksConfig = Field(default_factory=SinksConfig)
     dlq: DLQConfig = Field(default_factory=DLQConfig)
@@ -198,7 +199,7 @@ class DrakkarConfig(BaseSettings):
     def _validate_registry_connection(self) -> 'DrakkarConfig':
         """A registry provider that uses a connection needs that connection declared."""
         registry = self.fleet.registry
-        _require_declared_connection(
+        _require_provider_connection(
             'fleet.registry.connection', registry.provider, registry.connection, self.connections
         )
         return self
@@ -207,9 +208,35 @@ class DrakkarConfig(BaseSettings):
     def _validate_election_connection(self) -> 'DrakkarConfig':
         """An election provider that uses a connection needs that connection declared."""
         election = self.periodic.election
-        _require_declared_connection(
+        _require_provider_connection(
             'periodic.election.connection', election.provider, election.connection, self.connections
         )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_kafka_source_connection(self) -> 'DrakkarConfig':
+        """An enabled Kafka source needs its connection declared."""
+        source = self.sources.kafka
+        if source.enabled:
+            _require_declared_connection('sources.kafka.connection', 'kafka', source.connection, self.connections)
+        return self
+
+    @model_validator(mode='after')
+    def _validate_sink_connections(self) -> 'DrakkarConfig':
+        """Every configured sink of a connection kind needs its connection declared; the first by sorted name fails."""
+        for kind in SINK_CONNECTION_KINDS:
+            section: dict[str, Any] = getattr(self.sinks, kind)
+            for name in sorted(section):
+                _require_declared_connection(
+                    f'sinks.{kind}.{name}.connection', kind, section[name].connection, self.connections
+                )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_dlq_connection(self) -> 'DrakkarConfig':
+        """A DLQ that has a destination needs its connection declared."""
+        if self.dlq_enabled:
+            _require_declared_connection('dlq.connection', self.dlq.provider, self.dlq.connection, self.connections)
         return self
 
     @model_validator(mode='after')
@@ -264,8 +291,28 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def dlq_enabled(self) -> bool:
-        """Whether a DLQ producer is built: always with the Kafka source, otherwise only with an explicit ``dlq.topic``."""
-        return self.sources.kafka.enabled or bool(self.dlq.topic)
+        """Whether a DLQ producer is built: with ``dlq.enabled``, when the Kafka source or ``dlq.topic`` gives it a topic."""
+        return bool(self.resolved_dlq_topic)
+
+    @property
+    def dlq_unconfigured(self) -> bool:
+        """The DLQ is on but has no destination: no ``dlq.topic`` and no Kafka source.
+
+        A record then has nowhere to go and is a counted drop. A DLQ switched off
+        with ``dlq.enabled`` is not this case: it follows ``dlq.on_send_failure``.
+        """
+        return self.dlq.enabled and not self.resolved_dlq_topic
+
+    @property
+    def kafka_source_connection(self) -> KafkaConnectionConfig | None:
+        """The connection of the Kafka source; ``None`` when the source is off."""
+        source = self.sources.kafka
+        return self.connections.kafka[source.connection] if source.enabled else None
+
+    @property
+    def dlq_connection(self) -> KafkaConnectionConfig | None:
+        """The connection of the DLQ; ``None`` when no DLQ producer is built."""
+        return self.connections.kafka[self.dlq.connection] if self.dlq_enabled else None
 
     @property
     def resolved_consumer_group(self) -> str:
@@ -281,6 +328,8 @@ class DrakkarConfig(BaseSettings):
     @property
     def resolved_dlq_topic(self) -> str:
         """The DLQ topic the worker will use; ``''`` when the DLQ is off."""
+        if not self.dlq.enabled:
+            return ''
         if self.dlq.topic:
             return self.dlq.topic
         if self.sources.kafka.enabled:
@@ -388,19 +437,25 @@ class DrakkarConfig(BaseSettings):
         )
 
 
-def _require_declared_connection(path: str, provider: str, name: str, connections: ConnectionsConfig) -> None:
+def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> None:
+    """Fail when ``connections`` does not declare ``name`` under the kind ``kind``.
+
+    ``path`` is the config path of the ``connection`` key, for the message. ``kind``
+    is a field name of ``ConnectionsConfig``.
+    """
+    declared: dict[str, Any] = getattr(connections, kind)
+    if name not in declared:
+        raise ValueError(f"{path} '{name}' is not defined under connections.{kind}")
+
+
+def _require_provider_connection(path: str, provider: str, name: str, connections: ConnectionsConfig) -> None:
     """Fail when ``provider`` uses a named connection and ``connections`` does not declare ``name``.
 
-    ``path`` is the config path of the ``connection`` key, for the message. The check
-    goes by the provider name alone: a name in ``CONNECTION_PROVIDERS`` (``consul``,
-    ``redis``, ``postgres``) is checked; any other name is not.
+    The check goes by the provider name alone: a name in ``CONNECTION_PROVIDERS``
+    (``consul``, ``redis``, ``postgres``) is checked; any other name is not.
     """
-    if provider not in CONNECTION_PROVIDERS:
-        return
-    # The provider names are the field names of ConnectionsConfig.
-    declared: dict[str, Any] = getattr(connections, provider)
-    if name not in declared:
-        raise ValueError(f"{path} '{name}' is not defined under connections.{provider}")
+    if provider in CONNECTION_PROVIDERS:
+        _require_declared_connection(path, provider, name, connections)
 
 
 class _ConfigYamlLoader(yaml.SafeLoader):
@@ -434,7 +489,7 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     3. Falls back to env-only config
 
     Environment variables override YAML values. Use DK_ prefix
-    with __ for nesting (e.g., DK_KAFKA__BROKERS).
+    with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
     """
     if config_path is None:
         config_path = os.environ.get('DK_CONFIG')
@@ -545,7 +600,7 @@ def _numeric_dicts_to_lists(node: Any) -> Any:
     A dict like ``{'0': {...}, '2': {...}}`` represents a sparse list with
     indices 0 and 2. We materialise it as ``[{...}, {}, {...}]`` (filling
     gaps with empty dicts) so Pydantic can validate the surrounding model
-    and so ``_deep_merge`` can later overlay it onto a YAML-supplied list
+    and so ``deep_merge`` can later overlay it onto a YAML-supplied list
     by index.
     """
     if isinstance(node, dict):

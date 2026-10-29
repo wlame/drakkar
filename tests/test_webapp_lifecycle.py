@@ -25,7 +25,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -33,6 +32,7 @@ from drakkar.config import (
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import ExecutorTask
+from tests.conftest import kafka_connections
 
 
 class _Input(BaseModel):
@@ -96,9 +96,9 @@ def _http_block(enabled: bool) -> dict:
 def _build_config(*, http_enabled: bool, kafka_enabled: bool = True) -> DrakkarConfig:
     """Construct a minimal config with the HTTP source toggle pre-set."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections=kafka_connections(brokers='localhost:9092'),
         sources={
-            'kafka': {'enabled': kafka_enabled, 'topic': 'test-in', 'startup_align_enabled': False},
+            'kafka': {'enabled': kafka_enabled, 'topic': 'test-in', 'startup_align': {'enabled': False}},
             'http': _http_block(http_enabled),
         },
         executor=ExecutorConfig(

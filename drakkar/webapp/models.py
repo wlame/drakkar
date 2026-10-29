@@ -161,7 +161,7 @@ class SinkDeliverySummary(BaseModel):
     """Aggregate sink delivery results for one request.
 
     Keyed by sink type (``kafka``, ``postgres``, ``mongo`` …). Emitted
-    only on the ``sinks_enabled=True`` path; the response body carries
+    only on the ``deliver_to_sinks=True`` path; the response body carries
     ``sinks: null`` when sinks are disabled (the default mode).
 
     Modelled as ``dict[str, SinkResult]`` rather than a fixed-field model

@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from drakkar.config import DrakkarConfig, UIDocsConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 SITE_FILES = {
     'index.html': b'<html><body>Docs home</body></html>',
@@ -56,7 +56,7 @@ def make_docs_app(tmp_path, site_dir: str | None = None, auth_token: str = ''):
     app._worker_id = 'docs-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     return create_ui_app(cfg, recorder, app)
 
 
@@ -251,7 +251,7 @@ async def test_docs_unconfigured_keeps_the_hint_404_with_a_bundle_present(tmp_pa
     app._worker_id = 'docs-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     fastapi_app = create_ui_app(cfg, recorder, app, ui_root=ui_root)
     async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as client:
         resp = await client.get('/docs/')
@@ -273,7 +273,7 @@ async def test_spa_still_owns_non_docs_paths(tmp_path, docs_site):
     app._worker_id = 'docs-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     fastapi_app = create_ui_app(cfg, recorder, app, ui_root=ui_root)
     async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as client:
         spa = await client.get('/partitions')

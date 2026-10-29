@@ -14,7 +14,8 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 import drakkar.sinks.manager as manager_module
-from drakkar.config import SinkPolicy, UIConfig
+from drakkar.config import DrakkarConfig, SinkPolicy, UIConfig
+from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
@@ -33,6 +34,7 @@ from drakkar.sinks.manager import (
     DeliveryOutcome,
     MessageContext,
     MessageDLQState,
+    SinkDeliveryFailedError,
     SinkManager,
 )
 
@@ -111,7 +113,9 @@ class CollectingRecorder(EventWriter):
 
 
 def policy(on_failure: str = 'dlq', max_retries: int = 2, depends_on: tuple[str, ...] = ()) -> SinkPolicy:
-    return SinkPolicy(on_failure=on_failure, max_retries=max_retries, depends_on=depends_on)
+    return DEFAULT_SINK_POLICY.model_copy(
+        update={'on_failure': on_failure, 'max_retries': max_retries, 'depends_on': depends_on}
+    )
 
 
 def source_message(offset: int = 10, headers: list[tuple[str, bytes | None]] | None = None) -> SourceMessage:
@@ -764,7 +768,7 @@ async def test_dlq_off_by_config_counts_an_unconfigured_drop():
     sink = FakeSink('out', 'kafka')
     sink.fail = True
     mgr = manager_with((sink, policy(max_retries=0)))
-    mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall', dlq_enabled=False)
+    mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall', dlq_unconfigured=True)
     before = dlq_unconfigured_drops._value.get()
 
     outcomes = await mgr.deliver_all(
@@ -773,6 +777,46 @@ async def test_dlq_off_by_config_counts_an_unconfigured_drop():
 
     assert outcomes == {KAFKA: DeliveryOutcome.FAILED}
     assert dlq_unconfigured_drops._value.get() == before + 1
+
+
+@pytest.mark.parametrize(
+    ('on_send_failure', 'expected_drops'),
+    [('drop', 1), ('stall', 0)],
+)
+async def test_dlq_disabled_follows_on_send_failure(on_send_failure, expected_drops):
+    from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
+
+    config = DrakkarConfig(
+        connections={'kafka': {'main': {}}},
+        sources={'kafka': {'enabled': True}},
+        dlq={'enabled': False, 'on_send_failure': on_send_failure},
+        ui={'release': {'enabled': False}},
+    )
+    assert config.dlq_enabled is False
+    assert config.dlq_unconfigured is False
+    sink = FakeSink('out', 'kafka')
+    sink.fail = True
+    mgr = manager_with((sink, policy(max_retries=0)))
+    mgr.attach_runtime(
+        recorder=None,
+        dlq_sink=None,
+        dlq_on_send_failure=config.dlq.on_send_failure,
+        dlq_unconfigured=config.dlq_unconfigured,
+    )
+    unconfigured_before = dlq_unconfigured_drops._value.get()
+    dropped = dlq_dropped_payloads.labels(partition='0')
+    dropped_before = dropped._value.get()
+    result = CollectResult(kafka=[KafkaPayload(data=Data())])
+
+    if on_send_failure == 'stall':
+        with pytest.raises(SinkDeliveryFailedError):
+            await mgr.deliver_all(result, declared, 0, message_context=message_context())
+    else:
+        outcomes = await mgr.deliver_all(result, declared, 0, message_context=message_context())
+        assert outcomes == {KAFKA: DeliveryOutcome.FAILED}
+
+    assert dlq_unconfigured_drops._value.get() == unconfigured_before
+    assert dropped._value.get() == dropped_before + expected_drops
 
 
 # --- Observability ---

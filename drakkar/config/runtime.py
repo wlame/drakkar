@@ -1,7 +1,7 @@
 """Runtime configuration: executor, metrics, health, IO, offload, logging.
 
 Everything that tunes how a worker runs, as opposed to where its data
-comes from (``kafka``) or goes (``sinks``).
+comes from (``sources``) or goes (``sinks``).
 """
 
 from typing import Literal

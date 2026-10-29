@@ -21,7 +21,7 @@ from drakkar.recorder.memstore import MemoryCoverage
 from drakkar.recorder.queries import ReadBound, ReadClass, pick_source, still_covered
 from drakkar.uiserver import server as server_mod
 from drakkar.uiserver.server import UIDeps, create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 WORKER = 'w-1'
 LARGE_WINDOW_SECONDS = 86_400
@@ -118,7 +118,7 @@ async def started(tmp_path):
 
 def _drakkar_app() -> MagicMock:
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
     app._executor_pool = None
     app._consumer = None

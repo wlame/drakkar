@@ -26,7 +26,7 @@ from httpx import ASGITransport, AsyncClient
 from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,7 +77,7 @@ def _make_mock_app(*, webapp_enabled: bool = False) -> MagicMock:
     app._executor_pool = MagicMock(active_count=0, waiting_count=0, max_executors=8)
     app._consumer = None
 
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     if webapp_enabled:
         # ``WebAppConfig`` requires a non-default ``path`` length > 1 — the
         # default ``/process`` already satisfies this.

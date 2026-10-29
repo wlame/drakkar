@@ -1,6 +1,11 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, and the cross-field validation messages (fleet, history, periodic, election, connections and sinks). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (fleet, history, periodic, election, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
+    "connections": {
+      "kafka": {
+        "main": {}
+      }
+    },
     "sources": {
       "kafka": {
         "enabled": true
@@ -524,6 +529,17 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=postgres fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "dlq_switched_off",
+      "yaml": {
+        "dlq": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -906,12 +922,12 @@
         "connections": {
           "redis": {
             "main": {
-              "key_prefix": "bad prefix"
+              "state_prefix": "bad prefix"
             }
           }
         }
       },
-      "message": "connections.redis.main.key_prefix 'bad prefix' may only contain letters, digits, '_', ':', '.' and '-'"
+      "message": "connections.redis.main.state_prefix 'bad prefix' may only contain letters, digits, '_', ':', '.' and '-'"
     },
     {
       "name": "consul_prefix_invalid",
@@ -919,12 +935,12 @@
         "connections": {
           "consul": {
             "main": {
-              "key_prefix": "/drakkar"
+              "state_prefix": "/drakkar"
             }
           }
         }
       },
-      "message": "connections.consul.main.key_prefix '/drakkar' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
+      "message": "connections.consul.main.state_prefix '/drakkar' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
     },
     {
       "name": "consul_prefix_dot_segment",
@@ -932,12 +948,12 @@
         "connections": {
           "consul": {
             "main": {
-              "key_prefix": "drakkar/../other"
+              "state_prefix": "drakkar/../other"
             }
           }
         }
       },
-      "message": "connections.consul.main.key_prefix 'drakkar/../other' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
+      "message": "connections.consul.main.state_prefix 'drakkar/../other' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'"
     },
     {
       "name": "consul_datacenter_invalid",
@@ -1496,12 +1512,8 @@
       "yaml": {
         "sinks": {
           "postgres": {
-            "main-db": {
-              "dsn": "x"
-            },
-            "main_db": {
-              "dsn": "y"
-            }
+            "main-db": {},
+            "main_db": {}
           }
         }
       },
@@ -1517,6 +1529,231 @@
         "DK_EXECUTOR__MAX_EXECUTER": "8"
       },
       "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executor.max_executer (did you mean 'max_executors'?)"
+    },
+    {
+      "name": "kafka_source_connection_undeclared",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "connection": "other"
+          }
+        }
+      },
+      "message": "sources.kafka.connection 'other' is not defined under connections.kafka"
+    },
+    {
+      "name": "kafka_sink_connection_undeclared",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "connection": "other",
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.connection 'other' is not defined under connections.kafka"
+    },
+    {
+      "name": "postgres_sink_connection_undeclared",
+      "yaml": {
+        "sinks": {
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "message": "sinks.postgres.main-db.connection 'main' is not defined under connections.postgres"
+    },
+    {
+      "name": "mongo_sink_connection_undeclared",
+      "yaml": {
+        "sinks": {
+          "mongo": {
+            "docs": {
+              "database": "drakkar"
+            }
+          }
+        }
+      },
+      "message": "sinks.mongo.docs.connection 'main' is not defined under connections.mongo"
+    },
+    {
+      "name": "redis_sink_connection_undeclared",
+      "yaml": {
+        "sinks": {
+          "redis": {
+            "cache": {}
+          }
+        }
+      },
+      "message": "sinks.redis.cache.connection 'main' is not defined under connections.redis"
+    },
+    {
+      "name": "dlq_connection_undeclared",
+      "yaml": {
+        "dlq": {
+          "connection": "other"
+        }
+      },
+      "message": "dlq.connection 'other' is not defined under connections.kafka"
+    },
+    {
+      "name": "dlq_provider_unknown",
+      "yaml": {
+        "dlq": {
+          "provider": "sqs"
+        }
+      },
+      "message": "dlq.provider must be kafka, got 'sqs'"
+    },
+    {
+      "name": "sink_defaults_on_failure_unknown",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "on_failure": "stall"
+          }
+        }
+      },
+      "message": "sinks.defaults.on_failure must be dlq or skip, got 'stall'"
+    },
+    {
+      "name": "sink_defaults_max_retries_above_ten",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "max_retries": 11
+          }
+        }
+      },
+      "message": "sinks.defaults.max_retries must be a whole number from 0 to 10"
+    },
+    {
+      "name": "sink_defaults_delivery_timeout_zero",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "delivery_timeout": 0
+          }
+        }
+      },
+      "path": "sinks.defaults.delivery_timeout"
+    },
+    {
+      "name": "sink_delivery_timeout_zero",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "delivery_timeout": 0
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.delivery_timeout"
+    },
+    {
+      "name": "sink_breaker_failures_zero",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "breaker_failures": 0
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.breaker_failures"
+    },
+    {
+      "name": "kafka_session_timeout_needs_a_unit",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "session_timeout": 45000
+          }
+        }
+      },
+      "message": "needs a unit, for example 30s; got '45000'"
+    },
+    {
+      "name": "http_sink_request_timeout_whole_seconds",
+      "yaml": {
+        "sinks": {
+          "http": {
+            "api": {
+              "url": "https://api.example.com/results",
+              "request_timeout": "1500ms"
+            }
+          }
+        }
+      },
+      "message": "must be a whole number of seconds, got '1500ms'"
+    },
+    {
+      "name": "startup_align_interval_whole_seconds",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "startup_align": {
+              "interval": "500ms"
+            }
+          }
+        }
+      },
+      "message": "must be a whole number of seconds, got '500ms'"
+    },
+    {
+      "name": "http_source_max_body_is_a_size",
+      "yaml": {
+        "sources": {
+          "http": {
+            "max_body": "10XB"
+          }
+        }
+      },
+      "message": "is not a size, got '10XB'; write for example 64KiB or 256MB"
+    },
+    {
+      "name": "dlq_client_config_reserved_key",
+      "yaml": {
+        "dlq": {
+          "client_config": {
+            "bootstrap.servers": "h:9092"
+          }
+        }
+      },
+      "path": "dlq.client_config"
+    },
+    {
+      "name": "connection_client_config_reserved_key",
+      "yaml": {
+        "connections": {
+          "kafka": {
+            "main": {
+              "client_config": {
+                "group.id": "g"
+              }
+            }
+          }
+        }
+      },
+      "path": "connections.kafka.main.client_config"
+    },
+    {
+      "name": "mongo_connection_needs_a_uri",
+      "yaml": {
+        "connections": {
+          "mongo": {
+            "main": {}
+          }
+        }
+      },
+      "path": "connections.mongo.main.uri"
     }
   ],
   "load_values": [
@@ -1697,7 +1934,7 @@
       "value": "postgres"
     },
     {
-      "name": "sink_on_failure_default_dlq",
+      "name": "sink_on_failure_not_given",
       "yaml": {
         "sinks": {
           "kafka": {
@@ -1708,10 +1945,10 @@
         }
       },
       "path": "sinks.kafka.results.on_failure",
-      "value": "dlq"
+      "value": null
     },
     {
-      "name": "sink_max_retries_default_two",
+      "name": "sink_max_retries_not_given",
       "yaml": {
         "sinks": {
           "kafka": {
@@ -1722,7 +1959,7 @@
         }
       },
       "path": "sinks.kafka.results.max_retries",
-      "value": 2
+      "value": null
     },
     {
       "name": "sink_depends_on_default_empty",
@@ -1739,7 +1976,7 @@
       "value": []
     },
     {
-      "name": "http_sink_max_retries_default_two",
+      "name": "http_sink_max_retries_not_given",
       "yaml": {
         "sinks": {
           "http": {
@@ -1750,7 +1987,7 @@
         }
       },
       "path": "sinks.http.api.max_retries",
-      "value": 2
+      "value": null
     },
     {
       "name": "sink_max_retries_whole_float",
@@ -1770,6 +2007,13 @@
     {
       "name": "sink_depends_on_loads",
       "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
         "sinks": {
           "kafka": {
             "results": {
@@ -1780,9 +2024,7 @@
             }
           },
           "postgres": {
-            "main-db": {
-              "dsn": "postgresql://db.example/drakkar"
-            }
+            "main-db": {}
           }
         }
       },
@@ -1800,11 +2042,16 @@
     {
       "name": "env_segment_takes_the_hyphenated_sink_name",
       "yaml": {
-        "sinks": {
+        "connections": {
           "postgres": {
-            "main-db": {
+            "main": {
               "dsn": "postgresql://h/db"
             }
+          }
+        },
+        "sinks": {
+          "postgres": {
+            "main-db": {}
           }
         }
       },
@@ -1817,11 +2064,16 @@
     {
       "name": "env_segment_takes_the_mixed_case_sink_name",
       "yaml": {
-        "sinks": {
+        "connections": {
           "postgres": {
-            "MainDB": {
+            "main": {
               "dsn": "postgresql://h/db"
             }
+          }
+        },
+        "sinks": {
+          "postgres": {
+            "MainDB": {}
           }
         }
       },
@@ -1834,19 +2086,24 @@
     {
       "name": "env_segment_with_no_match_declares_its_own_name",
       "yaml": {
-        "sinks": {
+        "connections": {
           "postgres": {
-            "main-db": {
+            "main": {
               "dsn": "postgresql://h/db"
             }
+          }
+        },
+        "sinks": {
+          "postgres": {
+            "main-db": {}
           }
         }
       },
       "env": {
-        "DK_SINKS__POSTGRES__OTHER_DB__DSN": "postgresql://h/other"
+        "DK_SINKS__POSTGRES__OTHER_DB__POOL_MAX": "7"
       },
-      "path": "sinks.postgres.other_db.dsn",
-      "value": "postgresql://h/other"
+      "path": "sinks.postgres.other_db.pool_max",
+      "value": 7
     },
     {
       "name": "env_segment_takes_the_hyphenated_connection_name",
@@ -1922,6 +2179,331 @@
       "path": "executor.env",
       "value": {
         "FOO": "bar"
+      }
+    },
+    {
+      "name": "sink_defaults_on_failure_default",
+      "yaml": {},
+      "path": "sinks.defaults.on_failure",
+      "value": "dlq"
+    },
+    {
+      "name": "sink_defaults_max_retries_default",
+      "yaml": {},
+      "path": "sinks.defaults.max_retries",
+      "value": 2
+    },
+    {
+      "name": "sink_defaults_delivery_timeout_default",
+      "yaml": {},
+      "path": "sinks.defaults.delivery_timeout",
+      "value": 30.0
+    },
+    {
+      "name": "sink_defaults_breaker_failures_default",
+      "yaml": {},
+      "path": "sinks.defaults.breaker_failures",
+      "value": 5
+    },
+    {
+      "name": "sink_defaults_breaker_cooldown_default",
+      "yaml": {},
+      "path": "sinks.defaults.breaker_cooldown",
+      "value": 30.0
+    },
+    {
+      "name": "kafka_max_poll_interval_default",
+      "yaml": {},
+      "path": "sources.kafka.max_poll_interval",
+      "value": 300.0
+    },
+    {
+      "name": "kafka_session_timeout_default",
+      "yaml": {},
+      "path": "sources.kafka.session_timeout",
+      "value": 45.0
+    },
+    {
+      "name": "kafka_heartbeat_interval_default",
+      "yaml": {},
+      "path": "sources.kafka.heartbeat_interval",
+      "value": 3.0
+    },
+    {
+      "name": "kafka_session_timeout_with_a_unit",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "session_timeout": "1m30s"
+          }
+        }
+      },
+      "path": "sources.kafka.session_timeout",
+      "value": 90.0
+    },
+    {
+      "name": "startup_align_enabled_default",
+      "yaml": {},
+      "path": "sources.kafka.startup_align.enabled",
+      "value": true
+    },
+    {
+      "name": "startup_align_min_wait_default",
+      "yaml": {},
+      "path": "sources.kafka.startup_align.min_wait",
+      "value": 4.0
+    },
+    {
+      "name": "startup_align_interval_default",
+      "yaml": {},
+      "path": "sources.kafka.startup_align.interval",
+      "value": 10
+    },
+    {
+      "name": "kafka_source_connection_default",
+      "yaml": {},
+      "path": "sources.kafka.connection",
+      "value": "main"
+    },
+    {
+      "name": "http_source_request_timeout_default",
+      "yaml": {},
+      "path": "sources.http.request_timeout",
+      "value": 30.0
+    },
+    {
+      "name": "http_source_max_body_default",
+      "yaml": {},
+      "path": "sources.http.max_body",
+      "value": 10485760
+    },
+    {
+      "name": "http_source_max_body_with_a_unit",
+      "yaml": {
+        "sources": {
+          "http": {
+            "max_body": "1MB"
+          }
+        }
+      },
+      "path": "sources.http.max_body",
+      "value": 1000000
+    },
+    {
+      "name": "http_sink_request_timeout_default",
+      "yaml": {
+        "sinks": {
+          "http": {
+            "api": {
+              "url": "https://api.example.com/results"
+            }
+          }
+        }
+      },
+      "path": "sinks.http.api.request_timeout",
+      "value": 30
+    },
+    {
+      "name": "kafka_sink_flush_timeout_default",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.flush_timeout",
+      "value": 30.0
+    },
+    {
+      "name": "kafka_sink_connection_default",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.connection",
+      "value": "main"
+    },
+    {
+      "name": "dlq_enabled_default",
+      "yaml": {},
+      "path": "dlq.enabled",
+      "value": true
+    },
+    {
+      "name": "dlq_provider_default",
+      "yaml": {},
+      "path": "dlq.provider",
+      "value": "kafka"
+    },
+    {
+      "name": "dlq_flush_timeout_default",
+      "yaml": {},
+      "path": "dlq.flush_timeout",
+      "value": 30.0
+    },
+    {
+      "name": "dlq_off_does_not_check_its_connection",
+      "yaml": {
+        "dlq": {
+          "enabled": false,
+          "connection": "other"
+        }
+      },
+      "path": "dlq.connection",
+      "value": "other"
+    },
+    {
+      "name": "kafka_source_off_needs_no_kafka_connection",
+      "yaml": {},
+      "env_only": true,
+      "env": {
+        "DK_SOURCES__HTTP__ENABLED": "true",
+        "DK_UI__RELEASE__ENABLED": "false"
+      },
+      "path": "connections.kafka",
+      "value": {}
+    },
+    {
+      "name": "redis_state_prefix_default",
+      "yaml": {
+        "connections": {
+          "redis": {
+            "main": {}
+          }
+        }
+      },
+      "path": "connections.redis.main.state_prefix",
+      "value": "drakkar:"
+    },
+    {
+      "name": "consul_state_prefix_default",
+      "yaml": {
+        "connections": {
+          "consul": {
+            "main": {}
+          }
+        }
+      },
+      "path": "connections.consul.main.state_prefix",
+      "value": "drakkar"
+    }
+  ],
+  "sink_policies": [
+    {
+      "name": "not_given_reads_the_built_in_defaults",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "sink": "kafka/results",
+      "policy": {
+        "on_failure": "dlq",
+        "max_retries": 2,
+        "delivery_timeout": 30.0,
+        "breaker_failures": 5,
+        "breaker_cooldown": 30.0,
+        "depends_on": []
+      }
+    },
+    {
+      "name": "not_given_reads_sinks_defaults",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "on_failure": "skip",
+            "max_retries": 5,
+            "delivery_timeout": "10s",
+            "breaker_failures": 3,
+            "breaker_cooldown": "1m"
+          },
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "sink": "kafka/results",
+      "policy": {
+        "on_failure": "skip",
+        "max_retries": 5,
+        "delivery_timeout": 10.0,
+        "breaker_failures": 3,
+        "breaker_cooldown": 60.0,
+        "depends_on": []
+      }
+    },
+    {
+      "name": "given_wins_even_when_it_equals_the_built_in_default",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "on_failure": "skip",
+            "max_retries": 5,
+            "delivery_timeout": "10s",
+            "breaker_failures": 3,
+            "breaker_cooldown": "1m"
+          },
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "on_failure": "dlq",
+              "max_retries": 2,
+              "delivery_timeout": "30s",
+              "breaker_failures": 5,
+              "breaker_cooldown": "30s"
+            }
+          }
+        }
+      },
+      "sink": "kafka/results",
+      "policy": {
+        "on_failure": "dlq",
+        "max_retries": 2,
+        "delivery_timeout": 30.0,
+        "breaker_failures": 5,
+        "breaker_cooldown": 30.0,
+        "depends_on": []
+      }
+    },
+    {
+      "name": "zero_retries_given_wins",
+      "yaml": {
+        "sinks": {
+          "defaults": {
+            "max_retries": 5,
+            "breaker_cooldown": "1m"
+          },
+          "http": {
+            "api": {
+              "url": "https://api.example.com/results",
+              "max_retries": 0,
+              "breaker_cooldown": 0
+            }
+          }
+        }
+      },
+      "sink": "http/api",
+      "policy": {
+        "on_failure": "dlq",
+        "max_retries": 0,
+        "delivery_timeout": 30.0,
+        "breaker_failures": 5,
+        "breaker_cooldown": 0.0,
+        "depends_on": []
       }
     }
   ]

@@ -16,7 +16,7 @@ from typing import get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, computed_field
 
-from drakkar.config import DrakkarConfig, KafkaConfig
+from drakkar.config import DrakkarConfig, KafkaConnectionConfig
 from drakkar.configmeta import (
     ARTIFACT_PATH,
     ConfigMetadata,
@@ -58,7 +58,7 @@ def test_artifact_is_valid_json_matching_the_schema():
     raw = json.loads(ARTIFACT_PATH.read_text())
     # Round-trips through the pydantic model without error.
     parsed = ConfigMetadata.model_validate(raw)
-    assert len(parsed.groups) == 19
+    assert len(parsed.groups) == 18
 
 
 # --- 2. Anchor parity: every doc_anchor must exist on the real docs page ---
@@ -214,15 +214,11 @@ def test_known_sensitive_fields_are_flagged_secret():
     secret_paths = _secret_paths()
     expected_minimum = {
         'ui.auth_token',
-        'kafka.security.sasl_password',
-        'kafka.security.ssl_key_password',
-        'dlq.security.sasl_password',
-        'dlq.security.ssl_key_password',
-        'sinks.kafka.*.security.sasl_password',
-        'sinks.kafka.*.security.ssl_key_password',
-        'sinks.postgres.*.dsn',
-        'sinks.mongo.*.uri',
-        'sinks.redis.*.url',
+        'connections.kafka.*.security.sasl_password',
+        'connections.kafka.*.security.ssl_key_password',
+        'connections.postgres.*.dsn',
+        'connections.mongo.*.uri',
+        'connections.redis.*.url',
         'sinks.http.*.headers',
     }
     assert expected_minimum <= secret_paths
@@ -240,7 +236,7 @@ def test_known_sensitive_fields_are_flagged_secret():
 
 def test_non_secret_fields_are_not_flagged():
     secret_paths = _secret_paths()
-    assert 'kafka.brokers' not in secret_paths
+    assert 'connections.kafka.*.brokers' not in secret_paths
     assert 'sinks.http.*.url' not in secret_paths
     assert 'ui.public_url' not in secret_paths
     assert 'ui.prometheus_url' not in secret_paths
@@ -253,7 +249,6 @@ def test_env_var_names_for_known_scalar_paths():
     metadata = build_config_metadata()
     by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
 
-    assert by_path['kafka.brokers'].env == 'DK_KAFKA__BROKERS'
     assert by_path['storage.dir'].env == 'DK_STORAGE__DIR'
     assert by_path['fleet.cache_exchange.interval_seconds'].env == 'DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS'
     assert by_path['cluster_name'].env == 'DK_CLUSTER_NAME'
@@ -339,9 +334,10 @@ def test_type_field_uses_simple_json_type_names():
     metadata = build_config_metadata()
     by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
 
-    assert by_path['kafka.brokers'].type == 'string'
+    assert by_path['connections.kafka.*.brokers'].type == 'string'
     assert by_path['sources.kafka.max_poll_records'].type == 'integer'
-    assert by_path['sinks.circuit_breaker.cooldown_seconds'].type == 'number'
+    assert by_path['sinks.defaults.breaker_cooldown'].type == 'duration'
+    assert by_path['sinks.defaults.breaker_failures'].type == 'integer'
     assert by_path['metrics.enabled'].type == 'boolean'
     assert by_path['ui.expose_env_vars'].type == 'array'
     assert by_path['executor.env'].type == 'object'
@@ -418,7 +414,7 @@ def test_json_type_basemodel_leaf_is_object():
     """Never hit through build_config_metadata (nested models always
     recurse rather than becoming a leaf), but _json_type must still be
     correct if ever called on one directly."""
-    assert _json_type(KafkaConfig) == 'object'
+    assert _json_type(KafkaConnectionConfig) == 'object'
 
 
 # --- 4. A field with an alias is listed under its YAML key -------------------

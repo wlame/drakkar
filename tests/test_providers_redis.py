@@ -37,7 +37,7 @@ from drakkar.providers.connections import Connections
 from drakkar.providers.redis import (
     BAD_URL_MESSAGE,
     CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     KEY_TEMPLATES,
     PREFIX_PLACEHOLDER,
     REDIS_PROVIDER,
@@ -131,7 +131,7 @@ def test_redis_floor_is_the_release_that_sets_status_code():
 
 def test_provider_name_and_default_prefix_follow_the_connection_config():
     assert REDIS_PROVIDER == 'redis'
-    assert RedisConnectionConfig().key_prefix == DEFAULT_KEY_PREFIX
+    assert RedisConnectionConfig().state_prefix == DEFAULT_STATE_PREFIX
 
 
 @pytest.mark.parametrize('case', FIXTURE['key_examples'], ids=lambda c: c['key'])
@@ -461,13 +461,13 @@ async def test_refresh_and_release_scripts_act_only_for_the_holder(clock, server
     assert await run(client, 'EVAL', SCRIPTS['release'], '1', LOCK_KEY, holder) == 0
 
 
-def connections_with(*, key_prefix: str) -> Connections:
-    """Connections that declare one Redis entry, ``main``, with ``key_prefix``."""
-    return Connections(ConnectionsConfig(redis={'main': RedisConnectionConfig(key_prefix=key_prefix)}))
+def connections_with(*, state_prefix: str) -> Connections:
+    """Connections that declare one Redis entry, ``main``, with ``state_prefix``."""
+    return Connections(ConnectionsConfig(redis={'main': RedisConnectionConfig(state_prefix=state_prefix)}))
 
 
 async def test_resolve_client_shares_one_client_per_connection():
-    connections = connections_with(key_prefix='ops:')
+    connections = connections_with(state_prefix='ops:')
     opener = AsyncMock(return_value=object())
     closer = AsyncMock()
 
@@ -487,7 +487,7 @@ async def test_resolve_client_shares_one_client_per_connection():
     assert first == second
     assert first[1] == 'ops:'
     opener.assert_awaited_once()
-    assert opener.await_args.args[0].key_prefix == 'ops:'
+    assert opener.await_args.args[0].state_prefix == 'ops:'
 
 
 async def test_resolve_client_prefers_the_preset_client():

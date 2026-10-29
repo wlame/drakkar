@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import MongoSinkConfig
+from drakkar.config import MongoConnectionConfig, MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import MongoOp, MongoPayload
 from drakkar.sinks.base import BaseSink
@@ -328,9 +328,10 @@ class MongoSink(BaseSink[MongoPayload]):
         """
         return not any(payload.op in _NOT_IDEMPOTENT_OPS for payload in payloads)
 
-    def __init__(self, name: str, config: MongoSinkConfig) -> None:
+    def __init__(self, name: str, config: MongoSinkConfig, connection: MongoConnectionConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
+        self._uri = connection.uri
         self._client = None
         self._db = None
         # Operator-authored MQL, compiled at connect(). Never compiled on
@@ -347,7 +348,7 @@ class MongoSink(BaseSink[MongoPayload]):
         # so an operator can override per deployment.
         timeout_ms = int(self._delivery_timeout_seconds * 1000)
         self._client = AsyncMongoClient(
-            self._config.uri,
+            self._uri,
             socketTimeoutMS=timeout_ms,
             connectTimeoutMS=timeout_ms,
         )
@@ -368,7 +369,7 @@ class MongoSink(BaseSink[MongoPayload]):
             'mongo_sink_connected',
             category='sink',
             sink_name=self._name,
-            uri=redact_url(self._config.uri),
+            uri=redact_url(self._uri),
             database=self._config.database,
             statements=len(self._statements),
         )

@@ -22,7 +22,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -43,7 +42,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.dlq_record import DLQRecord, render_headers
-from tests.conftest import make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
@@ -78,8 +77,8 @@ def echo_pool() -> ExecutorPool:
 @pytest.fixture
 def app_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10, window_size=5),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),

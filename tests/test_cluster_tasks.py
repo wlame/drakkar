@@ -44,6 +44,7 @@ from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED, ElectionContext, ThreadFence
 from drakkar.schedule import MIN_HOLD_SECONDS, task_scope
+from tests.conftest import kafka_connections
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
 CLUSTER = 'search-fleet'
@@ -1256,6 +1257,7 @@ def _archive_config(**ui_recorder):
     from drakkar.config import DrakkarConfig
 
     return DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
         ui={'enabled': True, 'release': {'enabled': False}, 'recorder': ui_recorder},

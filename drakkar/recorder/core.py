@@ -1104,6 +1104,8 @@ class EventRecorder(EventWriter):
         # carries the analogous rule for the group.
         source = drakkar_config.sources.kafka
         source_topic = source.topic if source.enabled else ''
+        source_connection = drakkar_config.kafka_source_connection
+        kafka_brokers = source_connection.brokers if source_connection is not None else ''
         consumer_group = drakkar_config.resolved_consumer_group
 
         now = time.time()
@@ -1113,7 +1115,7 @@ class EventRecorder(EventWriter):
             detect_worker_ip(),
             self._config.port,
             self._config.public_url or None,
-            redact_url(drakkar_config.kafka.brokers),
+            redact_url(kafka_brokers),
             source_topic,
             consumer_group,
             drakkar_config.executor.binary_path,

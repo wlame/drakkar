@@ -20,7 +20,7 @@ from drakkar.config import DrakkarConfig, UIConsumePauseConfig
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 
 def _mock_recorder() -> AsyncMock:
@@ -34,7 +34,7 @@ def _mock_recorder() -> AsyncMock:
 
 
 def _mock_app(*, enabled: bool = True, consumer: AsyncMock | None = None) -> MagicMock:
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     cfg.ui.release.enabled = False
     cfg.ui.consume_pause = UIConsumePauseConfig(enabled=enabled, durations_seconds=[15, 60, 300])
 

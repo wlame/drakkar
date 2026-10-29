@@ -17,10 +17,12 @@ from drakkar import BaseDrakkarHandler, DrakkarApp, DrakkarConfig
 from drakkar.app import (
     SETTINGS_CONSUMED_BEFORE_ON_STARTUP,
     changed_consumed_settings,
+    reasons_for_settings,
     snapshot_consumed_settings,
 )
-from drakkar.config import ExecutorConfig, KafkaConfig, LoggingConfig, MetricsConfig
+from drakkar.config import ExecutorConfig, KafkaSinkConfig, LoggingConfig, MetricsConfig
 from drakkar.models import ErrorAction, ExecutorError, ExecutorTask
+from tests.conftest import kafka_connections
 
 
 class NoopHandler(BaseDrakkarHandler):
@@ -30,8 +32,8 @@ class NoopHandler(BaseDrakkarHandler):
 
 def make_config(**overrides) -> DrakkarConfig:
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092'),
-        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        'connections': kafka_connections(brokers='localhost:9092'),
+        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         'executor': ExecutorConfig(binary_path='/bin/echo'),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
@@ -176,70 +178,98 @@ class TestLifecycleWarning:
         assert await handler.on_error(task, ExecutorError(task=task)) is ErrorAction.DLQ
 
 
-class TestSinkSettingsAreHonoured:
-    """`sinks.circuit_breaker` and `sinks.delivery_timeout_seconds` are read
-    when the sinks are built, which happens after the hook — so tuning them
-    in `on_startup` works.
+def _config_with_a_sink(**settings) -> DrakkarConfig:
+    return make_config(sinks={'kafka': {'results': {'topic': 'out', **settings}}})
+
+
+def _results_sink(app: DrakkarApp):
+    return app._sink_manager.sinks[('kafka', 'results')]
+
+
+class TestSinkPoliciesAreResolvedAtConstruction:
+    """Each sink's policy is resolved in `DrakkarApp.__init__`, so a change of a policy key in `on_startup` is ignored.
+
+    The warning names the key, as for every other early-consumed setting.
     """
 
-    def test_the_manager_reads_the_live_config_not_a_snapshot(self):
-        config = make_config()
-        app = DrakkarApp(handler=NoopHandler(), config=config)
-
-        config.sinks.circuit_breaker.failure_threshold = 42
-        config.sinks.delivery_timeout_seconds = 7.5
-
-        assert app._sink_manager._circuit_breaker_config.failure_threshold == 42
-        assert app._sink_manager._delivery_timeout_seconds == 7.5
-
-    def test_a_sink_registered_after_the_hook_gets_the_new_values(self):
-        from tests.test_sink_manager import FakeSink
-
-        config = make_config()
-        app = DrakkarApp(handler=NoopHandler(), config=config)
-        config.sinks.circuit_breaker.failure_threshold = 42
-        config.sinks.delivery_timeout_seconds = 7.5
-
-        sink = FakeSink('after-the-hook')
-        app._sink_manager.register(sink)
-
-        assert sink._circuit_config.failure_threshold == 42
-        assert sink._delivery_timeout_seconds == 7.5
-
-    async def test_tuning_the_breaker_in_on_startup_no_longer_warns(self):
-        """It is honoured now, so warning about it would be wrong."""
-
-        class TunesTheBreaker(NoopHandler):
-            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
-                config.sinks.circuit_breaker.failure_threshold = 42
-                config.sinks.delivery_timeout_seconds = 7.5
-                return config
-
-        app = DrakkarApp(handler=TunesTheBreaker(), config=make_config())
-
+    async def _ignored_settings(self, app: DrakkarApp) -> list[str]:
         with capture_logs() as cap:
             await app._lifecycle._run_on_startup()
+        warnings = [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
+        return warnings[0]['settings'] if warnings else []
 
-        assert not [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
-        assert app._sink_manager._circuit_breaker_config.failure_threshold == 42
+    async def test_a_changed_default_is_reported_and_does_not_reach_the_sink(self):
+        class TunesTheDefaults(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.sinks.defaults.delivery_timeout = 7.5
+                config.sinks.defaults.breaker_failures = 42
+                return config
 
-    async def test_a_replaced_config_object_is_followed_too(self):
-        """A handler may return a fresh DrakkarConfig rather than mutating."""
+        app = DrakkarApp(handler=TunesTheDefaults(), config=_config_with_a_sink())
 
+        assert await self._ignored_settings(app) == ['sinks.defaults']
+
+        app._build_sinks()
+        assert _results_sink(app).delivery_timeout_seconds == 30.0
+        assert _results_sink(app)._breaker_failures == 5
+
+    async def test_a_changed_instance_key_is_reported_and_does_not_reach_the_sink(self):
+        class TunesTheSink(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.sinks.kafka['results'].delivery_timeout = 7.5
+                config.sinks.kafka['results'].depends_on.append('kafka/results')
+                return config
+
+        app = DrakkarApp(handler=TunesTheSink(), config=_config_with_a_sink())
+
+        assert await self._ignored_settings(app) == [
+            'sinks.kafka.results.delivery_timeout',
+            'sinks.kafka.results.depends_on',
+        ]
+
+        app._build_sinks()
+        assert _results_sink(app).delivery_timeout_seconds == 30.0
+        assert app._sink_manager._policies[('kafka', 'results')].depends_on == ()
+
+    async def test_a_replaced_config_object_keeps_the_resolved_policy_too(self):
         class ReplacesTheConfig(NoopHandler):
             async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
-                return make_config(sinks={'delivery_timeout_seconds': 3.0})
+                return _config_with_a_sink(delivery_timeout='3s')
 
-        app = DrakkarApp(handler=ReplacesTheConfig(), config=make_config())
+        app = DrakkarApp(handler=ReplacesTheConfig(), config=_config_with_a_sink())
 
-        await app._lifecycle._run_on_startup()
+        assert await self._ignored_settings(app) == ['sinks.kafka.results.delivery_timeout']
 
-        assert app._sink_manager._delivery_timeout_seconds == 3.0
+        app._build_sinks()
+        assert _results_sink(app).delivery_timeout_seconds == 30.0
 
-    def test_the_table_no_longer_claims_the_sink_settings_are_consumed_early(self):
-        """The list must stay complete — the sink manager is built
-        after the hook too."""
-        paths = {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+    async def test_a_sink_added_in_the_hook_is_no_ignored_change_and_gets_its_policy(self):
+        class AddsASink(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.sinks.kafka['added'] = KafkaSinkConfig(topic='more', delivery_timeout='5s')
+                return config
 
-        assert 'sinks.circuit_breaker' not in paths
-        assert 'sinks.delivery_timeout_seconds' not in paths
+        app = DrakkarApp(handler=AddsASink(), config=_config_with_a_sink())
+
+        assert await self._ignored_settings(app) == []
+
+        app._build_sinks()
+        assert app._sink_manager.sinks[('kafka', 'added')].delivery_timeout_seconds == 5.0
+
+    async def test_a_sink_setting_outside_the_policy_lands(self):
+        class TunesTheFlush(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.sinks.kafka['results'].flush_timeout = 7.5
+                return config
+
+        app = DrakkarApp(handler=TunesTheFlush(), config=_config_with_a_sink())
+
+        assert await self._ignored_settings(app) == []
+
+        app._build_sinks()
+        assert _results_sink(app)._config.flush_timeout == 7.5
+
+    def test_the_reason_names_the_policy_for_an_instance_key(self):
+        assert reasons_for_settings(['sinks.kafka.results.max_retries']) == [
+            "sinks.kafka.results.max_retries — each sink's policy is resolved in DrakkarApp.__init__"
+        ]

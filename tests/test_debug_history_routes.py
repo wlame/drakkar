@@ -22,7 +22,7 @@ from drakkar.recorder.archive import archive_file_name
 from drakkar.recorder.history import meta_path, serialize_json
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 CLUSTER = 'search'
 LIVE_NAME = 'w-1-2026-10-14__09_00_00.db'
@@ -105,7 +105,7 @@ def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merg
     )
     recorder._db_path = str(tmp_path / 'storage' / LIVE_NAME)
     drakkar_app = MagicMock()
-    drakkar_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    drakkar_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
     drakkar_app.fleet = None
     return create_ui_app(config, recorder, drakkar_app), recorder

@@ -25,7 +25,7 @@ from drakkar.recorder.memstore import (
     read_page_numbers,
     run_eviction_pass,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 WORKER = 'w-1'
 LARGE_WINDOW_SECONDS = 86_400
@@ -298,7 +298,11 @@ async def test_worker_config_row_is_never_evicted(started):
 
     rec = await started(max_rows=0, store_config=True)
     await rec.write_config(
-        DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}})
+        DrakkarConfig(
+            connections=kafka_connections(),
+            executor=ExecutorConfig(binary_path='/bin/echo'),
+            sources={'kafka': {'enabled': True}},
+        )
     )
     _record(rec, [time.time()] * 5)
 

@@ -32,7 +32,7 @@ from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.providers_redis import RedisRegistry, redis_registry_factory
 from drakkar.fleet.service import FleetRegistry
 from drakkar.providers.connections import Connections
-from drakkar.providers.redis import DEFAULT_KEY_PREFIX, SCRIPTS
+from drakkar.providers.redis import DEFAULT_STATE_PREFIX, SCRIPTS
 from drakkar.providers.resilience import ResilientCaller, TransientError
 from drakkar.providers.thread import PROVIDER_STOPPED
 from tests import fleet_testkit as testkit
@@ -161,7 +161,7 @@ async def test_commands_match_the_fixture_example(clock, server):
         connection='main',
         prune_after_seconds=inputs['prune_after_seconds'],
         client=recorder,
-        key_prefix=inputs['prefix'],
+        state_prefix=inputs['prefix'],
     )
     card = inputs['card']
 
@@ -178,7 +178,7 @@ async def test_commands_match_the_fixture_example(clock, server):
 
 async def test_a_preset_prefix_goes_into_every_key(clock, server):
     recorder = RecordingClient(fake_client(server))
-    provider = _provider(server, client=recorder, key_prefix='ops.fleet:')
+    provider = _provider(server, client=recorder, state_prefix='ops.fleet:')
     await provider.start(_context())
 
     await provider.publish(_card())
@@ -196,7 +196,7 @@ async def test_the_default_prefix_is_the_one_of_a_connection_entry(clock, server
 
     await provider.publish(_card())
 
-    assert DEFAULT_KEY_PREFIX == 'drakkar:'
+    assert DEFAULT_STATE_PREFIX == 'drakkar:'
     assert recorder.calls[1][3:5] == (f'{CARD_PREFIX}w-1', INDEX_KEY)
 
 
@@ -420,13 +420,13 @@ async def test_withdraw_uses_the_sanitized_name_of_the_worker(clock, server):
 
 @pytest.mark.parametrize('prefix', ['has space', 'a/b', 'star*', 'brace{', 'line\n'])
 def test_a_preset_prefix_outside_the_allowed_characters_is_refused(prefix, server):
-    with pytest.raises(ValueError, match='key_prefix'):
-        _provider(server, key_prefix=prefix)
+    with pytest.raises(ValueError, match='state_prefix'):
+        _provider(server, state_prefix=prefix)
 
 
 @pytest.mark.parametrize('prefix', ['', 'a', 'ops.fleet:', 'A_b-c:d.e'])
 def test_a_preset_prefix_inside_the_allowed_characters_is_accepted(prefix, server):
-    assert _provider(server, key_prefix=prefix) is not None
+    assert _provider(server, state_prefix=prefix) is not None
 
 
 # --- Start ---
@@ -455,7 +455,7 @@ async def test_start_without_connections_raises():
 
 
 async def test_start_through_the_connections_opens_one_shared_client_with_the_prefix_of_the_entry(clock, server):
-    connections = make_connections(key_prefix='ops.fleet:')
+    connections = make_connections(state_prefix='ops.fleet:')
     opener = AsyncMock(return_value=RecordingClient(fake_client(server)))
     first = RedisRegistry(connection='main', prune_after_seconds=PRUNE_AFTER, open_client=opener)
     second = RedisRegistry(connection='main', prune_after_seconds=PRUNE_AFTER, open_client=opener)

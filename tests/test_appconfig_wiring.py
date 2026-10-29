@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field, SecretStr
 from structlog.testing import capture_logs
 
 from drakkar import BaseDrakkarHandler, DrakkarApp, DrakkarConfig
-from drakkar.config import ExecutorConfig, KafkaConfig, LoggingConfig, MetricsConfig
+from drakkar.config import ExecutorConfig, LoggingConfig, MetricsConfig
+from tests.conftest import kafka_connections
 
 
 class DemoAppConfig(BaseModel):
@@ -56,8 +57,8 @@ class UndeclaredHandler(BaseDrakkarHandler):
 
 def make_config(**overrides) -> DrakkarConfig:
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092'),
-        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        'connections': kafka_connections(brokers='localhost:9092'),
+        'sources': {'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         'executor': ExecutorConfig(binary_path='/bin/echo'),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),

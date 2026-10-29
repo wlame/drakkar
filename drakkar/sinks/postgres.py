@@ -15,7 +15,7 @@ import asyncpg
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import PostgresSinkConfig
+from drakkar.config import PostgresConnectionConfig, PostgresSinkConfig
 from drakkar.metrics import (
     sink_batch_fallbacks,
     sink_deliver_duration,
@@ -178,9 +178,10 @@ class PostgresSink(BaseSink[PostgresPayload]):
         """
         return all(p.op in (PostgresOp.UPDATE, PostgresOp.UPSERT) for p in payloads)
 
-    def __init__(self, name: str, config: PostgresSinkConfig) -> None:
+    def __init__(self, name: str, config: PostgresSinkConfig, connection: PostgresConnectionConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
+        self._dsn = connection.dsn
         self._pool: asyncpg.Pool | None = None
         # Operator-authored statements, compiled from :name to positional $n
         # once at connect(). Never compiled on the delivery path.
@@ -203,7 +204,7 @@ class PostgresSink(BaseSink[PostgresPayload]):
         """
         self._statements = {name: compile_named_statement(sql) for name, sql in self._config.statements.items()}
         self._pool = await asyncpg.create_pool(
-            dsn=self._config.dsn,
+            dsn=self._dsn,
             min_size=self._config.pool_min,
             max_size=self._config.pool_max,
             # Same budget the manager gives one delivery, so a wedged server
@@ -219,7 +220,7 @@ class PostgresSink(BaseSink[PostgresPayload]):
             # split('@') — a DSN without an authority part (e.g.
             # ``postgresql://host/db?password=x``) would otherwise log
             # the secret verbatim.
-            host=redact_url(self._config.dsn),
+            host=redact_url(self._dsn),
             statements=len(self._statements),
         )
 

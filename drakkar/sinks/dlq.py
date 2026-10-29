@@ -30,7 +30,7 @@ from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
-# Mirrors ``DLQConfig.flush_timeout_seconds``' default, for a DLQSink built
+# Mirrors the default of ``DLQConfig.flush_timeout``, for a DLQSink built
 # outside a ``DrakkarApp`` (tests, tools).
 DEFAULT_FLUSH_TIMEOUT_SECONDS = 30.0
 DLQ_THREAD_NAME_PREFIX = 'dlq'
@@ -87,8 +87,8 @@ class DLQSink(BaseSink[BaseModel]):
         # an executor thread — and the DLQ is the last resort, so a write
         # that blocks that long stalls the partition it was meant to rescue.
         self._flush_timeout_seconds = flush_timeout_seconds
-        # Already resolved by the caller (DrakkarApp._build_dlq), which
-        # applies the same empty-brokers-inherits rule the Kafka sinks use.
+        # Already resolved by the caller (DrakkarApp._build_dlq) from the
+        # connection the DLQ names.
         self._security = security or KafkaSecurityConfig()
         self._client_config = dict(client_config or {})
         # A plain (sync) producer: the asyncio producer of the client cannot

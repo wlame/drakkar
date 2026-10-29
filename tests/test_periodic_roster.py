@@ -14,6 +14,7 @@ from drakkar.lifecycle import user_cluster_task
 from drakkar.periodic import PeriodicMeta, periodic
 from drakkar.periodic_roster import RosterTask, archive_definition, resolve_periodic_roster
 from drakkar.schedule import ARCHIVE_TASK_NAME, ClusterTaskDefinition, cluster_tasks_hash
+from tests.conftest import kafka_connections
 from tests.test_sources_validation import KafkaOnlyHandler
 
 
@@ -42,6 +43,7 @@ class RatesKafkaHandler(KafkaOnlyHandler):
 def _config(*, archive: bool = False, **values) -> DrakkarConfig:
     """A config whose archive runs only when ``archive`` is true."""
     return DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         ui={'enabled': archive, 'release': {'enabled': False}},
         **values,
@@ -116,6 +118,7 @@ def test_archive_definition_follows_the_archive_schedule():
 
 def _kafka_app(tmp_path, handler: object | None = None) -> DrakkarApp:
     config = DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': ''},
         ui={'enabled': False, 'release': {'enabled': False}},
@@ -148,6 +151,7 @@ def test_roster_build_sets_the_app_hash_and_an_election_for_every_cluster_task(t
     app = DrakkarApp(
         handler=RatesKafkaHandler(),
         config=DrakkarConfig(
+            connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
             storage={'dir': str(tmp_path)},
             ui={'enabled': False, 'release': {'enabled': False}},
@@ -209,6 +213,7 @@ async def test_cluster_loop_that_raises_outside_a_run_logs_periodic_loop_ended(t
     app = DrakkarApp(
         handler=RatesKafkaHandler(),
         config=DrakkarConfig(
+            connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
             storage={'dir': str(tmp_path)},
             ui={'enabled': False, 'release': {'enabled': False}},
@@ -273,6 +278,7 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
     app = DrakkarApp(
         handler=KafkaOnlyHandler(),
         config=DrakkarConfig(
+            connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
             storage={'dir': str(tmp_path) if storage else ''},
             ui={'enabled': True, 'release': {'enabled': False}},
@@ -293,11 +299,13 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
 
 def test_cluster_hash_of_a_none_worker_equals_the_hash_with_archive_disabled():
     none_worker = DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
         ui={'enabled': True, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
     )
     archive_off = DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
         ui={'enabled': True, 'release': {'enabled': False}},

@@ -133,17 +133,17 @@ point where config can be changed at runtime.
     | `sources.kafka.enabled` | handler validation and source construction |
     | `sources.http.enabled` | handler validation and source construction |
     | `storage.dir` | the worker creates its own-files folder before `on_startup` runs |
+    | `sinks.defaults`, and on each sink `on_failure`, `max_retries`, `delivery_timeout`, `breaker_failures`, `breaker_cooldown`, `depends_on` | each sink's policy is resolved when the worker is constructed |
 
     Set those in the config file or through their `DK_` environment
     overrides instead. The worker does not fail on such a change — it logs
     one `on_startup_config_change_ignored` warning naming every setting it
     dropped, so the gap is visible rather than silent.
 
-    Everything else — `executor`, `kafka`, `sinks` (the instances, the
-    circuit breaker and the delivery timeout alike), `ui`, `dlq`, `cache`,
-    `logging`, `metrics`, and every `sources.*` field other than the two
-    `enabled` switches — is read after the hook and a change to it takes
-    effect.
+    Everything else — `executor`, `connections`, the other sink keys (a
+    sink added here is built too), `ui`, `dlq`, `cache`, `logging`, `metrics`,
+    and every `sources.*` field other than the two `enabled` switches — is
+    read after the hook and a change to it takes effect.
 
 ```python
 import os

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **A service is declared once under `connections`.** The root `kafka:` section
+  is gone: brokers, security, `client_config` and the Kafka-UI links live in
+  `connections.kafka.<name>`. `connections.mongo.<name>` holds the Mongo `uri`.
+  The Kafka source, the DLQ and every Kafka, Postgres, Mongo and Redis sink name
+  an entry with `connection` (default `main`), and the entry must be declared, or
+  the load fails. A sink keeps its own client or pool. Two Kafka sinks may share
+  one connection, and a sink's or the DLQ's `client_config` is merged after the
+  connection's. `key_prefix` of a Redis or Consul connection is `state_prefix`.
+  The `kafka_brokers` column of `worker_config` holds the brokers of the source's
+  connection, or `''` with the source off.
+- **Durations and sizes in `sources`, `sinks` and `dlq` carry a unit.**
+  `max_poll_interval`, `session_timeout`, `heartbeat_interval`,
+  `sources.kafka.startup_align` (`enabled`, `min_wait`, `interval`),
+  `sources.http.deliver_to_sinks`, `request_timeout` and `max_body`,
+  `sinks.kafka.*.flush_timeout`, `sinks.http.*.request_timeout` and
+  `dlq.flush_timeout` replace the old names.
+- **Each sink has its own timeout and breaker.** `sinks.defaults` holds
+  `on_failure`, `max_retries`, `delivery_timeout`, `breaker_failures` and
+  `breaker_cooldown`. A sink may give any of them, and a key it gives wins.
+  `sinks.delivery_timeout_seconds` and `sinks.circuit_breaker` are gone. Each
+  policy is resolved when the worker is constructed, so a change of these keys in
+  `on_startup` is ignored and logged as `on_startup_config_change_ignored`.
+- **`dlq.enabled` and `dlq.provider` are new.** With `dlq.enabled: false` a `dlq`
+  outcome follows `dlq.on_send_failure`. `dlq.provider` accepts only `kafka`.
+  `dlq.brokers` and `dlq.security` are gone.
 - **Unknown config keys fail the load.** One message lists every unknown key
   from the YAML file and the `DK_*` environment, with a suggestion when a valid
   key is close. The message for moved keys and the refusal of `webapp:` are gone:

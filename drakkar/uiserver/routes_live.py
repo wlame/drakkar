@@ -144,7 +144,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         # of how many partitions the broker has assigned to this worker.
         # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
         # Results) for hooks the handler doesn't implement.
-        kafka_cfg = drakkar_app._config.kafka
+        kafka_cfg = drakkar_app._config.kafka_source_connection
         kafka_src = drakkar_app._config.sources.kafka
         overview = {
             'worker_id': drakkar_app._worker_id,
@@ -165,9 +165,10 @@ def create_live_router(deps: UIDeps) -> APIRouter:
                 'window_complete': False,
             },
             # Kafka-UI deep-link config for the SPA (Jinja globals on the
-            # HTML pages). Always strings; empty when unconfigured.
-            'kafka_ui_base': kafka_cfg.ui_url.rstrip('/'),
-            'kafka_ui_cluster': kafka_cfg.ui_cluster_name,
+            # HTML pages). Always strings; empty when unconfigured or when
+            # the Kafka source is off.
+            'kafka_ui_base': kafka_cfg.ui_url.rstrip('/') if kafka_cfg is not None else '',
+            'kafka_ui_cluster': kafka_cfg.ui_cluster_name if kafka_cfg is not None else '',
             # Empty when the Kafka source is off — there is no source topic
             # to report, and ``kafka_src.topic`` would otherwise leak the
             # unused default.

@@ -12,7 +12,7 @@ import structlog
 from confluent_kafka import KafkaError, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 
-from drakkar.config import KafkaConfig, KafkaSourceConfig
+from drakkar.config import KafkaConnectionConfig, KafkaSourceConfig
 from drakkar.kafka_security import merge_client_config
 from drakkar.metrics import consumer_errors, offsets_committed, rebalance_events
 from drakkar.models import SourceMessage
@@ -52,6 +52,11 @@ CONSUMER_MAX_WORKERS = 8
 AUTO_OFFSET_RESET_TO_END = frozenset({'largest', 'latest', 'end'})
 
 
+def _milliseconds(seconds: float) -> int:
+    """A duration the config holds in seconds, as the whole milliseconds librdkafka wants."""
+    return round(seconds * 1000)
+
+
 def _report_lag_query_failure(*, op: str, error: object, **context: Any) -> None:
     """Log and count one failed lag query, so an outage never reads as "no backlog"."""
     consumer_errors.inc()
@@ -72,7 +77,7 @@ class KafkaConsumer:
 
     def __init__(
         self,
-        connection: KafkaConfig,
+        connection: KafkaConnectionConfig,
         source: KafkaSourceConfig,
         on_assign: OnAssignCallback | None = None,
         on_revoke: OnRevokeCallback | None = None,
@@ -94,9 +99,9 @@ class KafkaConsumer:
                 'enable.auto.commit': False,
                 'auto.offset.reset': 'earliest',
                 'partition.assignment.strategy': 'cooperative-sticky',
-                'max.poll.interval.ms': source.max_poll_interval_ms,
-                'session.timeout.ms': source.session_timeout_ms,
-                'heartbeat.interval.ms': source.heartbeat_interval_ms,
+                'max.poll.interval.ms': _milliseconds(source.max_poll_interval),
+                'session.timeout.ms': _milliseconds(source.session_timeout),
+                'heartbeat.interval.ms': _milliseconds(source.heartbeat_interval),
             },
             connection.security,
             connection.client_config,

@@ -44,7 +44,7 @@ from drakkar.recorder.helpers import open_connection, open_reader
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.recorder.writer import _byte_len, _capped_stdin
 from drakkar.recorder.writer import logger as writer_logger
-from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, kafka_connections, make_ui_config, wait_for
 
 
 class _RecData(BaseModel):
@@ -2125,7 +2125,7 @@ def _make_drakkar_config():
     from drakkar.config import DrakkarConfig
 
     return DrakkarConfig(
-        kafka={'brokers': 'kafka:9092'},
+        connections=kafka_connections(brokers='kafka:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'test-topic', 'consumer_group': 'test-group'}},
         executor={
             'binary_path': '/usr/bin/test',
@@ -2254,6 +2254,28 @@ async def test_write_config_empty_topic_and_group_when_kafka_source_off(tmp_path
     await rec.stop()
 
 
+async def test_write_config_with_no_kafka_source_stores_no_kafka_brokers(tmp_path):
+    """An HTTP-only worker has no Kafka source and may declare no Kafka connection at all."""
+    from drakkar.config import DrakkarConfig
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    await rec.start()
+
+    await rec.write_config(
+        DrakkarConfig(
+            connections={'kafka': {'main': {'brokers': 'used-by-a-sink:9092'}}},
+            executor={'binary_path': '/usr/bin/echo'},
+            sources={'http': {'enabled': True}},
+        )
+    )
+
+    async with rec._db.execute('SELECT kafka_brokers FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row == ('',)
+    await rec.stop()
+
+
 # --- H7: secrets in recorder must be redacted ---
 
 
@@ -2269,7 +2291,7 @@ async def test_write_config_redacts_sasl_kafka_brokers(tmp_path):
     await rec.start()
 
     drakkar_cfg = DrakkarConfig(
-        kafka={'brokers': 'SASL_SSL://alice:s3cret@kafka-1.example.com:9094'},
+        connections=kafka_connections(brokers='SASL_SSL://alice:s3cret@kafka-1.example.com:9094'),
         sources={'kafka': {'enabled': True, 'topic': 't', 'consumer_group': 'g'}},
         executor={'binary_path': '/bin/echo'},
         sinks={'kafka': {'out': {'topic': 'results'}}},

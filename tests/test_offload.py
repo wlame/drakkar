@@ -28,6 +28,7 @@ from drakkar.config import OffloadConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context, current_hook_context
 from drakkar.offload import InlineOffloader, OffloaderLike, OffloadPool, resolve_max_threads
+from tests.conftest import kafka_connections
 
 
 class FakeRecorder:
@@ -349,7 +350,7 @@ async def test_lifecycle_wires_auto_sized_pool_from_the_executor_config():
     from drakkar.config import DrakkarConfig
     from drakkar.lifecycle import AppLifecycle
 
-    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     config.executor.max_executors = 13
     handler = SimpleNamespace(_offloader=None)
     app = SimpleNamespace(_config=config, _recorder=None, _handler=handler, _offload_pool=None)

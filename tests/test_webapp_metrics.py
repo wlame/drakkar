@@ -164,7 +164,7 @@ def _make_canned_result(task: ExecutorTask) -> ExecutorResult:
     )
 
 
-def _make_webapp(*, rpm: int = 4, request_timeout_seconds: float = 30.0, max_concurrent: int = 64) -> WebApp:
+def _make_webapp(*, rpm: int = 4, request_timeout: str = '30s', max_concurrent: int = 64) -> WebApp:
     """Build a fully-wired WebApp for TestClient / metric assertions."""
     handler = _MetricsHandler()
     app = _make_app_stub(handler, is_ready=True, pool=_make_pool_returning([]))
@@ -173,7 +173,7 @@ def _make_webapp(*, rpm: int = 4, request_timeout_seconds: float = 30.0, max_con
         host='127.0.0.1',
         port=0,
         path='/process',
-        request_timeout_seconds=request_timeout_seconds,
+        request_timeout=request_timeout,
         max_concurrent=max_concurrent,
         clients=[
             WebClientConfig(name='anonymous', token='', rpm=rpm),

@@ -32,51 +32,6 @@ cluster_name_env: ''               # env: DK_CLUSTER_NAME_ENV  · reasonable: K8
 
 ---
 
-## Kafka connection (`kafka:`)
-
-📚 [Deep details](configuration.md#kafka-connection-kafka)
-
-Kafka cluster connection settings: brokers, transport security, raw client properties, Kafka-UI links. Shared by the Kafka source, the Kafka sinks, and the DLQ — `brokers` doubles as their fallback when their own `brokers` field is left empty.
-
-```yaml
-kafka:
-  brokers: localhost:9092          # bootstrap servers, comma-separated. env: DK_KAFKA__BROKERS  · reasonable: kafka-1:9092,kafka-2:9092
-
-  # Transport security. Default PLAINTEXT emits no client properties at all, so a worker
-  # that configures nothing here connects exactly as it always did. Kafka sinks and the DLQ
-  # inherit this block whenever their own `brokers` field is empty.
-  security:
-    protocol: PLAINTEXT            # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL. env: DK_KAFKA__SECURITY__PROTOCOL
-    sasl_mechanism: null           # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 | GSSAPI | OAUTHBEARER.
-                                   #   Required for SASL_* protocols, rejected for the others.
-                                   #   env: DK_KAFKA__SECURITY__SASL_MECHANISM
-    sasl_username: ''              # env: DK_KAFKA__SECURITY__SASL_USERNAME
-    sasl_password: ''              # prefer the env override over a YAML literal.
-                                   #   env: DK_KAFKA__SECURITY__SASL_PASSWORD
-    ssl_ca_location: ''            # PEM CA bundle; empty uses the system trust store.
-                                   #   env: DK_KAFKA__SECURITY__SSL_CA_LOCATION
-    ssl_certificate_location: ''   # client cert (mutual TLS). env: DK_KAFKA__SECURITY__SSL_CERTIFICATE_LOCATION
-    ssl_key_location: ''           # client key (mutual TLS); requires ssl_certificate_location.
-                                   #   env: DK_KAFKA__SECURITY__SSL_KEY_LOCATION
-    ssl_key_password: ''           # passphrase for an encrypted client key.
-                                   #   env: DK_KAFKA__SECURITY__SSL_KEY_PASSWORD
-    ssl_endpoint_identification_algorithm: null  # unset = librdkafka default ("https", verification on).
-                                   #   Set to "none" ONLY for internal CAs without matching SANs.
-
-  # Escape hatch: raw librdkafka properties, merged AFTER `security` so they win.
-  # For options the typed block does not model. These four keys are rejected at startup —
-  # each one backs a delivery invariant: enable.auto.commit, partition.assignment.strategy,
-  # group.id, bootstrap.servers.
-  client_config: {}                # env: DK_KAFKA__CLIENT_CONFIG (JSON object)
-
-  # Kafka-UI deep-link integration: when both are set, the operator UI shows a clickable
-  # icon next to every <partition:offset>. Both empty = feature disabled silently.
-  ui_url: ''                       # env: DK_KAFKA__UI_URL  · example: http://kafka-ui:8080
-  ui_cluster_name: ''              # cluster name registered in Kafka-UI. env: DK_KAFKA__UI_CLUSTER_NAME
-```
-
----
-
 ## Input sources (`sources:`)
 
 📚 [Deep details](configuration.md#input-sources-sources) · [Input Sources](sources.md) · [Staggered startup](configuration.md#staggered-startup-alignment) · [Webapp page](webapp.md)
@@ -87,13 +42,14 @@ The Kafka consumer and the synchronous HTTP ingress, as peers. Each is optional 
 sources:
   kafka:
     enabled: false                   # consume the Kafka topic; off = no consumer group joined, arrange() never called. env: DK_SOURCES__KAFKA__ENABLED
+    connection: main                 # the cluster to read: a name under connections.kafka; must be declared. env: DK_SOURCES__KAFKA__CONNECTION
     topic: input-events              # topic to consume from. env: DK_SOURCES__KAFKA__TOPIC
     consumer_group: drakkar-workers  # consumer-group ID; workers sharing it split partitions. env: DK_SOURCES__KAFKA__CONSUMER_GROUP
 
     max_poll_records: 100            # messages per poll batch; ↑ throughput / ↓ latency. env: DK_SOURCES__KAFKA__MAX_POLL_RECORDS  · reasonable: 50–500
-    max_poll_interval_ms: 300000     # max ms between polls before broker kicks us out. env: DK_SOURCES__KAFKA__MAX_POLL_INTERVAL_MS  · raise for slow tasks
-    session_timeout_ms: 45000        # group-membership heartbeat window. env: DK_SOURCES__KAFKA__SESSION_TIMEOUT_MS
-    heartbeat_interval_ms: 3000      # heartbeat frequency; should be ≤ session_timeout_ms / 3. env: DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL_MS
+    max_poll_interval: 5m            # max time between polls before broker kicks us out. env: DK_SOURCES__KAFKA__MAX_POLL_INTERVAL  · raise for slow tasks
+    session_timeout: 45s             # group-membership heartbeat window. env: DK_SOURCES__KAFKA__SESSION_TIMEOUT
+    heartbeat_interval: 3s           # heartbeat frequency; should be ≤ session_timeout / 3. env: DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL
 
     # Policy for messages whose value fails input_model parsing. env: DK_SOURCES__KAFKA__ON_PARSE_ERROR
     #   skip  — message reaches arrange() with payload=None and msg.parse_error set (default)
@@ -104,19 +60,20 @@ sources:
     on_parse_error: skip
 
     # Rolling-deploy alignment: serialize fleet-wide consumer-group rebalances.
-    startup_align_enabled: true      # disable for snappy single-process dev. env: DK_SOURCES__KAFKA__STARTUP_ALIGN_ENABLED
-    startup_min_wait_seconds: 4.0    # min sleep before alignment (buffer for slow init). env: DK_SOURCES__KAFKA__STARTUP_MIN_WAIT_SECONDS
-    startup_align_interval_seconds: 10  # wake at next time%interval==0 boundary. env: DK_SOURCES__KAFKA__STARTUP_ALIGN_INTERVAL_SECONDS
+    startup_align:
+      enabled: true                  # disable for snappy single-process dev. env: DK_SOURCES__KAFKA__STARTUP_ALIGN__ENABLED
+      min_wait: 4s                   # min sleep before alignment (buffer for slow init). env: DK_SOURCES__KAFKA__STARTUP_ALIGN__MIN_WAIT
+      interval: 10s                  # whole seconds; wake at next time%interval==0 boundary. env: DK_SOURCES__KAFKA__STARTUP_ALIGN__INTERVAL
 
   http:
     enabled: false                   # master switch; false = no FastAPI server. env: DK_SOURCES__HTTP__ENABLED
     host: '0.0.0.0'                  # uvicorn bind interface. env: DK_SOURCES__HTTP__HOST
     port: 8090                       # uvicorn bind port. env: DK_SOURCES__HTTP__PORT
     path: '/process'                 # single POST route; must start with '/'. env: DK_SOURCES__HTTP__PATH
-    sinks_enabled: false             # when true, route on_message_complete payloads through SinkManager. env: DK_SOURCES__HTTP__SINKS_ENABLED
-    request_timeout_seconds: 30.0    # per-request budget; > 0. env: DK_SOURCES__HTTP__REQUEST_TIMEOUT_SECONDS
+    deliver_to_sinks: false          # when true, route on_message_complete payloads through SinkManager. env: DK_SOURCES__HTTP__DELIVER_TO_SINKS
+    request_timeout: 30s             # per-request budget; > 0. env: DK_SOURCES__HTTP__REQUEST_TIMEOUT
     max_concurrent: 64               # per-worker in-flight cap; > 0. 65th concurrent request 503s. env: DK_SOURCES__HTTP__MAX_CONCURRENT
-    max_body_bytes: 10485760         # request-body cap in bytes; > 0 (413 beyond). env: DK_SOURCES__HTTP__MAX_BODY_BYTES
+    max_body: 10MiB                  # request-body cap; > 0 (413 beyond). env: DK_SOURCES__HTTP__MAX_BODY
 
     # Configured tenants. At least one entry is required; default is one
     # anonymous client with rpm=4 so the HTTP source works out of the box.
@@ -180,20 +137,27 @@ executor:
 
 Where processed results are delivered. Each sink type maps **instance names → config**, so you can have multiple instances of the same type writing to different destinations. All instance keys (e.g. `results`, `analytics`) are user-chosen.
 
+A Kafka, Postgres, Mongo or Redis sink names a connection under [`connections`](#connections-connections). The connection says how to reach the service and log in. The sink says what to do with it, and owns its client or pool, so several sinks may share one connection.
+
 ### Keys of every sink instance
 
-📚 [Deep details](configuration.md#keys-of-every-sink-instance) · [Failure policy](sinks.md#failure-policy)
+📚 [Deep details](configuration.md#keys-of-every-sink-instance) · [Failure policy](sinks.md#failure-policy) · [Circuit breaker](sinks.md#circuit-breaker)
 
-Every instance of every type takes these three keys
-next to its own:
+`sinks.defaults` holds the default of five policy keys. An instance may give any of them; a key it does not give reads `sinks.defaults`, and a key it gives wins even when it equals the default. Each sink's policy is resolved once, when the worker is constructed.
 
 ```yaml
 sinks:
+  defaults:
+    on_failure: dlq                # dlq | skip: when the retry budget is spent. env: DK_SINKS__DEFAULTS__ON_FAILURE
+    max_retries: 2                 # 0-10: retries after the first attempt, spent only by a hook that returns RETRY (the default hook makes one attempt, then applies on_failure). env: DK_SINKS__DEFAULTS__MAX_RETRIES
+    delivery_timeout: 30s          # budget for one deliver() and one close(). env: DK_SINKS__DEFAULTS__DELIVERY_TIMEOUT  · reasonable: 10s–2m
+    breaker_failures: 5            # consecutive terminal failures to trip the circuit breaker. env: DK_SINKS__DEFAULTS__BREAKER_FAILURES  · reasonable: 3–10
+    breaker_cooldown: 30s          # time open before the half-open probe. env: DK_SINKS__DEFAULTS__BREAKER_COOLDOWN  · reasonable: 10s–2m
   kafka:
     results:
       topic: search-results
-      on_failure: dlq              # dlq | skip: when the retry budget is spent. env: DK_SINKS__KAFKA__RESULTS__ON_FAILURE
-      max_retries: 2               # 0-10: retries after the first attempt, spent only by a hook that returns RETRY (the default hook makes one attempt, then applies on_failure). env: DK_SINKS__KAFKA__RESULTS__MAX_RETRIES
+      on_failure: skip             # the same five keys, on one instance. env: DK_SINKS__KAFKA__RESULTS__ON_FAILURE
+      delivery_timeout: 10s        # env: DK_SINKS__KAFKA__RESULTS__DELIVERY_TIMEOUT
       depends_on: []               # sinks to deliver first, as '<type>/<name>' (set it in YAML)
 ```
 
@@ -205,15 +169,13 @@ sinks:
 sinks:
   kafka:
     results:                       # instance name (free-form, referenced from handler code)
+      connection: main             # a name under connections.kafka; must be declared. env: DK_SINKS__KAFKA__RESULTS__CONNECTION
       topic: search-results        # required. env: DK_SINKS__KAFKA__RESULTS__TOPIC
-      brokers: ''                  # empty = inherit kafka.brokers AND kafka.security.
-                                   #   env: DK_SINKS__KAFKA__RESULTS__BROKERS
       ui_url: ''                   # link to Kafka-UI/Kowl in the UI dashboard. env: DK_SINKS__KAFKA__RESULTS__UI_URL
-      security: {}                 # only consulted when `brokers` is set above; same fields as
-                                   #   kafka.security. Leaving brokers empty is the usual choice.
-      client_config: {}            # raw librdkafka overrides for this sink
-      flush_timeout_seconds: 30.0  # bound on the per-batch producer flush. env: DK_SINKS__KAFKA__RESULTS__FLUSH_TIMEOUT_SECONDS
-                                   #   reasonable: 10-60; a last resort, not a latency target
+      client_config: {}            # raw librdkafka overrides for this sink, merged after the connection's;
+                                   #   this sink wins on a shared key
+      flush_timeout: 30s           # bound on the per-batch producer flush. env: DK_SINKS__KAFKA__RESULTS__FLUSH_TIMEOUT
+                                   #   reasonable: 10s-1m; a last resort, not a latency target
 ```
 
 ### PostgreSQL sink
@@ -224,7 +186,7 @@ sinks:
 sinks:
   postgres:
     main-db:
-      dsn: postgresql://user:pass@db:5432/myapp  # required. env: DK_SINKS__POSTGRES__MAIN_DB__DSN
+      connection: main             # a name under connections.postgres; must be declared. env: DK_SINKS__POSTGRES__MAIN_DB__CONNECTION
       pool_min: 2                  # min connections in asyncpg pool. env: DK_SINKS__POSTGRES__MAIN_DB__POOL_MIN  · reasonable: 1–10
       pool_max: 10                 # max connections. env: DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX  · reasonable: 5–50
       ui_url: ''                   # pgAdmin / Adminer URL. env: DK_SINKS__POSTGRES__MAIN_DB__UI_URL
@@ -245,7 +207,7 @@ Statement names must match `^[a-z_][a-z0-9_]*$`; placeholders are written
 sinks:
   mongo:
     logs:
-      uri: mongodb://mongo:27017   # required. env: DK_SINKS__MONGO__LOGS__URI
+      connection: main             # a name under connections.mongo; must be declared. env: DK_SINKS__MONGO__LOGS__CONNECTION
       database: app_logs           # required. env: DK_SINKS__MONGO__LOGS__DATABASE
       ui_url: ''                   # Mongo Express URL. env: DK_SINKS__MONGO__LOGS__UI_URL
       statements:                  # optional. Operator-authored MQL by name
@@ -277,8 +239,7 @@ sinks:
     webhook:
       url: https://api.example.com/webhook  # required, http(s) scheme. env: DK_SINKS__HTTP__WEBHOOK__URL
       method: POST                 # env: DK_SINKS__HTTP__WEBHOOK__METHOD
-      timeout_seconds: 30          # request timeout. env: DK_SINKS__HTTP__WEBHOOK__TIMEOUT_SECONDS
-      max_retries: 2               # the shared key: retries of a failed delivery (0-10). env: DK_SINKS__HTTP__WEBHOOK__MAX_RETRIES
+      request_timeout: 30s         # whole seconds. env: DK_SINKS__HTTP__WEBHOOK__REQUEST_TIMEOUT
       headers: {}                  # extra request headers. env: DK_SINKS__HTTP__WEBHOOK__HEADERS (JSON)
       encoding: json               # body format: json | form | multipart. env: DK_SINKS__HTTP__WEBHOOK__ENCODING
       ui_url: ''                   # env: DK_SINKS__HTTP__WEBHOOK__UI_URL
@@ -292,7 +253,7 @@ sinks:
 sinks:
   redis:
     cache:
-      url: redis://localhost:6379/0  # env: DK_SINKS__REDIS__CACHE__URL
+      connection: main             # a name under connections.redis; must be declared. env: DK_SINKS__REDIS__CACHE__CONNECTION
       key_prefix: ''               # prepended to every key, e.g. "result:". env: DK_SINKS__REDIS__CACHE__KEY_PREFIX
       ui_url: ''                   # RedisInsight URL. env: DK_SINKS__REDIS__CACHE__UI_URL
       scripts:                     # optional. Operator-authored Lua by name
@@ -318,28 +279,6 @@ sinks:
       ui_url: ''                   # env: DK_SINKS__FILESYSTEM__ARCHIVE__UI_URL
 ```
 
-### Delivery timeout (shared default)
-
-📚 [Deep details](configuration.md#delivery-timeout-sinksdelivery_timeout_seconds)
-
-```yaml
-sinks:
-  delivery_timeout_seconds: 30.0   # budget for one deliver() and one close(). env: DK_SINKS__DELIVERY_TIMEOUT_SECONDS  · reasonable: 10–120
-```
-
-### Circuit breaker (shared default)
-
-📚 [Deep details](configuration.md#circuit-breaker-sinkscircuit_breaker) · [State machine](sinks.md#circuit-breaker)
-
-Applies uniformly to every sink instance. Per-sink overrides are not supported in v1 -- if one sink needs different thresholds, adjust the global default.
-
-```yaml
-sinks:
-  circuit_breaker:
-    failure_threshold: 5           # consecutive terminal failures to trip. env: DK_SINKS__CIRCUIT_BREAKER__FAILURE_THRESHOLD  · reasonable: 3–10
-    cooldown_seconds: 30.0         # seconds open before half-open probe. env: DK_SINKS__CIRCUIT_BREAKER__COOLDOWN_SECONDS  · reasonable: 10–120
-```
-
 ---
 
 ## Dead letter queue (`dlq:`)
@@ -350,22 +289,21 @@ Messages that fail to parse, to execute or to deliver are written to this Kafka 
 
 ```yaml
 dlq:
+  enabled: true                    # off: no DLQ producer; a dlq outcome follows on_send_failure. env: DK_DLQ__ENABLED
+  provider: kafka                  # the only value. env: DK_DLQ__PROVIDER
+  connection: main                 # a name under connections.kafka; must be declared when the DLQ has a topic. env: DK_DLQ__CONNECTION
   topic: ''                        # empty = auto-derive "{sources.kafka.topic}_dlq". env: DK_DLQ__TOPIC
                                    #   empty AND sources.kafka.enabled=false = no DLQ producer is
                                    #   built; DLQ sends are dropped and counted
-  brokers: ''                      # empty = inherit kafka.brokers AND kafka.security. env: DK_DLQ__BROKERS
-  security: {}                     # only consulted when `brokers` is set above; same fields as
-                                   #   kafka.security (env: DK_DLQ__SECURITY__<FIELD>).
-                                   #   Leaving brokers empty is the usual choice.
-  client_config: {}                # raw librdkafka overrides for the DLQ producer, merged after
-                                   #   security; only consulted when `brokers` is set
+  client_config: {}                # raw librdkafka overrides for the DLQ producer, merged after the
+                                   #   connection's; the DLQ wins on a shared key
 
   # Strategy when no DLQ record can be written (the message has nowhere safe to go):
   #   drop  — log CRITICAL + tick drakkar_dlq_dropped_payloads_total (source messages), commit
   #           the offset, keep the pipeline moving; the message is lost (default)
   #   stall — leave the offset uncommitted and pause the partition; messages are
   #           redelivered after restart/rebalance (no loss, at the cost of lag)
-  flush_timeout_seconds: 30.0      # bound on the per-write producer flush. env: DK_DLQ__FLUSH_TIMEOUT_SECONDS
+  flush_timeout: 30s               # bound on the per-write producer flush. env: DK_DLQ__FLUSH_TIMEOUT
   on_send_failure: drop            # env: DK_DLQ__ON_SEND_FAILURE
 ```
 
@@ -781,34 +719,67 @@ fleet:
 
 📚 [Deep details](configuration.md#connections) · [Fleet registry](fleet.md#connections)
 
-Named connections to shared services, declared once. A feature that needs a service names a connection (`fleet.registry.connection`, `periodic.election.connection`) and uses `main` when it names nothing. Each service type maps **connection names → config**; the names are user-chosen and written in lower case. Set the secret fields (`token`, `url`, `dsn`) from the environment; see [Security](security.md#provider-credentials). The `postgres` registry and election providers read `connections.postgres.<name>`, the `redis` ones read `connections.redis.<name>`, and the `consul` ones read `connections.consul.<name>`.
+A service is declared once. `connections.<kind>.<name>` says how to reach it and log in; a consumer says `connection: <name>` (default `main`), and the entry must be declared. A consumer in use that names an entry not declared fails the load with `<path>.connection '<name>' is not defined under connections.<kind>`. In use means: an enabled Kafka source, every configured sink of a connection kind, the DLQ when it has a destination, the recorder's Postgres table, and a registry or election provider that uses a connection. A different login to one server is a different connection. The names are user-chosen and written in lower case. Set the secret fields (`sasl_password`, `ssl_key_password`, `token`, `url`, `uri`, `dsn`) from the environment; see [Security](security.md#provider-credentials).
 
 ```yaml
 connections:
-  consul:
+  kafka:
     main:
-      address: http://127.0.0.1:8500   # http:// or https://, checked when a provider starts. env: DK_CONNECTIONS__CONSUL__MAIN__ADDRESS
-      token: ''                        # ACL token, sent in the X-Consul-Token header; a secret. env: DK_CONNECTIONS__CONSUL__MAIN__TOKEN
-      datacenter: ''                   # '' = the agent's datacenter. env: DK_CONNECTIONS__CONSUL__MAIN__DATACENTER
-      key_prefix: drakkar              # segments of letters, digits, _ . - joined by '/'; no leading or trailing '/';
-                                       #   no segment '.' or '..'. env: DK_CONNECTIONS__CONSUL__MAIN__KEY_PREFIX
-  redis:
-    main:
-      url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...); percent-encode special characters of the password.
-                                       #   env: DK_CONNECTIONS__REDIS__MAIN__URL
-      key_prefix: 'drakkar:'           # letters, digits, _ : . -; may be empty. env: DK_CONNECTIONS__REDIS__MAIN__KEY_PREFIX
+      brokers: localhost:9092          # bootstrap servers, comma-separated. env: DK_CONNECTIONS__KAFKA__MAIN__BROKERS
+
+      # Transport security. Default PLAINTEXT emits no client properties at all.
+      security:
+        protocol: PLAINTEXT            # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL. env: DK_CONNECTIONS__KAFKA__MAIN__SECURITY__PROTOCOL
+        sasl_mechanism: null           # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 | GSSAPI | OAUTHBEARER.
+                                       #   Required for SASL_* protocols, rejected for the others.
+        sasl_username: ''
+        sasl_password: ''              # a secret; prefer the env override over a YAML literal.
+                                       #   env: DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_PASSWORD
+        ssl_ca_location: ''            # PEM CA bundle; empty uses the system trust store.
+        ssl_certificate_location: ''   # client cert (mutual TLS).
+        ssl_key_location: ''           # client key (mutual TLS); requires ssl_certificate_location.
+        ssl_key_password: ''           # a secret; passphrase for an encrypted client key.
+        ssl_endpoint_identification_algorithm: null  # unset = librdkafka default ("https", verification on).
+                                       #   Set to "none" ONLY for internal CAs without matching SANs.
+
+      # Escape hatch: raw librdkafka properties, merged AFTER `security` so they win, for every
+      # client of this connection. A Kafka sink's or the DLQ's own client_config is merged after
+      # this one. These four keys are rejected at startup, because each one backs a delivery
+      # invariant: enable.auto.commit, partition.assignment.strategy, group.id, bootstrap.servers.
+      client_config: {}                # env: DK_CONNECTIONS__KAFKA__MAIN__CLIENT_CONFIG (JSON object)
+
+      # Kafka-UI deep links of the source topic: when both are set, the operator UI shows a
+      # clickable icon next to every <partition:offset>. Both empty = feature disabled silently.
+      ui_url: ''                       # env: DK_CONNECTIONS__KAFKA__MAIN__UI_URL  · example: http://kafka-ui:8080
+      ui_cluster_name: ''              # cluster name registered in Kafka-UI. env: DK_CONNECTIONS__KAFKA__MAIN__UI_CLUSTER_NAME
   postgres:
     main:
       dsn: postgresql://user:password@host/db  # required; a secret. env: DK_CONNECTIONS__POSTGRES__MAIN__DSN
-      schema: drakkar                  # lower-case identifier. env: DK_CONNECTIONS__POSTGRES__MAIN__SCHEMA
+      schema: drakkar                  # the schema of the tables Drakkar itself keeps; lower-case identifier. env: DK_CONNECTIONS__POSTGRES__MAIN__SCHEMA
       manage_schema: true              # create the schema and tables at the first provider start. false: they must exist;
                                        #   create them with `drakkar-schema postgres --schema=<name>`; add
                                        #   `--recorder [--table-prefix=<p>] [--retention-hours=<n>]` for the
                                        #   recorder events table (the role must own it).
                                        #   env: DK_CONNECTIONS__POSTGRES__MAIN__MANAGE_SCHEMA
       pool_min: 1                      # env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MIN
-      pool_max: 4                      # must be >= pool_min. One pool serves the registry and the election.
-                                       #   env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MAX
+      pool_max: 4                      # must be >= pool_min. This pool serves the registry and the election; a Postgres sink
+                                       #   has a pool of its own. env: DK_CONNECTIONS__POSTGRES__MAIN__POOL_MAX
+  redis:
+    main:
+      url: redis://localhost:6379/0    # a secret; rediss:// is TLS, the path is the database number; no query options (?...); percent-encode special characters of the password.
+                                       #   env: DK_CONNECTIONS__REDIS__MAIN__URL
+      state_prefix: 'drakkar:'         # prefix of the keys Drakkar itself keeps; letters, digits, _ : . -; may be empty.
+                                       #   env: DK_CONNECTIONS__REDIS__MAIN__STATE_PREFIX
+  mongo:
+    main:
+      uri: mongodb://mongo:27017       # required; a secret. env: DK_CONNECTIONS__MONGO__MAIN__URI
+  consul:
+    main:
+      address: http://127.0.0.1:8500   # http:// or https://, checked when a provider starts. env: DK_CONNECTIONS__CONSUL__MAIN__ADDRESS
+      token: ''                        # ACL token, sent in the X-Consul-Token header; a secret. env: DK_CONNECTIONS__CONSUL__MAIN__TOKEN
+      datacenter: ''                   # '' = the agent's datacenter. env: DK_CONNECTIONS__CONSUL__MAIN__DATACENTER
+      state_prefix: drakkar            # prefix of the keys Drakkar itself keeps; segments of letters, digits, _ . - joined by '/';
+                                       #   no leading or trailing '/'; no segment '.' or '..'. env: DK_CONNECTIONS__CONSUL__MAIN__STATE_PREFIX
 ```
 
 ---
@@ -832,10 +803,11 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 | Where | Path → env var |
 |-------|---------------|
 | Top-level | `cluster_name` → `DK_CLUSTER_NAME` |
-| One level deep | `kafka.brokers` → `DK_KAFKA__BROKERS` |
+| One level deep | `metrics.port` → `DK_METRICS__PORT` |
 | Section, sub-section, field | `sources.kafka.topic` → `DK_SOURCES__KAFKA__TOPIC` |
 | Two levels deep | `fleet.cache_exchange.interval_seconds` → `DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS` |
-| Map key (sink instance) | `sinks.postgres.main-db.dsn` → `DK_SINKS__POSTGRES__MAIN_DB__DSN` |
+| Map key (sink instance) | `sinks.postgres.main-db.pool_max` → `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` |
+| Map key (connection) | `connections.kafka.main.brokers` → `DK_CONNECTIONS__KAFKA__MAIN__BROKERS` |
 | List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |
 | List value | `ui.expose_env_vars` → `DK_UI__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
 | Dict value | `executor.env` → `DK_EXECUTOR__ENV='{"FOO":"bar"}'` (JSON) |

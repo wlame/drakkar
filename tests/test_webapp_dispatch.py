@@ -108,7 +108,7 @@ def _make_stub_app(
     return app
 
 
-def _make_config(*, max_concurrent: int = 64, request_timeout_seconds: float = 30.0) -> WebAppConfig:
+def _make_config(*, max_concurrent: int = 64, request_timeout: str = '30s') -> WebAppConfig:
     return WebAppConfig(
         enabled=True,
         host='127.0.0.1',
@@ -116,7 +116,7 @@ def _make_config(*, max_concurrent: int = 64, request_timeout_seconds: float = 3
         path='/process',
         clients=[WebClientConfig(name='anonymous', token='', rpm=10000)],
         max_concurrent=max_concurrent,
-        request_timeout_seconds=request_timeout_seconds,
+        request_timeout=request_timeout,
     )
 
 
@@ -255,7 +255,7 @@ def test_timeout_triggers_504_and_sets_cancellation_on_t1(background_loop):
 
     app = _make_stub_app(handler, pool=_make_pool(slow_execute), main_loop=background_loop.loop)
     # 0.1s timeout — slow_execute sleeps 2s, so the route will time out.
-    config = _make_config(request_timeout_seconds=0.1)
+    config = _make_config(request_timeout='100ms')
     webapp = WebApp(app, config)
 
     # Patch the runner.run to capture the ctx before delegating.
@@ -444,7 +444,7 @@ def test_max_concurrent_returns_503_capacity_when_pool_full(background_loop):
     handler.arrange_impl = arrange_impl
 
     app = _make_stub_app(handler, pool=_make_pool(execute), main_loop=background_loop.loop)
-    config = _make_config(max_concurrent=2, request_timeout_seconds=10.0)
+    config = _make_config(max_concurrent=2, request_timeout='10s')
     webapp = WebApp(app, config)
 
     # Fire 3 simultaneous requests against the wired webapp. The first

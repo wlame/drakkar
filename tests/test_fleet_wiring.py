@@ -36,7 +36,7 @@ from tests.archive_helpers import (
     idle_archive_task,
     make_sealed_db,
 )
-from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, kafka_connections, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore
 from tests.test_cluster_tasks import NOW, SLOT, RecordingLogger, VirtualClock
 from tests.test_lifecycle_sources import StubSource
@@ -51,9 +51,10 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
         'runtime_health': {'enabled': False},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
-        'sources': {'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
     }
     values.update(overrides)
+    values['connections'] = {**kafka_connections(), **values.get('connections', {})}
     return DrakkarConfig(**values)
 
 

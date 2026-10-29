@@ -20,7 +20,7 @@ from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine
 from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig
 from drakkar.uiserver import server as server_module
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'cache_changes.json').read_text(encoding='utf-8'))
 TOKEN = 'secret-token'
@@ -42,7 +42,7 @@ async def _engine(tmp_path: Path, *, exchange: bool = True) -> CacheEngine:
 
 def _ui(cache_engine: CacheEngine | None, *, token: str = TOKEN):
     drakkar_app = MagicMock()
-    drakkar_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    drakkar_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
     drakkar_app.cache_engine = cache_engine
     drakkar_app._cache_engine = cache_engine

@@ -53,7 +53,7 @@ class HttpSink(BaseSink[HttpPayload]):
     async def connect(self) -> None:
         """Create the httpx async client with configured timeout and headers."""
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self._config.timeout_seconds),
+            timeout=httpx.Timeout(self._config.request_timeout),
             headers=dict(self._config.headers),
         )
         await logger.ainfo(

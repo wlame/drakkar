@@ -23,14 +23,14 @@ Usage:
         --dry-run
 
 Args:
-    --dlq-config: path to the YAML config the worker used. The DLQ topic +
-        brokers are taken from ``dlq.topic`` / ``dlq.brokers`` (with fallback
-        to ``kafka.brokers`` and auto-derived topic ``{sources.kafka.topic}_dlq``,
-        identical to the runtime framework behavior).
+    --dlq-config: path to the YAML config the worker used. The DLQ topic
+        comes from ``dlq.topic`` (auto-derived ``{sources.kafka.topic}_dlq`` when
+        empty) and the brokers from the connection ``dlq.connection`` names,
+        identical to the runtime framework behavior.
     --target-topic: Kafka topic the records are republished to. Required
         unless --dry-run.
     --target-brokers: override the brokers used for producing. Defaults to
-        ``dlq.brokers`` → ``kafka.brokers`` (same as the reader).
+        the brokers of ``dlq.connection`` (same as the reader).
     --dry-run: iterate and log but never produce — useful for estimating
         volume and confirming filters before committing.
     --limit: stop after N records have been READ (not published — a
@@ -129,7 +129,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--target-brokers',
         default=None,
-        help='Override brokers for the producer. Defaults to dlq.brokers or kafka.brokers.',
+        help='Override brokers for the producer. Defaults to the brokers of dlq.connection.',
     )
     parser.add_argument(
         '--dry-run',
@@ -204,16 +204,17 @@ def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
 
     Applies the same fallback rules the runtime framework uses:
       - topic: ``dlq.topic`` when set, else ``{sources.kafka.topic}_dlq``
-      - brokers: ``dlq.brokers`` when set, else ``kafka.brokers``
+      - brokers: the ``brokers`` of the connection ``dlq.connection`` names
     """
     cfg = load_config(config_path)
-    topic = cfg.resolved_dlq_topic
-    brokers = cfg.dlq.brokers or cfg.kafka.brokers
-    if not topic:
-        raise ValueError('cannot derive DLQ topic: dlq.topic is empty and the Kafka source is disabled')
-    if not brokers:
-        raise ValueError('cannot derive DLQ brokers: dlq.brokers and kafka.brokers are both empty')
-    return topic, brokers
+    connection = cfg.dlq_connection
+    if connection is None:
+        raise ValueError(
+            'cannot derive DLQ topic: dlq.enabled is off, or dlq.topic is empty and the Kafka source is disabled'
+        )
+    if not connection.brokers:
+        raise ValueError(f'cannot derive DLQ brokers: connections.kafka.{cfg.dlq.connection}.brokers is empty')
+    return cfg.resolved_dlq_topic, connection.brokers
 
 
 class ReplayPublisher:

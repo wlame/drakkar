@@ -10,13 +10,13 @@ from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.providers.cardlog import InvalidCardLog
 from drakkar.providers.consul import (
     CARD_HELD_MESSAGE,
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     KV_PATH_HEAD,
     ConsulClient,
     ConsulError,
     acquire_key,
-    check_key_prefix,
     check_leader,
+    check_state_prefix,
     close_client,
     create_session,
     destroy_session,
@@ -84,7 +84,7 @@ class ConsulRegistry:
     nothing. The client is the one of ``connections.consul.<connection>``,
     shared with every other feature that names the same connection; ``stop``
     leaves it open, for the worker to close after every provider has stopped.
-    ``client`` presets a client and skips the connections; ``key_prefix``
+    ``client`` presets a client and skips the connections; ``state_prefix``
     applies only to such a preset client, since otherwise it comes from the
     connection entry. It goes into the paths as it is, so it must match the
     characters that the entry allows.
@@ -98,16 +98,16 @@ class ConsulRegistry:
         open_client: Callable[[Any], Awaitable[ConsulClient]] = open_client,
         close_client: Callable[[ConsulClient], Awaitable[None]] = close_client,
         client: ConsulClient | None = None,
-        key_prefix: str = DEFAULT_KEY_PREFIX,
+        state_prefix: str = DEFAULT_STATE_PREFIX,
     ) -> None:
-        check_key_prefix(key_prefix)
+        check_state_prefix(state_prefix)
         self._connection = connection
         self._offline_after = float(offline_after_seconds)
         self._open_client = open_client
         self._close_client = close_client
         self._preset_client = client
-        self._preset_prefix = key_prefix
-        # The client and the key prefix that go with it, set once a start succeeded.
+        self._preset_prefix = state_prefix
+        # The client and the state prefix that go with it, set once a start succeeded.
         self._ready: tuple[ConsulClient, str] | None = None
         # The id of this worker's session. Each change follows the answer that causes it with no await in
         # between: a new id is kept before anything else is awaited, so a publish cancelled later still
@@ -229,7 +229,7 @@ class ConsulRegistry:
         await destroy_session(client, holder)
 
     def _started(self) -> tuple[ConsulClient, str]:
-        """The client and the key prefix; raises after :meth:`stop` and before a successful :meth:`start`."""
+        """The client and the state prefix; raises after :meth:`stop` and before a successful :meth:`start`."""
         if self._stopped:
             raise RuntimeError(PROVIDER_STOPPED)
         if self._ready is None:

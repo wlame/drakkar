@@ -24,7 +24,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -39,7 +38,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
 )
 from drakkar.models import ExecutorTask
-from tests.conftest import wire_kafka_source
+from tests.conftest import kafka_connections, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
@@ -71,8 +70,11 @@ def shutdown_config() -> DrakkarConfig:
     even though we replace them with mocks before exercising shutdown.
     """
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections={
+            **kafka_connections(brokers='localhost:9092'),
+            'postgres': {'main': {'dsn': 'postgresql://localhost/test'}},
+        },
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
@@ -81,7 +83,7 @@ def shutdown_config() -> DrakkarConfig:
         ),
         sinks=SinksConfig(
             kafka={'results': KafkaSinkConfig(topic='test-out')},
-            postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/test')},
+            postgres={'main': PostgresSinkConfig()},
         ),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),

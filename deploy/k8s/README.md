@@ -72,7 +72,7 @@ Examples of common env-var overrides:
 
 ```yaml
 env:
-  - name: DK_KAFKA__BROKERS
+  - name: DK_CONNECTIONS__KAFKA__MAIN__BROKERS
     value: "kafka-bootstrap.kafka:9092"
   - name: DK_EXECUTOR__MAX_EXECUTORS
     value: "16"

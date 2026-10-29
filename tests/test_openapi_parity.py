@@ -28,7 +28,7 @@ from drakkar.config import DrakkarConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_openapi import SPEC_PATH
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 _HTTP_METHODS = {'get', 'post', 'put', 'delete', 'patch'}
 
@@ -138,7 +138,7 @@ def _stub_app():
     app._worker_id = 'parity-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     return create_ui_app(make_ui_config(), recorder, app)
 
 
@@ -187,7 +187,7 @@ async def test_api_docs_gated_when_token_configured():
     app._worker_id = 'parity-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     fastapi_app = create_ui_app(cfg, recorder, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -213,7 +213,7 @@ async def test_framework_openapi_route_is_not_served():
     app._worker_id = 'parity-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         # Not a route, so it falls through to the page catch-all — which is
@@ -301,7 +301,7 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     app._worker_id = 'schema-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.config_summary = '[schema-worker]'
     app._executor_pool = None
 
@@ -377,7 +377,7 @@ async def test_timeline_events_payload_matches_schema():
     app._worker_id = 'schema-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.config_summary = '[schema-worker]'
     app._executor_pool = None
 
@@ -425,7 +425,7 @@ async def test_archives_payload_matches_schema(tmp_path):
     app._worker_id = 'schema-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
 
     transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -487,7 +487,7 @@ async def test_workers_payload_matches_schema():
     app._worker_id = 'schema-worker'
     app._cluster_name = 'search'
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.lifecycle_state = 'running'
     app.cluster_tasks_hash = own_hash
     app.fleet = StubFleet()
@@ -540,7 +540,7 @@ async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch
     app._worker_id = 'degraded-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.config_summary = '[degraded-worker]'
     app._executor_pool.max_executors = 4
     app._executor_pool.running_task_ids = set()
@@ -569,7 +569,7 @@ async def test_databases_payload_matches_schema(tmp_path):
         recorder._record({'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': 1})
         await recorder.flush()
         app = MagicMock()
-        app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
         app._config.ui.release.enabled = False
         transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
         async with AsyncClient(transport=transport, base_url='http://test') as client:

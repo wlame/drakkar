@@ -26,7 +26,7 @@ from drakkar.config import (
     CacheExchangeConfig,
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
     KafkaSourceConfig,
     LoggingConfig,
@@ -49,7 +49,7 @@ from drakkar.models import (
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.kafka import KafkaSink
-from tests.conftest import wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
 from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
@@ -81,8 +81,8 @@ def echo_pool() -> ExecutorPool:
 @pytest.fixture
 def app_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10, window_size=5),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
@@ -256,7 +256,9 @@ async def test_kafka_sink_ignores_producer_wide_remainder_when_its_own_futures_a
     or ships delivered payloads to the DLQ for a replay that duplicates them
     again.
     """
-    sink = KafkaSink(name='k', config=KafkaSinkConfig(topic='out'), brokers_fallback='localhost:9092')
+    sink = KafkaSink(
+        name='k', config=KafkaSinkConfig(topic='out'), connection=KafkaConnectionConfig(brokers='localhost:9092')
+    )
     ok_report = MagicMock()
     ok_report.error.return_value = None
 
@@ -274,7 +276,9 @@ async def test_kafka_sink_reports_a_broker_error_carried_in_its_own_report():
     raised, so a resolved future is not on its own a confirmation. This path
     is unchanged by the producer-wide-remainder fix and must stay a failure.
     """
-    sink = KafkaSink(name='k', config=KafkaSinkConfig(topic='out'), brokers_fallback='localhost:9092')
+    sink = KafkaSink(
+        name='k', config=KafkaSinkConfig(topic='out'), connection=KafkaConnectionConfig(brokers='localhost:9092')
+    )
     err_report = MagicMock()
     err_report.error.return_value = 'BROKER_DOWN'
 
@@ -292,8 +296,8 @@ async def test_kafka_sink_timeout_survives_an_unresolved_future_without_cancelli
     the producer thread sets their result when the report finally arrives, and
     setting a result on a cancelled future raises inside that thread.
     """
-    cfg = KafkaSinkConfig(topic='out', flush_timeout_seconds=0.05)
-    sink = KafkaSink(name='k', config=cfg, brokers_fallback='localhost:9092')
+    cfg = KafkaSinkConfig(topic='out', flush_timeout='50ms')
+    sink = KafkaSink(name='k', config=cfg, connection=KafkaConnectionConfig(brokers='localhost:9092'))
 
     stuck: list[asyncio.Future] = []
 
@@ -315,7 +319,9 @@ async def test_kafka_sink_timeout_survives_an_unresolved_future_without_cancelli
 
 
 async def test_kafka_sink_collects_futures_when_flush_raises():
-    sink = KafkaSink(name='k', config=KafkaSinkConfig(topic='out'), brokers_fallback='localhost:9092')
+    sink = KafkaSink(
+        name='k', config=KafkaSinkConfig(topic='out'), connection=KafkaConnectionConfig(brokers='localhost:9092')
+    )
     err_report = MagicMock()
     err_report.error.return_value = 'BROKER_DOWN'
 
@@ -355,8 +361,8 @@ async def test_on_delivery_error_raise_applies_the_declared_policy_and_records_b
 
 
 @pytest.fixture
-def kafka_config() -> KafkaConfig:
-    return KafkaConfig(brokers='localhost:9092')
+def kafka_config() -> KafkaConnectionConfig:
+    return KafkaConnectionConfig(brokers='localhost:9092')
 
 
 @pytest.fixture

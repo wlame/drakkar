@@ -1,8 +1,8 @@
 """Config contract cases from ``tests/fixtures/config_contract.json``.
 
-The fixture pins three things byte for byte for any implementation of the
-config format: the load error for unknown keys, the summary one-liner, and
-the cross-field validation messages. Every case goes
+The fixture pins four things for any implementation of the config format: the
+load error for unknown keys, the summary one-liner, the cross-field validation
+messages, and the resolved policy of a sink instance. Every case goes
 through the public loader exactly as an operator's file would: its ``yaml``
 is merged over the fixture's ``base`` and written to a real YAML file, and
 its ``env`` entries are set as ``DK_*`` variables.
@@ -48,7 +48,7 @@ def value_at_path(config: DrakkarConfig, path: str) -> object:
 
 
 def test_fixture_case_names_are_unique():
-    for section in ('unknown_keys', 'summary', 'load_values', 'validation'):
+    for section in ('unknown_keys', 'summary', 'load_values', 'validation', 'sink_policies'):
         names = _case_ids(FIXTURE[section])
         assert len(names) == len(set(names)), section
 
@@ -65,6 +65,15 @@ def test_load_value_case_loads_with_the_contract_value(case, tmp_path, monkeypat
     config = _load(case, tmp_path, monkeypatch)
 
     assert value_at_path(config, case['path']) == case['value']
+
+
+@pytest.mark.parametrize('case', FIXTURE['sink_policies'], ids=_case_ids(FIXTURE['sink_policies']))
+def test_sink_policy_case_resolves_to_the_contract_policy(case, tmp_path, monkeypatch):
+    config = _load(case, tmp_path, monkeypatch)
+
+    sink_type, name = case['sink'].split('/')
+    policy = config.sinks.policy_of(sink_type, name)
+    assert {**policy.model_dump(), 'depends_on': list(policy.depends_on)} == case['policy']
 
 
 @pytest.mark.parametrize('case', FIXTURE['validation'], ids=_case_ids(FIXTURE['validation']))

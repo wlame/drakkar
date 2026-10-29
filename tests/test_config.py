@@ -12,7 +12,7 @@ from drakkar.config import (
     ExecutorConfig,
     FileSinkConfig,
     HttpSinkConfig,
-    KafkaConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -25,13 +25,13 @@ from drakkar.config import (
     WebClientConfig,
     load_config,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import KAFKA_CONNECTION_YAML, kafka_connections, make_ui_config
 
-# --- KafkaConfig (source/consumer) ---
+# --- KafkaConnectionConfig ---
 
 
 def test_kafka_config_defaults():
-    cfg = KafkaConfig()
+    cfg = KafkaConnectionConfig()
     assert cfg.brokers == 'localhost:9092'
 
 
@@ -89,7 +89,8 @@ def test_executor_config_output_caps_env_override(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv('DK_EXECUTOR__MAX_STDOUT_BYTES', '1048576')
     monkeypatch.setenv('DK_EXECUTOR__MAX_STDERR_BYTES', '65536')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.executor.max_stdout_bytes == 1048576
     assert cfg.executor.max_stderr_bytes == 65536
 
@@ -117,11 +118,13 @@ def test_env_inherit_deny_withholds_unambiguous_secrets(name):
 def test_kafka_sink_config():
     cfg = KafkaSinkConfig(topic='results')
     assert cfg.topic == 'results'
-    assert cfg.brokers == ''
+    assert cfg.connection == 'main'
+    assert cfg.client_config == {}
+    assert cfg.flush_timeout == 30.0
 
 
 def test_postgres_sink_config():
-    cfg = PostgresSinkConfig(dsn='postgresql://localhost/db')
+    cfg = PostgresSinkConfig()
     assert cfg.pool_min == 2
     assert cfg.pool_max == 10
 
@@ -129,9 +132,9 @@ def test_postgres_sink_config():
 def test_http_sink_config_defaults():
     cfg = HttpSinkConfig(url='https://api.example.com/results')
     assert cfg.method == 'POST'
-    assert cfg.timeout_seconds == 30
+    assert cfg.request_timeout == 30
     assert cfg.headers == {}
-    assert cfg.max_retries == 2
+    assert cfg.max_retries is None
 
 
 # --- H8: HttpSinkConfig.url validation ---
@@ -237,7 +240,7 @@ def test_http_sink_config_allows_other_headers():
 
 def test_redis_sink_config_defaults():
     cfg = RedisSinkConfig()
-    assert cfg.url == 'redis://localhost:6379/0'
+    assert cfg.connection == 'main'
     assert cfg.key_prefix == ''
 
 
@@ -266,7 +269,7 @@ def test_sinks_config_single_kafka():
 def test_sinks_config_multiple_types():
     cfg = SinksConfig(
         kafka={'results': KafkaSinkConfig(topic='results')},
-        postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/db')},
+        postgres={'main': PostgresSinkConfig()},
     )
     assert cfg.summary() == {'kafka': ['results'], 'postgres': ['main']}
 
@@ -287,8 +290,8 @@ def test_sinks_config_multiple_instances_same_type():
 def test_sinks_config_all_types():
     cfg = SinksConfig(
         kafka={'k': KafkaSinkConfig(topic='t')},
-        postgres={'p': PostgresSinkConfig(dsn='postgresql://x')},
-        mongo={'m': MongoSinkConfig(uri='mongodb://x', database='db')},
+        postgres={'p': PostgresSinkConfig()},
+        mongo={'m': MongoSinkConfig(database='db')},
         http={'h': HttpSinkConfig(url='https://x')},
         redis={'r': RedisSinkConfig()},
         filesystem={'f': FileSinkConfig(base_path='/data')},
@@ -310,7 +313,11 @@ def test_sinks_config_all_types():
 def test_dlq_config_defaults():
     cfg = DLQConfig()
     assert cfg.topic == ''
-    assert cfg.brokers == ''
+    assert cfg.enabled is True
+    assert cfg.provider == 'kafka'
+    assert cfg.connection == 'main'
+    assert cfg.flush_timeout == 30.0
+    assert cfg.on_send_failure == 'drop'
 
 
 # --- Other config models ---
@@ -377,18 +384,27 @@ def test_logging_config_invalid_format():
 
 
 def test_worker_name_env_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(
+        connections=kafka_connections(),
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
+    )
     assert cfg.worker_name_env == 'WORKER_ID'
 
 
 def test_drakkar_config_sinks_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(
+        connections=kafka_connections(),
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
+    )
     assert cfg.sinks.is_empty
     assert cfg.dlq.topic == ''
 
 
 def test_drakkar_config_with_sinks():
     cfg = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
         dlq=DLQConfig(topic='my-dlq'),
@@ -403,7 +419,7 @@ def test_drakkar_config_with_sinks():
 
 def test_load_config_from_yaml(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
-    assert cfg.kafka.brokers == 'kafka1:9092,kafka2:9092'
+    assert cfg.connections.kafka['main'].brokers == 'kafka1:9092,kafka2:9092'
     assert cfg.executor.binary_path == '/usr/local/bin/processor'
     assert cfg.executor.max_executors == 40
 
@@ -411,7 +427,7 @@ def test_load_config_from_yaml(config_yaml_file: Path):
 def test_load_config_minimal_yaml(minimal_config_yaml_file: Path):
     cfg = load_config(minimal_config_yaml_file)
     assert cfg.executor.binary_path == '/usr/bin/echo'
-    assert cfg.kafka.brokers == 'localhost:9092'
+    assert cfg.connections.kafka['main'].brokers == 'localhost:9092'
     assert cfg.metrics.enabled is True
 
 
@@ -427,21 +443,23 @@ def test_load_config_from_env_var(minimal_config_yaml_file: Path, monkeypatch: p
 
 
 def test_load_config_env_override(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DK_KAFKA__BROKERS', 'override:9092')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'override:9092')
     cfg = load_config(minimal_config_yaml_file)
-    assert cfg.kafka.brokers == 'override:9092'
+    assert cfg.connections.kafka['main'].brokers == 'override:9092'
 
 
 def test_load_config_no_path_no_env_requires_executor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv('DK_CONFIG', raising=False)
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     cfg = load_config()
     assert cfg.executor.binary_path == '/usr/bin/test'
 
 
 def test_load_config_empty_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     config_path = tmp_path / 'empty.yaml'
     config_path.write_text('')
     cfg = load_config(config_path)
@@ -452,8 +470,9 @@ def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
     monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTORS', '16')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_SOURCES__KAFKA__TOPIC', 'my-topic')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.executor.binary_path == '/usr/bin/test'
     assert cfg.executor.max_executors == 16
     assert cfg.sources.kafka.topic == 'my-topic'
@@ -463,10 +482,11 @@ def test_load_config_with_sinks_yaml(tmp_path: Path):
     """YAML with sinks section parses correctly."""
     config_data = {
         'executor': {'binary_path': '/bin/echo'},
+        'connections': {**kafka_connections(), 'postgres': {'main': {'dsn': 'postgresql://localhost/db'}}},
         'sources': {'kafka': {'enabled': True}},
         'sinks': {
             'kafka': {'results': {'topic': 'search-results'}},
-            'postgres': {'main': {'dsn': 'postgresql://localhost/db'}},
+            'postgres': {'main': {}},
         },
         'dlq': {'topic': 'my-dlq'},
     }
@@ -484,7 +504,7 @@ def test_load_config_with_sinks_yaml(tmp_path: Path):
 def test_config_serialization(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     data = cfg.model_dump()
-    assert data['kafka']['brokers'] == 'kafka1:9092,kafka2:9092'
+    assert data['connections']['kafka']['main']['brokers'] == 'kafka1:9092,kafka2:9092'
     assert data['executor']['max_executors'] == 40
 
 
@@ -492,7 +512,7 @@ def test_config_serialization(config_yaml_file: Path):
 
 
 def test_drakkar_config_app_section_defaults_to_empty_dict():
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.app == {}
 
 
@@ -502,6 +522,7 @@ def test_load_config_app_section_passes_through_unvalidated(tmp_path: Path):
     config_path.write_text(
         'executor:\n'
         '  binary_path: /bin/echo\n'
+        f'{KAFKA_CONNECTION_YAML}'
         'sources:\n'
         '  kafka:\n'
         '    enabled: true\n'
@@ -520,7 +541,7 @@ def test_drakkar_config_rejects_dk_app_env_overrides(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv('DK_APP__PRIORITY_THRESHOLD', '20')
     monkeypatch.setenv('DK_APP__API_KEY', 'sekrit')
     with pytest.raises(ValidationError, match='DK_APP__\\* environment overrides are not supported') as excinfo:
-        DrakkarConfig(sources={'kafka': {'enabled': True}})
+        DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     # Sorted var list, mirroring the retired-debug-section guard's style.
     assert 'DK_APP__API_KEY, DK_APP__PRIORITY_THRESHOLD' in str(excinfo.value)
 
@@ -533,7 +554,7 @@ def test_load_config_rejects_dk_app_env_overrides_with_yaml(tmp_path: Path, monk
         load_config(config_path)
 
 
-def testdeep_merge_recursive():
+def test_deep_merge_recursive():
     """deep_merge recursively merges nested dicts."""
     from drakkar.config import deep_merge
 
@@ -573,10 +594,10 @@ def test_webapp_config_defaults():
     assert cfg.host == '0.0.0.0'
     assert cfg.port == 8090
     assert cfg.path == '/process'
-    assert cfg.sinks_enabled is False
-    assert cfg.request_timeout_seconds == 30.0
+    assert cfg.deliver_to_sinks is False
+    assert cfg.request_timeout == 30.0
     assert cfg.max_concurrent == 64
-    assert cfg.max_body_bytes == 10 * 1024 * 1024
+    assert cfg.max_body == 10 * 1024 * 1024
     assert len(cfg.clients) == 1
     assert cfg.clients[0].name == 'anonymous'
     assert cfg.clients[0].token == ''
@@ -637,13 +658,13 @@ def test_webapp_config_rejects_negative_rpm_client():
 
 def test_webapp_config_rejects_zero_request_timeout():
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(enabled=True, request_timeout_seconds=0)
-    assert 'request_timeout_seconds' in str(exc_info.value)
+        WebAppConfig(enabled=True, request_timeout=0)
+    assert 'request_timeout' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_negative_request_timeout():
     with pytest.raises(ValidationError):
-        WebAppConfig(enabled=True, request_timeout_seconds=-1.0)
+        WebAppConfig(enabled=True, request_timeout='-1s')
 
 
 def test_webapp_config_rejects_zero_max_concurrent():
@@ -652,12 +673,12 @@ def test_webapp_config_rejects_zero_max_concurrent():
     assert 'max_concurrent' in str(exc_info.value)
 
 
-def test_webapp_config_rejects_non_positive_max_body_bytes():
+def test_webapp_config_rejects_a_max_body_of_zero():
     # A zero/negative cap would reject every non-empty POST — same
     # validation rule (and message shape).
     with pytest.raises(ValidationError) as exc_info:
-        WebAppConfig(enabled=True, max_body_bytes=0)
-    assert 'max_body_bytes must be > 0' in str(exc_info.value)
+        WebAppConfig(enabled=True, max_body=0)
+    assert 'max_body must be > 0' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_negative_max_concurrent():
@@ -698,7 +719,11 @@ def test_webapp_config_accepts_one_anonymous_plus_named_clients():
 
 
 def test_drakkar_config_webapp_default():
-    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'), sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(
+        connections=kafka_connections(),
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        sources={'kafka': {'enabled': True}},
+    )
     assert cfg.sources.http.enabled is False
     assert cfg.sources.http.port == 8090
     assert len(cfg.sources.http.clients) == 1
@@ -715,8 +740,8 @@ def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
                 'host': '0.0.0.0',
                 'port': 8090,
                 'path': '/process',
-                'sinks_enabled': True,
-                'request_timeout_seconds': 15.0,
+                'deliver_to_sinks': True,
+                'request_timeout': '15s',
                 'max_concurrent': 32,
                 'clients': [
                     {'name': 'anonymous', 'token': '', 'rpm': 4},
@@ -734,8 +759,8 @@ def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
     cfg = load_config(config_path)
     assert cfg.sources.http.enabled is True
     assert cfg.sources.http.port == 8090
-    assert cfg.sources.http.sinks_enabled is True
-    assert cfg.sources.http.request_timeout_seconds == 15.0
+    assert cfg.sources.http.deliver_to_sinks is True
+    assert cfg.sources.http.request_timeout == 15.0
     assert cfg.sources.http.max_concurrent == 32
     assert len(cfg.sources.http.clients) == 2
     assert cfg.sources.http.clients[1].name == 'tenant-a'
@@ -745,15 +770,16 @@ def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
 def test_drakkar_config_webapp_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
     monkeypatch.setenv('DK_SOURCES__HTTP__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.sources.http.enabled is True
 
 
 def test_drakkar_config_webapp_env_override_port(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_SOURCES__HTTP__PORT', '9000')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.sources.http.port == 9000
 
 
@@ -781,12 +807,11 @@ def test_drakkar_config_webapp_env_override_client_token(
 
 
 def test_postgres_sink_config_statements_default_empty():
-    assert PostgresSinkConfig(dsn='postgresql://localhost/db').statements == {}
+    assert PostgresSinkConfig().statements == {}
 
 
 def test_postgres_sink_config_accepts_named_statements():
     cfg = PostgresSinkConfig(
-        dsn='postgresql://localhost/db',
         statements={'claim_job': 'UPDATE jobs SET status = :status WHERE id = :id'},
     )
     assert 'claim_job' in cfg.statements
@@ -798,21 +823,21 @@ def test_postgres_sink_config_accepts_named_statements():
 def test_postgres_sink_config_rejects_bad_statement_names(name):
     """Names are used as structured-log fields, so they stay lowercase snake_case."""
     with pytest.raises(ValidationError, match='Invalid statement name'):
-        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={name: 'SELECT 1'})
+        PostgresSinkConfig(statements={name: 'SELECT 1'})
 
 
 @pytest.mark.parametrize('sql', ['', '   ', '\n'])
 def test_postgres_sink_config_rejects_empty_sql(sql):
     with pytest.raises(ValidationError, match='empty SQL'):
-        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': sql})
+        PostgresSinkConfig(statements={'s': sql})
 
 
 def test_postgres_sink_config_rejects_malformed_statement_sql():
     """Malformed statement config is a startup failure, not a first-delivery one."""
     with pytest.raises(ValidationError, match='positional'):
-        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': 'UPDATE t SET a = $1'})
+        PostgresSinkConfig(statements={'s': 'UPDATE t SET a = $1'})
     with pytest.raises(ValidationError, match='Unterminated'):
-        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': "UPDATE t SET a = 'oops"})
+        PostgresSinkConfig(statements={'s': "UPDATE t SET a = 'oops"})
 
 
 def test_postgres_sink_config_statements_from_yaml(minimal_config_dict, tmp_path):
@@ -821,10 +846,10 @@ def test_postgres_sink_config_statements_from_yaml(minimal_config_dict, tmp_path
 
     from drakkar.config import load_config
 
+    minimal_config_dict['connections']['postgres'] = {'main': {'dsn': 'postgresql://localhost/db'}}
     minimal_config_dict['sinks'] = {
         'postgres': {
             'main': {
-                'dsn': 'postgresql://localhost/db',
                 'statements': {
                     'claim_job': "UPDATE jobs SET status = :status WHERE id = :id AND status = 'pending'",
                 },
@@ -882,10 +907,10 @@ def test_redis_sink_config_scripts_from_yaml(minimal_config_dict, tmp_path):
 
     from drakkar.config import load_config
 
+    minimal_config_dict['connections']['redis'] = {'main': {'url': 'redis://localhost:6379/0'}}
     minimal_config_dict['sinks'] = {
         'redis': {
             'cache': {
-                'url': 'redis://localhost:6379/0',
                 'scripts': {'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])\n"},
             }
         }
@@ -903,7 +928,8 @@ def test_redis_sink_config_scripts_from_env(minimal_config_dict, tmp_path, monke
 
     from drakkar.config import load_config
 
-    minimal_config_dict['sinks'] = {'redis': {'cache': {'url': 'redis://localhost:6379/0'}}}
+    minimal_config_dict['connections']['redis'] = {'main': {'url': 'redis://localhost:6379/0'}}
+    minimal_config_dict['sinks'] = {'redis': {'cache': {}}}
     cfg_file = tmp_path / 'drakkar.yaml'
     cfg_file.write_text(yaml.dump(minimal_config_dict))
     monkeypatch.setenv('DK_SINKS__REDIS__CACHE__SCRIPTS__PUSH_AND_CAP', "redis.call('LPUSH', KEYS[1], ARGV[1])")
@@ -918,7 +944,7 @@ def test_redis_sink_config_scripts_from_env(minimal_config_dict, tmp_path, monke
 def _mongo_config(**overrides):
     from drakkar.config import MongoSinkConfig
 
-    return MongoSinkConfig(uri='mongodb://localhost:27017', database='app', **overrides)
+    return MongoSinkConfig(database='app', **overrides)
 
 
 def _claim_job(**overrides):
@@ -1021,10 +1047,10 @@ def test_mongo_sink_config_statements_from_yaml(minimal_config_dict, tmp_path):
 
     from drakkar.config import load_config
 
+    minimal_config_dict['connections']['mongo'] = {'main': {'uri': 'mongodb://localhost:27017'}}
     minimal_config_dict['sinks'] = {
         'mongo': {
             'main': {
-                'uri': 'mongodb://localhost:27017',
                 'database': 'app',
                 'statements': {'claim_job': _claim_job()},
             }
@@ -1047,10 +1073,10 @@ def test_mongo_sink_config_statements_from_env(minimal_config_dict, tmp_path, mo
 
     from drakkar.config import load_config
 
+    minimal_config_dict['connections']['mongo'] = {'main': {'uri': 'mongodb://localhost:27017'}}
     minimal_config_dict['sinks'] = {
         'mongo': {
             'main': {
-                'uri': 'mongodb://localhost:27017',
                 'database': 'app',
                 'statements': {'claim_job': _claim_job()},
             }
@@ -1067,7 +1093,7 @@ def test_mongo_sink_config_statements_from_env(minimal_config_dict, tmp_path, mo
 def test_config_package_reexports_every_public_model():
     """``from drakkar.config import X`` must keep working after the split.
 
-    The models live in per-domain modules now (``kafka``, ``sinks``,
+    The models live in per-domain modules (``connections``, ``sinks``,
     ``runtime``, ``ui``, ``cache``, ``webapp``, ``root``). This pins the
     façade: every name in ``__all__`` resolves, and every model a config
     section is built from is reachable through it.
@@ -1104,7 +1130,7 @@ def test_config_domain_modules_layer_without_cycles():
     import subprocess
     import sys
 
-    modules = ['kafka', 'sinks', 'runtime', 'ui', 'cache', 'webapp', 'root']
+    modules = ['connections', 'sinks', 'runtime', 'ui', 'cache', 'webapp', 'root']
     for name in modules:
         assert importlib.import_module(f'drakkar.config.{name}') is not None
 

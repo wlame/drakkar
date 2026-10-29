@@ -38,143 +38,6 @@
       ]
     },
     {
-      "key": "kafka",
-      "title": "Kafka connection (kafka:)",
-      "doc_anchor": "kafka-connection-kafka",
-      "entries": [
-        {
-          "path": "kafka.brokers",
-          "env": "DK_KAFKA__BROKERS",
-          "description": "Kafka bootstrap servers, comma-separated.",
-          "full_description": "Kafka bootstrap servers, comma-separated. Used by the Kafka source, and the fallback for sink and DLQ brokers left empty.",
-          "type": "string",
-          "default": "localhost:9092",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.protocol",
-          "env": "DK_KAFKA__SECURITY__PROTOCOL",
-          "description": "Wire protocol.",
-          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
-          "type": "string",
-          "default": "PLAINTEXT",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.sasl_mechanism",
-          "env": "DK_KAFKA__SECURITY__SASL_MECHANISM",
-          "description": "SASL mechanism.",
-          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.sasl_username",
-          "env": "DK_KAFKA__SECURITY__SASL_USERNAME",
-          "description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.sasl_password",
-          "env": "DK_KAFKA__SECURITY__SASL_PASSWORD",
-          "description": "SASL password.",
-          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.ssl_ca_location",
-          "env": "DK_KAFKA__SECURITY__SSL_CA_LOCATION",
-          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
-          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.ssl_certificate_location",
-          "env": "DK_KAFKA__SECURITY__SSL_CERTIFICATE_LOCATION",
-          "description": "Path to the client certificate (PEM) for mutual TLS.",
-          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.ssl_key_location",
-          "env": "DK_KAFKA__SECURITY__SSL_KEY_LOCATION",
-          "description": "Path to the client private key (PEM) for mutual TLS.",
-          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.ssl_key_password",
-          "env": "DK_KAFKA__SECURITY__SSL_KEY_PASSWORD",
-          "description": "Passphrase for an encrypted client private key.",
-          "full_description": "Passphrase for an encrypted client private key.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.security.ssl_endpoint_identification_algorithm",
-          "env": "DK_KAFKA__SECURITY__SSL_ENDPOINT_IDENTIFICATION_ALGORITHM",
-          "description": "Broker hostname verification.",
-          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.client_config",
-          "env": "DK_KAFKA__CLIENT_CONFIG",
-          "description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model.",
-          "full_description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model. Reserved keys (bootstrap.servers, group.id, enable.auto.commit, partition.assignment.strategy) are rejected at config load.",
-          "type": "object",
-          "default": {},
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.ui_url",
-          "env": "DK_KAFKA__UI_URL",
-          "description": "Base URL of a Kafka-UI instance for deep links.",
-          "full_description": "Base URL of a Kafka-UI instance for deep links. Together with ui_cluster_name, renders an icon next to every partition:offset that opens Kafka-UI filtered on that message; empty disables the links.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        },
-        {
-          "path": "kafka.ui_cluster_name",
-          "env": "DK_KAFKA__UI_CLUSTER_NAME",
-          "description": "Cluster name as configured in Kafka-UI, used in the deep links.",
-          "full_description": "Cluster name as configured in Kafka-UI, used in the deep links. Both this and ui_url must be set for the links to appear.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "kafka"
-        }
-      ]
-    },
-    {
       "key": "sources",
       "title": "Input sources (sources:)",
       "doc_anchor": "input-sources-sources",
@@ -186,6 +49,16 @@
           "full_description": "Consume the Kafka topic. Off, no consumer group is joined and arrange() is never called.",
           "type": "boolean",
           "default": false,
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.connection",
+          "env": "DK_SOURCES__KAFKA__CONNECTION",
+          "description": "The Kafka cluster to read: a name under connections.kafka.",
+          "full_description": "The Kafka cluster to read: a name under connections.kafka.",
+          "type": "string",
+          "default": "main",
           "secret": false,
           "group": "sources"
         },
@@ -220,32 +93,32 @@
           "group": "sources"
         },
         {
-          "path": "sources.kafka.max_poll_interval_ms",
-          "env": "DK_SOURCES__KAFKA__MAX_POLL_INTERVAL_MS",
-          "description": "Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance.",
-          "full_description": "Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase for long-running tasks.",
-          "type": "integer",
-          "default": 300000,
+          "path": "sources.kafka.max_poll_interval",
+          "env": "DK_SOURCES__KAFKA__MAX_POLL_INTERVAL",
+          "description": "Maximum time between poll calls before Kafka considers the consumer dead and triggers a rebalance.",
+          "full_description": "Maximum time between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase for long-running tasks.",
+          "type": "duration",
+          "default": "5m",
           "secret": false,
           "group": "sources"
         },
         {
-          "path": "sources.kafka.session_timeout_ms",
-          "env": "DK_SOURCES__KAFKA__SESSION_TIMEOUT_MS",
-          "description": "Session timeout (ms) for group membership.",
-          "full_description": "Session timeout (ms) for group membership. Without a heartbeat within this window the broker removes the consumer from the group.",
-          "type": "integer",
-          "default": 45000,
+          "path": "sources.kafka.session_timeout",
+          "env": "DK_SOURCES__KAFKA__SESSION_TIMEOUT",
+          "description": "Session timeout for group membership.",
+          "full_description": "Session timeout for group membership. Without a heartbeat within this window the broker removes the consumer from the group.",
+          "type": "duration",
+          "default": "45s",
           "secret": false,
           "group": "sources"
         },
         {
-          "path": "sources.kafka.heartbeat_interval_ms",
-          "env": "DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL_MS",
-          "description": "Interval (ms) between heartbeats to the broker.",
-          "full_description": "Interval (ms) between heartbeats to the broker. Keep below session_timeout_ms / 3.",
-          "type": "integer",
-          "default": 3000,
+          "path": "sources.kafka.heartbeat_interval",
+          "env": "DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL",
+          "description": "Interval between heartbeats to the broker.",
+          "full_description": "Interval between heartbeats to the broker. Keep below session_timeout / 3.",
+          "type": "duration",
+          "default": "3s",
           "secret": false,
           "group": "sources"
         },
@@ -260,8 +133,8 @@
           "group": "sources"
         },
         {
-          "path": "sources.kafka.startup_align_enabled",
-          "env": "DK_SOURCES__KAFKA__STARTUP_ALIGN_ENABLED",
+          "path": "sources.kafka.startup_align.enabled",
+          "env": "DK_SOURCES__KAFKA__STARTUP_ALIGN__ENABLED",
           "description": "Delay the first Kafka subscribe until a shared wall-clock boundary, so a rolling-deploy fleet converges on one rebalance instead of N.",
           "full_description": "Delay the first Kafka subscribe until a shared wall-clock boundary, so a rolling-deploy fleet converges on one rebalance instead of N. Disable for snappy single-worker dev runs.",
           "type": "boolean",
@@ -270,22 +143,22 @@
           "group": "sources"
         },
         {
-          "path": "sources.kafka.startup_min_wait_seconds",
-          "env": "DK_SOURCES__KAFKA__STARTUP_MIN_WAIT_SECONDS",
-          "description": "Minimum seconds to sleep before aligning — a buffer for slow init (DB connects, cache warm-up).",
-          "full_description": "Minimum seconds to sleep before aligning — a buffer for slow init (DB connects, cache warm-up).",
-          "type": "number",
-          "default": 4.0,
+          "path": "sources.kafka.startup_align.min_wait",
+          "env": "DK_SOURCES__KAFKA__STARTUP_ALIGN__MIN_WAIT",
+          "description": "Minimum time to sleep before aligning: a buffer for slow init (DB connects, cache warm-up).",
+          "full_description": "Minimum time to sleep before aligning: a buffer for slow init (DB connects, cache warm-up).",
+          "type": "duration",
+          "default": "4s",
           "secret": false,
           "group": "sources"
         },
         {
-          "path": "sources.kafka.startup_align_interval_seconds",
-          "env": "DK_SOURCES__KAFKA__STARTUP_ALIGN_INTERVAL_SECONDS",
-          "description": "Alignment interval in seconds.",
-          "full_description": "Alignment interval in seconds. Workers wake at the next Unix-epoch multiple — the default 10 aligns on :00/:10/:20/:30/:40/:50 of every minute.",
-          "type": "integer",
-          "default": 10,
+          "path": "sources.kafka.startup_align.interval",
+          "env": "DK_SOURCES__KAFKA__STARTUP_ALIGN__INTERVAL",
+          "description": "Alignment interval.",
+          "full_description": "Alignment interval. Workers wake at the next Unix-epoch multiple: the default 10s aligns on :00/:10/:20/:30/:40/:50 of every minute.",
+          "type": "duration",
+          "default": "10s",
           "secret": false,
           "group": "sources"
         },
@@ -330,8 +203,8 @@
           "group": "sources"
         },
         {
-          "path": "sources.http.sinks_enabled",
-          "env": "DK_SOURCES__HTTP__SINKS_ENABLED",
+          "path": "sources.http.deliver_to_sinks",
+          "env": "DK_SOURCES__HTTP__DELIVER_TO_SINKS",
           "description": "Call on_message_complete() after the executor fan-out and route returned payloads through the sinks.",
           "full_description": "Call on_message_complete() after the executor fan-out and route returned payloads through the sinks. Off, sinks are skipped and the response carries sinks: null.",
           "type": "boolean",
@@ -340,12 +213,12 @@
           "group": "sources"
         },
         {
-          "path": "sources.http.request_timeout_seconds",
-          "env": "DK_SOURCES__HTTP__REQUEST_TIMEOUT_SECONDS",
-          "description": "Per-request budget in seconds.",
-          "full_description": "Per-request budget in seconds. On timeout the client receives a 504 with status='timeout' and remaining pipeline work is cooperatively cancelled.",
-          "type": "number",
-          "default": 30.0,
+          "path": "sources.http.request_timeout",
+          "env": "DK_SOURCES__HTTP__REQUEST_TIMEOUT",
+          "description": "Per-request budget.",
+          "full_description": "Per-request budget. On timeout the client receives a 504 with status='timeout' and remaining pipeline work is cooperatively cancelled.",
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "sources"
         },
@@ -360,12 +233,12 @@
           "group": "sources"
         },
         {
-          "path": "sources.http.max_body_bytes",
-          "env": "DK_SOURCES__HTTP__MAX_BODY_BYTES",
-          "description": "Cap on a single POST body (bytes), counted from the stream so a lying Content-Length cannot bypass it.",
-          "full_description": "Cap on a single POST body (bytes), counted from the stream so a lying Content-Length cannot bypass it. Oversized requests receive 413 before parsing.",
-          "type": "integer",
-          "default": 10485760,
+          "path": "sources.http.max_body",
+          "env": "DK_SOURCES__HTTP__MAX_BODY",
+          "description": "Cap on a single POST body, counted from the stream so a lying Content-Length cannot bypass it.",
+          "full_description": "Cap on a single POST body, counted from the stream so a lying Content-Length cannot bypass it. Oversized requests receive 413 before parsing.",
+          "type": "size",
+          "default": "10MiB",
           "secret": false,
           "group": "sources"
         },
@@ -550,8 +423,8 @@
       "doc_anchor": "sinks-sinks",
       "entries": [
         {
-          "path": "sinks.kafka.*.on_failure",
-          "env": null,
+          "path": "sinks.defaults.on_failure",
+          "env": "DK_SINKS__DEFAULTS__ON_FAILURE",
           "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
           "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
           "type": "string",
@@ -560,12 +433,92 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.kafka.*.max_retries",
-          "env": null,
+          "path": "sinks.defaults.max_retries",
+          "env": "DK_SINKS__DEFAULTS__MAX_RETRIES",
           "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
           "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
           "type": "integer",
           "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.defaults.delivery_timeout",
+          "env": "DK_SINKS__DEFAULTS__DELIVERY_TIMEOUT",
+          "description": "Budget for one sink delivery, including the framework-internal transient retries.",
+          "full_description": "Budget for one sink delivery, including the framework-internal transient retries. A sink whose server stops answering while the TCP connection stays open would otherwise block its partition forever: the circuit breaker only sees a failure when a call returns. Sinks whose driver supports it also use this value for their own socket or command timeout, so the driver reports a specific error first. Applies to close() during shutdown as well.",
+          "type": "duration",
+          "default": "30s",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.defaults.breaker_failures",
+          "env": "DK_SINKS__DEFAULTS__BREAKER_FAILURES",
+          "description": "Consecutive delivery failures before the circuit trips open: 5 trips on the 5th consecutive failure.",
+          "full_description": "Consecutive delivery failures before the circuit trips open: 5 trips on the 5th consecutive failure. Intermittent failures with any success in between do not accumulate.",
+          "type": "integer",
+          "default": 5,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.defaults.breaker_cooldown",
+          "env": "DK_SINKS__DEFAULTS__BREAKER_COOLDOWN",
+          "description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe.",
+          "full_description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe. While open, no attempt is made on the sink.",
+          "type": "duration",
+          "default": "30s",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.on_failure",
+          "env": null,
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.max_retries",
+          "env": null,
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -580,6 +533,16 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.kafka.*.connection",
+          "env": null,
+          "description": "The Kafka cluster: a name under connections.kafka.",
+          "full_description": "The Kafka cluster: a name under connections.kafka.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.kafka.*.topic",
           "env": null,
           "description": "Target Kafka topic for output messages.",
@@ -590,12 +553,22 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.kafka.*.brokers",
+          "path": "sinks.kafka.*.client_config",
           "env": null,
-          "description": "Kafka brokers for this sink.",
-          "full_description": "Kafka brokers for this sink. Empty inherits kafka.brokers — and with it kafka.security and kafka.client_config (same cluster, same credentials). Setting brokers makes the sink self-contained with its own security block.",
-          "type": "string",
-          "default": "",
+          "description": "Raw librdkafka properties for this sink's producer, merged after the connection's client_config; this sink wins on a shared key.",
+          "full_description": "Raw librdkafka properties for this sink's producer, merged after the connection's client_config; this sink wins on a shared key. Reserved keys are rejected at config load.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.flush_timeout",
+          "env": null,
+          "description": "Bound on the producer flush that ends every delivery.",
+          "full_description": "Bound on the producer flush that ends every delivery. Without one, librdkafka flushes with no deadline and a wedged broker blocks the call until message.timeout.ms (300s by default) — and it blocks a producer executor thread while doing it, so a few stuck deliveries starve every other delivery on the same producer. On expiry the delivery fails with a transient error, which is what lets the circuit breaker see the outage. Kept deliberately generous: this is a last resort, not a latency target.",
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "sinks"
         },
@@ -610,132 +583,52 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.kafka.*.security.protocol",
-          "env": null,
-          "description": "Wire protocol.",
-          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
-          "type": "string",
-          "default": "PLAINTEXT",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.sasl_mechanism",
-          "env": null,
-          "description": "SASL mechanism.",
-          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.sasl_username",
-          "env": null,
-          "description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.sasl_password",
-          "env": null,
-          "description": "SASL password.",
-          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.ssl_ca_location",
-          "env": null,
-          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
-          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.ssl_certificate_location",
-          "env": null,
-          "description": "Path to the client certificate (PEM) for mutual TLS.",
-          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.ssl_key_location",
-          "env": null,
-          "description": "Path to the client private key (PEM) for mutual TLS.",
-          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.ssl_key_password",
-          "env": null,
-          "description": "Passphrase for an encrypted client private key.",
-          "full_description": "Passphrase for an encrypted client private key.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.security.ssl_endpoint_identification_algorithm",
-          "env": null,
-          "description": "Broker hostname verification.",
-          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.client_config",
-          "env": null,
-          "description": "Raw librdkafka properties for this sink, merged after security.",
-          "full_description": "Raw librdkafka properties for this sink, merged after security. Only consulted when brokers is set.",
-          "type": "object",
-          "default": {},
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.kafka.*.flush_timeout_seconds",
-          "env": null,
-          "description": "Bound on the producer flush that ends every delivery.",
-          "full_description": "Bound on the producer flush that ends every delivery. Without one, librdkafka flushes with no deadline and a wedged broker blocks the call until message.timeout.ms (300s by default) — and it blocks a producer executor thread while doing it, so a few stuck deliveries starve every other delivery on the same producer. On expiry the delivery fails with a transient error, which is what lets the circuit breaker see the outage. Kept deliberately generous: this is a last resort, not a latency target.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
           "path": "sinks.postgres.*.on_failure",
           "env": null,
-          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
-          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
           "type": "string",
-          "default": "dlq",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
         {
           "path": "sinks.postgres.*.max_retries",
           "env": null,
-          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
-          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
           "type": "integer",
-          "default": 2,
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -750,13 +643,13 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.postgres.*.dsn",
+          "path": "sinks.postgres.*.connection",
           "env": null,
-          "description": "PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.",
-          "full_description": "PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.",
+          "description": "The database: a name under connections.postgres.",
+          "full_description": "The database: a name under connections.postgres.",
           "type": "string",
-          "default": null,
-          "secret": true,
+          "default": "main",
+          "secret": false,
           "group": "sinks"
         },
         {
@@ -802,20 +695,50 @@
         {
           "path": "sinks.mongo.*.on_failure",
           "env": null,
-          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
-          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
           "type": "string",
-          "default": "dlq",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
         {
           "path": "sinks.mongo.*.max_retries",
           "env": null,
-          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
-          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
           "type": "integer",
-          "default": 2,
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -830,13 +753,13 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.mongo.*.uri",
+          "path": "sinks.mongo.*.connection",
           "env": null,
-          "description": "MongoDB connection string, typically embedding user and password.",
-          "full_description": "MongoDB connection string, typically embedding user and password.",
+          "description": "The server: a name under connections.mongo.",
+          "full_description": "The server: a name under connections.mongo.",
           "type": "string",
-          "default": null,
-          "secret": true,
+          "default": "main",
+          "secret": false,
           "group": "sinks"
         },
         {
@@ -902,20 +825,50 @@
         {
           "path": "sinks.http.*.on_failure",
           "env": null,
-          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
-          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
           "type": "string",
-          "default": "dlq",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
         {
           "path": "sinks.http.*.max_retries",
           "env": null,
-          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
-          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
           "type": "integer",
-          "default": 2,
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -950,12 +903,12 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.http.*.timeout_seconds",
+          "path": "sinks.http.*.request_timeout",
           "env": null,
-          "description": "Request timeout in seconds.",
-          "full_description": "Request timeout in seconds.",
-          "type": "integer",
-          "default": 30,
+          "description": "Request timeout.",
+          "full_description": "Request timeout.",
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "sinks"
         },
@@ -992,20 +945,50 @@
         {
           "path": "sinks.redis.*.on_failure",
           "env": null,
-          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
-          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
           "type": "string",
-          "default": "dlq",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
         {
           "path": "sinks.redis.*.max_retries",
           "env": null,
-          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
-          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
           "type": "integer",
-          "default": 2,
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -1020,13 +1003,13 @@
           "group": "sinks"
         },
         {
-          "path": "sinks.redis.*.url",
+          "path": "sinks.redis.*.connection",
           "env": null,
-          "description": "Redis connection URL, which may embed a password (redis://:password@host:port/db).",
-          "full_description": "Redis connection URL, which may embed a password (redis://:password@host:port/db).",
+          "description": "The server: a name under connections.redis.",
+          "full_description": "The server: a name under connections.redis.",
           "type": "string",
-          "default": "redis://localhost:6379/0",
-          "secret": true,
+          "default": "main",
+          "secret": false,
           "group": "sinks"
         },
         {
@@ -1062,20 +1045,50 @@
         {
           "path": "sinks.filesystem.*.on_failure",
           "env": null,
-          "description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
-          "full_description": "What happens when the retry budget of a delivery is spent: 'dlq' writes the source message to the DLQ and ends the message; 'skip' drops this sink's payloads and goes on.",
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
           "type": "string",
-          "default": "dlq",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
         {
           "path": "sinks.filesystem.*.max_retries",
           "env": null,
-          "description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
-          "full_description": "Retries after the first attempt, a whole number from 0 to 10 (2 = 3 attempts). on_delivery_error returning RETRY spends one; the quick internal retries of an idempotent write are not counted.",
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
           "type": "integer",
-          "default": 2,
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
           "secret": false,
           "group": "sinks"
         },
@@ -1108,36 +1121,6 @@
           "default": "",
           "secret": false,
           "group": "sinks"
-        },
-        {
-          "path": "sinks.delivery_timeout_seconds",
-          "env": "DK_SINKS__DELIVERY_TIMEOUT_SECONDS",
-          "description": "Budget for one sink delivery, including the framework-internal transient retries.",
-          "full_description": "Budget for one sink delivery, including the framework-internal transient retries. A sink whose server stops answering while the TCP connection stays open would otherwise block its partition forever: the circuit breaker only sees a failure when a call returns. Sinks whose driver supports it also use this value for their own socket/command timeout, so the driver reports a specific error before this outer budget expires. Applies to close() during shutdown as well.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.circuit_breaker.failure_threshold",
-          "env": "DK_SINKS__CIRCUIT_BREAKER__FAILURE_THRESHOLD",
-          "description": "Consecutive delivery failures before the circuit trips open.",
-          "full_description": "Consecutive delivery failures before the circuit trips open. 5 = trip on the 5th consecutive failure (4 prior failures did not trip, the 5th did). Intermittent failures with any success in between do not accumulate.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.circuit_breaker.cooldown_seconds",
-          "env": "DK_SINKS__CIRCUIT_BREAKER__COOLDOWN_SECONDS",
-          "description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe.",
-          "full_description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe. While open, all deliveries route directly to DLQ — no attempt is made on the sink.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "sinks"
         }
       ]
     },
@@ -1147,140 +1130,70 @@
       "doc_anchor": "dead-letter-queue-dlq",
       "entries": [
         {
+          "path": "dlq.enabled",
+          "env": "DK_DLQ__ENABLED",
+          "description": "Write DLQ records.",
+          "full_description": "Write DLQ records. Off, a dlq outcome follows on_send_failure, as with no DLQ sink.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.provider",
+          "env": "DK_DLQ__PROVIDER",
+          "description": "Where DLQ records go. kafka is the only value.",
+          "full_description": "Where DLQ records go. kafka is the only value.",
+          "type": "string",
+          "default": "kafka",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.connection",
+          "env": "DK_DLQ__CONNECTION",
+          "description": "The Kafka cluster: a name under connections.kafka.",
+          "full_description": "The Kafka cluster: a name under connections.kafka.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
           "path": "dlq.topic",
           "env": "DK_DLQ__TOPIC",
           "description": "DLQ Kafka topic name.",
-          "full_description": "DLQ Kafka topic name. Empty derives '{sources.kafka.topic}_dlq' when the Kafka source is enabled, and disables the DLQ when it is not.",
+          "full_description": "DLQ Kafka topic name. Empty derives '{sources.kafka.topic}_dlq' when the Kafka source is enabled; with no Kafka source and no topic there is no DLQ.",
           "type": "string",
           "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.brokers",
-          "env": "DK_DLQ__BROKERS",
-          "description": "Kafka brokers for the DLQ producer.",
-          "full_description": "Kafka brokers for the DLQ producer. Empty inherits kafka.brokers — and with it kafka.security and kafka.client_config, on the same same-cluster-means-same-credentials rule the Kafka sinks follow.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.protocol",
-          "env": "DK_DLQ__SECURITY__PROTOCOL",
-          "description": "Wire protocol.",
-          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
-          "type": "string",
-          "default": "PLAINTEXT",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.sasl_mechanism",
-          "env": "DK_DLQ__SECURITY__SASL_MECHANISM",
-          "description": "SASL mechanism.",
-          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.sasl_username",
-          "env": "DK_DLQ__SECURITY__SASL_USERNAME",
-          "description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.sasl_password",
-          "env": "DK_DLQ__SECURITY__SASL_PASSWORD",
-          "description": "SASL password.",
-          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.ssl_ca_location",
-          "env": "DK_DLQ__SECURITY__SSL_CA_LOCATION",
-          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
-          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.ssl_certificate_location",
-          "env": "DK_DLQ__SECURITY__SSL_CERTIFICATE_LOCATION",
-          "description": "Path to the client certificate (PEM) for mutual TLS.",
-          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.ssl_key_location",
-          "env": "DK_DLQ__SECURITY__SSL_KEY_LOCATION",
-          "description": "Path to the client private key (PEM) for mutual TLS.",
-          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.ssl_key_password",
-          "env": "DK_DLQ__SECURITY__SSL_KEY_PASSWORD",
-          "description": "Passphrase for an encrypted client private key.",
-          "full_description": "Passphrase for an encrypted client private key.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "dlq"
-        },
-        {
-          "path": "dlq.security.ssl_endpoint_identification_algorithm",
-          "env": "DK_DLQ__SECURITY__SSL_ENDPOINT_IDENTIFICATION_ALGORITHM",
-          "description": "Broker hostname verification.",
-          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
-          "type": "string",
-          "default": null,
           "secret": false,
           "group": "dlq"
         },
         {
           "path": "dlq.client_config",
           "env": "DK_DLQ__CLIENT_CONFIG",
-          "description": "Raw librdkafka properties for the DLQ producer, merged after security.",
-          "full_description": "Raw librdkafka properties for the DLQ producer, merged after security. Only consulted when brokers is set.",
+          "description": "Raw librdkafka properties for the DLQ producer, merged after the connection's client_config; the DLQ wins on a shared key.",
+          "full_description": "Raw librdkafka properties for the DLQ producer, merged after the connection's client_config; the DLQ wins on a shared key. Reserved keys are rejected at config load.",
           "type": "object",
           "default": {},
           "secret": false,
           "group": "dlq"
         },
         {
-          "path": "dlq.flush_timeout_seconds",
-          "env": "DK_DLQ__FLUSH_TIMEOUT_SECONDS",
+          "path": "dlq.flush_timeout",
+          "env": "DK_DLQ__FLUSH_TIMEOUT",
           "description": "Bound on the producer flush that ends every DLQ write.",
-          "full_description": "Bound on the producer flush that ends every DLQ write. Same rationale as KafkaSinkConfig.flush_timeout_seconds, and it matters more here: the DLQ is the last resort, so a DLQ write that blocks for message.timeout.ms stalls the partition it was meant to rescue. On expiry the write is reported as unconfirmed and the affected offsets stall.",
-          "type": "number",
-          "default": 30.0,
+          "full_description": "Bound on the producer flush that ends every DLQ write. Same rationale as flush_timeout of a Kafka sink, and it matters more here: the DLQ is the last resort, so a DLQ write that blocks for message.timeout.ms stalls the partition it was meant to rescue. On expiry the write is reported as unconfirmed and the affected offsets stall.",
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "dlq"
         },
         {
           "path": "dlq.on_send_failure",
           "env": "DK_DLQ__ON_SEND_FAILURE",
-          "description": "Strategy when the DLQ write itself fails.",
-          "full_description": "Strategy when the DLQ write itself fails. 'drop' logs CRITICAL, counts the loss, commits the offset, and keeps the pipeline moving; 'stall' leaves the offset uncommitted and pauses the partition until restart — no loss, at the cost of consumer lag.",
+          "description": "Strategy when no DLQ record can be written.",
+          "full_description": "Strategy when no DLQ record can be written. 'drop' logs CRITICAL, counts the loss, commits the offset, and keeps the pipeline moving; 'stall' leaves the offset uncommitted and pauses the partition until restart — no loss, at the cost of consumer lag.",
           "type": "string",
           "default": "drop",
           "secret": false,
@@ -2723,6 +2636,216 @@
       "doc_anchor": "connections-connections",
       "entries": [
         {
+          "path": "connections.kafka.*.brokers",
+          "env": null,
+          "description": "Kafka bootstrap servers, comma-separated.",
+          "full_description": "Kafka bootstrap servers, comma-separated.",
+          "type": "string",
+          "default": "localhost:9092",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.protocol",
+          "env": null,
+          "description": "Wire protocol.",
+          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
+          "type": "string",
+          "default": "PLAINTEXT",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_mechanism",
+          "env": null,
+          "description": "SASL mechanism.",
+          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_username",
+          "env": null,
+          "description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_password",
+          "env": null,
+          "description": "SASL password.",
+          "full_description": "SASL password. Prefer the DK_CONNECTIONS__KAFKA__<NAME>__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_ca_location",
+          "env": null,
+          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
+          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_certificate_location",
+          "env": null,
+          "description": "Path to the client certificate (PEM) for mutual TLS.",
+          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_key_location",
+          "env": null,
+          "description": "Path to the client private key (PEM) for mutual TLS.",
+          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_key_password",
+          "env": null,
+          "description": "Passphrase for an encrypted client private key.",
+          "full_description": "Passphrase for an encrypted client private key.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_endpoint_identification_algorithm",
+          "env": null,
+          "description": "Broker hostname verification.",
+          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.client_config",
+          "env": null,
+          "description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection.",
+          "full_description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection. Reserved keys (bootstrap.servers, group.id, enable.auto.commit, partition.assignment.strategy) are rejected at config load.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.ui_url",
+          "env": null,
+          "description": "Base URL of a Kafka-UI instance for deep links.",
+          "full_description": "Base URL of a Kafka-UI instance for deep links. Together with ui_cluster_name, renders an icon next to every partition:offset of the source topic that opens Kafka-UI filtered on that message; empty disables the links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.ui_cluster_name",
+          "env": null,
+          "description": "Cluster name as configured in Kafka-UI, used in the deep links.",
+          "full_description": "Cluster name as configured in Kafka-UI, used in the deep links. Both this and ui_url must be set for the links to appear.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.dsn",
+          "env": null,
+          "description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "full_description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.schema",
+          "env": null,
+          "description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
+          "full_description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.manage_schema",
+          "env": null,
+          "description": "Create the schema and the tables Drakkar keeps when they are missing.",
+          "full_description": "Create the schema and the tables Drakkar keeps when they are missing. Off, they must already exist.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_min",
+          "env": null,
+          "description": "Minimum connections in the pool of the autodiscovery registry and election.",
+          "full_description": "Minimum connections in the pool of the autodiscovery registry and election.",
+          "type": "integer",
+          "default": 1,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_max",
+          "env": null,
+          "description": "Maximum connections in the pool of the autodiscovery registry and election.",
+          "full_description": "Maximum connections in the pool of the autodiscovery registry and election. Must be >= pool_min.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.url",
+          "env": null,
+          "description": "Redis connection URL, typically embedding the password.",
+          "full_description": "Redis connection URL, typically embedding the password.",
+          "type": "string",
+          "default": "redis://localhost:6379/0",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.state_prefix",
+          "env": null,
+          "description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\".",
+          "full_description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\". May be empty.",
+          "type": "string",
+          "default": "drakkar:",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.mongo.*.uri",
+          "env": null,
+          "description": "MongoDB connection string, typically embedding user and password.",
+          "full_description": "MongoDB connection string, typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "connections"
+        },
+        {
           "path": "connections.consul.*.address",
           "env": null,
           "description": "Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional path; no user info, query or fragment.",
@@ -2753,82 +2876,12 @@
           "group": "connections"
         },
         {
-          "path": "connections.consul.*.key_prefix",
+          "path": "connections.consul.*.state_prefix",
           "env": null,
-          "description": "Key prefix of everything a feature stores in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
-          "full_description": "Key prefix of everything a feature stores in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
+          "description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
+          "full_description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
           "type": "string",
           "default": "drakkar",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.redis.*.url",
-          "env": null,
-          "description": "Redis connection URL, typically embedding the password.",
-          "full_description": "Redis connection URL, typically embedding the password.",
-          "type": "string",
-          "default": "redis://localhost:6379/0",
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.redis.*.key_prefix",
-          "env": null,
-          "description": "Prefix of every key a feature stores in Redis: letters, digits, \"_\", \":\", \".\" and \"-\".",
-          "full_description": "Prefix of every key a feature stores in Redis: letters, digits, \"_\", \":\", \".\" and \"-\". May be empty.",
-          "type": "string",
-          "default": "drakkar:",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.dsn",
-          "env": null,
-          "description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
-          "full_description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
-          "type": "string",
-          "default": null,
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.schema",
-          "env": null,
-          "description": "Schema that holds the tables a feature creates: a lower-case identifier.",
-          "full_description": "Schema that holds the tables a feature creates: a lower-case identifier.",
-          "type": "string",
-          "default": "drakkar",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.manage_schema",
-          "env": null,
-          "description": "Create the schema and the tables of a feature when they are missing.",
-          "full_description": "Create the schema and the tables of a feature when they are missing. Off, they must already exist.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.pool_min",
-          "env": null,
-          "description": "Minimum connections in the pool.",
-          "full_description": "Minimum connections in the pool.",
-          "type": "integer",
-          "default": 1,
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.pool_max",
-          "env": null,
-          "description": "Maximum connections in the pool.",
-          "full_description": "Maximum connections in the pool. Must be >= pool_min.",
-          "type": "integer",
-          "default": 4,
           "secret": false,
           "group": "connections"
         }

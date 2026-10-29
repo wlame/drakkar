@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import KafkaConfig, KafkaSourceConfig
+from drakkar.config import KafkaConnectionConfig, KafkaSourceConfig
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
@@ -280,7 +280,7 @@ async def test_consumer_keeps_message_headers(mock_cls):
     ]
     mock_cls.return_value = inner
     consumer = KafkaConsumer(
-        connection=KafkaConfig(brokers='localhost:9092'),
+        connection=KafkaConnectionConfig(brokers='localhost:9092'),
         source=KafkaSourceConfig(enabled=True, topic='orders', consumer_group='g'),
     )
 

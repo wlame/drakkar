@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import CircuitBreakerConfig, SinkPolicy, SinksConfig
+from drakkar.config import SinkPolicy
 from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.metrics import (
     dlq_dropped_payloads,
@@ -41,7 +41,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.providers.resilience import RateLimitedLog
-from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
+from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.utils import redact_url
 
@@ -257,37 +257,17 @@ class SinkManager:
 
     def __init__(
         self,
-        circuit_breaker_config: CircuitBreakerConfig | None = None,
         recorder: EventRecorder | None = None,
         dlq_sink: DLQSink | None = None,
-        delivery_timeout_seconds: float = DEFAULT_DELIVERY_TIMEOUT_SECONDS,
-        sinks_config: Callable[[], SinksConfig] | None = None,
     ) -> None:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
-        # The declared policy of each sink and its dependencies as keys,
+        # The resolved policy of each sink and its dependencies as keys,
         # fixed when the sink is registered so a delivery reads two dicts
         # instead of walking the config section.
         self._policies: dict[SinkKey, SinkPolicy] = {}
         self._dependencies: dict[SinkKey, tuple[SinkKey, ...]] = {}
-        # Reads the live ``sinks:`` section, when the app has one.
-        #
-        # A callable rather than the section itself, for two reasons that
-        # both come from ``DrakkarApp`` building this manager in its
-        # constructor while ``on_startup`` — the documented point where a
-        # handler may change the config — runs later: a handler may mutate
-        # the section in place, and it may return a whole new
-        # ``DrakkarConfig``, which rebinds ``app._config`` and leaves any
-        # captured section object stale. Going through the app on each read
-        # follows both.
-        #
-        # ``None`` for a manager built standalone (tests),
-        # which then uses the two explicit arguments.
-        self._sinks_config: Callable[[], SinksConfig] | None = sinks_config
-        # Fallbacks for a manager with no config section. None => default
-        # CircuitBreakerConfig (5 failures / 30s cooldown).
-        self._circuit_breaker_default: CircuitBreakerConfig = circuit_breaker_config or CircuitBreakerConfig()
         # Recorder + DLQ sink are owned by the app but accessed on every
         # delivery. Holding references here keeps the ``deliver_all`` hot
         # path signature minimal and removes the per-call plumbing from
@@ -301,39 +281,20 @@ class SinkManager:
         # Strategy for circuit-open deliveries whose DLQ write fails.
         # Overridden via attach_runtime from DLQConfig.on_send_failure.
         self._dlq_on_send_failure: str = 'drop'
-        # False when the config switches the DLQ off (no topic, no Kafka
+        # True when the DLQ is on but has no destination (no topic, no Kafka
         # source): a missing DLQ sink is then a counted drop, never a stall.
-        self._dlq_enabled: bool = True
+        self._dlq_unconfigured: bool = False
         self._dlq_drop_warned: bool = False
         # One warning line per sink and event per minute for the failure
         # paths that can fire on every result of a failing sink.
         self._rate_limited_log = RateLimitedLog(time.monotonic)
-        # Budget for one delivery and for one close. Without it a sink whose
-        # server stopped answering on a still-open TCP connection blocks its
-        # partition indefinitely: the breaker only counts a failure when a
-        # call returns, so /readyz stays green while the worker does nothing.
-        self._delivery_timeout_default: float = delivery_timeout_seconds
-
-    @property
-    def _circuit_breaker_config(self) -> CircuitBreakerConfig:
-        """Breaker thresholds, read live from the config section when there is one."""
-        if self._sinks_config is not None:
-            return self._sinks_config().circuit_breaker
-        return self._circuit_breaker_default
-
-    @property
-    def _delivery_timeout_seconds(self) -> float:
-        """Per-delivery budget, read live from the config section when there is one."""
-        if self._sinks_config is not None:
-            return self._sinks_config().delivery_timeout_seconds
-        return self._delivery_timeout_default
 
     def attach_runtime(
         self,
         recorder: EventRecorder | None,
         dlq_sink: DLQSink | None,
         dlq_on_send_failure: str = 'drop',
-        dlq_enabled: bool = True,
+        dlq_unconfigured: bool = False,
     ) -> None:
         """Inject recorder + DLQ sink after construction.
 
@@ -354,15 +315,16 @@ class SinkManager:
         the offset commit; 'stall' raises ``SinkDeliveryFailedError`` so
         the partition pipeline stalls the affected offsets.
 
-        ``dlq_enabled`` mirrors ``DrakkarConfig.dlq_enabled``: with the DLQ
-        off by configuration a record that has nowhere to go is a counted
-        drop (``drakkar_dlq_unconfigured_drops_total``), whatever
-        ``dlq_on_send_failure`` says.
+        ``dlq_unconfigured`` mirrors ``DrakkarConfig.dlq_unconfigured``: with
+        a DLQ that has no destination a record that has nowhere to go is a
+        counted drop (``drakkar_dlq_unconfigured_drops_total``), whatever
+        ``dlq_on_send_failure`` says. A DLQ switched off with ``dlq.enabled``
+        is not this case: with no sink, ``dlq_on_send_failure`` decides.
         """
         self._recorder = recorder
         self._dlq_sink = dlq_sink
         self._dlq_on_send_failure = dlq_on_send_failure
-        self._dlq_enabled = dlq_enabled
+        self._dlq_unconfigured = dlq_unconfigured
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
@@ -375,11 +337,10 @@ class SinkManager:
         return len(self._sinks)
 
     def register(self, sink: BaseSink[Any], policy: SinkPolicy = DEFAULT_SINK_POLICY) -> None:
-        """Register a sink instance with its declared failure policy, retry budget and dependencies.
+        """Register a sink instance with its resolved policy.
 
         Raises ValueError if a sink with the same (type, name) already exists.
-        Also installs the manager's circuit breaker config on the sink so the
-        breaker uses operator-configured thresholds instead of the default.
+        Also installs the policy's circuit breaker settings and delivery timeout on the sink.
         """
         key = (sink.sink_type, sink.name)
         if key in self._sinks:
@@ -397,8 +358,8 @@ class SinkManager:
         # Route circuit-breaker config through the public setter so the sink
         # keeps a single documented API for thresholds — the manager never
         # reaches into BaseSink's private attributes.
-        sink.configure_circuit_breaker(self._circuit_breaker_config)
-        sink.configure_delivery_timeout(self._delivery_timeout_seconds)
+        sink.configure_circuit_breaker(failures=policy.breaker_failures, cooldown_seconds=policy.breaker_cooldown)
+        sink.configure_delivery_timeout(policy.delivery_timeout)
 
     def get_sink_info(self) -> list[dict]:
         """Return list of all configured sinks with their type, name, and optional UI URL."""
@@ -506,19 +467,20 @@ class SinkManager:
 
     async def close_all(self) -> None:
         """Close all registered sinks. Logs errors but doesn't raise."""
-        for sink in self._sinks.values():
+        for key, sink in self._sinks.items():
+            timeout = self._policies[key].delivery_timeout
             try:
                 # Bounded for the same reason delivery is: a close() against
                 # an unresponsive server would otherwise hold shutdown open
                 # past the drain budget, and every sink after it too.
-                await asyncio.wait_for(sink.close(), timeout=self._delivery_timeout_seconds)
+                await asyncio.wait_for(sink.close(), timeout=timeout)
             except TimeoutError:
                 await logger.awarning(
                     'sink_close_timeout',
                     category='sink',
                     sink_type=sink.sink_type,
                     sink_name=sink.name,
-                    timeout_seconds=self._delivery_timeout_seconds,
+                    timeout_seconds=timeout,
                 )
             except Exception as e:
                 await logger.awarning(
@@ -867,12 +829,17 @@ class SinkManager:
 
         One budget for the whole attempt, transient retries included, so a
         partition's wait on a wedged sink is predictable rather than a
-        multiple of the retry count. A timeout cancels the sink coroutine:
+        multiple of the retry count. Without it a sink whose server stopped
+        answering on a still-open TCP connection blocks its partition
+        indefinitely: the breaker only counts a failure when a call returns,
+        so /readyz stays green while the worker does nothing. A timeout
+        cancels the sink coroutine:
         ``CancelledError`` is a ``BaseException``, so a sink's own ``except
         Exception`` fallback (the Postgres per-row retry) does not fire on it
         and the "failed batch wrote nothing" premise is preserved.
         """
         sink_type, sink_name = key
+        timeout = self._policies[key].delivery_timeout
         try:
             await asyncio.wait_for(
                 self._deliver_with_transient_retry(
@@ -881,15 +848,14 @@ class SinkManager:
                     sink_name=sink_name,
                     payloads=payloads,
                 ),
-                timeout=self._delivery_timeout_seconds,
+                timeout=timeout,
             )
         except TimeoutError as exc:
             # ``str(TimeoutError())`` is the empty string, and this error is
             # what reaches the handler, the DLQ record and the log — say what
             # actually happened. Same class, so it stays classified transient.
             raise TimeoutError(
-                f'{sink_type} sink {sink_name!r} did not finish delivering '
-                f'{len(payloads)} payload(s) within {self._delivery_timeout_seconds}s'
+                f'{sink_type} sink {sink_name!r} did not finish delivering {len(payloads)} payload(s) within {timeout}s'
             ) from exc
 
     async def _deliver_to_sink(
@@ -1211,11 +1177,11 @@ class SinkManager:
         ``SinkDeliveryFailedError`` when a record could not be written and
         ``dlq.on_send_failure`` is ``stall``.
         """
-        if self._dlq_sink is None and not self._dlq_enabled:
-            # The DLQ is off by configuration, not broken: stalling a partition
-            # over it would wedge a worker that never asked for a DLQ. A live
-            # Kafka source always implies a DLQ, so this guards the HTTP-only
-            # worker.
+        if self._dlq_sink is None and self._dlq_unconfigured:
+            # The DLQ has no destination by configuration, it is not broken:
+            # stalling a partition over it would wedge a worker that never
+            # asked for a DLQ. A live Kafka source always gives the DLQ a
+            # topic, so this guards the HTTP-only worker.
             await self.drop_unconfigured_dlq_send(partition_id, payload_count)
             return DeliveryOutcome.FAILED
         if message_context is None:
@@ -1287,7 +1253,7 @@ class SinkManager:
         """
         # Not a sink: the label of the lost-record line and of the stall error.
         subject = ('executor', task.task_id)
-        if self._dlq_sink is None and not self._dlq_enabled:
+        if self._dlq_sink is None and self._dlq_unconfigured:
             message_count = len(message_context.source_messages) if message_context is not None else 1
             await self.drop_unconfigured_dlq_send(partition_id, message_count)
             return
@@ -1411,7 +1377,7 @@ class SinkManager:
         )
 
     async def drop_unconfigured_dlq_send(self, partition_id: int, payload_count: int) -> None:
-        """Count and log a DLQ send that has nowhere to go because the DLQ is off by configuration.
+        """Count and log a DLQ send that has nowhere to go because the DLQ has no destination.
 
         Only the first drop warns: a worker running without a DLQ on purpose
         would otherwise repeat the warning for every failed delivery, and the

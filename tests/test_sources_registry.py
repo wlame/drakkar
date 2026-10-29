@@ -6,12 +6,16 @@ from drakkar.config import DrakkarConfig
 from drakkar.sources.http import HttpSource
 from drakkar.sources.kafka import KafkaSource
 from drakkar.sources.registry import SOURCE_FACTORIES, build_sources
+from tests.conftest import kafka_connections
 
 
 def _app(sources: dict) -> MagicMock:
     app = MagicMock()
     app._config = DrakkarConfig(
-        ui={'release': {'enabled': False}}, executor={'binary_path': '/usr/bin/echo'}, sources=sources
+        connections=kafka_connections(),
+        ui={'release': {'enabled': False}},
+        executor={'binary_path': '/usr/bin/echo'},
+        sources=sources,
     )
     return app
 

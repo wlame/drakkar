@@ -1,7 +1,10 @@
-"""Sink configuration models, the circuit breaker, and the DLQ.
+"""Sink configuration models and the DLQ.
 
 One model per sink type, plus the ``SinksConfig`` container that groups
-instances by type and the ``DLQConfig`` for the dead-letter producer.
+instances by type and holds the defaults of their policy keys, and the
+``DLQConfig`` for the dead-letter producer. A sink of a service kind names a
+connection under ``connections.<kind>``; how to reach and log in to the service
+stays there, and each sink owns its client or pool.
 
 The two imports from ``drakkar.sinks`` are the pure, dependency-free
 template compilers — they validate operator-authored SQL/MQL at config
@@ -24,8 +27,9 @@ from pydantic import (
     model_validator,
 )
 
-from drakkar.config.base import ConfigModel
-from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
+from drakkar.config.base import ConfigModel, yaml_text
+from drakkar.config.units import Duration, WholeSeconds
+from drakkar.kafka_security import validate_client_config
 from drakkar.models import MongoOp
 from drakkar.sinks.mql import compile_template
 from drakkar.sinks.pgsql import compile_named_statement
@@ -52,24 +56,23 @@ _MONGO_STATEMENT_NAME_RE = _PG_STATEMENT_NAME_RE
 _REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 
-# The failure policy of one sink instance. The three keys are shared by every
-# sink type.
+# The failure policy of one sink instance. The keys are shared by every sink
+# type; every one but ``depends_on`` has its default in ``sinks.defaults``.
 ON_FAILURE_CHOICES = ('dlq', 'skip')
 MAX_RETRIES_LIMIT = 10
-POLICY_KEYS = ('on_failure', 'max_retries', 'depends_on')
+DEFAULTED_POLICY_KEYS = ('on_failure', 'max_retries', 'delivery_timeout', 'breaker_failures', 'breaker_cooldown')
+POLICY_KEYS = (*DEFAULTED_POLICY_KEYS, 'depends_on')
 
 # The same integer rule as the ``max_retries`` field, so the range check sees
 # the value the field would hold (``3.0`` and ``'3'`` are 3; ``2.5`` is left to
 # the field, whose integer message names the path).
 _WHOLE_NUMBER = TypeAdapter(int)
 
+DLQ_PROVIDER_KAFKA = 'kafka'
 
-class SinkInstanceConfig(ConfigModel):
-    """The failure policy, retry budget and dependencies of one sink instance.
 
-    Every sink config class inherits these keys; ``SinksConfig`` reads them
-    through ``SinksConfig.policy_of``.
-    """
+class SinkDefaults(ConfigModel):
+    """The policy keys of a sink instance that does not give them (``sinks.defaults``)."""
 
     on_failure: Literal['dlq', 'skip'] = Field(
         default='dlq',
@@ -89,6 +92,68 @@ class SinkInstanceConfig(ConfigModel):
             'idempotent write are not counted.'
         ),
     )
+    delivery_timeout: Duration = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            'Budget for one sink delivery, including the framework-internal transient retries. '
+            'A sink whose server stops answering while the TCP connection stays open would otherwise '
+            'block its partition forever: the circuit breaker only sees a failure when a call returns. '
+            'Sinks whose driver supports it also use this value for their own socket or command '
+            'timeout, so the driver reports a specific error first. Applies to close() during shutdown '
+            'as well.'
+        ),
+    )
+    breaker_failures: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            'Consecutive delivery failures before the circuit trips open: 5 trips on the 5th '
+            'consecutive failure. Intermittent failures with any success in between do not accumulate.'
+        ),
+    )
+    breaker_cooldown: Duration = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            'Time the circuit stays fully open before the next delivery is allowed through as a '
+            'half-open probe. While open, no attempt is made on the sink.'
+        ),
+    )
+
+
+class SinkInstanceConfig(ConfigModel):
+    """The policy keys of one sink instance; a key not given reads ``sinks.defaults``.
+
+    Every sink config class inherits these keys; ``SinksConfig`` resolves them
+    through ``SinksConfig.policy_of``.
+    """
+
+    on_failure: Literal['dlq', 'skip'] | None = Field(
+        default=None,
+        description="This sink's on_failure. Not given: sinks.defaults.on_failure.",
+    )
+    max_retries: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_RETRIES_LIMIT,
+        description="This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
+    )
+    delivery_timeout: Duration | None = Field(
+        default=None,
+        gt=0,
+        description="This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+    )
+    breaker_failures: int | None = Field(
+        default=None,
+        ge=1,
+        description="This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+    )
+    breaker_cooldown: Duration | None = Field(
+        default=None,
+        ge=0.0,
+        description="This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+    )
     depends_on: list[str] = Field(
         default_factory=list,
         description=(
@@ -99,34 +164,38 @@ class SinkInstanceConfig(ConfigModel):
 
 
 class SinkPolicy(ConfigModel):
-    """The declared policy of one sink instance, as the delivery reads it."""
+    """The resolved policy of one sink instance, as the delivery reads it."""
 
     model_config = ConfigDict(frozen=True)
 
     on_failure: Literal['dlq', 'skip']
     max_retries: int
+    delivery_timeout: float
+    breaker_failures: int
+    breaker_cooldown: float
     depends_on: tuple[str, ...]
 
     @classmethod
-    def of(cls, instance: SinkInstanceConfig) -> 'SinkPolicy':
-        """The policy declared by ``instance``."""
-        return cls(
-            on_failure=instance.on_failure,
-            max_retries=instance.max_retries,
-            depends_on=tuple(instance.depends_on),
-        )
+    def of(cls, instance: SinkInstanceConfig, defaults: SinkDefaults) -> 'SinkPolicy':
+        """The policy of ``instance``: a key it gives wins, even one equal to the default."""
+        resolved = {key: getattr(instance, key) for key in DEFAULTED_POLICY_KEYS}
+        for key, value in resolved.items():
+            if value is None:
+                resolved[key] = getattr(defaults, key)
+        return cls(**resolved, depends_on=tuple(instance.depends_on))
 
 
 def check_instance_policy(path: str, raw: Mapping[str, Any]) -> None:
     """Refuse a bad ``on_failure`` or ``max_retries`` in the raw leaf at ``path``, with the pinned message.
 
-    A ``max_retries`` that is not a whole number is left to the field's
-    integer rule. ``depends_on`` references are checked once every instance
+    A key with no value is not given. A ``max_retries`` that is not a whole
+    number is left to the field's integer rule. ``depends_on`` references are checked once every instance
     is known (``SinksConfig.check_dependencies``).
     """
-    if 'on_failure' in raw and raw['on_failure'] not in ON_FAILURE_CHOICES:
-        raise ValueError(f"{path}.on_failure must be dlq or skip, got '{raw['on_failure']}'")
-    if 'max_retries' not in raw:
+    on_failure = raw.get('on_failure')
+    if on_failure is not None and on_failure not in ON_FAILURE_CHOICES:
+        raise ValueError(f"{path}.on_failure must be dlq or skip, got '{on_failure}'")
+    if raw.get('max_retries') is None:
         return
     try:
         retries = _WHOLE_NUMBER.validate_python(raw['max_retries'])
@@ -175,41 +244,18 @@ def find_dependency_cycle(graph: Mapping[str, list[str]]) -> list[str] | None:
 
 
 class KafkaSinkConfig(SinkInstanceConfig):
-    """Configuration for a Kafka output sink.
+    """Configuration for a Kafka output sink: a topic on the cluster that ``connection`` names."""
 
-    Each named instance produces messages to a specific topic.
-    If `brokers` is empty, inherits from `kafka.brokers` (same cluster) —
-    and, because it is the same cluster, inherits `kafka.security` and
-    `kafka.client_config` along with it. Setting `brokers` here makes the
-    sink self-contained: it then uses only its own security block, which
-    defaults to PLAINTEXT.
-    """
-
+    connection: str = Field(default='main', description='The Kafka cluster: a name under connections.kafka.')
     topic: str = Field(description='Target Kafka topic for output messages.')
-    brokers: str = Field(
-        default='',
-        description=(
-            'Kafka brokers for this sink. Empty inherits kafka.brokers — and with it '
-            'kafka.security and kafka.client_config (same cluster, same credentials). '
-            'Setting brokers makes the sink self-contained with its own security block.'
-        ),
-    )
-    ui_url: str = Field(
-        default='',
-        description='URL to a web UI for this sink (e.g. Kafka-UI), shown as a link in the operator UI.',
-    )
-
-    # Only consulted when ``brokers`` is set; an inheriting sink takes the
-    # consumer's security instead. See ``resolve_kafka_client_settings``.
-    security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
     client_config: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            'Raw librdkafka properties for this sink, merged after security. Only consulted when brokers is set.'
+            "Raw librdkafka properties for this sink's producer, merged after the connection's client_config; "
+            'this sink wins on a shared key. Reserved keys are rejected at config load.'
         ),
     )
-
-    flush_timeout_seconds: float = Field(
+    flush_timeout: Duration = Field(
         default=30.0,
         gt=0,
         description=(
@@ -224,6 +270,10 @@ class KafkaSinkConfig(SinkInstanceConfig):
             'target.'
         ),
     )
+    ui_url: str = Field(
+        default='',
+        description='URL to a web UI for this sink (e.g. Kafka-UI), shown as a link in the operator UI.',
+    )
 
     @field_validator('client_config')
     @classmethod
@@ -234,13 +284,11 @@ class KafkaSinkConfig(SinkInstanceConfig):
 class PostgresSinkConfig(SinkInstanceConfig):
     """Configuration for a PostgreSQL output sink.
 
-    Each named instance connects to a database via asyncpg pool.
+    Each named instance keeps its own asyncpg pool on the database that
+    ``connection`` names.
     """
 
-    dsn: str = Field(
-        description='PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.',
-        json_schema_extra={'drakkar_secret': True},
-    )
+    connection: str = Field(default='main', description='The database: a name under connections.postgres.')
     pool_min: int = Field(default=2, ge=1, description='Minimum connections in the asyncpg pool.')
     pool_max: int = Field(default=10, ge=1, description='Maximum connections in the asyncpg pool.')
     statements: dict[str, str] = Field(
@@ -353,13 +401,11 @@ class MongoStatementConfig(ConfigModel):
 class MongoSinkConfig(SinkInstanceConfig):
     """Configuration for a MongoDB output sink.
 
-    Each named instance connects to a database via PyMongo's AsyncMongoClient.
+    Each named instance keeps its own PyMongo AsyncMongoClient on the server
+    that ``connection`` names.
     """
 
-    uri: str = Field(
-        description='MongoDB connection string, typically embedding user and password.',
-        json_schema_extra={'drakkar_secret': True},
-    )
+    connection: str = Field(default='main', description='The server: a name under connections.mongo.')
     database: str = Field(description='Target database name.')
     statements: dict[str, MongoStatementConfig] = Field(
         default_factory=dict,
@@ -446,7 +492,7 @@ class HttpSinkConfig(SinkInstanceConfig):
         )
     )
     method: str = Field(default='POST', description='HTTP method to use.')
-    timeout_seconds: int = Field(default=30, ge=1, description='Request timeout in seconds.')
+    request_timeout: WholeSeconds = Field(default=30, ge=1, description='Request timeout.')
     headers: dict[str, str] = Field(
         default_factory=dict,
         description='Extra request headers. May carry an Authorization value, so treated as secret as a whole.',
@@ -502,15 +548,12 @@ class HttpSinkConfig(SinkInstanceConfig):
 class RedisSinkConfig(SinkInstanceConfig):
     """Configuration for a Redis output sink.
 
-    Each named instance connects to a Redis server and issues one write
-    command per payload, or runs an operator-authored Lua script by name.
+    Each named instance keeps its own client on the server that ``connection``
+    names and issues one write command per payload, or runs an operator-authored
+    Lua script by name.
     """
 
-    url: str = Field(
-        default='redis://localhost:6379/0',
-        description='Redis connection URL, which may embed a password (redis://:password@host:port/db).',
-        json_schema_extra={'drakkar_secret': True},
-    )
+    connection: str = Field(default='main', description='The server: a name under connections.redis.')
     key_prefix: str = Field(
         default='',
         description="Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
@@ -575,42 +618,6 @@ class FileSinkConfig(SinkInstanceConfig):
     )
 
 
-class CircuitBreakerConfig(ConfigModel):
-    """Per-sink circuit breaker settings — shared default across all sinks.
-
-    The breaker guards a sink from burning pool slots when its downstream
-    is down. After ``failure_threshold`` consecutive failed deliveries the
-    circuit trips open — subsequent deliveries are NOT attempted, they
-    route straight to DLQ. After ``cooldown_seconds`` elapse the next
-    delivery is allowed through as a half-open probe; success closes the
-    circuit, failure reopens with a renewed cooldown.
-
-    This default applies uniformly to every configured sink. Per-sink
-    overrides can be added later — for v1 a single global default is
-    enough for operational resilience under a downstream outage.
-    """
-
-    failure_threshold: int = Field(
-        default=5,
-        ge=1,
-        description=(
-            'Consecutive delivery failures before the circuit trips open. '
-            '5 = trip on the 5th consecutive failure (4 prior failures did '
-            'not trip, the 5th did). Intermittent failures with any success '
-            'in between do not accumulate.'
-        ),
-    )
-    cooldown_seconds: float = Field(
-        default=30.0,
-        ge=0.0,
-        description=(
-            'Time the circuit stays fully open before the next delivery is '
-            'allowed through as a half-open probe. While open, all deliveries '
-            'route directly to DLQ — no attempt is made on the sink.'
-        ),
-    )
-
-
 class SinksConfig(ConfigModel):
     """Container for all configured sink instances, grouped by type.
 
@@ -618,43 +625,23 @@ class SinksConfig(ConfigModel):
     Example YAML::
 
         sinks:
+          defaults:
+            max_retries: 5
           kafka:
             results:
               topic: "search-results"
           postgres:
             main-db:
-              dsn: "postgresql://..."
+              connection: analytics
     """
 
+    defaults: SinkDefaults = Field(default_factory=SinkDefaults)
     kafka: dict[str, KafkaSinkConfig] = Field(default_factory=dict)
     postgres: dict[str, PostgresSinkConfig] = Field(default_factory=dict)
     mongo: dict[str, MongoSinkConfig] = Field(default_factory=dict)
     http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
     filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
-    delivery_timeout_seconds: float = Field(
-        default=30.0,
-        gt=0,
-        description=(
-            'Budget for one sink delivery, including the framework-internal '
-            'transient retries. A sink whose server stops answering while the '
-            'TCP connection stays open would otherwise block its partition '
-            'forever: the circuit breaker only sees a failure when a call '
-            'returns. Sinks whose driver supports it also use this value for '
-            'their own socket/command timeout, so the driver reports a '
-            'specific error before this outer budget expires. Applies to '
-            'close() during shutdown as well.'
-        ),
-    )
-    circuit_breaker: CircuitBreakerConfig = Field(
-        default_factory=CircuitBreakerConfig,
-        description=(
-            'Default circuit breaker config applied to every configured sink. '
-            'Per-sink overrides are not supported in v1 — if a sink needs a '
-            'different threshold/cooldown, adjust this default or add a '
-            'per-sink override in a future release.'
-        ),
-    )
 
     @model_validator(mode='wrap')
     @classmethod
@@ -664,9 +651,12 @@ class SinksConfig(ConfigModel):
         The checks run on the raw input because only here is the instance
         path known, and the messages name it. Instances are checked in sorted
         ``<type>/<name>`` order, ``on_failure`` before ``max_retries``, so the
-        first message is the same for any key order.
+        first message is the same for any key order; ``sinks.defaults`` comes first.
         """
         if isinstance(data, Mapping):
+            defaults = data.get('defaults')
+            if isinstance(defaults, Mapping):
+                check_instance_policy('sinks.defaults', defaults)
             for _, path, raw in sorted(_raw_instance_leaves(data), key=lambda leaf: leaf[0]):
                 check_instance_policy(path, raw)
         return handler(data)
@@ -677,11 +667,16 @@ class SinksConfig(ConfigModel):
         for sink_type in SINK_TYPES:
             section: dict[str, SinkInstanceConfig] = getattr(self, sink_type)
             for name, instance in section.items():
-                instances[f'{sink_type}/{name}'] = (f'sinks.{sink_type}.{name}', SinkPolicy.of(instance))
+                policy = SinkPolicy.of(instance, self.defaults)
+                instances[f'{sink_type}/{name}'] = (f'sinks.{sink_type}.{name}', policy)
         return instances
 
+    def policies(self) -> dict[str, SinkPolicy]:
+        """The resolved policy of every instance, keyed by its ``<type>/<name>`` reference."""
+        return {ref: policy for ref, (_, policy) in self._instances().items()}
+
     def policy_of(self, sink_type: str, name: str) -> SinkPolicy:
-        """The declared policy of the instance ``name`` of ``sink_type``.
+        """The resolved policy of the instance ``name`` of ``sink_type``.
 
         Raises:
             KeyError: no such instance is configured.
@@ -761,7 +756,7 @@ SINK_TYPES: tuple[str, ...] = tuple(
     name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict
 )
 
-DEFAULT_SINK_POLICY = SinkPolicy.of(SinkInstanceConfig())
+DEFAULT_SINK_POLICY = SinkPolicy.of(SinkInstanceConfig(), SinkDefaults())
 
 
 def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, Any]]]:
@@ -780,47 +775,39 @@ def _raw_instance_leaves(data: Mapping[str, Any]) -> list[tuple[str, str, Mappin
 
 
 class DLQConfig(ConfigModel):
-    """Dead letter queue configuration.
+    """Dead letter queue configuration: failed messages are written to a Kafka topic.
 
-    Failed sink deliveries are written to this Kafka topic.
-    If `topic` is empty and the Kafka source is enabled, the topic is `{sources.kafka.topic}_dlq`.
-    If `topic` is empty and the Kafka source is disabled, no DLQ producer is built (see docs/sources.md).
-    If `brokers` is empty, inherits from `kafka.brokers` — and with them
-    `kafka.security` and `kafka.client_config`, on the same
-    same-cluster-means-same-credentials rule the Kafka sinks follow.
+    With ``enabled`` off, or with no topic and no Kafka source, no DLQ producer is
+    built (see docs/sources.md). ``provider`` selects the destination, and ``connection``
+    names its cluster under ``connections.kafka``.
     """
 
+    enabled: bool = Field(
+        default=True,
+        description='Write DLQ records. Off, a dlq outcome follows on_send_failure, as with no DLQ sink.',
+    )
+    provider: Literal['kafka'] = Field(default='kafka', description='Where DLQ records go. kafka is the only value.')
+    connection: str = Field(default='main', description='The Kafka cluster: a name under connections.kafka.')
     topic: str = Field(
         default='',
         description=(
             "DLQ Kafka topic name. Empty derives '{sources.kafka.topic}_dlq' when the Kafka source "
-            'is enabled, and disables the DLQ when it is not.'
+            'is enabled; with no Kafka source and no topic there is no DLQ.'
         ),
     )
-    brokers: str = Field(
-        default='',
-        description=(
-            'Kafka brokers for the DLQ producer. Empty inherits kafka.brokers — and with it '
-            'kafka.security and kafka.client_config, on the same same-cluster-means-same-'
-            'credentials rule the Kafka sinks follow.'
-        ),
-    )
-
-    # Only consulted when ``brokers`` is set; see ``KafkaSinkConfig.security``.
-    security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
     client_config: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            'Raw librdkafka properties for the DLQ producer, merged after security. Only consulted when brokers is set.'
+            "Raw librdkafka properties for the DLQ producer, merged after the connection's client_config; "
+            'the DLQ wins on a shared key. Reserved keys are rejected at config load.'
         ),
     )
-
-    flush_timeout_seconds: float = Field(
+    flush_timeout: Duration = Field(
         default=30.0,
         gt=0,
         description=(
             'Bound on the producer flush that ends every DLQ write. Same '
-            'rationale as KafkaSinkConfig.flush_timeout_seconds, and it '
+            'rationale as flush_timeout of a Kafka sink, and it '
             'matters more here: the DLQ is the last resort, so a DLQ write '
             'that blocks for message.timeout.ms stalls the partition it was '
             'meant to rescue. On expiry the write is reported as unconfirmed '
@@ -828,13 +815,8 @@ class DLQConfig(ConfigModel):
         ),
     )
 
-    @field_validator('client_config')
-    @classmethod
-    def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
-        return validate_client_config(v)
-
-    # Strategy when the DLQ write itself fails (or no DLQ sink exists) after
-    # a sink delivery already failed — the payloads have nowhere safe to go:
+    # Strategy when no record can be written after a sink delivery already
+    # failed (the write failed, or the DLQ is off) — the payloads have nowhere safe to go:
     #   - 'drop'  — log CRITICAL, tick drakkar_dlq_dropped_payloads_total,
     #               count the message as processed and commit its offset.
     #               The pipeline keeps moving; the payloads are lost (default).
@@ -848,9 +830,21 @@ class DLQConfig(ConfigModel):
     on_send_failure: Literal['drop', 'stall'] = Field(
         default='drop',
         description=(
-            "Strategy when the DLQ write itself fails. 'drop' logs CRITICAL, counts the loss, "
+            "Strategy when no DLQ record can be written. 'drop' logs CRITICAL, counts the loss, "
             "commits the offset, and keeps the pipeline moving; 'stall' leaves the offset "
             'uncommitted and pauses the partition until restart — no loss, at the cost of '
             'consumer lag.'
         ),
     )
+
+    @field_validator('provider', mode='before')
+    @classmethod
+    def _require_a_known_provider(cls, value: Any) -> Any:
+        if value != DLQ_PROVIDER_KAFKA:
+            raise ValueError(f"dlq.provider must be kafka, got '{yaml_text(value)}'")
+        return value
+
+    @field_validator('client_config')
+    @classmethod
+    def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_client_config(v)

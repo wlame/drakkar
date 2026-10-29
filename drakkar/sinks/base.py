@@ -12,12 +12,13 @@ from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
-from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import sink_circuit_open, sink_circuit_trips
 
-# Mirrors ``SinksConfig.delivery_timeout_seconds``' default, for sinks
-# constructed outside a ``SinkManager`` (tests, standalone use).
+# The defaults of ``sinks.defaults``, for sinks constructed outside a
+# ``SinkManager`` (tests, standalone use).
 DEFAULT_DELIVERY_TIMEOUT_SECONDS = 30.0
+DEFAULT_BREAKER_FAILURES = 5
+DEFAULT_BREAKER_COOLDOWN_SECONDS = 30.0
 
 PayloadT = TypeVar('PayloadT', bound=BaseModel)
 
@@ -47,10 +48,10 @@ class BaseSink(ABC, Generic[PayloadT]):
         / ``release_probe_inflight`` methods and the ``circuit_state``
         property implement a per-sink circuit breaker. The SinkManager drives
         the state transitions — a sink subclass never calls these directly.
-        The breaker config is wired in by the SinkManager via
-        ``configure_circuit_breaker`` when it registers the sink, or falls
-        back to the default ``CircuitBreakerConfig()`` when no manager is
-        involved (tests, standalone sink usage).
+        The breaker settings come from the sink's policy: the SinkManager
+        passes them to ``configure_circuit_breaker`` when it registers the
+        sink. With no manager involved (tests, standalone sink usage) the
+        defaults of ``sinks.defaults`` apply.
     """
 
     sink_type: str = ''
@@ -121,7 +122,7 @@ class BaseSink(ABC, Generic[PayloadT]):
         self._is_connected: bool = False
 
         # Budget for one delivery, pushed in by ``SinkManager.register`` from
-        # ``sinks.delivery_timeout_seconds``. Sinks whose driver takes a
+        # the sink's policy. Sinks whose driver takes a
         # socket or command timeout read it in ``connect()`` so the driver
         # raises a specific error before the manager's outer budget expires.
         # The default matches the config default, so a sink registered
@@ -131,8 +132,8 @@ class BaseSink(ABC, Generic[PayloadT]):
         # Circuit breaker state. Starts closed (0.0 on the gauge) — the
         # per-sink gauge is initialized eagerly so a freshly-registered sink
         # appears in Prometheus scrape output as "closed" rather than absent.
-        # SinkManager calls ``configure_circuit_breaker`` with operator-
-        # configured thresholds when the manager registers the sink.
+        # SinkManager calls ``configure_circuit_breaker`` with this sink's
+        # settings when the manager registers the sink.
         self._consecutive_failures: int = 0
         self._circuit_state: CircuitState = 'closed'
         self._circuit_opened_at: float | None = None
@@ -144,7 +145,8 @@ class BaseSink(ABC, Generic[PayloadT]):
         # single probe: the first caller marks it, subsequent callers see
         # ``half_open`` + inflight and skip.
         self._probe_inflight: bool = False
-        self._circuit_config: CircuitBreakerConfig = CircuitBreakerConfig()
+        self._breaker_failures: int = DEFAULT_BREAKER_FAILURES
+        self._breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
         sink_circuit_open.labels(sink_type=self.sink_type, sink_name=self._name).set(0.0)
 
     @property
@@ -182,15 +184,15 @@ class BaseSink(ABC, Generic[PayloadT]):
         """
         self._delivery_timeout_seconds = seconds
 
-    def configure_circuit_breaker(self, config: CircuitBreakerConfig) -> None:
-        """Replace the breaker's thresholds — called by SinkManager.register.
+    def configure_circuit_breaker(self, *, failures: int, cooldown_seconds: float) -> None:
+        """Replace the breaker's settings — called by SinkManager.register.
 
         Kept as an explicit method rather than a direct attribute assignment
         so every call site routes through a named public API. Sinks
-        registered outside a manager keep the default ``CircuitBreakerConfig``
-        wired in ``__init__``.
+        registered outside a manager keep the defaults set in ``__init__``.
         """
-        self._circuit_config = config
+        self._breaker_failures = failures
+        self._breaker_cooldown_seconds = cooldown_seconds
 
     @property
     def name(self) -> str:
@@ -261,7 +263,7 @@ class BaseSink(ABC, Generic[PayloadT]):
             sink_circuit_trips.labels(sink_type=self.sink_type, sink_name=self._name).inc()
             return
 
-        if self._circuit_state == 'closed' and self._consecutive_failures >= self._circuit_config.failure_threshold:
+        if self._circuit_state == 'closed' and self._consecutive_failures >= self._breaker_failures:
             # Threshold hit — trip open. Cooldown timer starts now; the next
             # delivery attempt after cooldown elapses becomes a half-open
             # probe (see should_skip_delivery).
@@ -352,7 +354,7 @@ class BaseSink(ABC, Generic[PayloadT]):
         if self._circuit_opened_at is None:
             raise RuntimeError('circuit state is "open" but _circuit_opened_at is None — internal invariant broken')
         elapsed = time.monotonic() - self._circuit_opened_at
-        if elapsed >= self._circuit_config.cooldown_seconds:
+        if elapsed >= self._breaker_cooldown_seconds:
             # Cooldown elapsed — promote to half_open and claim the probe
             # slot in a single non-awaiting step.
             self._circuit_state = 'half_open'

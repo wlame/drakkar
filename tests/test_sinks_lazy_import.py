@@ -60,7 +60,7 @@ def test_config_imports_the_helpers_from_their_sinks_home() -> None:
             sys.executable,
             '-c',
             'import drakkar.config as c; import drakkar.sinks.pgsql, drakkar.sinks.mql; '
-            'print(c.DrakkarConfig(sources={"kafka": {"enabled": True}}).kafka.brokers)',
+            'print(c.DrakkarConfig(sources={"http": {"enabled": True}}).sources.http.port)',
         ],
         capture_output=True,
         text=True,

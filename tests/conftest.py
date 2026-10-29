@@ -26,6 +26,18 @@ from drakkar.models import (
 
 _RECORDER_FIELDS = frozenset(UIRecorderConfig.model_fields)
 
+# YAML of the Kafka connection that a config with the Kafka source (and so the DLQ) on must declare.
+KAFKA_CONNECTION_YAML = 'connections:\n  kafka:\n    main: {}\n'
+
+
+def kafka_connections(**settings: Any) -> dict[str, Any]:
+    """The ``connections`` section that declares the Kafka connection ``main``.
+
+    A config with the Kafka source on, and so with the DLQ on, names that
+    connection and fails to load without it.
+    """
+    return {'kafka': {'main': settings}}
+
 
 def make_ui_config(**kwargs) -> UIConfig:
     """Build a ``UIConfig`` from flat kwargs, routing recorder-tier fields.
@@ -165,6 +177,7 @@ def minimal_config_dict() -> dict:
         'executor': {
             'binary_path': '/usr/bin/echo',
         },
+        'connections': kafka_connections(),
         'sources': {'kafka': {'enabled': True}},
     }
 
@@ -172,8 +185,9 @@ def minimal_config_dict() -> dict:
 @pytest.fixture
 def full_config_dict() -> dict:
     return {
-        'kafka': {
-            'brokers': 'kafka1:9092,kafka2:9092',
+        'connections': {
+            **kafka_connections(brokers='kafka1:9092,kafka2:9092'),
+            'postgres': {'main': {'dsn': 'postgresql://user:pass@db:5432/app'}},
         },
         'sources': {
             'kafka': {
@@ -181,9 +195,9 @@ def full_config_dict() -> dict:
                 'topic': 'input-events',
                 'consumer_group': 'drakkar-workers',
                 'max_poll_records': 200,
-                'max_poll_interval_ms': 600_000,
-                'session_timeout_ms': 30_000,
-                'heartbeat_interval_ms': 5_000,
+                'max_poll_interval': '10m',
+                'session_timeout': '30s',
+                'heartbeat_interval': '5s',
             },
         },
         'executor': {
@@ -198,7 +212,7 @@ def full_config_dict() -> dict:
         },
         'sinks': {
             'kafka': {'results': {'topic': 'output-results'}},
-            'postgres': {'main': {'dsn': 'postgresql://user:pass@db:5432/app', 'pool_min': 5, 'pool_max': 20}},
+            'postgres': {'main': {'pool_min': 5, 'pool_max': 20}},
         },
         'metrics': {
             'enabled': True,

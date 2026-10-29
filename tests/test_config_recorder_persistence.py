@@ -6,12 +6,18 @@ from pydantic import ValidationError
 
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.config.root import PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE
+from tests.conftest import kafka_connections
 
-BASE = {'sources': {'kafka': {'enabled': True}}, 'ui': {'release': {'enabled': False}}}
+BASE = {
+    'connections': {'kafka': {'main': {}}},
+    'sources': {'kafka': {'enabled': True}},
+    'ui': {'release': {'enabled': False}},
+}
 
 
 def _config(storage_dir: str = '/data', **recorder) -> DrakkarConfig:
     return DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': storage_dir},
         ui={'release': {'enabled': False}, 'recorder': recorder},
@@ -27,7 +33,7 @@ def _clear_dk_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_recorder_memory_defaults():
-    recorder = DrakkarConfig(sources={'kafka': {'enabled': True}}).ui.recorder
+    recorder = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}}).ui.recorder
 
     assert recorder.persistence is None
     assert recorder.memory.window_seconds == 120
@@ -54,6 +60,7 @@ def test_resolved_persistence_derive_table(persistence, storage_dir, expected):
 def test_persistence_sqlite_without_storage_dir_fails_even_with_ui_disabled():
     with pytest.raises(ValidationError) as excinfo:
         DrakkarConfig(
+            connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
             storage={'dir': ''},
             ui={'enabled': False, 'recorder': {'persistence': 'sqlite'}},
@@ -110,7 +117,7 @@ def _postgres_config(storage_dir: str = '', ui_enabled: bool = True, **postgres)
     return DrakkarConfig(
         sources={'kafka': {'enabled': True}},
         storage={'dir': storage_dir},
-        connections=POSTGRES_CONNECTIONS,
+        connections={**kafka_connections(), **POSTGRES_CONNECTIONS},
         ui={
             'enabled': ui_enabled,
             'release': {'enabled': False},
@@ -120,7 +127,7 @@ def _postgres_config(storage_dir: str = '', ui_enabled: bool = True, **postgres)
 
 
 def test_recorder_postgres_defaults():
-    postgres = DrakkarConfig(sources={'kafka': {'enabled': True}}).ui.recorder.postgres
+    postgres = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}}).ui.recorder.postgres
 
     assert postgres.connection == 'main'
     assert postgres.table_prefix == ''
@@ -142,6 +149,7 @@ def test_resolved_persistence_postgres_is_never_derived_and_loads_without_storag
 def test_postgres_connection_is_checked_even_with_ui_disabled():
     with pytest.raises(ValidationError) as excinfo:
         DrakkarConfig(
+            connections=kafka_connections(),
             sources={'kafka': {'enabled': True}},
             ui={'enabled': False, 'recorder': {'persistence': 'postgres'}},
         )
@@ -152,7 +160,7 @@ def test_postgres_connection_is_checked_even_with_ui_disabled():
 def test_postgres_connection_key_names_another_entry():
     config = DrakkarConfig(
         sources={'kafka': {'enabled': True}},
-        connections={'postgres': {'history': {'dsn': POSTGRES_DSN}}},
+        connections={**kafka_connections(), 'postgres': {'history': {'dsn': POSTGRES_DSN}}},
         ui={
             'release': {'enabled': False},
             'recorder': {'persistence': 'postgres', 'postgres': {'connection': 'history'}},
@@ -164,6 +172,7 @@ def test_postgres_connection_key_names_another_entry():
 
 def test_postgres_keys_are_not_checked_for_a_connection_in_other_modes():
     DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         ui={'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
     )
@@ -197,7 +206,9 @@ def test_table_prefix_rule(prefix, ok):
 
 def test_postgres_keys_by_environment(monkeypatch, tmp_path):
     path = tmp_path / 'drakkar.yaml'
-    path.write_text(yaml.safe_dump({**BASE, 'connections': POSTGRES_CONNECTIONS}), encoding='utf-8')
+    path.write_text(
+        yaml.safe_dump({**BASE, 'connections': {**kafka_connections(), **POSTGRES_CONNECTIONS}}), encoding='utf-8'
+    )
     _clear_dk_env(monkeypatch)
     monkeypatch.setenv('DK_UI__RECORDER__PERSISTENCE', 'postgres')
     monkeypatch.setenv('DK_UI__RECORDER__POSTGRES__TABLE_PREFIX', 'heavy')

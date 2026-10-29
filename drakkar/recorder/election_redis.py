@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from drakkar.config.connections import REDIS_PREFIX_RE
 from drakkar.providers.redis import (
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     REDIS_PROVIDER,
     SCRIPTS,
     close_client,
@@ -60,7 +60,7 @@ class RedisElection:
     every other feature that names the same connection. ``stop`` leaves it
     open: the worker closes the shared connections after every provider has
     stopped. ``client`` presets a client and skips the connections;
-    ``key_prefix`` applies only to such a preset client, since otherwise it
+    ``state_prefix`` applies only to such a preset client, since otherwise it
     comes from the connection entry. It is put into the keys as it is, so it
     must match the characters that the entry allows.
     """
@@ -72,16 +72,16 @@ class RedisElection:
         open_client: Callable[[Any], Awaitable[Any]] = open_client,
         close_client: Callable[[Any], Awaitable[None]] = close_client,
         client: Any | None = None,
-        key_prefix: str = DEFAULT_KEY_PREFIX,
+        state_prefix: str = DEFAULT_STATE_PREFIX,
     ) -> None:
-        if not re.fullmatch(REDIS_PREFIX_RE, key_prefix):
-            raise ValueError(f"key_prefix '{key_prefix}' may only contain letters, digits, '_', ':', '.' and '-'")
+        if not re.fullmatch(REDIS_PREFIX_RE, state_prefix):
+            raise ValueError(f"state_prefix '{state_prefix}' may only contain letters, digits, '_', ':', '.' and '-'")
         self._connection = connection
         self._open_client = open_client
         self._close_client = close_client
         self._preset_client = client
-        self._preset_prefix = key_prefix
-        # The client and the key prefix that go with it, set once a start succeeded.
+        self._preset_prefix = state_prefix
+        # The client and the state prefix that go with it, set once a start succeeded.
         self._ready: tuple[Any, str] | None = None
         # The worker and instance written into the lock bodies this provider sets.
         self._worker = ''
@@ -181,7 +181,7 @@ class RedisElection:
         ).decode('utf-8')
 
     def _started(self) -> tuple[Any, str]:
-        """The client and the key prefix; raises after :meth:`stop` and before a successful :meth:`start`."""
+        """The client and the state prefix; raises after :meth:`stop` and before a successful :meth:`start`."""
         if self._stopped:
             raise RuntimeError(PROVIDER_STOPPED)
         if self._ready is None:

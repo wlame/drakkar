@@ -25,7 +25,7 @@ from drakkar.providers.consul import (
     CARD_HELD_MESSAGE,
     CONNECT_TIMEOUT_SECONDS,
     CONSUL_PROVIDER,
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     FILTERED_HEADER,
     FILTERED_MESSAGE,
     INSTANCE_PLACEHOLDER,
@@ -50,8 +50,8 @@ from drakkar.providers.consul import (
     ConsulError,
     acquire_key,
     base_url,
-    check_key_prefix,
     check_leader,
+    check_state_prefix,
     check_token,
     classify,
     close_client,
@@ -193,7 +193,7 @@ def test_statuses_timeouts_and_messages_match_the_fixture():
 
 def test_provider_name_and_default_prefix_follow_the_connection_config():
     assert CONSUL_PROVIDER == 'consul'
-    assert ConsulConnectionConfig().key_prefix == DEFAULT_KEY_PREFIX
+    assert ConsulConnectionConfig().state_prefix == DEFAULT_STATE_PREFIX
 
 
 @pytest.mark.parametrize(('seconds', 'expected'), FIXTURE['ttl'])
@@ -227,17 +227,17 @@ def test_session_ttl_rounds_a_fractional_half_up_to_whole_seconds():
 )
 def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_shape(prefix):
     with pytest.raises(ValueError) as info:
-        check_key_prefix(prefix)
+        check_state_prefix(prefix)
 
     assert str(info.value) == (
-        f"key_prefix '{prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
+        f"state_prefix '{prefix}' must be segments of letters, digits, '_', '.' and '-' joined by '/', "
         "with no leading or trailing '/', and no segment may be '.' or '..'"
     )
 
 
 @pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'a/...', 'v1.2/x..'])
 def test_check_key_prefix_accepts_a_prefix_inside_the_allowed_shape(prefix):
-    check_key_prefix(prefix)
+    check_state_prefix(prefix)
 
 
 @pytest.mark.parametrize('case', FIXTURE['own_session_names'], ids=lambda c: c['name'])
@@ -1098,13 +1098,13 @@ def test_fake_put_raw_refuses_a_request_path_and_an_unknown_session(fake):
         fake.put_raw('drakkar/fleet/workers/w', b'x', session=UNKNOWN_SESSION)
 
 
-def connections_with(*, key_prefix: str) -> Connections:
-    """Connections that declare one Consul entry, ``main``, with ``key_prefix``."""
-    return Connections(ConnectionsConfig(consul={'main': ConsulConnectionConfig(key_prefix=key_prefix)}))
+def connections_with(*, state_prefix: str) -> Connections:
+    """Connections that declare one Consul entry, ``main``, with ``state_prefix``."""
+    return Connections(ConnectionsConfig(consul={'main': ConsulConnectionConfig(state_prefix=state_prefix)}))
 
 
 async def test_resolve_client_shares_one_client_per_connection():
-    connections = connections_with(key_prefix='ops/fleet')
+    connections = connections_with(state_prefix='ops/fleet')
     opener = AsyncMock(return_value=object())
     closer = AsyncMock()
 
@@ -1125,7 +1125,7 @@ async def test_resolve_client_shares_one_client_per_connection():
     assert first[1] == 'ops/fleet'
     opener.assert_awaited_once()
     assert opener.await_args is not None
-    assert opener.await_args.args[0].key_prefix == 'ops/fleet'
+    assert opener.await_args.args[0].state_prefix == 'ops/fleet'
     await connections.close_all()
     closer.assert_awaited_once_with(first[0])
 

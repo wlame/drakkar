@@ -14,6 +14,7 @@ from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
 )
+from tests.conftest import kafka_connections
 
 # --- CacheExchangeConfig bounds ---
 
@@ -103,7 +104,11 @@ def test_cache_exchange_config_has_no_resolution_cache_knob():
 
 
 def test_drakkar_config_has_cache_field():
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}}, executor=ExecutorConfig(binary_path='/bin/true'))
+    cfg = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        executor=ExecutorConfig(binary_path='/bin/true'),
+    )
     assert isinstance(cfg.cache, CacheConfig)
     # default: disabled
     assert cfg.cache.enabled is False
@@ -115,7 +120,7 @@ def test_drakkar_config_has_cache_field():
 def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
 
 
@@ -127,7 +132,7 @@ def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
     monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '60')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
     assert cfg.fleet.cache_exchange.interval_seconds == 60.0
 
@@ -135,5 +140,5 @@ def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyP
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__MAX_MEMORY_ENTRIES', '2000')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.cache.max_memory_entries == 2000

@@ -69,7 +69,7 @@ from drakkar.uiserver.runner import (
     _make_value_preview,
     _probe_stage,
 )
-from tests.conftest import wait_for
+from tests.conftest import kafka_connections, wait_for
 
 # --- shared fixtures --------------------------------------------------------
 
@@ -990,7 +990,8 @@ def _make_config(*, max_retries: int = 1) -> DrakkarConfig:
     budget per scenario (retry path, retries exhausted, etc.).
     """
     return DrakkarConfig(
-        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(
             binary_path='/nonexistent/binary/should-never-run',
             task_timeout_seconds=5,

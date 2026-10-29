@@ -28,7 +28,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     UIConsumePauseConfig,
@@ -36,7 +35,7 @@ from drakkar.config import (
 from drakkar.consume_pause import ConsumerNotReadyError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import ExecutorTask
-from tests.conftest import wire_kafka_source
+from tests.conftest import kafka_connections, wire_kafka_source
 
 
 class _Handler(BaseDrakkarHandler):
@@ -47,8 +46,8 @@ class _Handler(BaseDrakkarHandler):
 @pytest.fixture
 def pause_config() -> DrakkarConfig:
     cfg = DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),

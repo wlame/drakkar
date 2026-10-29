@@ -19,11 +19,13 @@ from drakkar.config import (
     UITraceConfig,
     load_config,
 )
+from tests.conftest import kafka_connections
 
 
 def _config(**sections) -> DrakkarConfig:
     """A loadable config: one enabled source, bundle fetching off, plus ``sections``."""
     sections.setdefault('sources', {'kafka': {'enabled': True}})
+    sections['connections'] = {**kafka_connections(), **sections.get('connections', {})}
     ui = sections.setdefault('ui', {})
     ui.setdefault('release', {'enabled': False})
     return DrakkarConfig(**sections)
@@ -209,7 +211,7 @@ def test_the_filesystem_provider_ignores_the_connection_name():
 
 def test_every_provider_with_a_connection_has_a_connections_kind_of_its_name():
     # The cross-check reads connections.<provider> by the provider's name.
-    assert set(CONNECTION_PROVIDERS) == set(ConnectionsConfig.model_fields)
+    assert set(CONNECTION_PROVIDERS) <= set(ConnectionsConfig.model_fields)
 
 
 def test_registry_names_a_connection_of_its_own_kind_only():
@@ -280,6 +282,7 @@ def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider)
 
 def test_resilience_blocks_load_from_env_names(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
     monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS', '2.5')
     monkeypatch.setenv('DK_PERIODIC__ELECTION__RESILIENCE__RETRIES', '0')
@@ -296,6 +299,7 @@ def test_resilience_blocks_load_from_env_names(monkeypatch):
 
 def test_env_names_load_into_the_new_sections(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
     monkeypatch.setenv('DK_STORAGE__DIR', '/var/lib/drakkar')
     monkeypatch.setenv('DK_SHARED__DIR', '/mnt/fleet')

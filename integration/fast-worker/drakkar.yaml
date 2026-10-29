@@ -4,14 +4,16 @@
 worker_name_env: "WORKER_ID"
 cluster_name: "fast cluster"
 
-kafka:
-  brokers: "kafka:9092"
-  # Kafka-UI deep-link config — renders a clickable Kafka icon next to
-  # every <partition:offset> in the Debug UI that opens the message in
-  # Kafka-UI. Must match the cluster name Kafka-UI itself is configured
-  # with (docker-compose: KAFKA_CLUSTERS_0_NAME=drakkar-local).
-  ui_url: "http://localhost:8088"
-  ui_cluster_name: "drakkar-local"
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"
+      # Kafka-UI deep-link config — renders a clickable Kafka icon next to
+      # every <partition:offset> in the Debug UI that opens the message in
+      # Kafka-UI. Must match the cluster name Kafka-UI itself is configured
+      # with (docker-compose: KAFKA_CLUSTERS_0_NAME=drakkar-local).
+      ui_url: "http://localhost:8088"
+      ui_cluster_name: "drakkar-local"
 
 sources:
   kafka:
@@ -19,9 +21,9 @@ sources:
     topic: "search-requests"
     consumer_group: "drakkar-fast"
     max_poll_records: 50
-    max_poll_interval_ms: 300000
-    session_timeout_ms: 45000
-    heartbeat_interval_ms: 3000
+    max_poll_interval: 5m
+    session_timeout: 45s
+    heartbeat_interval: 3s
   # No http block: the fast worker only serves the Kafka pipeline.
 
 executor:
@@ -48,7 +50,6 @@ sinks:
   #   - "sinks"        (top-level section marker)
   #   - "kafka"        (sink type — one of kafka/postgres/mongo/...)
   #   - "topic"        (field within a kafka sink instance)
-  #   - "brokers"      (field within a kafka sink instance)
   #   - "ui_url"       (field within a kafka sink instance)
   #
   # Everything at "sinks.kafka.<your-name-here>" is user-chosen.

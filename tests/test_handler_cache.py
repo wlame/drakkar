@@ -37,7 +37,6 @@ from drakkar.config import (
     CacheExchangeConfig,
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -53,7 +52,7 @@ from drakkar.models import (
     PrecomputedResult,
     SourceMessage,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 # -- NoOpCache defaults ------------------------------------------------------
 
@@ -145,8 +144,8 @@ def _make_config_with_cache(
 ) -> DrakkarConfig:
     """Build a DrakkarConfig with a working cache+debug setup rooted at tmp_path."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,

@@ -5,7 +5,7 @@ Covers the three layers of the module in isolation, with no real Kafka
 scripted fake):
 
 1. ``build_alias_table`` — the config → alias resolution, including the
-   credential-inheritance rules shared with the pipeline and the
+   connection each alias reads through, as in the pipeline, and the
    reserved-alias collision policy.
 2. ``fetch_message`` — watermark gating, exact-offset fetch, the
    compacted-slot case, error classification, and consumer hygiene
@@ -23,7 +23,7 @@ import pytest
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
 from drakkar import kafka_read
-from drakkar.config import DLQConfig, DrakkarConfig, KafkaConfig, KafkaSinkConfig, SinksConfig
+from drakkar.config import DLQConfig, DrakkarConfig, KafkaSinkConfig, SinksConfig
 from drakkar.kafka_read import (
     STREAM_LIMIT_MAX,
     AliasTarget,
@@ -36,6 +36,7 @@ from drakkar.kafka_read import (
     stream_messages,
 )
 from drakkar.kafka_security import KafkaSecurityConfig
+from tests.conftest import kafka_connections
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -185,12 +186,14 @@ def _target(topic: str = 'orders') -> AliasTarget:
 
 def _config_with_sinks(**kafka_overrides) -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='main:9092', **kafka_overrides),
-        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
+        connections={
+            'kafka': {'main': {'brokers': 'main:9092', **kafka_overrides}, 'other': {'brokers': 'other:9092'}}
+        },
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align': {'enabled': False}}},
         sinks=SinksConfig(
             kafka={
                 'search-results-kafka-sink': KafkaSinkConfig(topic='search-results'),
-                'audit-kafka-sink': KafkaSinkConfig(topic='audit-log', brokers='other:9092'),
+                'audit-kafka-sink': KafkaSinkConfig(topic='audit-log', connection='other'),
             }
         ),
     )
@@ -214,17 +217,15 @@ def test_alias_table_explicit_dlq_topic_wins_over_derived_default():
     assert table['dlq'].topic == 'custom-dlq-topic'
 
 
-def test_alias_table_sink_without_brokers_inherits_consumer_credentials():
+def test_alias_table_each_alias_reads_through_its_own_connection():
     security = KafkaSecurityConfig(
         protocol='SASL_PLAINTEXT', sasl_mechanism='PLAIN', sasl_username='svc', sasl_password='pw'
     )
     config = _config_with_sinks(security=security)
     table = build_alias_table(config)
-    # empty brokers → same cluster → same credentials (resolve_client rule)
-    inherited = table['search-results-kafka-sink']
-    assert inherited.brokers == 'main:9092'
-    assert inherited.security.protocol == 'SASL_PLAINTEXT'
-    # explicit brokers → self-contained, defaults to PLAINTEXT
+    same_connection = table['search-results-kafka-sink']
+    assert same_connection.brokers == 'main:9092'
+    assert same_connection.security.protocol == 'SASL_PLAINTEXT'
     own = table['audit-kafka-sink']
     assert own.brokers == 'other:9092'
     assert own.security.protocol == 'PLAINTEXT'
@@ -232,7 +233,8 @@ def test_alias_table_sink_without_brokers_inherits_consumer_credentials():
 
 def test_alias_table_sink_shadowing_reserved_alias_is_skipped():
     config = DrakkarConfig(
-        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align': {'enabled': False}}},
         sinks=SinksConfig(kafka={'dlq': KafkaSinkConfig(topic='not-the-real-dlq')}),
     )
     table = build_alias_table(config)
@@ -254,7 +256,7 @@ def _http_only_config(**overrides) -> DrakkarConfig:
 def test_alias_table_without_kafka_source_has_no_source_alias_and_dlq_only_with_topic():
     table = build_alias_table(_http_only_config())
     assert 'source' not in table and 'dlq' not in table
-    table_with_dlq = build_alias_table(_http_only_config(dlq={'topic': 'd'}))
+    table_with_dlq = build_alias_table(_http_only_config(connections=kafka_connections(), dlq={'topic': 'd'}))
     assert table_with_dlq['dlq'].topic == 'd'
 
 
@@ -271,7 +273,10 @@ def test_sink_named_after_a_reserved_alias_is_skipped_even_when_the_source_is_of
     read of ``source`` would silently return the sink's topic instead of
     failing with "the Kafka source is disabled".
     """
-    config = _http_only_config(sinks=SinksConfig(kafka={'source': KafkaSinkConfig(topic='a-plain-sink-topic')}))
+    config = _http_only_config(
+        connections=kafka_connections(),
+        sinks=SinksConfig(kafka={'source': KafkaSinkConfig(topic='a-plain-sink-topic')}),
+    )
     assert build_alias_table(config) == {}
     with pytest.raises(KafkaReadError, match="alias 'source' is not available: the Kafka source is disabled"):
         resolve_alias(config, 'source')

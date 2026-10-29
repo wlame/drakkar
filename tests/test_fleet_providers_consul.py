@@ -35,7 +35,7 @@ from drakkar.fleet.service import FleetRegistry
 from drakkar.providers.connections import Connections
 from drakkar.providers.consul import (
     CARD_HELD_MESSAGE,
-    DEFAULT_KEY_PREFIX,
+    DEFAULT_STATE_PREFIX,
     INSTANCE_RE,
     NO_LEADER_MESSAGE,
     PATHS,
@@ -85,12 +85,12 @@ def fake() -> FakeConsul:
     return FakeConsul()
 
 
-def card_key(member: str, prefix: str = DEFAULT_KEY_PREFIX) -> str:
+def card_key(member: str, prefix: str = DEFAULT_STATE_PREFIX) -> str:
     """The KV key of the card of ``member``, as ``FakeConsul.put_raw`` takes it."""
     return f'{prefix}/fleet/workers/{member}'
 
 
-def card_path(member: str, prefix: str = DEFAULT_KEY_PREFIX) -> str:
+def card_path(member: str, prefix: str = DEFAULT_STATE_PREFIX) -> str:
     """The request path of the card of ``member``."""
     return path('registry_card', prefix=prefix, worker=member)
 
@@ -144,7 +144,7 @@ def _example_provider(fake: FakeConsul) -> ConsulRegistry:
         connection='main',
         offline_after_seconds=INPUTS['offline_after_seconds'],
         client=fake_client(fake, datacenter=INPUTS['datacenter']),
-        key_prefix=INPUTS['prefix'],
+        state_prefix=INPUTS['prefix'],
     )
 
 
@@ -474,7 +474,7 @@ async def test_list_reads_an_empty_fleet_from_a_404(fake):
     provider = await _started(fake)
 
     assert await provider.list() == []
-    assert _routes(fake)[-1] == ('GET', path('registry_list', prefix=DEFAULT_KEY_PREFIX))
+    assert _routes(fake)[-1] == ('GET', path('registry_list', prefix=DEFAULT_STATE_PREFIX))
 
 
 async def test_a_key_without_a_session_is_listed_offline(fake):
@@ -504,8 +504,8 @@ async def test_a_key_with_a_null_or_empty_session_is_listed_offline(shown, fake)
 @pytest.mark.parametrize(
     ('key', 'value'),
     [
-        (f'{DEFAULT_KEY_PREFIX}/fleet/workers/', b''),
-        (f'{DEFAULT_KEY_PREFIX}/fleet/workers/x/y', serialize_card(_card('x'))),
+        (f'{DEFAULT_STATE_PREFIX}/fleet/workers/', b''),
+        (f'{DEFAULT_STATE_PREFIX}/fleet/workers/x/y', serialize_card(_card('x'))),
     ],
     ids=['folder_key', 'nested_key'],
 )
@@ -667,13 +667,13 @@ async def test_withdraw_after_a_takeover_is_harmless(fake):
     'prefix', ['', '/drakkar', 'drakkar/', 'a//b', 'has space', 'a:b', 'brace{', 'line\n', '.', '..', 'a/../b', 'a/./b']
 )
 def test_a_preset_prefix_outside_the_allowed_shape_is_refused(prefix, fake):
-    with pytest.raises(ValueError, match='key_prefix'):
-        _provider(fake, key_prefix=prefix)
+    with pytest.raises(ValueError, match='state_prefix'):
+        _provider(fake, state_prefix=prefix)
 
 
 @pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'v1.2'])
 def test_a_preset_prefix_inside_the_allowed_shape_is_accepted(prefix, fake):
-    assert _provider(fake, key_prefix=prefix) is not None
+    assert _provider(fake, state_prefix=prefix) is not None
 
 
 # --- Start ---
@@ -707,7 +707,7 @@ async def test_start_without_connections_raises():
 
 
 async def test_start_through_the_connections_shares_one_client_with_the_prefix_of_the_entry(fake):
-    connections = Connections(ConnectionsConfig(consul={'main': ConsulConnectionConfig(key_prefix='ops/fleet')}))
+    connections = Connections(ConnectionsConfig(consul={'main': ConsulConnectionConfig(state_prefix='ops/fleet')}))
     opener = AsyncMock(return_value=fake_client(fake))
     first = ConsulRegistry(connection='main', offline_after_seconds=OFFLINE_AFTER, open_client=opener)
     second = ConsulRegistry(connection='main', offline_after_seconds=OFFLINE_AFTER, open_client=opener)
@@ -720,7 +720,7 @@ async def test_start_through_the_connections_shares_one_client_with_the_prefix_o
 
     opener.assert_awaited_once()
     assert opener.await_args is not None
-    assert opener.await_args.args[0].key_prefix == 'ops/fleet'
+    assert opener.await_args.args[0].state_prefix == 'ops/fleet'
     assert sorted(entry.card['worker'] for entry in listed) == ['w-1', 'w-2']
     assert ('PUT', card_path('w-2', 'ops/fleet')) in _routes(fake)
 
@@ -873,7 +873,7 @@ async def test_consul_registry_factory_builds_a_provider_from_the_options(fake, 
         return await fake.transport().handle_async_request(request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', answer_from_the_fake)
-    connections = Connections(ConnectionsConfig(consul={'locks': ConsulConnectionConfig(key_prefix='ops')}))
+    connections = Connections(ConnectionsConfig(consul={'locks': ConsulConnectionConfig(state_prefix='ops')}))
     provider = consul_registry_factory({'connection': 'locks', 'offline_after_seconds': 120})
 
     await provider.start(_context(connections))

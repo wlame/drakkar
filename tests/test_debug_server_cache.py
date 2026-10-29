@@ -41,7 +41,7 @@ from drakkar.cache import Cache, CacheEngine
 from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -90,7 +90,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False

@@ -3,6 +3,7 @@
 from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
+from drakkar.config.units import ByteSize, Duration
 
 
 class WebClientConfig(ConfigModel):
@@ -82,17 +83,17 @@ class WebAppConfig(ConfigModel):
         default='/process',
         description="The single POST route the webapp registers. Must start with '/' and name a non-empty route.",
     )
-    sinks_enabled: bool = Field(
+    deliver_to_sinks: bool = Field(
         default=False,
         description=(
             'Call on_message_complete() after the executor fan-out and route returned payloads '
             'through the sinks. Off, sinks are skipped and the response carries sinks: null.'
         ),
     )
-    request_timeout_seconds: float = Field(
+    request_timeout: Duration = Field(
         default=30.0,
         description=(
-            'Per-request budget in seconds. On timeout the client receives a 504 with '
+            'Per-request budget. On timeout the client receives a 504 with '
             "status='timeout' and remaining pipeline work is cooperatively cancelled."
         ),
     )
@@ -100,12 +101,12 @@ class WebAppConfig(ConfigModel):
         default=64,
         description='Cap on in-flight HTTP requests. Requests beyond it receive an immediate 503 instead of queuing.',
     )
-    # Cap on a single POST body (bytes); requests beyond it get a 413
+    # Cap on a single POST body; requests beyond it get a 413
     # ``request_too_large`` envelope before the body is buffered.
-    max_body_bytes: int = Field(
+    max_body: ByteSize = Field(
         default=10 * 1024 * 1024,
         description=(
-            'Cap on a single POST body (bytes), counted from the stream so a lying '
+            'Cap on a single POST body, counted from the stream so a lying '
             'Content-Length cannot bypass it. Oversized requests receive 413 before parsing.'
         ),
     )
@@ -124,12 +125,12 @@ class WebAppConfig(ConfigModel):
         errors: list[str] = []
         if not self.path.startswith('/') or len(self.path) <= 1:
             errors.append(f"sources.http.path must start with '/' and have a non-empty route, got {self.path!r}")
-        if self.request_timeout_seconds <= 0:
-            errors.append(f'sources.http.request_timeout_seconds must be > 0, got {self.request_timeout_seconds}')
+        if self.request_timeout <= 0:
+            errors.append(f'sources.http.request_timeout must be > 0, got {self.request_timeout}')
         if self.max_concurrent <= 0:
             errors.append(f'sources.http.max_concurrent must be > 0, got {self.max_concurrent}')
-        if self.max_body_bytes <= 0:
-            errors.append(f'sources.http.max_body_bytes must be > 0, got {self.max_body_bytes}')
+        if self.max_body <= 0:
+            errors.append(f'sources.http.max_body must be > 0, got {self.max_body}')
         if len(self.clients) == 0:
             errors.append('sources.http.clients must contain at least one client')
         for client in self.clients:

@@ -50,7 +50,7 @@ class Factory:
 def config() -> ConnectionsConfig:
     return ConnectionsConfig(
         consul={'main': ConsulConnectionConfig()},
-        redis={'main': RedisConnectionConfig(), 'cache': RedisConnectionConfig(key_prefix='cache:')},
+        redis={'main': RedisConnectionConfig(), 'cache': RedisConnectionConfig(state_prefix='cache:')},
         postgres={'main': PostgresConnectionConfig(dsn='postgresql://h/db')},
     )
 

@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from drakkar.config import DrakkarConfig, RuntimeHealthConfig
 from drakkar.runtimehealth import RuntimeHealthMonitor
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def mock_app():
     app._worker_id = 'test-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False  # hermetic: no bundle fetch
     app._runtime_health = None
     return app

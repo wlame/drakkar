@@ -10,7 +10,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -26,6 +25,7 @@ from drakkar.timeline_events import (
     TimelineMatch,
     referenced_link_bases,
 )
+from tests.conftest import kafka_connections
 
 
 class RecordingSink:
@@ -199,8 +199,8 @@ def test_end_ts_timestamp_overflow_drops_without_raising(window_ctx):
 def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__ (mirrors tests/test_uipages.py)."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),

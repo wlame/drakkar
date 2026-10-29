@@ -17,9 +17,13 @@ from structlog.testing import capture_logs
 from drakkar.config import (
     FileSinkConfig,
     HttpSinkConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
+    MongoConnectionConfig,
     MongoSinkConfig,
+    PostgresConnectionConfig,
     PostgresSinkConfig,
+    RedisConnectionConfig,
     RedisSinkConfig,
 )
 from drakkar.models import (
@@ -31,6 +35,10 @@ from drakkar.models import (
     RedisPayload,
 )
 from drakkar.sinks.mongo import MongoWriteError
+
+PG_CONNECTION = PostgresConnectionConfig(dsn='postgresql://localhost/testdb')
+MONGO_CONNECTION = MongoConnectionConfig(uri='mongodb://localhost:27017')
+REDIS_CONNECTION = RedisConnectionConfig(url='redis://localhost:6379/0')
 
 
 class SampleOutput(BaseModel):
@@ -79,7 +87,7 @@ def kafka_sink_config():
 async def test_kafka_sink_connect(mock_cls, kafka_sink_config):
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     mock_cls.assert_called_once_with({'bootstrap.servers': 'localhost:9092'})
@@ -87,15 +95,43 @@ async def test_kafka_sink_connect(mock_cls, kafka_sink_config):
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
-async def test_kafka_sink_uses_config_brokers_over_fallback(mock_cls):
-    config = KafkaSinkConfig(topic='t', brokers='custom:9092')
+async def test_kafka_sink_uses_the_brokers_of_its_connection(mock_cls):
+    config = KafkaSinkConfig(topic='t')
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('out', config, brokers_fallback='fallback:9092')
+    sink = KafkaSink('out', config, KafkaConnectionConfig(brokers='custom:9092'))
     await sink.connect()
 
     call_args = mock_cls.call_args[0][0]
     assert call_args['bootstrap.servers'] == 'custom:9092'
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_two_kafka_sinks_share_one_connection(mock_cls):
+    from drakkar.sinks.kafka import KafkaSink
+
+    connection = KafkaConnectionConfig(brokers='shared:9092')
+    results = KafkaSink('results', KafkaSinkConfig(topic='results-topic'), connection)
+    audit = KafkaSink('audit', KafkaSinkConfig(topic='audit-topic'), connection)
+
+    await results.connect()
+    await audit.connect()
+
+    # Each sink owns its producer, on the same brokers, with its own topic.
+    assert [call.args[0]['bootstrap.servers'] for call in mock_cls.call_args_list] == ['shared:9092', 'shared:9092']
+    assert (results.topic, audit.topic) == ('results-topic', 'audit-topic')
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_client_config_merges_after_the_connection(mock_cls):
+    from drakkar.sinks.kafka import KafkaSink
+
+    connection = KafkaConnectionConfig(brokers='b:9092', client_config={'acks': '1', 'linger.ms': '5'})
+    sink = KafkaSink('results', KafkaSinkConfig(topic='t', client_config={'acks': 'all'}), connection)
+
+    await sink.connect()
+
+    assert mock_cls.call_args[0][0] == {'bootstrap.servers': 'b:9092', 'acks': 'all', 'linger.ms': '5'}
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
@@ -107,7 +143,7 @@ async def test_kafka_sink_deliver_single(mock_cls, kafka_sink_config):
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     payload = KafkaPayload(key=b'k1', data=SampleOutput(request_id='r1'))
@@ -130,7 +166,7 @@ async def test_kafka_sink_deliver_batch(mock_cls, kafka_sink_config):
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     payloads = [
@@ -151,7 +187,7 @@ async def test_kafka_sink_deliver_empty(mock_cls, kafka_sink_config):
     mock_producer = AsyncMock()
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     await sink.deliver([])
@@ -162,7 +198,7 @@ async def test_kafka_sink_deliver_not_connected_raises(kafka_sink_config):
     """A silent return would let the offset commit past lost payloads."""
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     with pytest.raises(RuntimeError, match='not connected'):
         await sink.deliver([KafkaPayload(data=SampleOutput())])
 
@@ -171,7 +207,7 @@ async def test_kafka_sink_deliver_empty_not_connected_returns(kafka_sink_config)
     """The empty-batch early return stays silent even before connect()."""
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.deliver([])  # must not raise
 
 
@@ -184,7 +220,7 @@ async def test_kafka_sink_deliver_error_increments_metrics(mock_cls, kafka_sink_
     mock_producer.produce.side_effect = RuntimeError('broker down')
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     labels = {'sink_type': 'kafka', 'sink_name': 'results'}
@@ -206,7 +242,7 @@ async def test_kafka_sink_deliver_success_increments_metrics(mock_cls, kafka_sin
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     labels = {'sink_type': 'kafka', 'sink_name': 'results'}
@@ -224,7 +260,7 @@ async def test_kafka_sink_close(mock_cls, kafka_sink_config):
     mock_producer = AsyncMock()
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
     await sink.close()
 
@@ -237,7 +273,7 @@ async def test_kafka_sink_close_not_connected(mock_cls, kafka_sink_config):
     """Close on unconnected sink is a no-op."""
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.close()  # should not raise
 
 
@@ -256,7 +292,7 @@ async def test_kafka_sink_deliver_with_falsy_producer(mock_cls, kafka_sink_confi
     mock_producer.__len__ = lambda self: 0  # empty queue → bool() returns False
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     await sink.deliver([KafkaPayload(data=SampleOutput())])
@@ -266,7 +302,7 @@ async def test_kafka_sink_deliver_with_falsy_producer(mock_cls, kafka_sink_confi
 def test_kafka_sink_topic_property(kafka_sink_config):
     from drakkar.sinks.kafka import KafkaSink
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     assert sink.topic == 'test-results'
 
 
@@ -287,7 +323,7 @@ async def test_kafka_sink_deliver_succeeds_when_flush_reports_other_partitions_b
     mock_producer.flush.return_value = 3  # someone else's messages
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     labels = {'sink_type': 'kafka', 'sink_name': 'results'}
@@ -317,8 +353,8 @@ async def test_kafka_sink_deliver_raises_timeout_when_own_futures_never_resolve(
     mock_producer.flush.return_value = 0  # the producer itself looks drained
     mock_cls.return_value = mock_producer
 
-    cfg = kafka_sink_config.model_copy(update={'flush_timeout_seconds': 0.05})
-    sink = KafkaSink('results', cfg, brokers_fallback='localhost:9092')
+    cfg = kafka_sink_config.model_copy(update={'flush_timeout': 0.05})
+    sink = KafkaSink('results', cfg, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     with pytest.raises(TimeoutError, match=r'not acknowledged.*1 of 1 message'):
@@ -340,8 +376,8 @@ async def test_kafka_sink_flush_is_bounded_by_the_configured_timeout(mock_cls, k
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    cfg = kafka_sink_config.model_copy(update={'flush_timeout_seconds': 12.5})
-    sink = KafkaSink('results', cfg, brokers_fallback='localhost:9092')
+    cfg = kafka_sink_config.model_copy(update={'flush_timeout': 12.5})
+    sink = KafkaSink('results', cfg, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
     await sink.deliver([KafkaPayload(data=SampleOutput())])
 
@@ -363,7 +399,7 @@ async def test_kafka_sink_deliver_future_none_raises(mock_cls, kafka_sink_config
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     with pytest.raises(RuntimeError, match='future resolved to None'):
@@ -387,7 +423,7 @@ async def test_kafka_sink_deliver_future_with_error_raises(mock_cls, kafka_sink_
     mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     with pytest.raises(RuntimeError, match='delivery error'):
@@ -405,11 +441,11 @@ def test_sink_type_reports_backend_name(sink_name, tmp_path):
     from drakkar.sinks.redis import RedisSink
 
     factories = {
-        'kafka': lambda: KafkaSink('x', KafkaSinkConfig(topic='t')),
-        'postgres': lambda: PostgresSink('main', PostgresSinkConfig(dsn='postgresql://localhost/testdb')),
-        'mongo': lambda: MongoSink('analytics', MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb')),
+        'kafka': lambda: KafkaSink('x', KafkaSinkConfig(topic='t'), KafkaConnectionConfig()),
+        'postgres': lambda: PostgresSink('main', PostgresSinkConfig(), PG_CONNECTION),
+        'mongo': lambda: MongoSink('analytics', MongoSinkConfig(database='testdb'), MONGO_CONNECTION),
         'http': lambda: HttpSink('webhook', HttpSinkConfig(url='https://api.example.com/results')),
-        'redis': lambda: RedisSink('cache', RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='drakkar:')),
+        'redis': lambda: RedisSink('cache', RedisSinkConfig(key_prefix='drakkar:'), REDIS_CONNECTION),
         'filesystem': lambda: FileSink('output', FileSinkConfig(base_path=str(tmp_path))),
     }
     assert factories[sink_name]().sink_type == sink_name
@@ -428,7 +464,7 @@ class DBResultModel(BaseModel):
 
 @pytest.fixture
 def pg_sink_config():
-    return PostgresSinkConfig(dsn='postgresql://localhost/testdb')
+    return PostgresSinkConfig()
 
 
 def _mock_asyncpg_pool():
@@ -464,7 +500,7 @@ def _make_pg_sink(pg_sink_config):
     mock_pool.acquire.return_value = _FakeAcquireCtx(mock_conn)
     mock_pool.close = AsyncMock()
 
-    sink = PostgresSink('main', pg_sink_config)
+    sink = PostgresSink('main', pg_sink_config, PG_CONNECTION)
     sink._pool = mock_pool  # bypass connect() to avoid mocking create_pool
     return sink, mock_conn, mock_pool
 
@@ -472,7 +508,7 @@ def _make_pg_sink(pg_sink_config):
 async def test_postgres_sink_connect(pg_sink_config):
     from drakkar.sinks.postgres import PostgresSink
 
-    sink = PostgresSink('main', pg_sink_config)
+    sink = PostgresSink('main', pg_sink_config, PG_CONNECTION)
     mock_pool = AsyncMock()
 
     async def fake_create_pool(**kwargs):
@@ -626,7 +662,7 @@ async def test_postgres_sink_deliver_not_connected_raises(pg_sink_config):
     """A silent return would let the offset commit past lost payloads."""
     from drakkar.sinks.postgres import PostgresSink
 
-    sink = PostgresSink('main', pg_sink_config)
+    sink = PostgresSink('main', pg_sink_config, PG_CONNECTION)
     with pytest.raises(RuntimeError, match='not connected'):
         await sink.deliver([PostgresPayload(table='results', data=SampleOutput())])
 
@@ -672,7 +708,6 @@ async def test_postgres_sink_statement_without_any_configured_says_so(pg_sink_co
 @pytest.fixture
 def pg_stmt_config():
     return PostgresSinkConfig(
-        dsn='postgresql://localhost/testdb',
         statements={
             'claim_job': 'UPDATE jobs SET status = :status, attempts = attempts + 1 WHERE id = :id',
             'sweep': 'DELETE FROM jobs WHERE done',
@@ -692,7 +727,7 @@ def _make_pg_sink_with_statements(config):
 async def test_postgres_sink_connect_compiles_statements(pg_stmt_config):
     from drakkar.sinks.postgres import PostgresSink
 
-    sink = PostgresSink('main', pg_stmt_config)
+    sink = PostgresSink('main', pg_stmt_config, PG_CONNECTION)
 
     async def fake_create_pool(**kwargs):
         return AsyncMock()
@@ -1112,7 +1147,7 @@ async def test_postgres_sink_close(pg_sink_config):
 async def test_postgres_sink_close_not_connected(pg_sink_config):
     from drakkar.sinks.postgres import PostgresSink
 
-    sink = PostgresSink('main', pg_sink_config)
+    sink = PostgresSink('main', pg_sink_config, PG_CONNECTION)
     await sink.close()  # should not raise
 
 
@@ -1123,7 +1158,7 @@ async def test_postgres_sink_close_not_connected(pg_sink_config):
 
 @pytest.fixture
 def mongo_sink_config():
-    return MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb')
+    return MongoSinkConfig(database='testdb')
 
 
 async def _make_mongo_sink(mongo_sink_config):
@@ -1161,7 +1196,7 @@ async def _make_mongo_sink(mongo_sink_config):
     # silently leaking the client.
     mock_client.close = AsyncMock()
 
-    sink = MongoSink('analytics', mongo_sink_config)
+    sink = MongoSink('analytics', mongo_sink_config, MONGO_CONNECTION)
     with patch('pymongo.AsyncMongoClient', return_value=mock_client):
         await sink.connect()
     return sink, collections, mock_client
@@ -1181,7 +1216,7 @@ async def test_mongo_sink_connect(mongo_sink_config):
         mock_client.__getitem__ = MagicMock(return_value=mock_db)
         mock_cls.return_value = mock_client
 
-        sink = MongoSink('analytics', mongo_sink_config)
+        sink = MongoSink('analytics', mongo_sink_config, MONGO_CONNECTION)
         await sink.connect()
 
         # PyMongo leaves socketTimeoutMS unset by default — unbounded.
@@ -1334,7 +1369,7 @@ async def test_mongo_sink_deliver_not_connected_raises(mongo_sink_config):
     """A silent return would let the offset commit past lost payloads."""
     from drakkar.sinks.mongo import MongoSink
 
-    sink = MongoSink('analytics', mongo_sink_config)
+    sink = MongoSink('analytics', mongo_sink_config, MONGO_CONNECTION)
     with pytest.raises(RuntimeError, match='not connected'):
         await sink.deliver([MongoPayload(collection='c', data=SampleOutput())])
 
@@ -1370,7 +1405,7 @@ async def test_mongo_sink_close(mongo_sink_config):
 async def test_mongo_sink_close_not_connected(mongo_sink_config):
     from drakkar.sinks.mongo import MongoSink
 
-    sink = MongoSink('analytics', mongo_sink_config)
+    sink = MongoSink('analytics', mongo_sink_config, MONGO_CONNECTION)
     await sink.close()  # should not raise
 
 
@@ -1680,7 +1715,7 @@ async def test_http_sink_headers_cannot_override_content_type(content_type_key):
 
 @pytest.fixture
 def redis_sink_config():
-    return RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='drakkar:')
+    return RedisSinkConfig(key_prefix='drakkar:')
 
 
 def _make_redis_sink(redis_sink_config):
@@ -1737,7 +1772,7 @@ def _make_redis_sink(redis_sink_config):
     # awaitable. An AsyncMock would get both halves wrong.
     mock_client.register_script = MagicMock(side_effect=_fake_script)
 
-    sink = RedisSink('cache', redis_sink_config)
+    sink = RedisSink('cache', redis_sink_config, REDIS_CONNECTION)
     sink._client = mock_client
     return sink, mock_client
 
@@ -1765,7 +1800,6 @@ def _script_config(**overrides):
     from drakkar.config import RedisSinkConfig
 
     return RedisSinkConfig(
-        url='redis://localhost:6379/0',
         key_prefix='drakkar:',
         scripts={
             'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])\nredis.call('LTRIM', KEYS[1], 0, ARGV[2])",
@@ -1808,7 +1842,7 @@ async def _capture_wire_command(config, payload: RedisPayload) -> list:
     captured: list[tuple] = []
     client.execute_command = AsyncMock(side_effect=lambda *args, **kw: captured.append(args))
 
-    sink = RedisSink('cache', config)
+    sink = RedisSink('cache', config, REDIS_CONNECTION)
     with patch('redis.asyncio.from_url', return_value=client):
         await sink.connect()
     await sink.deliver([payload])
@@ -1823,7 +1857,6 @@ async def test_redis_command_corpus(case):
     from drakkar.config import RedisSinkConfig
 
     config = RedisSinkConfig(
-        url='redis://localhost:6379/0',
         key_prefix=_REDIS_COMMAND_CORPUS['key_prefix'],
         scripts=_REDIS_COMMAND_CORPUS['scripts'],
     )
@@ -1904,7 +1937,7 @@ async def test_redis_sink_exposes_its_client_after_connect(redis_sink_config):
     """
     from drakkar.sinks.redis import RedisSink
 
-    sink = RedisSink('cache', redis_sink_config)
+    sink = RedisSink('cache', redis_sink_config, REDIS_CONNECTION)
     assert sink.client is None, 'no client before connect()'
 
     connected, mock_client = await _connect_redis_sink(redis_sink_config)
@@ -2040,7 +2073,7 @@ async def test_redis_sink_connect(redis_sink_config):
         mock_client = AsyncMock()
         mock_from_url.return_value = mock_client
 
-        sink = RedisSink('cache', redis_sink_config)
+        sink = RedisSink('cache', redis_sink_config, REDIS_CONNECTION)
         await sink.connect()
 
         # redis-py leaves socket_timeout at None by default — unbounded.
@@ -2448,7 +2481,7 @@ async def test_redis_sink_deliver_not_connected_raises(redis_sink_config):
     """A silent return would let the offset commit past lost payloads."""
     from drakkar.sinks.redis import RedisSink
 
-    sink = RedisSink('cache', redis_sink_config)
+    sink = RedisSink('cache', redis_sink_config, REDIS_CONNECTION)
     with pytest.raises(RuntimeError, match='not connected'):
         await sink.deliver([RedisPayload(key='k', data=SampleOutput())])
 
@@ -2467,9 +2500,9 @@ async def test_redis_sink_no_prefix():
     """Empty key prefix passes key through as-is."""
     from drakkar.sinks.redis import RedisSink
 
-    config = RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='')
+    config = RedisSinkConfig(key_prefix='')
     mock_client = AsyncMock()
-    sink = RedisSink('cache', config)
+    sink = RedisSink('cache', config, REDIS_CONNECTION)
     sink._client = mock_client
 
     await sink.deliver([RedisPayload(key='raw-key', data=SampleOutput())])
@@ -2504,7 +2537,7 @@ async def test_redis_sink_close(redis_sink_config):
 async def test_redis_sink_close_not_connected(redis_sink_config):
     from drakkar.sinks.redis import RedisSink
 
-    sink = RedisSink('cache', redis_sink_config)
+    sink = RedisSink('cache', redis_sink_config, REDIS_CONNECTION)
     await sink.close()  # should not raise
 
 
@@ -3045,7 +3078,7 @@ async def test_kafka_sink_close_exception_is_caught(mock_cls, kafka_sink_config)
     mock_producer.close.side_effect = RuntimeError('transport error')
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    sink = KafkaSink('results', kafka_sink_config, KafkaConnectionConfig(brokers='localhost:9092'))
     await sink.connect()
 
     await sink.close()  # should not raise
@@ -3520,7 +3553,7 @@ def _statement_config(**overrides):
             'filter': {'batch': ':batch'},
         },
     }
-    return MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb', statements=statements, **overrides)
+    return MongoSinkConfig(database='testdb', statements=statements, **overrides)
 
 
 class _AttemptParams(BaseModel):

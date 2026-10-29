@@ -21,7 +21,7 @@ The security surface is deliberately two-layered:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr, model_validator
 
@@ -60,7 +60,7 @@ RESERVED_CLIENT_KEYS: dict[str, str] = {
         'strategy re-opens the duplicate-delivery window'
     ),
     'group.id': 'set it with sources.kafka.consumer_group',
-    'bootstrap.servers': 'set it with kafka.brokers (or the sink/DLQ brokers field)',
+    'bootstrap.servers': 'set it with connections.kafka.<name>.brokers',
 }
 
 # SASL mechanisms that authenticate with a username and password. GSSAPI
@@ -115,7 +115,7 @@ class KafkaSecurityConfig(ConfigModel):
     sasl_password: SecretStr = Field(
         default=SecretStr(''),
         description=(
-            'SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment '
+            'SASL password. Prefer the DK_CONNECTIONS__KAFKA__<NAME>__SECURITY__SASL_PASSWORD environment '
             'override over a literal in YAML; DK_* variables are withheld from '
             'executor subprocesses by the default executor.env_inherit_deny list.'
         ),
@@ -176,7 +176,7 @@ class KafkaSecurityConfig(ConfigModel):
             if not self.sasl_password.get_secret_value():
                 raise ValueError(
                     f'sasl_mechanism={self.sasl_mechanism} requires sasl_password '
-                    '(set DK_KAFKA__SECURITY__SASL_PASSWORD rather than writing it into YAML)'
+                    '(set DK_CONNECTIONS__KAFKA__<NAME>__SECURITY__SASL_PASSWORD rather than writing it into YAML)'
                 )
 
         if self.ssl_key_location and not self.ssl_certificate_location:
@@ -231,58 +231,22 @@ def validate_client_config(raw: Mapping[str, str]) -> dict[str, str]:
     return dict(raw)
 
 
-class ResolvedKafkaClient(NamedTuple):
-    """The brokers, security, and raw overrides one client should connect with."""
-
-    brokers: str
-    security: KafkaSecurityConfig
-    client_config: dict[str, str]
-
-
-def resolve_client(
-    brokers: str,
-    security: KafkaSecurityConfig,
-    client_config: Mapping[str, str],
-    *,
-    fallback_brokers: str,
-    fallback_security: KafkaSecurityConfig,
-    fallback_client_config: Mapping[str, str],
-) -> ResolvedKafkaClient:
-    """Resolve a sink/DLQ client against the consumer's settings.
-
-    Inheritance is keyed on ``brokers`` being empty — the rule the brokers
-    field already followed before security existed, extended to carry
-    security with it. An empty ``brokers`` means "the same cluster as the
-    consumer", and the same cluster needs the same credentials; inheriting
-    the address while silently dropping the credentials would turn one
-    omitted field into a connection that cannot authenticate.
-
-    Setting ``brokers`` makes the client self-contained: it uses only its
-    own security block, which defaults to PLAINTEXT. That is not a silent
-    downgrade — a secured cluster refuses a plaintext connect — but callers
-    should surface it, which :func:`describe_mixed_security` supports.
-    """
-    if not brokers:
-        return ResolvedKafkaClient(fallback_brokers, fallback_security, dict(fallback_client_config))
-    return ResolvedKafkaClient(brokers, security, dict(client_config))
-
-
 def describe_mixed_security(
-    resolved: KafkaSecurityConfig,
+    client: KafkaSecurityConfig,
     consumer: KafkaSecurityConfig,
 ) -> str:
-    """Return a warning message when a client drops the consumer's security.
+    """Return a warning message when a client on another connection drops the consumer's security.
 
     Empty string when there is nothing to warn about. Fires only for the
     combination that is almost always a mistake: the consumer authenticates,
-    and a client pointed at its own brokers does not.
+    and a client that names another connection does not.
     """
-    if consumer.protocol == 'PLAINTEXT' or resolved.protocol != 'PLAINTEXT':
+    if consumer.protocol == 'PLAINTEXT' or client.protocol != 'PLAINTEXT':
         return ''
     return (
-        f'the consumer connects with {consumer.describe()} but this client sets its own brokers '
-        'with no security block, so it will connect in plaintext — add a security block to it, '
-        'or clear its brokers field to inherit the consumer cluster settings'
+        f'the consumer connects with {consumer.describe()} but this client names a connection '
+        'with no security block, so it will connect in plaintext — add a security block to that '
+        'connection, or name the connection of the consumer'
     )
 
 

@@ -12,7 +12,7 @@ from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ThreadFence
 from tests.archive_helpers import idle_archive_task, run_won_slot
-from tests.conftest import wait_for
+from tests.conftest import kafka_connections, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 from tests.recorder_pg_fake import RecorderFakePostgres
 from tests.test_lifecycle_sources import StubSource
@@ -31,9 +31,10 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
         'runtime_health': {'enabled': False},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': DRAIN_TIMEOUT_SECONDS},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
-        'sources': {'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
     }
     values.update(overrides)
+    values['connections'] = {**kafka_connections(), **values.get('connections', {})}
     return DrakkarApp(handler=KafkaOnlyHandler(), config=DrakkarConfig(**values), worker_id='w-1')
 
 

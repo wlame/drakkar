@@ -17,7 +17,7 @@ from drakkar.config import (
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
     KafkaSourceConfig,
     LoggingConfig,
@@ -36,7 +36,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
-from tests.conftest import make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 # --- Helpers ---
@@ -99,7 +99,7 @@ def make_msg(partition=0, offset=0) -> SourceMessage:
 def make_config(**overrides) -> DrakkarConfig:
     """Build a DrakkarConfig with sensible test defaults, allowing overrides."""
     defaults = {
-        'kafka': KafkaConfig(brokers='localhost:9092'),
+        'connections': kafka_connections(brokers='localhost:9092'),
         'sources': {'kafka': {'enabled': True, 'topic': 'test-in'}},
         'executor': ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
@@ -318,7 +318,9 @@ class TestRecorderStoreFlags:
         from drakkar.config import DrakkarConfig, ExecutorConfig
 
         dummy_config = DrakkarConfig(
-            executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}}
+            connections=kafka_connections(),
+            executor=ExecutorConfig(binary_path='/bin/echo'),
+            sources={'kafka': {'enabled': True}},
         )
         await rec.write_config(dummy_config)
 
@@ -351,7 +353,9 @@ class TestRecorderStoreFlags:
         from drakkar.config import DrakkarConfig, ExecutorConfig
 
         dummy_config = DrakkarConfig(
-            executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}}
+            connections=kafka_connections(),
+            executor=ExecutorConfig(binary_path='/bin/echo'),
+            sources={'kafka': {'enabled': True}},
         )
         await rec.write_config(dummy_config)
         _, config_rows = await rec.memory_store.read('SELECT worker_name FROM worker_config')
@@ -629,17 +633,17 @@ class TestDLQModes:
         app._build_dlq()
         assert app._dlq_sink.topic == 'my-dlq'
 
-    def test_dlq_custom_brokers(self):
-        config = make_config(dlq=DLQConfig(brokers='dlq-kafka:9092'))
+    def test_dlq_names_another_connection(self):
+        config = make_config(
+            connections={'kafka': {'main': {}, 'dlq-cluster': {'brokers': 'dlq-kafka:9092'}}},
+            dlq=DLQConfig(connection='dlq-cluster'),
+        )
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._build_dlq()
         assert app._dlq_sink._brokers == 'dlq-kafka:9092'
 
-    def test_dlq_empty_brokers_inherits_from_kafka(self):
-        config = make_config(
-            kafka=KafkaConfig(brokers='main-kafka:9092'),
-            dlq=DLQConfig(brokers=''),
-        )
+    def test_dlq_uses_the_main_connection_by_default(self):
+        config = make_config(connections=kafka_connections(brokers='main-kafka:9092'))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._build_dlq()
         assert app._dlq_sink._brokers == 'main-kafka:9092'
@@ -763,7 +767,7 @@ class TestConsumerCallbackModes:
         from drakkar.consumer import KafkaConsumer
 
         consumer = KafkaConsumer(
-            connection=KafkaConfig(brokers='localhost:9092'),
+            connection=KafkaConnectionConfig(brokers='localhost:9092'),
             source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
             on_assign=None,
             on_revoke=None,
@@ -777,7 +781,7 @@ class TestConsumerCallbackModes:
         assign_cb = MagicMock()
         revoke_cb = MagicMock()
         consumer = KafkaConsumer(
-            connection=KafkaConfig(brokers='localhost:9092'),
+            connection=KafkaConnectionConfig(brokers='localhost:9092'),
             source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
             on_assign=assign_cb,
             on_revoke=revoke_cb,
@@ -920,9 +924,10 @@ class TestConfigSummary:
         from drakkar.config import PostgresSinkConfig
 
         cfg = make_config(
+            connections={**kafka_connections(), 'postgres': {'main': {'dsn': 'postgresql://localhost/db'}}},
             sinks=SinksConfig(
                 kafka={'events': KafkaSinkConfig(topic='t1'), 'alerts': KafkaSinkConfig(topic='t2')},
-                postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/db')},
+                postgres={'main': PostgresSinkConfig()},
             ),
         )
         summary = cfg.config_summary(worker_id='w')

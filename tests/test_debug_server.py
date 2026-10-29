@@ -29,7 +29,7 @@ from drakkar.uiserver.server import (
     origin_allowed,
     worker_group,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 TEST_IDENTITY = WorkerIdentity(
     worker='test-worker',
@@ -168,7 +168,7 @@ def mock_app():
     app.cluster_tasks_hash = OWN_CLUSTER_TASKS_HASH
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
@@ -3706,7 +3706,7 @@ def _probe_mock_app(mock_app):
     )
     # Replace the MagicMock-based config with a real one so the endpoint
     # can read ``executor.task_timeout_seconds`` without TypeError.
-    mock_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    mock_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     return mock_app
 
 
@@ -4030,7 +4030,8 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     # With a -1.9 headroom that lands at 0.1s, which is well below the
     # handler's 1s sleep.
     _probe_mock_app._config = DrakkarConfig(
-        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
@@ -4076,7 +4077,8 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     handler.on_message_complete = on_message_complete_slow  # type: ignore[method-assign]
 
     _probe_mock_app._config = DrakkarConfig(
-        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
@@ -4187,12 +4189,12 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
     without this default — the endpoint substitutes the configured
     source topic so the probe produces a realistic ``SourceMessage``.
     """
-    from drakkar.config import ExecutorConfig, KafkaConfig
+    from drakkar.config import ExecutorConfig
 
     _probe_mock_app.handler = _ProbeTestHandler(task_count=0)
     _probe_mock_app._config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/nonexistent'),
-        kafka=KafkaConfig(brokers='host:9092'),
+        connections=kafka_connections(brokers='host:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'configured-input-topic', 'consumer_group': 'grp'}},
     )
 
@@ -4887,11 +4889,18 @@ class TestKafkaUiMessageUrl:
         deps = self._make_deps(mock_recorder, mock_app)
         assert deps.kafka_ui_message_url('topic-a', 0, 42) == ''
 
+    def test_returns_empty_string_with_the_kafka_source_off(self, mock_recorder, mock_app):
+        """The deep links belong to the source's connection, and an HTTP-only worker may declare none."""
+        mock_app._config = DrakkarConfig(sources={'http': {'enabled': True}})
+        deps = self._make_deps(mock_recorder, mock_app)
+
+        assert deps.kafka_ui_message_url('topic-a', 0, 42) == ''
+
     def test_builds_seek_url_with_encoded_cluster_and_topic(self, mock_recorder, mock_app):
         """Configured Kafka-UI base + cluster produce the seekTo deep link,
         URL-encoding the cluster name and topic."""
-        mock_app._config.kafka.ui_url = 'http://kafka-ui.internal:8080/'
-        mock_app._config.kafka.ui_cluster_name = 'prod cluster'
+        mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui.internal:8080/'
+        mock_app._config.connections.kafka['main'].ui_cluster_name = 'prod cluster'
         deps = self._make_deps(mock_recorder, mock_app)
 
         url = deps.kafka_ui_message_url('events.raw', 3, 1200)
@@ -4902,8 +4911,8 @@ class TestKafkaUiMessageUrl:
         )
 
     def test_returns_empty_string_for_empty_topic(self, mock_recorder, mock_app):
-        mock_app._config.kafka.ui_url = 'http://kafka-ui.internal:8080'
-        mock_app._config.kafka.ui_cluster_name = 'prod'
+        mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui.internal:8080'
+        mock_app._config.connections.kafka['main'].ui_cluster_name = 'prod'
         deps = self._make_deps(mock_recorder, mock_app)
         assert deps.kafka_ui_message_url('', 0, 0) == ''
 
@@ -5181,3 +5190,5 @@ async def test_probe_without_topic_is_400_when_kafka_source_off(http_only_client
 async def test_live_overview_kafka_source_topic_empty_when_off(http_only_client):
     resp = await http_only_client.get('/api/v1/live/overview')
     assert resp.json()['kafka_source_topic'] == ''
+    assert resp.json()['kafka_ui_base'] == ''
+    assert resp.json()['kafka_ui_cluster'] == ''

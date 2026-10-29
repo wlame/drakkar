@@ -15,7 +15,6 @@ from drakkar.app_security import SIDE_EFFECTING_ENDPOINTS
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
@@ -23,7 +22,9 @@ from drakkar.config import (
     SinksConfig,
     UIConfig,
 )
+from drakkar.configmeta import dump_by_yaml_key
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.kafka_read import build_alias_table
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
@@ -35,7 +36,7 @@ from drakkar.models import (
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
 from tests.archive_helpers import idle_archive_task
-from tests.conftest import make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
 from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
@@ -93,7 +94,10 @@ class HttpOnlyHandler(BaseDrakkarHandler[_D, _D, _D, _D]):
 @pytest.fixture
 def test_config(tmp_path) -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections={
+            **kafka_connections(brokers='localhost:9092'),
+            'postgres': {'main': {'dsn': 'postgresql://localhost/test'}},
+        },
         storage={'dir': str(tmp_path / 'storage')},
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(
@@ -104,7 +108,7 @@ def test_config(tmp_path) -> DrakkarConfig:
         ),
         sinks=SinksConfig(
             kafka={'results': KafkaSinkConfig(topic='test-out')},
-            postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/test')},
+            postgres={'main': PostgresSinkConfig()},
         ),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
@@ -114,7 +118,7 @@ def test_config(tmp_path) -> DrakkarConfig:
 @pytest.fixture
 def test_config_no_sinks(tmp_path) -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections=kafka_connections(brokers='localhost:9092'),
         storage={'dir': str(tmp_path / 'storage')},
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
@@ -186,6 +190,7 @@ def test_app_worker_id_from_env(test_config, monkeypatch):
 def test_app_worker_id_custom_env_var(monkeypatch):
     monkeypatch.setenv('MY_SVC_NAME', 'svc-alpha')
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
         worker_name_env='MY_SVC_NAME',
@@ -226,7 +231,7 @@ def test_app_build_dlq_custom_topic():
     from drakkar.config import DLQConfig
 
     config = DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections=kafka_connections(brokers='localhost:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'input'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         dlq=DLQConfig(topic='custom-dlq'),
@@ -362,10 +367,10 @@ def test_build_sinks_registers_each_declared_policy(test_config):
     """The policy is read from the config once, at build time, keyed like the manager's groups."""
     cfg = DrakkarConfig.model_validate(
         {
-            **test_config.model_dump(),
+            **dump_by_yaml_key(test_config, mode='python'),
             'sinks': {
                 'kafka': {'results': {'topic': 'test-out', 'depends_on': ['postgres/main']}},
-                'postgres': {'main': {'dsn': 'postgresql://localhost/test', 'on_failure': 'skip', 'max_retries': 5}},
+                'postgres': {'main': {'on_failure': 'skip', 'max_retries': 5}},
             },
         }
     )
@@ -494,13 +499,13 @@ def _http_only_without_sinks(test_config: DrakkarConfig, *, http_sinks: bool) ->
     cfg.sources.kafka.enabled = False
     cfg.sources.http.enabled = True
     cfg.sources.http.port = 0
-    cfg.sources.http.sinks_enabled = http_sinks
+    cfg.sources.http.deliver_to_sinks = http_sinks
     cfg.sinks = SinksConfig()
     return cfg
 
 
 async def test_an_http_only_worker_without_sinks_starts(test_config, monkeypatch):
-    """With the Kafka source off and sources.http.sinks_enabled off, no result reaches a sink."""
+    """With the Kafka source off and sources.http.deliver_to_sinks off, no result reaches a sink."""
     app = DrakkarApp(handler=WebCapableHandler(), config=_http_only_without_sinks(test_config, http_sinks=False))
 
     # The sources start after the sink check, the sink connect and the DLQ
@@ -515,8 +520,8 @@ async def test_an_http_only_worker_without_sinks_starts(test_config, monkeypatch
         await app._lifecycle._async_run()
 
 
-async def test_http_sinks_enabled_without_sinks_fails_at_startup(test_config):
-    """sources.http.sinks_enabled routes results to sinks, so a worker with none is misconfigured."""
+async def test_http_deliver_to_sinks_without_sinks_fails_at_startup(test_config):
+    """sources.http.deliver_to_sinks routes results to sinks, so a worker with none is misconfigured."""
     app = DrakkarApp(handler=WebCapableHandler(), config=_http_only_without_sinks(test_config, http_sinks=True))
 
     with pytest.raises(SinkNotConfiguredError, match='No sinks configured'):
@@ -685,6 +690,7 @@ def test_app_cluster_name_from_env(monkeypatch):
     """cluster_name_env takes precedence over config.cluster_name."""
     monkeypatch.setenv('MY_CLUSTER', 'env-cluster')
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
         cluster_name='config-cluster',
@@ -698,6 +704,7 @@ def test_app_cluster_name_falls_back_to_config(monkeypatch):
     """When cluster_name_env is not set, config.cluster_name is used."""
     monkeypatch.delenv('MY_CLUSTER', raising=False)
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
         cluster_name='fallback-cluster',
@@ -711,6 +718,7 @@ def test_app_cluster_name_falls_back_to_config_when_env_var_is_empty(monkeypatch
     """An empty value counts as unset: config.cluster_name is used."""
     monkeypatch.setenv('MY_CLUSTER', '')
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
         cluster_name='fallback-cluster',
@@ -723,6 +731,7 @@ def test_app_cluster_name_falls_back_to_config_when_env_var_is_empty(monkeypatch
 def test_app_cluster_name_no_env_var_configured():
     """When cluster_name_env is empty, config.cluster_name is used directly."""
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
         cluster_name='direct-cluster',
@@ -2419,8 +2428,33 @@ def test_app_delegates_kafka_state_to_source(test_config):
     assert app._consumer is None
 
 
+async def test_http_only_worker_needs_no_kafka_connection():
+    config = DrakkarConfig(
+        sources={'http': {'enabled': True}},
+        sinks={'http': {'api': {'url': 'https://api.example.com/results'}}},
+        ui={'release': {'enabled': False}},
+    )
+    assert config.connections.kafka == {}
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=config)
+
+    with capture_logs() as logs:
+        await app._lifecycle._report_kafka_security()
+    app._build_sinks()
+    app._build_dlq()
+
+    assert logs == []
+    assert app._dlq_sink is None
+    assert config.kafka_source_connection is None
+    assert config.dlq_connection is None
+    assert config.resolved_dlq_topic == ''
+    assert config.dlq_unconfigured is True
+    assert build_alias_table(config) == {}
+
+
 def test_app_without_kafka_source_exposes_empty_state(test_config):
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     assert app.kafka_source is None
     assert app._processors == {}
@@ -2432,7 +2466,7 @@ def test_app_without_kafka_source_exposes_empty_state(test_config):
 
 def test_build_dlq_is_none_when_kafka_off_and_no_topic(test_config):
     cfg = DrakkarConfig.model_validate(
-        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
     )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     app._build_dlq()
@@ -2441,7 +2475,11 @@ def test_build_dlq_is_none_when_kafka_off_and_no_topic(test_config):
 
 def test_build_dlq_with_topic_when_kafka_off(test_config):
     cfg = DrakkarConfig.model_validate(
-        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': 'x-dlq'}}
+        {
+            **dump_by_yaml_key(test_config, mode='python'),
+            'sources': {'http': {'enabled': True}},
+            'dlq': {'topic': 'x-dlq'},
+        }
     )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     app._build_dlq()
@@ -2451,7 +2489,9 @@ def test_build_dlq_with_topic_when_kafka_off(test_config):
 async def test_unconfigured_dlq_drop_is_counted(test_config):
     from drakkar.metrics import dlq_unconfigured_drops
 
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     before = dlq_unconfigured_drops._value.get()
     await app._sink_manager.drop_unconfigured_dlq_send(partition_id=-1, payload_count=3)
@@ -2464,7 +2504,9 @@ async def test_dlq_unconfigured_drop_warns_once_then_drops_to_debug(test_config)
     without a DLQ on purpose would otherwise repeat the warning for every
     failed delivery, and the counter already carries the volume.
     """
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
 
     with capture_logs() as cap:
@@ -2484,7 +2526,7 @@ async def test_handle_collect_dlq_action_drops_when_dlq_is_off(test_config):
     so the payloads are counted as lost and the pipeline carries on.
     """
     cfg = DrakkarConfig.model_validate(
-        {**test_config.model_dump(), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}, 'dlq': {'topic': ''}}
     )
 
     class DlqHandler(HttpOnlyHandler):
@@ -2499,7 +2541,7 @@ async def test_handle_collect_dlq_action_drops_when_dlq_is_off(test_config):
         recorder=None,
         dlq_sink=None,
         dlq_on_send_failure='stall',
-        dlq_enabled=cfg.dlq_enabled,
+        dlq_unconfigured=cfg.dlq_unconfigured,
     )
 
     kafka_sink = app._sink_manager._sinks[('kafka', 'results')]
@@ -2527,14 +2569,18 @@ def test_app_paused_setter_delegates_and_tolerates_no_kafka_source(test_config):
     assert app.kafka_source.paused is True
     assert app._paused is True
 
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     http_only = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     http_only._paused = True
     assert http_only._paused is False
 
 
 def test_app_webapp_delegates_to_http_source(test_config):
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     assert app.http_source is not None
     assert app._webapp is None
@@ -2549,7 +2595,9 @@ def test_app_webapp_delegates_to_http_source(test_config):
 
 def test_app_is_ready_tracks_sources_and_stopping(test_config):
     """/readyz goes green only while every source serves input and no drain has begun."""
-    cfg = DrakkarConfig.model_validate({**test_config.model_dump(), 'sources': {'http': {'enabled': True}}})
+    cfg = DrakkarConfig.model_validate(
+        {**dump_by_yaml_key(test_config, mode='python'), 'sources': {'http': {'enabled': True}}}
+    )
     app = DrakkarApp(handler=HttpOnlyHandler(), config=cfg)
     assert app.is_ready is False
 

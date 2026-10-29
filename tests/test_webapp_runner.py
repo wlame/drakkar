@@ -265,7 +265,7 @@ async def test_runner_happy_path_returns_assembled_web_report():
     assert report.task_summary.success == 2
     assert report.task_summary.failed == 0
 
-    # Sinks stays None on the sinks_enabled=False path (the default).
+    # Sinks stays None on the deliver_to_sinks=False path (the default).
     assert report.sinks is None
 
     # Timeline records arrange / execute / on_http_request_complete.
@@ -740,7 +740,7 @@ async def test_runner_allocates_cancelled_event_lazily():
 # Sinks-enabled delivery path
 #
 # These tests focus on the runner's optional sinks block: it triggers
-# only when ``WebAppConfig.sinks_enabled=True``, calls
+# only when ``WebAppConfig.deliver_to_sinks=True``, calls
 # ``handler.on_message_complete(group)`` for the synthetic group, and
 # delivers any returned ``CollectResult`` through the SinkManager. The
 # runner accumulates per-sink-type outcomes into a ``SinkDeliverySummary``
@@ -749,7 +749,7 @@ async def test_runner_allocates_cancelled_event_lazily():
 #   * happy path → summary populated with attempted/delivered counts;
 #   * a validation failure or a raising ``deliver_all`` → recorded in the summary;
 #   * ``on_message_complete`` returning ``None`` → ``WebReport.sinks=None``;
-#   * ``sinks_enabled=False`` → ``on_message_complete`` not called;
+#   * ``deliver_to_sinks=False`` → ``on_message_complete`` not called;
 #   * ``on_message_complete`` raising → wrapped in ``WebappHandlerError``.
 # ---------------------------------------------------------------------------
 
@@ -774,14 +774,14 @@ def _make_collect_result_kafka_postgres(
     )
 
 
-def _make_sinks_enabled_config() -> WebAppConfig:
+def _make_deliver_to_sinks_config() -> WebAppConfig:
     """Build a ``WebAppConfig`` with sinks enabled — used by the sinks tests."""
     return WebAppConfig(
         enabled=True,
         host='127.0.0.1',
         port=0,
         path='/process',
-        sinks_enabled=True,
+        deliver_to_sinks=True,
         clients=[WebClientConfig(name='anonymous', token='', rpm=4)],
     )
 
@@ -795,7 +795,7 @@ class _RecordingSinkManager(SinkManager):
         self.postgres = FakeSink('default', 'postgres')
         self.register(self.kafka, policy=policy())
         self.register(self.postgres, policy=policy())
-        self.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='drop', dlq_enabled=False)
+        self.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='drop', dlq_unconfigured=True)
         self.deliver_calls: list[CollectResult] = []
 
     async def deliver_all(self, result, on_delivery_error, partition_id, **kwargs):
@@ -821,8 +821,8 @@ def _make_stub_app_with_sinks(
 
 
 @pytest.mark.asyncio
-async def test_runner_sinks_enabled_happy_path_populates_summary():
-    """sinks_enabled + on_message_complete returns CollectResult → summary populated."""
+async def test_runner_deliver_to_sinks_happy_path_populates_summary():
+    """deliver_to_sinks + on_message_complete returns CollectResult → summary populated."""
     handler = _RecordingHandler()
     task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
 
@@ -843,7 +843,7 @@ async def test_runner_sinks_enabled_happy_path_populates_summary():
     pool = _make_pool_returning([_make_canned_result(task)])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     report = await runner.run(_make_ctx())
 
@@ -904,7 +904,7 @@ async def test_runner_deliver_all_raising_records_catastrophic_failure():
     pool = _make_pool_returning([])
     sink_manager = _RaisingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     report = await runner.run(_make_ctx())
 
@@ -916,8 +916,8 @@ async def test_runner_deliver_all_raising_records_catastrophic_failure():
 
 
 @pytest.mark.asyncio
-async def test_runner_sinks_enabled_but_on_message_complete_returns_none():
-    """sinks_enabled=True + on_message_complete returns None → WebReport.sinks=None."""
+async def test_runner_deliver_to_sinks_but_on_message_complete_returns_none():
+    """deliver_to_sinks=True + on_message_complete returns None → WebReport.sinks=None."""
     handler = _RecordingHandler()
 
     async def arrange_impl(req, pending):
@@ -936,7 +936,7 @@ async def test_runner_sinks_enabled_but_on_message_complete_returns_none():
     pool = _make_pool_returning([])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     report = await runner.run(_make_ctx())
 
@@ -975,7 +975,7 @@ async def test_runner_sink_validation_failure_records_error_and_skips_that_sink_
     pool = _make_pool_returning([])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     report = await runner.run(_make_ctx())
 
@@ -1046,7 +1046,7 @@ async def test_runner_drops_request_when_timeout_detected_before_response_hook()
     pool = _make_pool_returning([_make_canned_result(task)])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     with pytest.raises(asyncio.CancelledError):
         await runner.run(ctx)
@@ -1057,7 +1057,7 @@ async def test_runner_drops_request_when_timeout_detected_before_response_hook()
 
 @pytest.mark.asyncio
 async def test_runner_sinks_disabled_does_not_call_on_message_complete():
-    """sinks_enabled=False → on_message_complete is NOT called and sinks=None."""
+    """deliver_to_sinks=False → on_message_complete is NOT called and sinks=None."""
     handler = _RecordingHandler()
 
     async def arrange_impl(req, pending):
@@ -1076,9 +1076,9 @@ async def test_runner_sinks_disabled_does_not_call_on_message_complete():
     pool = _make_pool_returning([])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    # Default config has sinks_enabled=False — verify the default.
+    # Default config has deliver_to_sinks=False — verify the default.
     config = _make_config()
-    assert config.sinks_enabled is False
+    assert config.deliver_to_sinks is False
     runner = WebappRunner(app, config)
 
     report = await runner.run(_make_ctx())
@@ -1106,7 +1106,7 @@ async def test_runner_sinks_on_message_complete_raising_wraps_handler_error():
     pool = _make_pool_returning([])
     sink_manager = _RecordingSinkManager()
     app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
-    runner = WebappRunner(app, _make_sinks_enabled_config())
+    runner = WebappRunner(app, _make_deliver_to_sinks_config())
 
     with pytest.raises(WebappHandlerError) as exc_info:
         await runner.run(_make_ctx())
@@ -1288,7 +1288,7 @@ def test_serialize_request_body_falls_back_to_str_encoding_for_non_pydantic_inpu
 def test_split_collect_by_type_covers_every_sink_type():
     """The per-sink-type split must route every CollectResult field to its
     own batch — missing one here would silently drop that sink type's
-    payloads from webapp delivery whenever sinks_enabled=True. kafka and
+    payloads from webapp delivery whenever deliver_to_sinks=True. kafka and
     postgres are exercised elsewhere; this pins down the remaining four."""
     from drakkar.models import CollectResult, FilePayload, HttpPayload, MongoPayload, RedisPayload
 

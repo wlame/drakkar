@@ -13,6 +13,7 @@ from drakkar.config import (
     UIRecorderConfig,
     UIReleaseConfig,
 )
+from tests.conftest import kafka_connections
 
 
 def test_ui_defaults_match_old_debug_defaults():
@@ -79,7 +80,7 @@ def test_annotation_env_override(monkeypatch):
     monkeypatch.setenv('DK_UI__RECORDER__ANNOTATIONS_ENABLED', 'false')
     monkeypatch.setenv('DK_UI__RECORDER__ANNOTATION_MAX_BYTES', '4096')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.ui.recorder.annotations_enabled is False
     assert cfg.ui.recorder.annotation_max_bytes == 4096
 
@@ -107,7 +108,7 @@ def test_env_nested_override(monkeypatch):
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'false')
     monkeypatch.setenv('DK_UI__PORT', '9001')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.ui.recorder.flush_interval_seconds == 7
     assert cfg.ui.release.check_update is False
     assert cfg.ui.port == 9001
@@ -119,19 +120,19 @@ def test_unknown_top_level_section_fails_with_the_unknown_keys_message():
 
 
 def test_config_summary_uses_ui_token():
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
     assert ' ui=on:8080 ' in summary
     assert 'debug=' not in summary
 
 
 def test_config_summary_ui_off():
-    cfg = DrakkarConfig(ui={'enabled': False}, sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), ui={'enabled': False}, sources={'kafka': {'enabled': True}})
     assert ' ui=off ' in cfg.config_summary(worker_id='w1')
 
 
 def test_config_summary_storage_and_fleet_tokens_follow_ui():
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
     assert ' ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off ' in summary
 
@@ -148,6 +149,6 @@ def test_probe_and_merge_env_overrides(monkeypatch):
     monkeypatch.setenv('DK_UI__PROBE_ENABLED', 'false')
     monkeypatch.setenv('DK_UI__MERGE_ENABLED', 'false')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.ui.probe_enabled is False
     assert cfg.ui.merge_enabled is False

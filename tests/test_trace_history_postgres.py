@@ -30,7 +30,7 @@ from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.routes_debug import create_debug_router
 from drakkar.uiserver.server import UIDeps
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 WORKER = 'w-1'
@@ -380,7 +380,7 @@ async def test_trace_history_postgres_slot_comes_back_after_a_failed_search(knob
 
 def _drakkar_app() -> MagicMock:
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
     return app
 

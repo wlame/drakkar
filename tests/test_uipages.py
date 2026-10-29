@@ -8,7 +8,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -27,6 +26,7 @@ from drakkar.uipages import (
     build_pages,
     pages_referenced_bases,
 )
+from tests.conftest import kafka_connections
 
 
 def _page(**overrides):
@@ -202,8 +202,8 @@ def test_pages_referenced_bases_collects_column_templates():
 def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),

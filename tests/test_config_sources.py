@@ -3,11 +3,16 @@
 import pytest
 from pydantic import ValidationError
 
-from drakkar.config import DrakkarConfig, KafkaConfig, KafkaSourceConfig, SourcesConfig, WebAppConfig
+from drakkar.config import DrakkarConfig, KafkaConnectionConfig, KafkaSourceConfig, SourcesConfig, WebAppConfig
+from tests.conftest import kafka_connections
 
 
 def _config(**overrides) -> DrakkarConfig:
-    base = {'ui': {'release': {'enabled': False}}, 'executor': {'binary_path': '/usr/bin/echo'}}
+    base = {
+        'connections': kafka_connections(),
+        'ui': {'release': {'enabled': False}},
+        'executor': {'binary_path': '/usr/bin/echo'},
+    }
     base.update(overrides)
     return DrakkarConfig(**base)
 
@@ -33,7 +38,7 @@ def test_sources_both_disabled_is_a_config_error():
 def test_delivers_to_sinks_when_the_kafka_source_or_http_sinks_are_on(kafka, http, http_sinks, expected):
     sources = SourcesConfig(
         kafka=KafkaSourceConfig(enabled=kafka, topic='t', consumer_group='g'),
-        http=WebAppConfig(enabled=http, sinks_enabled=http_sinks),
+        http=WebAppConfig(enabled=http, deliver_to_sinks=http_sinks),
     )
 
     assert sources.delivers_to_sinks is expected
@@ -46,20 +51,27 @@ def test_sources_default_flags_are_false():
     assert sources.enabled_names == []
 
 
-def test_kafka_source_defaults_match_previous_consumer_defaults():
+def test_kafka_source_defaults():
     src = KafkaSourceConfig()
     assert src.topic == 'input-events'
     assert src.consumer_group == 'drakkar-workers'
     assert src.max_poll_records == 100
-    assert src.max_poll_interval_ms == 300_000
-    assert src.session_timeout_ms == 45_000
-    assert src.heartbeat_interval_ms == 3_000
+    assert src.max_poll_interval == 300.0
+    assert src.session_timeout == 45.0
+    assert src.heartbeat_interval == 3.0
+    assert src.connection == 'main'
     assert src.on_parse_error == 'skip'
-    assert src.startup_align_enabled is True
+    assert src.startup_align.enabled is True
 
 
 def test_kafka_connection_has_no_consumer_fields():
-    assert set(KafkaConfig.model_fields) == {'brokers', 'security', 'client_config', 'ui_url', 'ui_cluster_name'}
+    assert set(KafkaConnectionConfig.model_fields) == {
+        'brokers',
+        'security',
+        'client_config',
+        'ui_url',
+        'ui_cluster_name',
+    }
 
 
 def test_enabled_kafka_source_requires_topic_and_group():
@@ -97,10 +109,10 @@ def test_webapp_config_field_set_unchanged():
         'host',
         'port',
         'path',
-        'sinks_enabled',
-        'request_timeout_seconds',
+        'deliver_to_sinks',
+        'request_timeout',
         'max_concurrent',
-        'max_body_bytes',
+        'max_body',
         'clients',
     }
 
@@ -122,8 +134,9 @@ def _summary_config(**overrides) -> DrakkarConfig:
         },
         'sinks': {
             'kafka': {'a': {'topic': 't'}, 'b': {'topic': 'u'}},
-            'postgres': {'main': {'dsn': 'postgresql://u:p@h/d'}},
+            'postgres': {'main': {}},
         },
+        'connections': {**kafka_connections(), 'postgres': {'main': {'dsn': 'postgresql://u:p@h/d'}}},
         'metrics': {'port': 9090},
         'logging': {'level': 'INFO'},
     }

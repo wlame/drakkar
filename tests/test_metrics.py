@@ -16,7 +16,7 @@ from confluent_kafka import KafkaError, TopicPartition
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
     KafkaSourceConfig,
     LoggingConfig,
@@ -52,7 +52,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.partition import PartitionProcessor
-from tests.conftest import wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
 
 # --- Helpers ---
 
@@ -131,7 +131,7 @@ def make_kafka_ok_msg(partition=0, offset=0, value=b'v'):
 
 @pytest.fixture
 def kafka_config():
-    return KafkaConfig(brokers='localhost:9092')
+    return KafkaConnectionConfig(brokers='localhost:9092')
 
 
 @pytest.fixture
@@ -500,6 +500,7 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     from drakkar.app import DrakkarApp
 
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
         sources={'kafka': {'enabled': True}},
         metrics=MetricsConfig(enabled=False),
@@ -523,6 +524,7 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     from drakkar.app import DrakkarApp
 
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
         sources={'kafka': {'enabled': True}},
         metrics=MetricsConfig(enabled=False),
@@ -548,6 +550,7 @@ async def test_handle_collect_delivers_to_sinks():
     from drakkar.app import DrakkarApp
 
     config = DrakkarConfig(
+        connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2),
         sources={'kafka': {'enabled': True}},
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='t')}),
@@ -793,6 +796,7 @@ async def test_total_waiting_excludes_inflight():
     from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
 
     config = DrakkarConfig(
+        connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
     )

@@ -225,12 +225,12 @@ cycle across active partitions. Too low starves the pipeline (partition
 queues empty between polls). Too high wastes memory on queued messages
 that will not be processed for minutes.
 
-**`session_timeout_ms`** controls how fast Kafka detects a dead worker.
+**`session_timeout`** controls how fast Kafka detects a dead worker.
 Lower = faster rebalance, but more false positives if the event loop is
 temporarily busy. Fast tasks (heartbeat-friendly) use 10s. Slow tasks
 use 45-60s to avoid spurious rebalances.
 
-**`max_poll_interval_ms`** must exceed the worst-case window duration
+**`max_poll_interval`** must exceed the worst-case window duration
 (all tasks hitting the timeout). If a window takes longer, Kafka
 kicks the consumer out of the group and triggers rebalance.
 

@@ -76,7 +76,7 @@ def make_runner(handler: BaseDrakkarHandler, manager: SinkManager, *, recorder: 
         host='127.0.0.1',
         port=0,
         path='/process',
-        sinks_enabled=True,
+        deliver_to_sinks=True,
         clients=[WebClientConfig(name='anonymous', token='', rpm=4)],
     )
     return WebappRunner(app, config)
@@ -281,7 +281,7 @@ async def test_http_dlq_off_counts_one_unconfigured_drop():
     kafka = FakeSink('out', 'kafka')
     kafka.fail = True
     manager = manager_with((kafka, policy(max_retries=0)))
-    manager.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='drop', dlq_enabled=False)
+    manager.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='drop', dlq_unconfigured=True)
     before = dlq_unconfigured_drops._value.get()
 
     report = await make_runner(Handler(CollectResult(kafka=[KafkaPayload(data=Data())])), manager).run(make_ctx())

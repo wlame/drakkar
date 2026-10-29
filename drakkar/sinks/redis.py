@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
-from drakkar.config import RedisSinkConfig
+from drakkar.config import RedisConnectionConfig, RedisSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import RedisOp, RedisPayload
 from drakkar.sinks.base import BaseSink
@@ -278,9 +278,10 @@ class RedisSink(BaseSink[RedisPayload]):
         """
         return not any(payload.op in _NOT_IDEMPOTENT_OPS for payload in payloads)
 
-    def __init__(self, name: str, config: RedisSinkConfig) -> None:
+    def __init__(self, name: str, config: RedisSinkConfig, connection: RedisConnectionConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
+        self._url = connection.url
         self._client: redis.asyncio.Redis | None = None
         # Operator-authored Lua, registered at connect(). Never registered on
         # the delivery path.
@@ -304,7 +305,7 @@ class RedisSink(BaseSink[RedisPayload]):
         return self._client
 
     async def connect(self) -> None:
-        """Create the Redis client from the configured URL."""
+        """Create the Redis client from the URL of the connection."""
         import redis.asyncio as aioredis
 
         # ``socket_timeout`` defaults to None in redis-py: a server that
@@ -312,7 +313,7 @@ class RedisSink(BaseSink[RedisPayload]):
         # with no bound at all. Use the manager's delivery budget for both
         # the read and the connect.
         self._client = aioredis.from_url(
-            self._config.url,
+            self._url,
             socket_timeout=self._delivery_timeout_seconds,
             socket_connect_timeout=self._delivery_timeout_seconds,
         )
@@ -325,7 +326,7 @@ class RedisSink(BaseSink[RedisPayload]):
             'redis_sink_connected',
             category='sink',
             sink_name=self._name,
-            url=redact_url(self._config.url),
+            url=redact_url(self._url),
             key_prefix=self._config.key_prefix,
             scripts=len(self._scripts),
         )

@@ -133,8 +133,10 @@ async def _run(replay_module, entries, producer, **overrides):
 def _write_config(tmp_path) -> str:
     config_file = tmp_path / 'config.yaml'
     config_file.write_text(
-        'kafka:\n'
-        '  brokers: "localhost:9092"\n'
+        'connections:\n'
+        '  kafka:\n'
+        '    main:\n'
+        '      brokers: "localhost:9092"\n'
         'sources:\n'
         '  kafka:\n'
         '    enabled: true\n'
@@ -142,7 +144,6 @@ def _write_config(tmp_path) -> str:
         '    consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: "requests_dlq"\n'
-        '  brokers: "localhost:9092"\n'
     )
     return str(config_file)
 
@@ -513,8 +514,10 @@ def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):
     """When dlq.topic is empty, topic is derived as {sources.kafka.topic}_dlq."""
     config_file = tmp_path / 'config.yaml'
     config_file.write_text(
-        'kafka:\n'
-        '  brokers: "kafka:9092"\n'
+        'connections:\n'
+        '  kafka:\n'
+        '    main:\n'
+        '      brokers: "kafka:9092"\n'
         'sources:\n'
         '  kafka:\n'
         '    enabled: true\n'
@@ -522,7 +525,6 @@ def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):
         '    consumer_group: "grp"\n'
         'dlq:\n'
         '  topic: ""\n'
-        '  brokers: ""\n'
     )
 
     topic, brokers = replay_module._resolve_dlq_coordinates(str(config_file))
@@ -531,19 +533,23 @@ def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):
 
 
 def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
-    """Explicit dlq.topic / dlq.brokers take precedence over kafka.*."""
+    """dlq.topic wins over the derived name, and dlq.connection names the cluster."""
     config_file = tmp_path / 'config.yaml'
     config_file.write_text(
-        'kafka:\n'
-        '  brokers: "kafka:9092"\n'
+        'connections:\n'
+        '  kafka:\n'
+        '    main:\n'
+        '      brokers: "kafka:9092"\n'
+        '    other:\n'
+        '      brokers: "other-cluster:9092"\n'
         'sources:\n'
         '  kafka:\n'
         '    enabled: true\n'
         '    topic: "requests"\n'
         '    consumer_group: "grp"\n'
         'dlq:\n'
+        '  connection: other\n'
         '  topic: "custom-dlq"\n'
-        '  brokers: "other-cluster:9092"\n'
     )
 
     topic, brokers = replay_module._resolve_dlq_coordinates(str(config_file))
@@ -554,10 +560,13 @@ def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
 def test_resolve_dlq_coordinates_raises_when_topic_cannot_be_derived(replay_module, tmp_path):
     """No dlq.topic and a disabled Kafka source leaves resolved_dlq_topic empty — surface that plainly."""
     config_file = tmp_path / 'config.yaml'
-    config_file.write_text('kafka:\n  brokers: "kafka:9092"\nsources:\n  http:\n    enabled: true\ndlq:\n  topic: ""\n')
+    config_file.write_text('sources:\n  http:\n    enabled: true\ndlq:\n  topic: ""\n')
 
     with pytest.raises(
-        ValueError, match=re.escape('cannot derive DLQ topic: dlq.topic is empty and the Kafka source is disabled')
+        ValueError,
+        match=re.escape(
+            'cannot derive DLQ topic: dlq.enabled is off, or dlq.topic is empty and the Kafka source is disabled'
+        ),
     ):
         replay_module._resolve_dlq_coordinates(str(config_file))
 

@@ -101,10 +101,11 @@ class KafkaSource:
         # Stagger startup: sleep until the next wall-clock alignment
         # boundary so a fleet of workers in a rolling deploy converges
         # on a single Kafka consumer-group rebalance instead of N. See
-        # KafkaSourceConfig.startup_align_* for tuning and rationale.
-        if config.sources.kafka.startup_align_enabled:
-            min_wait = config.sources.kafka.startup_min_wait_seconds
-            interval = config.sources.kafka.startup_align_interval_seconds
+        # StartupAlignConfig for tuning and rationale.
+        align = config.sources.kafka.startup_align
+        if align.enabled:
+            min_wait = align.min_wait
+            interval = align.interval
             target_wall = math.ceil((time.time() + min_wait) / interval) * interval
             await log.ainfo(
                 'startup_align_waiting',
@@ -118,7 +119,7 @@ class KafkaSource:
             await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
 
         self.consumer = KafkaConsumer(
-            connection=config.kafka,
+            connection=config.connections.kafka[config.sources.kafka.connection],
             source=config.sources.kafka,
             on_assign=self.on_assign,
             on_revoke=self.on_revoke,

@@ -22,6 +22,7 @@
   // characters and does not end with ':' (a plain scalar that ends with ':' starts a mapping).
   // The first-character rule also keeps every number-like text quoted.
   var BARE_STRING = /^[A-Za-z_\/][A-Za-z0-9_.\/:-]*$/;
+  var BARE_DURATION = /^([0-9]+(d|h|m|s|ms))+$/;
   var RESERVED_WORDS = ['true', 'false', 'yes', 'no', 'on', 'off', 'null', '~'];
   var CALCULATOR_SECTIONS = ['sources', 'executor', 'ui'];
   var TABLE_URL = '../data/config-wizard.json';
@@ -109,14 +110,27 @@
     return c;
   }
 
+  /** The canonical text of a duration given in milliseconds: descending terms, no zero term. */
+  function durationText(milliseconds) {
+    var units = [['d', 86400000], ['h', 3600000], ['m', 60000], ['s', 1000], ['ms', 1]];
+    var remaining = milliseconds;
+    var text = '';
+    units.forEach(function (unit) {
+      var count = Math.floor(remaining / unit[1]);
+      if (count > 0) { text += count + unit[0]; }
+      remaining -= count * unit[1];
+    });
+    return text || '0';
+  }
+
   /** The YAML part that the calculator values set. */
   function calculatorFragment(c) {
     return {
       sources: { kafka: {
         max_poll_records: c.pollRecords,
-        session_timeout_ms: c.sessionTimeout,
-        heartbeat_interval_ms: c.heartbeatInterval,
-        max_poll_interval_ms: c.maxPollInterval
+        session_timeout: durationText(c.sessionTimeout),
+        heartbeat_interval: durationText(c.heartbeatInterval),
+        max_poll_interval: durationText(c.maxPollInterval)
       } },
       executor: {
         max_executors: c.maxWorkers,
@@ -155,8 +169,8 @@
     add('backpressure high/low: ' + c.highMult + '/' + c.lowMult, 'High watermark = max_executors * ' + c.highMult + ' = ' + (maxWorkers * c.highMult) + '. Low = max_executors * ' + c.lowMult + ' = ' + Math.max(1, maxWorkers * c.lowMult) + '. ' + bpText + ' The gap prevents pause/resume flapping.');
     add('drain_timeout_seconds: ' + c.drainTimeout, '2x p80 = ' + c.drainTimeout + 's. On shutdown, in-flight tasks get this long to finish. If exceeded, their offsets remain uncommitted and Kafka redelivers after restart.');
     var stText = p80s < 1 ? 'Fast tasks: 10s for quick dead-worker detection.' : p80s < 10 ? 'Moderate: 45s balances detection speed vs false positives.' : 'Slow tasks: 60s prevents spurious rebalances.';
-    add('session_timeout_ms: ' + c.sessionTimeout, stText + ' Heartbeat every ' + c.heartbeatInterval + 'ms (session/5). Kafka declares consumer dead if no heartbeat for this duration.');
-    add('max_poll_interval_ms: ' + c.maxPollInterval, 'Worst-case window: ' + c.windowSize + ' tasks * ' + c.taskTimeout + 's = ' + c.worstWindowSec + 's. 2x margin = ' + (c.worstWindowSec * 2) + 's. Kafka kicks the consumer if no poll() within this interval.');
+    add('session_timeout: ' + durationText(c.sessionTimeout), stText + ' Heartbeat every ' + durationText(c.heartbeatInterval) + ' (session/5). Kafka declares consumer dead if no heartbeat for this duration.');
+    add('max_poll_interval: ' + durationText(c.maxPollInterval), 'Worst-case window: ' + c.windowSize + ' tasks * ' + c.taskTimeout + 's = ' + c.worstWindowSec + 's. 2x margin = ' + (c.worstWindowSec * 2) + 's. Kafka kicks the consumer if no poll() within this interval.');
     add('ws_min_duration_ms: ' + c.wsMin, c.wsMin > 0 ? 'Tasks faster than ' + c.wsMin + 'ms hidden from live UI. Floor is 30ms — below that, fast task WebSocket events cause buggy timeline rendering and browser performance issues. Failed tasks always shown regardless.' : '0 = show all tasks. With p80=' + p80 + 'ms, task throughput is low enough for the UI to handle.');
     add('event_min_duration_ms: ' + c.eventMin, c.eventMin > 0 ? 'Tasks faster than ' + c.eventMin + 'ms skip SQLite storage. At ~' + Math.round(c.tasksPerSec) + ' tasks/sec, filtering prevents DB bottleneck.' : '0 = store all events. SQLite handles ~' + Math.round(c.tasksPerSec) + ' tasks/sec comfortably.');
     add('store_output: ' + c.storeOutput, !c.storeOutput ? 'Disabled — fast task stdout is small and uninteresting. Saves ~' + Math.round(c.stdoutKb * c.tasksPerSec) + ' KB/sec of writes.' : 'Enabled — stdout/stderr valuable for debugging. Storage cost manageable at ' + Math.round(c.tasksPerSec) + ' tasks/sec.');
@@ -325,6 +339,7 @@
     if (typeof value === 'boolean') { return value ? 'true' : 'false'; }
     if (typeof value === 'number') { return String(value); }
     if (typeof value === 'string') {
+      if (BARE_DURATION.test(value)) { return value; }
       if (BARE_STRING.test(value) && value.charAt(value.length - 1) !== ':' && RESERVED_WORDS.indexOf(value.toLowerCase()) < 0) {
         return value;
       }

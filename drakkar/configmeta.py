@@ -35,7 +35,6 @@ from drakkar.config import (
     FleetConfig,
     HistoryConfig,
     IOConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     OffloadConfig,
@@ -103,7 +102,7 @@ class ConfigFieldMeta(BaseModel):
     carry a credential and a UI should mask or omit its value."""
 
     group: str
-    """Top-level section key (``root``, ``kafka``, ``executor``, ``sinks``, …)."""
+    """Top-level section key (``root``, ``connections``, ``executor``, ``sinks``, …)."""
 
 
 class ConfigGroupMeta(BaseModel):
@@ -137,7 +136,6 @@ class ConfigMetadata(BaseModel):
 # drift from the page it points into.
 _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('root', 'Worker identity', 'worker-identity', None),
-    ('kafka', 'Kafka connection (kafka:)', 'kafka-connection-kafka', KafkaConfig),
     ('sources', 'Input sources (sources:)', 'input-sources-sources', SourcesConfig),
     ('executor', 'Executor pool (executor:)', 'executor-pool-executor', ExecutorConfig),
     ('sinks', 'Sinks (sinks:)', 'sinks-sinks', SinksConfig),

@@ -225,13 +225,13 @@ class UIDeps:
     def kafka_ui_message_url(self, topic: str, partition: int, offset: int) -> str:
         """Build a Kafka-UI deep-link URL for a single message.
 
-        Returns '' when ``kafka.ui_url`` or ``kafka.ui_cluster_name`` is
-        absent, so callers can treat it as a
+        Returns '' when the Kafka source is off, or its connection has no
+        ``ui_url`` or ``ui_cluster_name``, so callers can treat it as a
         feature toggle. The ``%3A%3A`` literal is the URL-encoded form of
         ``::`` that Kafka-UI expects in the seekTo parameter.
         """
-        kcfg = self.drakkar_app._config.kafka
-        if not kcfg.ui_url or not kcfg.ui_cluster_name or not topic:
+        kcfg = self.drakkar_app._config.kafka_source_connection
+        if kcfg is None or not kcfg.ui_url or not kcfg.ui_cluster_name or not topic:
             return ''
         base = kcfg.ui_url.rstrip('/')
         cluster = quote(kcfg.ui_cluster_name, safe='')

@@ -1077,7 +1077,7 @@ webapp_requests = Counter(
 )
 
 # Histogram buckets cover the documented webapp request budget
-# (``request_timeout_seconds=30s`` default) plus a long-tail bucket so
+# (``request_timeout`` default 30s) plus a long-tail bucket so
 # timeouts are visible without losing precision in the sub-second range.
 # Mirrors the shape of ``sink_deliver_duration`` for sub-second work
 # while extending out to 30s for full-pipeline executions.
@@ -1097,7 +1097,7 @@ webapp_inflight = Gauge(
 )
 
 # Counter for requests whose result was discarded after T2's
-# ``request_timeout_seconds`` budget elapsed. The runner increments this
+# ``request_timeout`` budget elapsed. The runner increments this
 # at each cancellation gate (post-execute and pre-on_http_request_complete)
 # so a high rate indicates either a too-tight timeout or a slow
 # subprocess pipeline.

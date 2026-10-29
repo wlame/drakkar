@@ -138,7 +138,7 @@ spec:
             # changing a single value without re-rolling the ConfigMap.
             # Anything matching DK_<SECTION>__<FIELD> wins over the
             # YAML at config load time.
-            - name: DK_KAFKA__BROKERS
+            - name: DK_CONNECTIONS__KAFKA__MAIN__BROKERS
               valueFrom:
                 secretKeyRef:
                   name: drakkar-secrets  # <-- create this Secret
@@ -146,12 +146,12 @@ spec:
                   optional: true
             # Kafka SASL password. Keep the credential out of the
             # ConfigMap: the protocol, mechanism, and username belong in
-            # kafka.security in the YAML, and only the secret comes from
+            # connections.kafka.main.security in the YAML, and only the secret comes from
             # here. DK_* variables are withheld from executor
             # subprocesses by the default executor.env_inherit_deny list,
             # so the handler binary never sees this value.
             # Drop this entry entirely for a PLAINTEXT cluster.
-            - name: DK_KAFKA__SECURITY__SASL_PASSWORD
+            - name: DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: drakkar-secrets

@@ -10,6 +10,7 @@ from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
+from tests.conftest import kafka_connections
 from tests.test_sources_validation import BothHandler, KafkaOnlyHandler
 
 
@@ -82,7 +83,8 @@ class FailingSource(StubSource):
 
 def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
     """A worker whose disk, sink and executor layers are stubbed out."""
-    config_overrides.setdefault('sources', {'kafka': {'enabled': True, 'startup_align_enabled': False}})
+    config_overrides.setdefault('sources', {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}})
+    config_overrides.setdefault('connections', kafka_connections())
     config = DrakkarConfig(
         # An empty ``storage.dir`` keeps the watchdog (and every other on-disk
         # artifact) out of the test; ``test_watchdog.py`` covers that path.
@@ -280,7 +282,7 @@ async def test_disabled_source_with_bad_config_logs_warning(monkeypatch):
         monkeypatch,
         StubSource('a'),
         sources={
-            'kafka': {'enabled': True, 'startup_align_enabled': False},
+            'kafka': {'enabled': True, 'startup_align': {'enabled': False}},
             'http': {'enabled': False, 'path': 'bad'},
         },
     )
@@ -310,7 +312,7 @@ async def test_worker_info_reports_the_consumer_group_only_with_a_kafka_source(m
     kafka_app = _app(
         monkeypatch,
         StubSource('a'),
-        sources={'kafka': {'enabled': True, 'consumer_group': 'search-workers', 'startup_align_enabled': False}},
+        sources={'kafka': {'enabled': True, 'consumer_group': 'search-workers', 'startup_align': {'enabled': False}}},
     )
     await kafka_app._lifecycle._start_observability()
     assert worker_info._value['consumer_group'] == 'search-workers'

@@ -178,7 +178,7 @@ def _mask_env_dict(values: Any) -> Any:
 _DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
     'sources.http.clients': _mask_http_clients,
     'executor.env': _mask_env_dict,
-    'kafka.client_config': _mask_env_dict,
+    'connections.kafka.*.client_config': _mask_env_dict,
     'dlq.client_config': _mask_env_dict,
     'sinks.kafka.*.client_config': _mask_env_dict,
 }

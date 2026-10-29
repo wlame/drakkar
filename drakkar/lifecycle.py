@@ -65,7 +65,7 @@ from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry
 from drakkar.hostinfo import effective_cpu_count
-from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
+from drakkar.kafka_security import describe_mixed_security
 from drakkar.logging import close_logging
 from drakkar.metrics import (
     discover_handler_metrics,
@@ -125,7 +125,7 @@ def _builtin_factory[F](table: Mapping[str, F], name: str, *, config_path: str) 
 # Startup refuses a worker whose results go to sinks when it has none.
 NO_SINKS_ERROR = (
     'No sinks configured, but results are delivered to sinks (the Kafka source is on, '
-    'or sources.http.sinks_enabled is true). Add at least one sink to the sinks: section in config.'
+    'or sources.http.deliver_to_sinks is true). Add at least one sink to the sinks: section in config.'
 )
 
 
@@ -415,13 +415,16 @@ class AppLifecycle:
         never a username, password, or key path.
 
         The warning covers the one combination that is almost always a
-        mistake: the consumer authenticates, but a sink or DLQ pointing at
-        its own brokers carries no security block and would connect in
-        plaintext.
+        mistake: the consumer authenticates, but a sink or the DLQ names
+        another connection with no security block and would connect in
+        plaintext. A worker with no Kafka source has no consumer to report.
         """
         app = self._app
+        config = app._config
         log = logger.bind(worker_id=app._worker_id)
-        consumer_security = app._config.kafka.security
+        if config.kafka_source_connection is None:
+            return
+        consumer_security = config.kafka_source_connection.security
 
         await log.ainfo(
             'kafka_security',
@@ -431,16 +434,15 @@ class AppLifecycle:
             summary=consumer_security.describe(),
         )
 
-        clients: list[tuple[str, str, KafkaSecurityConfig]] = [
-            ('dlq', app._config.dlq.brokers, app._config.dlq.security),
-            *((f'sinks.kafka.{name}', cfg.brokers, cfg.security) for name, cfg in app._config.sinks.kafka.items()),
+        clients: list[tuple[str, str]] = [
+            *((('dlq', config.dlq.connection),) if config.dlq_enabled else ()),
+            *((f'sinks.kafka.{name}', cfg.connection) for name, cfg in config.sinks.kafka.items()),
         ]
-        for label, brokers, security in clients:
-            # Only a client with its own brokers can diverge; an empty
-            # brokers field inherits the consumer's settings wholesale.
-            if not brokers:
+        for label, connection_name in clients:
+            # Only a client on another connection can diverge.
+            if connection_name == config.sources.kafka.connection:
                 continue
-            message = describe_mixed_security(security, consumer_security)
+            message = describe_mixed_security(config.connections.kafka[connection_name].security, consumer_security)
             if message:
                 await log.awarning(
                     'kafka_security_mismatch',
@@ -967,7 +969,7 @@ class AppLifecycle:
             recorder=app._recorder,
             dlq_sink=app._dlq_sink,
             dlq_on_send_failure=app._config.dlq.on_send_failure,
-            dlq_enabled=app._config.dlq_enabled,
+            dlq_unconfigured=app._config.dlq_unconfigured,
         )
 
         # log sink topology

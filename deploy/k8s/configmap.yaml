@@ -11,7 +11,7 @@
 #     toggle ui.enabled) prefer DK_<SECTION>__<FIELD> env vars on
 #     the Deployment — they win over the YAML at config load time and
 #     don't require re-applying the ConfigMap. Examples:
-#       DK_KAFKA__BROKERS=kafka:9092
+#       DK_CONNECTIONS__KAFKA__MAIN__BROKERS=kafka:9092
 #       DK_UI__PORT=8080
 #       DK_UI__AUTH_TOKEN=<token>
 #       DK_EXECUTOR__MAX_EXECUTORS=16
@@ -33,8 +33,10 @@ data:
     worker_name_env: "WORKER_ID"
     cluster_name: "<cluster_name>"  # <-- e.g. "prod-eu-west-1"
 
-    kafka:
-      brokers: "<kafka_brokers>"  # <-- e.g. "kafka-bootstrap.kafka:9092"
+    connections:
+      kafka:
+        main:
+          brokers: "<kafka_brokers>"  # <-- e.g. "kafka-bootstrap.kafka:9092"
 
     sources:
       # At least one input source must be enabled or the worker refuses
@@ -44,9 +46,9 @@ data:
         topic: "<source_topic>"  # <-- e.g. "input-events"
         consumer_group: "drakkar-workers"
         max_poll_records: 100
-        max_poll_interval_ms: 300000
-        session_timeout_ms: 45000
-        heartbeat_interval_ms: 3000
+        max_poll_interval: 5m
+        session_timeout: 45s
+        heartbeat_interval: 3s
 
     executor:
       binary_path: "<binary_path>"  # <-- e.g. "/usr/local/bin/my-handler"

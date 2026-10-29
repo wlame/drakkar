@@ -28,7 +28,7 @@ from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 LIVE_NAME = 'w-1-2026-10-14__09_00_00.db'
 
@@ -57,7 +57,7 @@ def _client(tmp_path, *, memory_only: bool = False) -> tuple[AsyncClient, EventR
     if not memory_only:
         recorder._db_path = str(tmp_path / 'storage' / LIVE_NAME)
     drakkar_app = MagicMock()
-    drakkar_app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    drakkar_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
     app = create_ui_app(config, recorder, drakkar_app)
     return AsyncClient(transport=ASGITransport(app=app), base_url='http://test'), recorder
@@ -180,7 +180,7 @@ async def started(tmp_path):
 
 
 def _drakkar_config() -> DrakkarConfig:
-    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     config.ui.release.enabled = False
     return config
 

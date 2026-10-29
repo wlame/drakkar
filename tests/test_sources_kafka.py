@@ -8,13 +8,15 @@ from drakkar.config import DrakkarConfig
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.sources.base import SourceContext
 from drakkar.sources.kafka import KafkaSource
+from tests.conftest import kafka_connections
 
 
 def _config() -> DrakkarConfig:
     return DrakkarConfig(
+        connections=kafka_connections(),
         ui={'release': {'enabled': False}},
         executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
-        sources={'kafka': {'enabled': True, 'startup_align_enabled': False}},
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         sinks={'kafka': {'out': {'topic': 't'}}},
     )
 
@@ -101,7 +103,7 @@ async def test_start_logs_the_wall_clock_alignment_window(monkeypatch):
     from structlog.testing import capture_logs
 
     source, _ = _source_with_fake_consumer(monkeypatch)
-    source._context().config.sources.kafka.startup_align_enabled = True
+    source._context().config.sources.kafka.startup_align.enabled = True
     monkeypatch.setattr('drakkar.sources.kafka.wait_for_aligned_startup', AsyncMock(return_value=0.25))
 
     with capture_logs() as cap:
@@ -111,6 +113,6 @@ async def test_start_logs_the_wall_clock_alignment_window(monkeypatch):
     done = next(entry for entry in cap if entry['event'] == 'startup_align_done')
     # The published target must actually sit on an interval boundary —
     # that is the entire point of the alignment sleep.
-    interval = source._context().config.sources.kafka.startup_align_interval_seconds
+    interval = source._context().config.sources.kafka.startup_align.interval
     assert waiting['target_wall_unix'] % interval == 0
     assert done['slept_seconds'] == 0.25

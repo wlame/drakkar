@@ -8,7 +8,6 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -26,6 +25,7 @@ from drakkar.probe import (
     probe_field,
     referenced_bases,
 )
+from tests.conftest import kafka_connections
 
 
 def test_validate_template_accepts_value_base_and_row_tokens():
@@ -269,8 +269,8 @@ def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
     the __init__-time warning.
     """
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='localhost:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(),
         metrics=MetricsConfig(enabled=False),

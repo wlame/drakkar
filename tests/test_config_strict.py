@@ -262,6 +262,7 @@ def test_env_typo_is_reported(tmp_path, monkeypatch):
 
 def test_env_typo_is_reported_with_no_config_file(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTER', '8')
 
     with pytest.raises(ValueError, match=r'executor\.max_executer'):
@@ -289,7 +290,7 @@ def test_an_unknown_top_level_env_key_is_reported(tmp_path, monkeypatch):
     [('main-db', 'MAIN_DB'), ('MainDB', 'MAINDB'), ('main_db', 'MAIN_DB'), ('a-b_c', 'A_B_C')],
 )
 def test_env_segment_reaches_the_existing_sink_name(yaml_name, segment, tmp_path, monkeypatch):
-    tree = {'sinks': {'postgres': {yaml_name: {'dsn': 'postgresql://h/db'}}}}
+    tree = {'connections': {'postgres': {'main': {'dsn': 'postgresql://h/db'}}}, 'sinks': {'postgres': {yaml_name: {}}}}
     monkeypatch.setenv(f'DK_SINKS__POSTGRES__{segment}__POOL_MAX', '3')
 
     config = load_config(_write_config(tmp_path, tree))
@@ -299,18 +300,18 @@ def test_env_segment_reaches_the_existing_sink_name(yaml_name, segment, tmp_path
 
 
 def test_env_segment_with_no_matching_name_keeps_the_segment(tmp_path, monkeypatch):
-    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'postgresql://h/db'}}}}
-    monkeypatch.setenv('DK_SINKS__POSTGRES__OTHER_DB__DSN', 'postgresql://h/other')
+    tree = {'connections': {'postgres': {'main': {'dsn': 'postgresql://h/db'}}}, 'sinks': {'postgres': {'main-db': {}}}}
+    monkeypatch.setenv('DK_SINKS__POSTGRES__OTHER_DB__POOL_MAX', '7')
 
     config = load_config(_write_config(tmp_path, tree))
 
     assert sorted(config.sinks.postgres) == ['main-db', 'other_db']
-    assert config.sinks.postgres['main-db'].dsn == 'postgresql://h/db'
-    assert config.sinks.postgres['other_db'].dsn == 'postgresql://h/other'
+    assert config.sinks.postgres['main-db'].pool_max == 10
+    assert config.sinks.postgres['other_db'].pool_max == 7
 
 
 def test_env_segment_matching_two_names_fails_the_load(tmp_path, monkeypatch):
-    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'x'}, 'main_db': {'dsn': 'y'}}}}
+    tree = {'sinks': {'postgres': {'main-db': {}, 'main_db': {}}}}
     monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX', '3')
 
     with pytest.raises(ValueError) as excinfo:
@@ -322,7 +323,7 @@ def test_env_segment_matching_two_names_fails_the_load(tmp_path, monkeypatch):
 
 
 def test_two_segments_that_reach_one_name_both_land(tmp_path, monkeypatch):
-    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'postgresql://h/db'}}}}
+    tree = {'connections': {'postgres': {'main': {'dsn': 'postgresql://h/db'}}}, 'sinks': {'postgres': {'main-db': {}}}}
     monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX', '7')
     monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN-DB__POOL_MIN', '3')
 
@@ -410,7 +411,7 @@ def test_the_loader_applies_each_env_value_once_with_no_second_source(tmp_path, 
     ],
 )
 def test_a_json_text_for_a_list_or_map_field_loads(variable, value, read, expected, tmp_path, monkeypatch):
-    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'postgresql://h/db'}}}}
+    tree = {'connections': {'postgres': {'main': {'dsn': 'postgresql://h/db'}}}, 'sinks': {'postgres': {'main-db': {}}}}
     monkeypatch.setenv(variable, value)
 
     assert read(load_config(_write_config(tmp_path, tree))) == expected

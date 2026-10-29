@@ -9,7 +9,7 @@ open, close and look up the shared client.
 The key templates and the scripts are pinned by
 ``tests/fixtures/fleet_providers.json`` so the emitted bytes are identical for
 any implementation. ``{prefix}``, ``{worker}`` and ``{scope}`` in a template
-stand for the key prefix of the connection, the sanitized worker name and the
+stand for the state prefix of the connection, the sanitized worker name and the
 election scope (``<sanitized cluster>/<task>``, see
 :func:`drakkar.schedule.task_scope`). None of the three can contain a brace or
 a glob character (the config loader, the sanitizers and the task name rule see
@@ -57,7 +57,7 @@ PREFIX_PLACEHOLDER = '{prefix}'
 WORKER_PLACEHOLDER = '{worker}'
 SCOPE_PLACEHOLDER = '{scope}'
 # The prefix of a connection entry that names none, so a preset client gets the same default.
-DEFAULT_KEY_PREFIX: str = RedisConnectionConfig.model_fields['key_prefix'].default
+DEFAULT_STATE_PREFIX: str = RedisConnectionConfig.model_fields['state_prefix'].default
 
 KEY_TEMPLATES: dict[str, str] = {
     'registry_index': '{prefix}fleet:workers',
@@ -401,12 +401,12 @@ async def resolve_client(
     close_client: Callable[[Any], Awaitable[None]],
     who: str,
 ) -> tuple[Any, str]:
-    """Return the client a provider uses and the key prefix that goes with it.
+    """Return the client a provider uses and the state prefix that goes with it.
 
     A preset client (a test's) is used as it is, with ``preset_prefix``. Otherwise
     the client is the shared one of ``connections.redis.<connection>``, opened by
     ``open_client`` on the first call and closed by ``close_client`` when the
-    connections close, with the ``key_prefix`` of that entry. ``who`` names the
+    connections close, with the ``state_prefix`` of that entry. ``who`` names the
     provider in the error when there is neither.
     """
     if preset_client is not None:
@@ -415,4 +415,4 @@ async def resolve_client(
         raise RuntimeError(f'the redis {who} needs the worker connections')
     settings = cast(RedisConnectionConfig, connections.settings(REDIS_PROVIDER, connection))
     client = await connections.acquire(REDIS_PROVIDER, connection, open_client, close_client)
-    return client, settings.key_prefix
+    return client, settings.state_prefix

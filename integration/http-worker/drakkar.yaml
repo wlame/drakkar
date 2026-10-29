@@ -8,10 +8,12 @@ worker_name_env: "WORKER_ID"
 # for why this worker's cluster identity does not need to match theirs.
 cluster_name: "http cluster"
 
-kafka:
-  brokers: "kafka:9092"          # still needed: the sink below is Kafka
-  ui_url: "http://localhost:8088"
-  ui_cluster_name: "drakkar-local"
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"      # still needed: the sink below is Kafka
+      ui_url: "http://localhost:8088"
+      ui_cluster_name: "drakkar-local"
 
 sources:
   kafka:
@@ -21,8 +23,8 @@ sources:
     host: "0.0.0.0"
     port: 8092                   # convention: UI port + 10 (UI is 8086 in compose)
     path: "/process"
-    sinks_enabled: true          # on_message_complete → mirrored_results
-    request_timeout_seconds: 60.0
+    deliver_to_sinks: true       # on_message_complete → mirrored_results
+    request_timeout: 1m
     max_concurrent: 16
     clients:
       - name: mirror

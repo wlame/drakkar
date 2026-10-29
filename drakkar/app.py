@@ -28,15 +28,14 @@ from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
-from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, load_config
-from drakkar.config.sinks import SINK_TYPES
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config
+from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
@@ -85,6 +84,8 @@ class ConsumedSetting:
     reason: str
 
 
+SINK_POLICY_REASON = "each sink's policy is resolved in DrakkarApp.__init__"
+
 # Settings ``DrakkarApp.__init__`` consumes into a component or a derived
 # value. ``on_startup`` runs later (``AppLifecycle._async_run``), so a hook
 # that changes one of these changes nothing — the object built from the old
@@ -95,7 +96,8 @@ class ConsumedSetting:
 # documented contract (``docs/handler.md``), it is what the warning below
 # iterates, and a test asserts every path still resolves — so a setting
 # that stops being consumed early cannot quietly keep warning, and one that
-# starts being consumed early is a single row.
+# starts being consumed early is a single row. The policy keys of each sink
+# instance have names no table can list, so ``_sink_policy_settings`` adds them.
 SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
     ConsumedSetting(
         'app',
@@ -126,15 +128,27 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         'storage.dir',
         'the worker creates its own-files folder before on_startup runs',
     ),
+    ConsumedSetting('sinks.defaults', SINK_POLICY_REASON),
 )
 
 
 def _read_path(config: DrakkarConfig, path: str) -> Any:
-    """Read a dotted config path (``sinks.circuit_breaker``)."""
+    """Read a dotted config path (``sinks.defaults``)."""
     value: Any = config
     for part in path.split('.'):
         value = getattr(value, part)
     return value
+
+
+def _sink_policy_settings(config: DrakkarConfig) -> dict[str, Any]:
+    """The policy keys of every sink instance, by config path. A list is copied, so it can be compared later."""
+    settings: dict[str, Any] = {}
+    for sink_type in SINK_TYPES:
+        for name, instance in getattr(config.sinks, sink_type).items():
+            for key in POLICY_KEYS:
+                value = getattr(instance, key)
+                settings[f'sinks.{sink_type}.{name}.{key}'] = tuple(value) if isinstance(value, list) else value
+    return settings
 
 
 def snapshot_consumed_settings(config: DrakkarConfig) -> dict[str, Any]:
@@ -149,7 +163,7 @@ def snapshot_consumed_settings(config: DrakkarConfig) -> dict[str, Any]:
     for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP:
         value = _read_path(config, setting.path)
         snapshot[setting.path] = value.model_copy(deep=True) if isinstance(value, BaseModel) else value
-    return snapshot
+    return {**snapshot, **_sink_policy_settings(config)}
 
 
 def changed_consumed_settings(before: dict[str, Any], config: DrakkarConfig) -> list[str]:
@@ -157,19 +171,24 @@ def changed_consumed_settings(before: dict[str, Any], config: DrakkarConfig) -> 
 
     Compared by value, so a handler that returns a freshly built
     ``DrakkarConfig`` rather than mutating the one it was given is judged
-    on content, not identity.
+    on content, not identity. A sink the hook added or removed is no ignored
+    change: a sink added there is built, and its policy comes from the config
+    it was added to.
     """
-    return [
+    changed = [
         setting.path
         for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP
         if _read_path(config, setting.path) != before[setting.path]
     ]
+    policy_settings = _sink_policy_settings(config)
+    changed.extend(path for path, value in policy_settings.items() if path in before and before[path] != value)
+    return changed
 
 
 def reasons_for_settings(paths: list[str]) -> list[str]:
     """The ``path — reason`` lines the warning shows for ``paths``."""
     by_path = {setting.path: setting.reason for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
-    return [f'{path} — {by_path[path]}' for path in paths]
+    return [f'{path} — {by_path.get(path, SINK_POLICY_REASON)}' for path in paths]
 
 
 class DrakkarApp:
@@ -310,13 +329,11 @@ class DrakkarApp:
         self._ui_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
-        # The manager reads the ``sinks:`` section through a callable rather
-        # than being handed its values now: this constructor runs before
-        # ``on_startup``, and a handler that tunes ``sinks.circuit_breaker``
-        # or ``sinks.delivery_timeout_seconds`` there must be honoured. The
-        # sinks themselves are registered later (``_build_sinks``, after the
-        # hook), so every sink gets the post-hook values.
-        self._sink_manager: SinkManager = SinkManager(sinks_config=lambda: self._config.sinks)
+        self._sink_manager: SinkManager = SinkManager()
+        # Each sink's policy, resolved once, here. The sinks are built later
+        # (``_build_sinks``, after ``on_startup``); a change of a policy key in
+        # the hook is reported as ignored (SETTINGS_CONSUMED_BEFORE_ON_STARTUP).
+        self._sink_policies: dict[str, SinkPolicy] = self._config.sinks.policies()
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._ui_server = None
@@ -667,59 +684,57 @@ class DrakkarApp:
 
         Sinks (kafka, postgres, mongo, http, redis, filesystem) are
         constructed directly — their config models are typed and well-known.
+        Each sink gets the connection it names, and owns its client or pool.
+        A delivery reads the manager's copy of the policy, never the config
+        section.
         """
-        kafka_brokers = self._config.kafka.brokers
-        # Each instance is registered with the policy its config declares,
-        # read once here: a delivery reads the manager's copy, never the
-        # config section.
         sinks = self._config.sinks
+        connections = self._config.connections
 
-        for name, cfg in self._config.sinks.kafka.items():
+        for name, cfg in sinks.kafka.items():
             self._sink_manager.register(
-                KafkaSink(
-                    name,
-                    cfg,
-                    brokers_fallback=kafka_brokers,
-                    security_fallback=self._config.kafka.security,
-                    client_config_fallback=self._config.kafka.client_config,
-                ),
-                policy=sinks.policy_of('kafka', name),
+                KafkaSink(name, cfg, connections.kafka[cfg.connection]), policy=self._sink_policy('kafka', name)
             )
 
-        for name, cfg in self._config.sinks.postgres.items():
-            self._sink_manager.register(PostgresSink(name, cfg), policy=sinks.policy_of('postgres', name))
+        for name, cfg in sinks.postgres.items():
+            self._sink_manager.register(
+                PostgresSink(name, cfg, connections.postgres[cfg.connection]),
+                policy=self._sink_policy('postgres', name),
+            )
 
-        for name, cfg in self._config.sinks.mongo.items():
-            self._sink_manager.register(MongoSink(name, cfg), policy=sinks.policy_of('mongo', name))
+        for name, cfg in sinks.mongo.items():
+            self._sink_manager.register(
+                MongoSink(name, cfg, connections.mongo[cfg.connection]), policy=self._sink_policy('mongo', name)
+            )
 
-        for name, cfg in self._config.sinks.http.items():
-            self._sink_manager.register(HttpSink(name, cfg), policy=sinks.policy_of('http', name))
+        for name, cfg in sinks.http.items():
+            self._sink_manager.register(HttpSink(name, cfg), policy=self._sink_policy('http', name))
 
-        for name, cfg in self._config.sinks.redis.items():
-            self._sink_manager.register(RedisSink(name, cfg), policy=sinks.policy_of('redis', name))
+        for name, cfg in sinks.redis.items():
+            self._sink_manager.register(
+                RedisSink(name, cfg, connections.redis[cfg.connection]), policy=self._sink_policy('redis', name)
+            )
 
-        for name, cfg in self._config.sinks.filesystem.items():
-            self._sink_manager.register(FileSink(name, cfg), policy=sinks.policy_of('filesystem', name))
+        for name, cfg in sinks.filesystem.items():
+            self._sink_manager.register(FileSink(name, cfg), policy=self._sink_policy('filesystem', name))
+
+    def _sink_policy(self, sink_type: str, name: str) -> SinkPolicy:
+        """The policy resolved at construction; a sink ``on_startup`` added resolves against the config it was added to."""
+        policy = self._sink_policies.get(f'{sink_type}/{name}')
+        return policy if policy is not None else self._config.sinks.policy_of(sink_type, name)
 
     def _build_dlq(self) -> None:
         """Create the DLQ sink, or leave it None when the config disables the DLQ (see DrakkarConfig.dlq_enabled)."""
-        if not self._config.dlq_enabled:
+        connection = self._config.dlq_connection
+        if connection is None:
             self._dlq_sink = None
             return
-        resolved = resolve_client(
-            self._config.dlq.brokers,
-            self._config.dlq.security,
-            self._config.dlq.client_config,
-            fallback_brokers=self._config.kafka.brokers,
-            fallback_security=self._config.kafka.security,
-            fallback_client_config=self._config.kafka.client_config,
-        )
         self._dlq_sink = DLQSink(
             topic=self._config.resolved_dlq_topic,
-            brokers=resolved.brokers,
-            security=resolved.security,
-            client_config=resolved.client_config,
-            flush_timeout_seconds=self._config.dlq.flush_timeout_seconds,
+            brokers=connection.brokers,
+            security=connection.security,
+            client_config=connection.client_config_with(self._config.dlq.client_config),
+            flush_timeout_seconds=self._config.dlq.flush_timeout,
             worker=self._worker_id,
             instance=self._instance,
         )

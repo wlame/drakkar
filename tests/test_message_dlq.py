@@ -18,12 +18,11 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
-    SinkPolicy,
     SinksConfig,
 )
+from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import dlq_dropped_payloads, dlq_unconfigured_drops
@@ -42,7 +41,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import render_headers
 from drakkar.sinks.manager import MessageContext, MessageDLQState, SinkManager
-from tests.conftest import wait_for
+from tests.conftest import kafka_connections, wait_for
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ
 
 OFFSET = 10
@@ -157,7 +156,7 @@ class Pipeline:
         self.contexts: list[MessageContext | None] = []
         self.manager = SinkManager()
         for sink in sinks:
-            self.manager.register(sink, policy=SinkPolicy(on_failure='dlq', max_retries=0, depends_on=()))
+            self.manager.register(sink, policy=DEFAULT_SINK_POLICY.model_copy(update={'max_retries': 0}))
         self.manager.attach_runtime(
             recorder=self.recorder,  # ty: ignore[invalid-argument-type]
             dlq_sink=self.dlq,  # ty: ignore[invalid-argument-type]
@@ -452,7 +451,7 @@ async def test_a_raising_on_error_with_on_failure_skip_writes_nothing():
 @pytest.mark.parametrize(('on_failure', 'expected'), [('skip', ErrorAction.SKIP), ('dlq', ErrorAction.DLQ)])
 async def test_executor_on_failure_dlq_is_the_default_hook_answer(tmp_path, on_failure, expected):
     config = DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections=kafka_connections(brokers='localhost:9092'),
         storage={'dir': str(tmp_path / 'storage')},
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo', on_failure=on_failure),
@@ -684,7 +683,7 @@ async def test_send_execute_dlq_without_a_context_follows_on_send_failure():
 
 async def test_send_execute_dlq_with_the_dlq_off_counts_an_unconfigured_drop():
     manager = SinkManager()
-    manager.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall', dlq_enabled=False)
+    manager.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall', dlq_unconfigured=True)
     task = ExecutorTask(task_id='t-1', args=['x'], source_offsets=[OFFSET])
     before = dlq_unconfigured_drops._value.get()
 

@@ -39,7 +39,7 @@ from drakkar.recorder import queries as queries_mod
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 _INT32_MAX = 2**31 - 1
@@ -73,7 +73,7 @@ def mock_app():
     app.cluster_tasks_hash = '0123456789abcdef'
     app._start_time = time.monotonic() - 120
     app.processors = {}
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
@@ -644,8 +644,8 @@ class TestApiV1LiveOverview:
         }
 
     async def test_kafka_ui_config_surfaces(self, debug_config, mock_recorder, mock_app):
-        mock_app._config.kafka.ui_url = 'http://kafka-ui:8080/'
-        mock_app._config.kafka.ui_cluster_name = 'local'
+        mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui:8080/'
+        mock_app._config.connections.kafka['main'].ui_cluster_name = 'local'
         mock_app._config.sources.kafka.topic = 'events-in'
         mock_recorder.config = debug_config
         async with make_client(debug_config, mock_recorder, mock_app) as c:
@@ -1439,7 +1439,7 @@ async def started_recorder(tmp_path):
         )
         await rec.start()
         recorders.append(rec)
-        drakkar_config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+        drakkar_config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
         drakkar_config.ui.release.enabled = False
         await rec.write_config(drakkar_config)
         # Recent timestamps: older rows would leave the memory window.
@@ -1457,7 +1457,7 @@ async def started_recorder(tmp_path):
 
 async def _databases(rec: EventRecorder) -> dict:
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
     async with make_client(rec.config, rec, app) as c:
         resp = await c.get('/api/v1/debug/databases')
@@ -1479,7 +1479,7 @@ async def test_databases_memory_row_comes_first_in_both_modes(started_recorder, 
 async def test_download_live_defaults_to_memory_and_databases_has_one_memory_row_with_postgres(started_recorder):
     rec = await started_recorder('postgres')
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
     async with make_client(rec.config, rec, app) as c:
@@ -1509,7 +1509,7 @@ async def test_postgres_worker_answers_live_and_label_reads_from_memory(started_
     )
     await rec.flush()
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
     async with make_client(rec.config, rec, app) as c:
@@ -1580,7 +1580,7 @@ async def test_databases_memory_read_stopped_by_the_limit_logs_one_rate_limited_
 async def test_databases_and_download_after_stop_answer_empty_shapes(started_recorder):
     rec = await started_recorder('none')
     app = MagicMock()
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
     # A store closed while the recorder still points at it (a read racing

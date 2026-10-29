@@ -12,7 +12,6 @@ from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
     FileSinkConfig,
-    KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
@@ -25,6 +24,7 @@ from drakkar.config.sinks import SINK_TYPES
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.probe import Column
 from drakkar.uipages import Page, TasksSource, Widget
+from tests.conftest import kafka_connections
 
 
 def _anchor(**over) -> dict:
@@ -124,7 +124,7 @@ def test_extra_keys_forbidden():
 def _minimal_config(ui: UIConfig | None = None, sinks: SinksConfig | None = None) -> DrakkarConfig:
     """Smallest DrakkarConfig that satisfies DrakkarApp.__init__ (mirrors tests/test_uipages.py)."""
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092'),
+        connections=kafka_connections(brokers='localhost:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'test-in'}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=sinks or SinksConfig(),
@@ -192,11 +192,11 @@ def test_builtin_sink_types_are_derived_from_the_sinks_model():
 
     Restating the six built-in names would go stale the day a seventh sink
     type lands; deriving them off every field would try to iterate
-    ``delivery_timeout_seconds`` (a float) and blow up instead.
+    ``defaults`` (a model) and blow up instead.
     """
     mapping_fields = {name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict}
     assert set(SINK_TYPES) == mapping_fields
-    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(SINK_TYPES)
+    assert 'defaults' not in SINK_TYPES
     assert all(isinstance(getattr(SinksConfig(), section), dict) for section in SINK_TYPES)
 
 

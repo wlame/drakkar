@@ -331,6 +331,8 @@ def document_for(table: dict[str, Any], resolution: Resolution) -> dict[str, Any
 # characters and does not end with ':' (a plain scalar that ends with ':' starts a mapping).
 # The first-character rule also keeps every number-like text quoted.
 BARE_STRING = re.compile(r'[A-Za-z_/][A-Za-z0-9_./:-]*')
+# A duration such as 2h45m is a plain text for YAML too, so it stays bare although it starts with a digit.
+BARE_DURATION = re.compile(r'([0-9]+(d|h|m|s|ms))+')
 RESERVED_WORDS = {'true', 'false', 'yes', 'no', 'on', 'off', 'null', '~'}
 
 
@@ -341,6 +343,8 @@ def yaml_scalar(value: Any) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, str):
+        if BARE_DURATION.fullmatch(value):
+            return value
         if BARE_STRING.fullmatch(value) and not value.endswith(':') and value.lower() not in RESERVED_WORDS:
             return value
         return json.dumps(value, ensure_ascii=False)
@@ -776,6 +780,9 @@ def test_merging_the_same_leaf_twice_is_an_error():
         ('/mnt/drakkar-shared', '/mnt/drakkar-shared'),
         ('http://127.0.0.1:8500', 'http://127.0.0.1:8500'),
         ('drakkar:', '"drakkar:"'),
+        ('10s', '10s'),
+        ('6m10s', '6m10s'),
+        ('500ms', '500ms'),
         ('yes', '"yes"'),
         ('Null', '"Null"'),
         ('8500', '"8500"'),
@@ -833,7 +840,9 @@ def test_golden_example_matches_the_computed_fleet_part(example, tmp_path, clean
         assert node == value, path
     calculator_sections = {'sources', 'executor', 'ui'}
     fleet_keys = {key: value for key, value in loaded.items() if key not in calculator_sections}
-    assert fleet_keys == {key: value for key, value in resolution.fleet.items() if key not in calculator_sections}
+    assert fleet_keys == {
+        key: value for key, value in document_for(TABLE, resolution).items() if key not in calculator_sections
+    }
     assert loaded['sources']['kafka']['enabled'] is True
     assert serialize_yaml(loaded) == example['yaml']
     assert example['env'] == resolution.env
@@ -901,7 +910,7 @@ def test_wizard_golden_disk_no():
     loaded = yaml.safe_load(example['yaml'])
 
     assert example['query'] == 'v=1&disk=no'
-    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'fleet', 'periodic']
+    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'connections', 'fleet', 'periodic']
     assert loaded['storage'] == {'dir': ''}
     assert loaded['fleet'] == {'registry': {'provider': 'filesystem'}}
 

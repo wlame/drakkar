@@ -20,7 +20,7 @@ fixed ``CONNECT_TIMEOUT_SECONDS``: the resilience block of the provider caller
 is the only retry and the only clock on a call.
 
 Nothing is percent-encoded. Every piece that goes into a path or a query is
-checked before it gets there: the key prefix and the datacenter by the config
+checked before it gets there: the state prefix and the datacenter by the config
 loader, the worker name by its sanitizer, the scope by
 :func:`drakkar.schedule.parse_task_scope` (a sanitized cluster, a slash and a
 task name), and a session id
@@ -47,7 +47,7 @@ from drakkar.config.connections import (
     CONSUL_PREFIX_RULE,
     ConsulConnectionConfig,
     has_dot_segment,
-    is_consul_key_prefix,
+    is_consul_state_prefix,
 )
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import TransientError
@@ -61,7 +61,7 @@ SESSION_PLACEHOLDER = '{session}'
 INSTANCE_PLACEHOLDER = '{instance}'
 TOKEN_PLACEHOLDER = '{token}'
 # The prefix of a connection entry that names none, so a preset client gets the same default.
-DEFAULT_KEY_PREFIX: str = ConsulConnectionConfig.model_fields['key_prefix'].default
+DEFAULT_STATE_PREFIX: str = ConsulConnectionConfig.model_fields['state_prefix'].default
 
 PATHS: dict[str, str] = {
     'leader': '/v1/status/leader',
@@ -121,7 +121,7 @@ STATUS_MESSAGE = 'consul: {method} {path} answered {status}: {text}'
 STATUS_NO_TEXT_MESSAGE = 'consul: {method} {path} answered {status}'
 FILTERED_MESSAGE = "consul: {method} {path} answered with results hidden by the token's rights"
 UNREADABLE_MESSAGE = 'consul: {method} {path} answered {status} with an answer that cannot be read'
-KEY_PREFIX_MESSAGE = "key_prefix '{prefix}' " + CONSUL_PREFIX_RULE
+STATE_PREFIX_MESSAGE = "state_prefix '{prefix}' " + CONSUL_PREFIX_RULE
 
 
 class ConsulError(Exception):
@@ -270,14 +270,14 @@ def _is_portable_address(address: str) -> bool:
     return is_portable_host_and_port(host_and_port)
 
 
-def check_key_prefix(prefix: str) -> None:
-    """Raise ``ValueError(KEY_PREFIX_MESSAGE)`` unless ``prefix`` has the shape a connection entry allows.
+def check_state_prefix(prefix: str) -> None:
+    """Raise ``ValueError(STATE_PREFIX_MESSAGE)`` unless ``prefix`` has the shape a connection entry allows.
 
     A provider checks a preset prefix with it, since such a prefix skips the
     config loader and goes into the paths as it is.
     """
-    if not is_consul_key_prefix(prefix):
-        raise ValueError(KEY_PREFIX_MESSAGE.format(prefix=prefix))
+    if not is_consul_state_prefix(prefix):
+        raise ValueError(STATE_PREFIX_MESSAGE.format(prefix=prefix))
 
 
 def check_token(token: str) -> None:
@@ -580,12 +580,12 @@ async def resolve_client(
     close_client: Callable[[ConsulClient], Awaitable[None]],
     who: str,
 ) -> tuple[ConsulClient, str]:
-    """Return the client a provider uses and the key prefix that goes with it.
+    """Return the client a provider uses and the state prefix that goes with it.
 
     A preset client (a test's) is used as it is, with ``preset_prefix``. Otherwise
     the client is the shared one of ``connections.consul.<connection>``, opened by
     ``open_client`` on the first call and closed by ``close_client`` when the
-    connections close, with the ``key_prefix`` of that entry. ``who`` names the
+    connections close, with the ``state_prefix`` of that entry. ``who`` names the
     provider in the error when there is neither.
     """
     if preset_client is not None:
@@ -594,4 +594,4 @@ async def resolve_client(
         raise RuntimeError(f'the consul {who} needs the worker connections')
     settings = cast(ConsulConnectionConfig, connections.settings(CONSUL_PROVIDER, connection))
     client = await connections.acquire(CONSUL_PROVIDER, connection, open_client, close_client)
-    return client, settings.key_prefix
+    return client, settings.state_prefix

@@ -32,7 +32,7 @@ from drakkar.uihost import (
     resolve,
 )
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 # ---------------------------------------------------------------------------
 # Stub GitHub server
@@ -415,7 +415,7 @@ def test_ui_config_defaults():
     # Default-ON with an update check: workers serve the latest
     # fetched/cached release and keep the Jinja pages when nothing is
     # fetchable.
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.ui.enabled is True
     assert cfg.ui.release.enabled is True
     assert cfg.ui.release.repo == 'wlame/drakkar-ui'
@@ -433,6 +433,7 @@ def test_ui_config_env_overrides(monkeypatch):
     from drakkar.config import load_config
 
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__ENABLED', 'true')
     monkeypatch.setenv('DK_UI__RELEASE__PINNED_VERSION', 'v9.9.9')
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'true')
@@ -468,7 +469,7 @@ def mock_app():
     app._cluster_name = ''
     app._start_time = time.monotonic() - 60
     app.processors = {}
-    app._config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.cache_engine = None
     app.handler = None
     app._consumer = None

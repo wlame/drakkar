@@ -10,13 +10,40 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from drakkar.config.base import ConfigModel
+from drakkar.config.units import Duration, WholeSeconds
 from drakkar.config.webapp import WebAppConfig
+
+
+class StartupAlignConfig(ConfigModel):
+    """Delay the first Kafka subscribe until a shared wall-clock boundary (``sources.kafka.startup_align``)."""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            'Delay the first Kafka subscribe until a shared wall-clock boundary, so a '
+            'rolling-deploy fleet converges on one rebalance instead of N. Disable for '
+            'snappy single-worker dev runs.'
+        ),
+    )
+    min_wait: Duration = Field(
+        default=4.0,
+        ge=0.0,
+        description='Minimum time to sleep before aligning: a buffer for slow init (DB connects, cache warm-up).',
+    )
+    interval: WholeSeconds = Field(
+        default=10,
+        ge=1,
+        description=(
+            'Alignment interval. Workers wake at the next Unix-epoch multiple: '
+            'the default 10s aligns on :00/:10/:20/:30/:40/:50 of every minute.'
+        ),
+    )
 
 
 class KafkaSourceConfig(ConfigModel):
     """The Kafka consumer as an input source (``sources.kafka``).
 
-    Connection settings (brokers, security) live in ``kafka:``; this block
+    ``connection`` names the cluster under ``connections.kafka``; this block
     holds what only the consumer needs.
     """
 
@@ -24,6 +51,7 @@ class KafkaSourceConfig(ConfigModel):
         default=False,
         description='Consume the Kafka topic. Off, no consumer group is joined and arrange() is never called.',
     )
+    connection: str = Field(default='main', description='The Kafka cluster to read: a name under connections.kafka.')
     topic: str = Field(default='input-events', description='Kafka topic to consume messages from.')
     consumer_group: str = Field(
         default='drakkar-workers',
@@ -33,23 +61,23 @@ class KafkaSourceConfig(ConfigModel):
         default=100,
         description='Maximum messages returned per poll batch. Higher improves throughput; lower reduces latency.',
     )
-    max_poll_interval_ms: int = Field(
-        default=300_000,
+    max_poll_interval: Duration = Field(
+        default=300.0,
         description=(
-            'Maximum time (ms) between poll calls before Kafka considers the consumer dead '
+            'Maximum time between poll calls before Kafka considers the consumer dead '
             'and triggers a rebalance. Increase for long-running tasks.'
         ),
     )
-    session_timeout_ms: int = Field(
-        default=45_000,
+    session_timeout: Duration = Field(
+        default=45.0,
         description=(
-            'Session timeout (ms) for group membership. Without a heartbeat within this window '
+            'Session timeout for group membership. Without a heartbeat within this window '
             'the broker removes the consumer from the group.'
         ),
     )
-    heartbeat_interval_ms: int = Field(
-        default=3_000,
-        description='Interval (ms) between heartbeats to the broker. Keep below session_timeout_ms / 3.',
+    heartbeat_interval: Duration = Field(
+        default=3.0,
+        description='Interval between heartbeats to the broker. Keep below session_timeout / 3.',
     )
     on_parse_error: Literal['skip', 'dlq', 'raise'] = Field(
         default='skip',
@@ -61,27 +89,7 @@ class KafkaSourceConfig(ConfigModel):
             "'raise' fails fast — a MessageParseError stops the partition processor."
         ),
     )
-    startup_align_enabled: bool = Field(
-        default=True,
-        description=(
-            'Delay the first Kafka subscribe until a shared wall-clock boundary, so a '
-            'rolling-deploy fleet converges on one rebalance instead of N. Disable for '
-            'snappy single-worker dev runs.'
-        ),
-    )
-    startup_min_wait_seconds: float = Field(
-        default=4.0,
-        ge=0.0,
-        description='Minimum seconds to sleep before aligning — a buffer for slow init (DB connects, cache warm-up).',
-    )
-    startup_align_interval_seconds: int = Field(
-        default=10,
-        ge=1,
-        description=(
-            'Alignment interval in seconds. Workers wake at the next Unix-epoch multiple — '
-            'the default 10 aligns on :00/:10/:20/:30/:40/:50 of every minute.'
-        ),
-    )
+    startup_align: StartupAlignConfig = Field(default_factory=StartupAlignConfig)
 
     def validation_errors(self) -> list[str]:
         """Problems that block this source when it is enabled. Pure; used by the model validator and by startup warnings."""
@@ -124,7 +132,7 @@ class SourcesConfig(ConfigModel):
         """Whether results of an enabled source go to the sinks.
 
         The Kafka source always delivers to sinks. The HTTP source does so
-        only with ``sinks_enabled``; otherwise the handler's response is
+        only with ``deliver_to_sinks``; otherwise the handler's response is
         the whole result, and a worker with only that source needs no sink.
         """
-        return self.kafka.enabled or (self.http.enabled and self.http.sinks_enabled)
+        return self.kafka.enabled or (self.http.enabled and self.http.deliver_to_sinks)

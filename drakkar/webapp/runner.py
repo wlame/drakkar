@@ -28,7 +28,7 @@ response body.
 Cooperative cancellation wraps the user-facing side effects (sink
 delivery and ``on_http_request_complete``). When the route handler on
 T2 hits its
-``request_timeout_seconds`` budget, it (a) sets ``ctx.cancelled`` via
+``request_timeout`` budget, it (a) sets ``ctx.cancelled`` via
 ``call_soon_threadsafe`` so the flag is set on T1's loop, and (b)
 cancels the cross-thread ``concurrent.futures.Future`` so any awaits
 on T1 that are still running raise ``CancelledError``. The runner
@@ -43,7 +43,7 @@ the cancellation gate trips. Documented as a known limitation; v2
 may add SIGTERM-on-cancel for in-flight subprocesses.
 
 The optional sinks-enabled path sits between the two cancellation
-checks. When ``config.sinks_enabled`` is True the runner
+checks. When ``config.deliver_to_sinks`` is True the runner
 calls ``handler.on_message_complete(group)`` and, if it returns a
 ``CollectResult``, delivers it in one ``SinkManager.deliver_all`` call
 with the same declared policies and ``depends_on`` order as a Kafka
@@ -382,14 +382,14 @@ class WebappRunner:
         )
 
         # ----- Stage: optional sinks delivery -----
-        # Only fires on the opt-in ``sinks_enabled=True`` path. Mirrors
+        # Only fires on the opt-in ``deliver_to_sinks=True`` path. Mirrors
         # the Kafka pipeline's behaviour: ``on_message_complete`` may
         # return ``None`` (no rollup payloads) — we treat that as "no
         # sinks-side work" and leave ``WebReport.sinks`` as ``None``.
         # When a CollectResult comes back, we deliver it through the
         # SinkManager and capture per-sink outcomes into the summary.
         sinks_summary: SinkDeliverySummary | None = None
-        if self._config.sinks_enabled:
+        if self._config.deliver_to_sinks:
             sinks_started = time.monotonic()
             sinks_summary = await self._deliver_sinks(ctx=ctx, group=group)
             timeline.append(
@@ -476,7 +476,7 @@ class WebappRunner:
             # and there is no per-request observation hook. CacheStats
             # default zeros keep the response shape stable for clients.
             cache=CacheStats(),
-            # Populated by ``_deliver_sinks`` only when ``sinks_enabled``
+            # Populated by ``_deliver_sinks`` only when ``deliver_to_sinks``
             # is True AND ``on_message_complete`` returned a non-empty
             # CollectResult; ``None`` otherwise (consistent with the
             # documented response shape).
@@ -634,7 +634,7 @@ class WebappRunner:
     ) -> SinkDeliverySummary | None:
         """Run the optional ``on_message_complete`` → ``SinkManager`` sequence.
 
-        Only invoked when ``config.sinks_enabled`` is True. Returns
+        Only invoked when ``config.deliver_to_sinks`` is True. Returns
         ``None`` when ``on_message_complete`` returns ``None`` (no
         rollup payloads — same convention as the Kafka pipeline) so the
         ``WebReport.sinks`` field stays ``null`` for that case.

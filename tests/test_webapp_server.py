@@ -347,12 +347,12 @@ def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
 
 
 # ---------------------------------------------------------------------------
-# Body-size cap (max_body_bytes / 413 path)
+# Body-size cap (max_body / 413 path)
 # ---------------------------------------------------------------------------
 
 
-def test_oversized_body_returns_413_with_go_parity_envelope():
-    """A body beyond ``max_body_bytes`` trips 413 BEFORE parsing.
+def test_oversized_body_returns_413_with_the_error_envelope():
+    """A body beyond ``max_body`` trips 413 BEFORE parsing.
 
     The envelope (keys and details text) is contractual —
     MaxBytesReader path byte-for-byte, and the cap fires ahead of the
@@ -367,7 +367,7 @@ def test_oversized_body_returns_413_with_go_parity_envelope():
         host='127.0.0.1',
         port=port,
         path='/process',
-        max_body_bytes=64,
+        max_body='64B',
         clients=[WebClientConfig(name='anonymous', token='', rpm=100)],
     )
     webapp = WebApp(app, config)
@@ -387,7 +387,7 @@ def test_oversized_body_returns_413_with_go_parity_envelope():
             assert response.status_code == 413
             body = response.json()
             assert body['error'] == 'request_too_large'
-            assert body['details'] == 'request body exceeds sources.http.max_body_bytes (64 bytes)'
+            assert body['details'] == 'request body exceeds sources.http.max_body (64 bytes)'
             assert 'request_id' in body
 
             # Exactly at the limit is still accepted by the cap — this
@@ -603,7 +603,7 @@ async def test_slow_request_body_is_answered_with_408():
     import drakkar.webapp.server as webapp_server
 
     config = _make_config(port=_free_port())
-    config.request_timeout_seconds = 0.05
+    config.request_timeout = 0.05
     webapp = WebApp(_make_app_stub(_WebHandler(), is_ready=True), config)
 
     original_margin = webapp_server.BODY_READ_TIMEOUT_MARGIN_SECONDS

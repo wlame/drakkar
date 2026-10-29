@@ -30,9 +30,8 @@ table is built from the worker's own config (`build_alias_table`):
 
 Only these topics are reachable, and responses echo the alias — the raw
 topic name never appears in the API. Broker addresses and credentials
-resolve per alias with the same inheritance rule the pipeline uses
-(``resolve_client``): a sink/DLQ with empty ``brokers`` reads from the
-consumer's cluster with the consumer's credentials.
+resolve per alias from the connection that the source, the DLQ or the sink
+names, as in the pipeline.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ from confluent_kafka.aio import AIOConsumer
 from pydantic import BaseModel
 
 from drakkar.config import DrakkarConfig
-from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config, resolve_client
+from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 
 logger = structlog.get_logger()
 
@@ -107,7 +106,7 @@ class AliasTarget:
 # name that was never registered).
 _DISABLED_ALIAS_REASONS: dict[str, str] = {
     'source': 'the Kafka source is disabled',
-    'dlq': 'the DLQ is disabled (set dlq.topic)',
+    'dlq': 'the DLQ is disabled (set dlq.enabled and dlq.topic)',
 }
 
 # The alias names the framework owns. Reserved whether or not the source and
@@ -126,36 +125,28 @@ def build_alias_table(config: DrakkarConfig) -> dict[str, AliasTarget]:
     skipped with a warning so the reserved meaning stays stable (the sink
     itself is unaffected — only its read alias is unavailable).
     """
-    kafka = config.kafka
     table: dict[str, AliasTarget] = {}
 
-    source = config.sources.kafka
-    if source.enabled:
+    source_connection = config.kafka_source_connection
+    if source_connection is not None:
         table['source'] = AliasTarget(
             alias='source',
             kind='source',
-            topic=source.topic,
-            brokers=kafka.brokers,
-            security=kafka.security,
-            client_config=dict(kafka.client_config),
+            topic=config.sources.kafka.topic,
+            brokers=source_connection.brokers,
+            security=source_connection.security,
+            client_config=dict(source_connection.client_config),
         )
 
-    if config.dlq_enabled:
-        dlq_client = resolve_client(
-            config.dlq.brokers,
-            config.dlq.security,
-            config.dlq.client_config,
-            fallback_brokers=kafka.brokers,
-            fallback_security=kafka.security,
-            fallback_client_config=kafka.client_config,
-        )
+    dlq_connection = config.dlq_connection
+    if dlq_connection is not None:
         table['dlq'] = AliasTarget(
             alias='dlq',
             kind='dlq',
             topic=config.resolved_dlq_topic,
-            brokers=dlq_client.brokers,
-            security=dlq_client.security,
-            client_config=dict(dlq_client.client_config),
+            brokers=dlq_connection.brokers,
+            security=dlq_connection.security,
+            client_config=dlq_connection.client_config_with(config.dlq.client_config),
         )
 
     for name, sink in config.sinks.kafka.items():
@@ -170,21 +161,14 @@ def build_alias_table(config: DrakkarConfig) -> dict[str, AliasTarget]:
                 'the sink still delivers, but it is not readable under this alias',
             )
             continue
-        sink_client = resolve_client(
-            sink.brokers,
-            sink.security,
-            sink.client_config,
-            fallback_brokers=kafka.brokers,
-            fallback_security=kafka.security,
-            fallback_client_config=kafka.client_config,
-        )
+        sink_connection = config.connections.kafka[sink.connection]
         table[name] = AliasTarget(
             alias=name,
             kind='sink',
             topic=sink.topic,
-            brokers=sink_client.brokers,
-            security=sink_client.security,
-            client_config=dict(sink_client.client_config),
+            brokers=sink_connection.brokers,
+            security=sink_connection.security,
+            client_config=sink_connection.client_config_with(sink.client_config),
         )
     return table
 

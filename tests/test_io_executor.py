@@ -8,10 +8,11 @@ from types import SimpleNamespace
 
 from drakkar.config import DrakkarConfig
 from drakkar.lifecycle import AppLifecycle
+from tests.conftest import kafka_connections
 
 
 def make_lifecycle(max_threads: int) -> AppLifecycle:
-    config = DrakkarConfig(sources={'kafka': {'enabled': True}})
+    config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     config.io.max_threads = max_threads
     lifecycle = AppLifecycle.__new__(AppLifecycle)
     lifecycle._app = SimpleNamespace(_config=config)

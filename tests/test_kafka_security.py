@@ -10,12 +10,13 @@ from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
-    KafkaConfig,
+    KafkaConnectionConfig,
     KafkaSinkConfig,
     KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
+    load_config,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.kafka_security import (
@@ -23,7 +24,6 @@ from drakkar.kafka_security import (
     KafkaSecurityConfig,
     describe_mixed_security,
     merge_client_config,
-    resolve_client,
     validate_client_config,
 )
 from drakkar.models import ExecutorTask
@@ -204,7 +204,7 @@ def test_merge_leaves_base_untouched():
 
 def test_kafka_config_rejects_reserved_client_key():
     with pytest.raises(ValidationError, match=re.escape('enable.auto.commit')):
-        KafkaConfig(client_config={'enable.auto.commit': 'true'})
+        KafkaConnectionConfig(client_config={'enable.auto.commit': 'true'})
 
 
 def test_sink_config_rejects_reserved_client_key():
@@ -213,7 +213,7 @@ def test_sink_config_rejects_reserved_client_key():
 
 
 def test_security_is_configurable_from_yaml_shape():
-    cfg = KafkaConfig.model_validate(
+    cfg = KafkaConnectionConfig.model_validate(
         {
             'brokers': 'broker:9093',
             'security': {
@@ -225,39 +225,6 @@ def test_security_is_configurable_from_yaml_shape():
         }
     )
     assert cfg.security.to_client_config()['sasl.mechanism'] == 'SCRAM-SHA-512'
-
-
-def test_inheritance_carries_security_with_the_brokers():
-    """An empty brokers field means the consumer's cluster — and its credentials."""
-    consumer_sec = KafkaSecurityConfig(
-        protocol='SASL_SSL', sasl_mechanism='PLAIN', sasl_username='u', sasl_password='p'
-    )
-    resolved = resolve_client(
-        '',
-        KafkaSecurityConfig(),
-        {},
-        fallback_brokers='shared:9093',
-        fallback_security=consumer_sec,
-        fallback_client_config={'a': 'b'},
-    )
-    assert resolved.brokers == 'shared:9093'
-    assert resolved.security.protocol == 'SASL_SSL'
-    assert resolved.client_config == {'a': 'b'}
-
-
-def test_own_brokers_do_not_inherit_security():
-    own_sec = KafkaSecurityConfig(protocol='SSL')
-    resolved = resolve_client(
-        'other:9093',
-        own_sec,
-        {},
-        fallback_brokers='shared:9093',
-        fallback_security=KafkaSecurityConfig(protocol='SASL_PLAINTEXT', sasl_mechanism='GSSAPI'),
-        fallback_client_config={'a': 'b'},
-    )
-    assert resolved.brokers == 'other:9093'
-    assert resolved.security.protocol == 'SSL'
-    assert resolved.client_config == {}
 
 
 def test_mixed_security_is_described_only_when_downgrading():
@@ -283,7 +250,7 @@ def test_consumer_passes_security_to_the_client(monkeypatch):
     from drakkar.consumer import KafkaConsumer
 
     KafkaConsumer(
-        connection=KafkaConfig(
+        connection=KafkaConnectionConfig(
             brokers='b:9093',
             security=KafkaSecurityConfig(
                 protocol='SASL_SSL', sasl_mechanism='PLAIN', sasl_username='u', sasl_password='p'
@@ -298,6 +265,33 @@ def test_consumer_passes_security_to_the_client(monkeypatch):
     assert captured['partition.assignment.strategy'] == 'cooperative-sticky'
 
 
+def test_consumer_converts_durations_to_milliseconds(monkeypatch):
+    captured = {}
+
+    class FakeAIOConsumer:
+        def __init__(self, conf, **kwargs):
+            captured.update(conf)
+
+    monkeypatch.setattr('drakkar.consumer.AIOConsumer', FakeAIOConsumer)
+    from drakkar.consumer import KafkaConsumer
+
+    KafkaConsumer(
+        connection=KafkaConnectionConfig(brokers='b:9093'),
+        source=KafkaSourceConfig(
+            enabled=True,
+            topic='test-topic',
+            consumer_group='test-group',
+            max_poll_interval='5m',
+            session_timeout='1.5s',
+            heartbeat_interval='500ms',
+        ),
+    )
+
+    assert captured['max.poll.interval.ms'] == 300_000
+    assert captured['session.timeout.ms'] == 1500
+    assert captured['heartbeat.interval.ms'] == 500
+
+
 def test_consumer_without_security_is_unchanged(monkeypatch):
     captured = {}
 
@@ -309,13 +303,13 @@ def test_consumer_without_security_is_unchanged(monkeypatch):
     from drakkar.consumer import KafkaConsumer
 
     KafkaConsumer(
-        connection=KafkaConfig(brokers='b:9092'),
+        connection=KafkaConnectionConfig(brokers='b:9092'),
         source=KafkaSourceConfig(enabled=True, topic='test-topic', consumer_group='test-group'),
     )
     assert not [k for k in captured if k.startswith(('security.', 'sasl.', 'ssl.'))]
 
 
-async def test_kafka_sink_inherits_consumer_security(monkeypatch):
+async def test_kafka_sink_connects_with_the_security_of_its_connection(monkeypatch):
     captured = {}
 
     class FakeAIOProducer:
@@ -327,9 +321,10 @@ async def test_kafka_sink_inherits_consumer_security(monkeypatch):
 
     sink = KafkaSink(
         'out',
-        KafkaSinkConfig(topic='t'),  # no brokers -> inherits
-        brokers_fallback='shared:9093',
-        security_fallback=KafkaSecurityConfig(protocol='SASL_SSL', sasl_mechanism='GSSAPI'),
+        KafkaSinkConfig(topic='t'),
+        KafkaConnectionConfig(
+            brokers='shared:9093', security=KafkaSecurityConfig(protocol='SASL_SSL', sasl_mechanism='GSSAPI')
+        ),
     )
     await sink.connect()
     assert captured['bootstrap.servers'] == 'shared:9093'
@@ -361,8 +356,13 @@ async def test_dlq_sink_applies_security(monkeypatch):
 def _app_with(consumer_security: KafkaSecurityConfig, sink_config: KafkaSinkConfig) -> DrakkarApp:
     """A minimal app whose only interesting property is its Kafka security."""
     config = DrakkarConfig(
-        kafka=KafkaConfig(brokers='shared:9092', security=consumer_security),
-        sources={'kafka': {'enabled': True, 'topic': 'in', 'startup_align_enabled': False}},
+        connections={
+            'kafka': {
+                'main': {'brokers': 'shared:9092', 'security': consumer_security},
+                'other': {'brokers': 'other:9092'},
+            }
+        },
+        sources={'kafka': {'enabled': True, 'topic': 'in', 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(binary_path='/bin/echo'),
         sinks=SinksConfig(kafka={'out': sink_config}),
         metrics=MetricsConfig(enabled=False),
@@ -373,10 +373,10 @@ def _app_with(consumer_security: KafkaSecurityConfig, sink_config: KafkaSinkConf
 
 
 async def test_startup_warns_when_a_sink_drops_the_consumer_security():
-    """A sink on its own brokers with no security, next to a secured consumer."""
+    """A sink on another connection with no security, next to a secured consumer."""
     app = _app_with(
         consumer_security=KafkaSecurityConfig(protocol='SASL_SSL', sasl_mechanism='GSSAPI'),
-        sink_config=KafkaSinkConfig(topic='out', brokers='other:9092'),
+        sink_config=KafkaSinkConfig(topic='out', connection='other'),
     )
     with capture_logs() as cap:
         await app._lifecycle._report_kafka_security()
@@ -388,8 +388,8 @@ async def test_startup_warns_when_a_sink_drops_the_consumer_security():
     assert 'plaintext' in mismatches[0]['message']
 
 
-async def test_startup_does_not_warn_for_an_inheriting_sink():
-    """Empty brokers means it inherits the consumer's security — nothing to flag."""
+async def test_startup_does_not_warn_for_a_sink_on_the_connection_of_the_consumer():
+    """The same connection means the same security — nothing to flag."""
     app = _app_with(
         consumer_security=KafkaSecurityConfig(protocol='SASL_SSL', sasl_mechanism='GSSAPI'),
         sink_config=KafkaSinkConfig(topic='out'),
@@ -401,7 +401,7 @@ async def test_startup_does_not_warn_for_an_inheriting_sink():
 
 
 async def test_startup_reports_plaintext_without_warning():
-    app = _app_with(KafkaSecurityConfig(), KafkaSinkConfig(topic='out', brokers='other:9092'))
+    app = _app_with(KafkaSecurityConfig(), KafkaSinkConfig(topic='out', connection='other'))
     with capture_logs() as cap:
         await app._lifecycle._report_kafka_security()
 
@@ -412,12 +412,13 @@ async def test_startup_reports_plaintext_without_warning():
 
 def test_env_override_reaches_the_password(monkeypatch):
     """Production credentials come from DK_ env, never from YAML."""
-    monkeypatch.setenv('DK_KAFKA__SECURITY__PROTOCOL', 'SASL_SSL')
-    monkeypatch.setenv('DK_KAFKA__SECURITY__SASL_MECHANISM', 'PLAIN')
-    monkeypatch.setenv('DK_KAFKA__SECURITY__SASL_USERNAME', 'envuser')
-    monkeypatch.setenv('DK_KAFKA__SECURITY__SASL_PASSWORD', 'envpass')
+    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__SECURITY__PROTOCOL', 'SASL_SSL')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_MECHANISM', 'PLAIN')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_USERNAME', 'envuser')
+    monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_PASSWORD', 'envpass')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
 
-    cfg = DrakkarConfig(sources={'kafka': {'enabled': True}})
-    assert cfg.kafka.security.sasl_username == 'envuser'
-    assert cfg.kafka.security.to_client_config()['sasl.password'] == 'envpass'
+    security = load_config(None).connections.kafka['main'].security
+    assert security.sasl_username == 'envuser'
+    assert security.to_client_config()['sasl.password'] == 'envpass'

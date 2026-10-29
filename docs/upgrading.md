@@ -613,3 +613,72 @@ config has unknown keys (YAML paths; as env vars they are DK_ plus the path with
 4. **Config models refuse unknown keywords** when you build one in code.
    `DrakkarConfig(**other.model_dump())` fails with a Postgres connection, because
    the dump keys it `schema_name`. Use `drakkar.configmeta.dump_by_yaml_key`.
+
+## Services, sources, sinks and the DLQ {#services}
+
+A service is now declared once under `connections`. The Kafka source, the DLQ and
+every Kafka, Postgres, Mongo and Redis sink name a connection, and the connection
+must be declared. Do these steps in order. An old key fails the load, so the load
+error tells you what is left.
+
+1. Move the root `kafka:` section to `connections.kafka.main`. Every key keeps its
+   name. Every config with the Kafka source on needs this entry, even an empty one
+   (`main: {}`), because the source and the DLQ name `main` by default.
+2. Give each Kafka sink or DLQ that has its own `brokers` a connection of its own,
+   and name it with `connection`. Move its `brokers` and `security` to that entry.
+   A sink's or the DLQ's `client_config` stays where it is. It is now merged after
+   the connection's, so a sink or DLQ with no `brokers` gains the properties of
+   `connections.kafka.main` and wins on a key that both set.
+3. Move each `dsn`, `uri` and `url` of a Postgres, Mongo or Redis sink to an entry
+   under `connections.postgres`, `connections.mongo` or `connections.redis`, and
+   name the entry with `connection` on the sink. Sinks that used one server can
+   share one entry. A Postgres connection entry also holds `schema`, `manage_schema`
+   and its own `pool_min` and `pool_max`, for the autodiscovery tables only. A
+   sink's `pool_min` and `pool_max` stay on the sink.
+4. Rename the keys in this table, and write each duration or size with a unit. The
+   environment variables follow the YAML paths.
+
+| Old path | New path | Example |
+|---|---|---|
+| `kafka.<key>` | `connections.kafka.main.<key>` | |
+| `DK_KAFKA__BROKERS` | `DK_CONNECTIONS__KAFKA__MAIN__BROKERS` | |
+| `DK_KAFKA__SECURITY__SASL_PASSWORD` | `DK_CONNECTIONS__KAFKA__MAIN__SECURITY__SASL_PASSWORD` | |
+| `connections.redis.<name>.key_prefix` | `connections.redis.<name>.state_prefix` | |
+| `connections.consul.<name>.key_prefix` | `connections.consul.<name>.state_prefix` | |
+| `sources.kafka.max_poll_interval_ms` | `sources.kafka.max_poll_interval` | `300000` is `5m` |
+| `sources.kafka.session_timeout_ms` | `sources.kafka.session_timeout` | `45000` is `45s` |
+| `sources.kafka.heartbeat_interval_ms` | `sources.kafka.heartbeat_interval` | `3000` is `3s` |
+| `sources.kafka.startup_align_enabled` | `sources.kafka.startup_align.enabled` | |
+| `sources.kafka.startup_min_wait_seconds` | `sources.kafka.startup_align.min_wait` | `4.0` is `4s` |
+| `sources.kafka.startup_align_interval_seconds` | `sources.kafka.startup_align.interval` | `10` is `10s` |
+| `sources.http.sinks_enabled` | `sources.http.deliver_to_sinks` | |
+| `sources.http.request_timeout_seconds` | `sources.http.request_timeout` | `30.0` is `30s` |
+| `sources.http.max_body_bytes` | `sources.http.max_body` | `10485760` is `10MiB` |
+| `sinks.delivery_timeout_seconds` | `sinks.defaults.delivery_timeout` | `30.0` is `30s` |
+| `sinks.circuit_breaker.failure_threshold` | `sinks.defaults.breaker_failures` | |
+| `sinks.circuit_breaker.cooldown_seconds` | `sinks.defaults.breaker_cooldown` | `30.0` is `30s` |
+| `sinks.kafka.<name>.flush_timeout_seconds` | `sinks.kafka.<name>.flush_timeout` | `30.0` is `30s` |
+| `sinks.kafka.<name>.brokers`, `.security` | `connections.kafka.<entry>.brokers`, `.security`, and `sinks.kafka.<name>.connection: <entry>` | |
+| `sinks.postgres.<name>.dsn` | `connections.postgres.<entry>.dsn`, and `sinks.postgres.<name>.connection: <entry>` | |
+| `sinks.mongo.<name>.uri` | `connections.mongo.<entry>.uri`, and `sinks.mongo.<name>.connection: <entry>` | |
+| `sinks.redis.<name>.url` | `connections.redis.<entry>.url`, and `sinks.redis.<name>.connection: <entry>` | |
+| `sinks.http.<name>.timeout_seconds` | `sinks.http.<name>.request_timeout` | `30` is `30s` |
+| `dlq.flush_timeout_seconds` | `dlq.flush_timeout` | `30.0` is `30s` |
+| `dlq.brokers`, `dlq.security` | `connections.kafka.<entry>.brokers`, `.security`, and `dlq.connection: <entry>` | |
+
+5. Check the two new DLQ keys. `dlq.enabled` is on by default. With `dlq.enabled:
+   false` a `dlq` outcome follows `dlq.on_send_failure`, so `stall` holds the offset.
+   `dlq.provider` accepts only `kafka`.
+6. If a handler changes `sinks.circuit_breaker` or `sinks.delivery_timeout_seconds`
+   in `on_startup`, set `sinks.defaults` in the config file instead. Each sink's
+   policy is resolved when the worker is constructed. A change of `sinks.defaults`
+   or of a sink's `on_failure`, `max_retries`, `delivery_timeout`,
+   `breaker_failures`, `breaker_cooldown` or `depends_on` in `on_startup` is logged
+   as `on_startup_config_change_ignored` and does nothing. A sink added in
+   `on_startup` still gets its policy from the config it was added to.
+7. Check tools that read `worker_config.kafka_brokers`. It holds the brokers of the
+   source's connection, and `''` on a worker with the Kafka source off.
+
+In code, these names changed: `KafkaConfig` is `KafkaConnectionConfig`,
+`CircuitBreakerConfig` is gone, and `KafkaSink`, `PostgresSink`, `MongoSink` and
+`RedisSink` take the connection as their third argument.

@@ -20,7 +20,7 @@ from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.memstore import EVICT_MIN_INTERVAL_SECONDS, MemoryCoverage, PrefixDeletion
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 WORKER = 'w-1'
 SQLITE_BUSY = 5
@@ -746,7 +746,11 @@ async def test_write_config_writes_memory_and_file_and_rotation_rewrites_the_new
     from drakkar.config import DrakkarConfig, ExecutorConfig
 
     rec = sqlite_recorder
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}})
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        executor=ExecutorConfig(binary_path='/bin/echo'),
+        sources={'kafka': {'enabled': True}},
+    )
 
     await rec.write_config(config)
     _, memory_rows = await rec.memory_store.read('SELECT worker_name FROM worker_config')
@@ -763,7 +767,11 @@ async def test_write_config_writes_memory_and_file_and_rotation_rewrites_the_new
 def _drakkar_config():
     from drakkar.config import DrakkarConfig, ExecutorConfig
 
-    return DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'), sources={'kafka': {'enabled': True}})
+    return DrakkarConfig(
+        connections=kafka_connections(),
+        executor=ExecutorConfig(binary_path='/bin/echo'),
+        sources={'kafka': {'enabled': True}},
+    )
 
 
 async def test_write_config_rolls_back_an_open_chunk_before_its_memory_commit(none_recorder):

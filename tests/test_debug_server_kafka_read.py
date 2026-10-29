@@ -21,7 +21,7 @@ import pytest
 import structlog.testing
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, KafkaConfig, KafkaSinkConfig, SinksConfig
+from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
 from drakkar.kafka_read import (
     AliasTarget,
     KafkaReadMessage,
@@ -33,7 +33,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.uiserver import routes_kafka_read
 from drakkar.uiserver.routes_kafka_read import _warn_if_exposed_without_ui_auth
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import make_ui_config
+from tests.conftest import kafka_connections, make_ui_config
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -52,8 +52,8 @@ def _mock_recorder() -> AsyncMock:
 
 def _drakkar_config() -> DrakkarConfig:
     return DrakkarConfig(
-        kafka=KafkaConfig(brokers='main:9092'),
-        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align_enabled': False}},
+        connections=kafka_connections(brokers='main:9092'),
+        sources={'kafka': {'enabled': True, 'topic': 'input-events', 'startup_align': {'enabled': False}}},
         sinks=SinksConfig(kafka={'search-results-kafka-sink': KafkaSinkConfig(topic='search-results')}),
     )
 
@@ -175,7 +175,7 @@ async def test_message_dlq_alias_404_names_the_disabled_dlq():
     async with _client(config=_http_only_config()) as client:
         resp = await client.get('/api/v1/debug/kafka/dlq/message?partition=0&offset=0')
     assert resp.status_code == 404
-    assert resp.json()['detail'] == "alias 'dlq' is not available: the DLQ is disabled (set dlq.topic)"
+    assert resp.json()['detail'] == "alias 'dlq' is not available: the DLQ is disabled (set dlq.enabled and dlq.topic)"
 
 
 async def test_message_source_alias_still_resolves_when_kafka_source_enabled(monkeypatch):

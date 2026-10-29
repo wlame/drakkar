@@ -1,19 +1,8 @@
 # Drakkar integration test configuration
-# All values can be overridden with env vars: DK_KAFKA__BROKERS, etc.
+# All values can be overridden with env vars: DK_CONNECTIONS__KAFKA__MAIN__BROKERS, etc.
 
 worker_name_env: "WORKER_ID"
 cluster_name: "main cluster"
-
-kafka:
-  brokers: "kafka:9092"
-  # Kafka-UI deep-link config. The Debug UI renders a small Kafka icon
-  # next to every <partition:offset> link; clicking it opens Kafka-UI
-  # pre-filtered on (topic, partition, offset) in a new tab. Both
-  # ui_url and ui_cluster_name must be set for the icon to appear; the
-  # cluster_name must match the value Kafka-UI is itself configured with
-  # (see docker-compose: KAFKA_CLUSTERS_0_NAME=drakkar-local).
-  ui_url: "http://localhost:8088"
-  ui_cluster_name: "drakkar-local"
 
 sources:
   kafka:
@@ -21,9 +10,9 @@ sources:
     topic: "search-requests"
     consumer_group: "drakkar-integration"
     max_poll_records: 50
-    max_poll_interval_ms: 300000
-    session_timeout_ms: 10000
-    heartbeat_interval_ms: 2000
+    max_poll_interval: 5m
+    session_timeout: 10s
+    heartbeat_interval: 2s
   # --- HTTP input source ---
   #
   # Synchronous HTTP front door for the same handler pipeline that consumes
@@ -34,9 +23,9 @@ sources:
   # the load_generator service hits worker-1 directly because round-robin
   # would 503 two-thirds of requests.
   #
-  # ``sinks_enabled=false`` keeps the demo simple: HTTP responses are built
+  # ``deliver_to_sinks=false`` keeps the demo simple: HTTP responses are built
   # entirely from gathered task outputs, no per-request fan-out into the
-  # Kafka/Postgres/Mongo sinks. Flip via ``DK_SOURCES__HTTP__SINKS_ENABLED=true``
+  # Kafka/Postgres/Mongo sinks. Flip via ``DK_SOURCES__HTTP__DELIVER_TO_SINKS=true``
   # on worker-1 to exercise the sinks-enabled variant.
   http:
     enabled: false
@@ -47,8 +36,8 @@ sources:
     # cluster's port plan consistent across services.
     port: 8091
     path: '/process'
-    sinks_enabled: false
-    request_timeout_seconds: 30.0
+    deliver_to_sinks: false
+    request_timeout: 30s
     max_concurrent: 64
     clients:
       - name: anonymous
@@ -111,8 +100,8 @@ app:
 #   - <INSTANCE_NAME> is a USER-CHOSEN label — pick anything you like.
 #     The handler code refers to it via `Payload(sink="<INSTANCE_NAME>")`
 #     when multiple instances of the same sink type exist.
-#   - The inner field names ("topic", "dsn", "uri", "url", "ui_url",
-#     "brokers", "pool_min", "pool_max", etc.) ARE Drakkar keywords
+#   - The inner field names ("topic", "connection", "url", "ui_url",
+#     "pool_min", "pool_max", etc.) ARE Drakkar keywords
 #     and are schema-validated by pydantic.
 #
 # Below, "results", "priority_match_notifications",
@@ -134,7 +123,6 @@ sinks:
     # Default output — every search result. Referenced as sink="results".
     results:
       topic: "search-results"
-      # brokers inherited from kafka.brokers
       ui_url: "http://localhost:8088"
     # Lower-volume side-channel for the subset of high-match results that
     # also trigger the HTTP webhook. A separate topic so downstream
@@ -148,7 +136,7 @@ sinks:
     # The long-term archive — every search result lands here. Larger pool
     # because writes are frequent. Points at the "postgres" service.
     archive_results_db:
-      dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
+      connection: archive
       pool_min: 1
       pool_max: 5
       # Operator-authored SQL, invoked by name from the handler with
@@ -176,13 +164,12 @@ sinks:
     # where a hot/interactive DB has tighter resource limits than the
     # archive.
     hot_recent_matches_db:
-      dsn: "postgresql://drakkar:drakkar@postgres-hot:5432/drakkar_hot"
+      connection: hot
       pool_min: 1
       pool_max: 2
 
   mongo:
     archive:
-      uri: "mongodb://mongo:27017"
       database: "drakkar"
       ui_url: "http://localhost:8089"
 
@@ -193,7 +180,7 @@ sinks:
     # glance that this is "the redis-backed per-task hot match cache",
     # distinct from the framework cache configured under `cache:` below.
     hot_match_cache:
-      url: "redis://redis:6379/0"
+      connection: sink
       key_prefix: "drakkar:"
       ui_url: "http://localhost:8087"
       # Operator-authored Lua, invoked by name with `op=script`. Two reasons
@@ -215,7 +202,7 @@ sinks:
     webhook:
       url: "http://webhook:8080/"
       method: "POST"
-      timeout_seconds: 10
+      request_timeout: 10s
       max_retries: 2
 
   filesystem:
@@ -409,23 +396,46 @@ storage:
 # DK_CONNECTIONS__REDIS__MAIN__URL and the token through
 # DK_CONNECTIONS__CONSUL__MAIN__TOKEN, so the secrets never sit in this file.
 # The worker creates the Postgres schema and its tables on first use
-# (manage_schema defaults to true). The Redis keys start with key_prefix,
+# (manage_schema defaults to true). The Redis keys start with state_prefix,
 # which is also the key pattern of the drakkar user on redis-fleet, and the
-# path of the URL picks database 3. The Consul keys start with key_prefix
+# path of the URL picks database 3. The Consul keys start with state_prefix
 # and a "/", which is the key prefix of the token's policy on consul-fleet.
 connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"
+      # Kafka-UI deep-link config. The Debug UI renders a small Kafka icon
+      # next to every <partition:offset> link; clicking it opens Kafka-UI
+      # pre-filtered on (topic, partition, offset) in a new tab. Both
+      # ui_url and ui_cluster_name must be set for the icon to appear; the
+      # cluster_name must match the value Kafka-UI is itself configured with
+      # (see docker-compose: KAFKA_CLUSTERS_0_NAME=drakkar-local).
+      ui_url: "http://localhost:8088"
+      ui_cluster_name: "drakkar-local"
+
   postgres:
     main:
       dsn: "postgresql://drakkar@postgres-fleet:5432/drakkar_fleet"
       schema: drakkar
+    # The two databases of the Postgres sinks: separate servers in docker-compose.yml.
+    archive:
+      dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
+    hot:
+      dsn: "postgresql://drakkar:drakkar@postgres-hot:5432/drakkar_hot"
   redis:
     main:
       url: "redis://drakkar@redis-fleet:6379/3"
-      key_prefix: "drakkar:"
+      state_prefix: "drakkar:"
+    # The server of the Redis sink.
+    sink:
+      url: "redis://redis:6379/0"
+  mongo:
+    main:
+      uri: "mongodb://mongo:27017"
   consul:
     main:
       address: "http://consul-fleet:8500"
-      key_prefix: "drakkar"
+      state_prefix: "drakkar"
 
 fleet:
   # Worker registry. The provider is filesystem (cards in storage.dir),

@@ -1,9 +1,9 @@
 """Configuration loading for Drakkar framework.
 
 Supports YAML files with environment variable overrides.
-Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
+Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
-The models are split per domain across this package — ``kafka``, ``sinks``,
+The models are split per domain across this package — ``sinks``,
 ``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
@@ -16,6 +16,8 @@ from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import (
     ConnectionsConfig,
     ConsulConnectionConfig,
+    KafkaConnectionConfig,
+    MongoConnectionConfig,
     PostgresConnectionConfig,
     RedisConnectionConfig,
 )
@@ -25,7 +27,6 @@ from drakkar.config.fleet import (
     FleetConfig,
     FleetRegistryConfig,
 )
-from drakkar.config.kafka import KafkaConfig
 from drakkar.config.periodic import ElectionConfig, PeriodicConfig
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _parse_env_overrides, load_config, load_yaml_document
@@ -38,7 +39,6 @@ from drakkar.config.runtime import (
     RuntimeHealthConfig,
 )
 from drakkar.config.sinks import (
-    CircuitBreakerConfig,
     DLQConfig,
     FileSinkConfig,
     HttpSinkConfig,
@@ -47,11 +47,12 @@ from drakkar.config.sinks import (
     MongoStatementConfig,
     PostgresSinkConfig,
     RedisSinkConfig,
+    SinkDefaults,
     SinkInstanceConfig,
     SinkPolicy,
     SinksConfig,
 )
-from drakkar.config.sources import KafkaSourceConfig, SourcesConfig
+from drakkar.config.sources import KafkaSourceConfig, SourcesConfig, StartupAlignConfig
 from drakkar.config.storage import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     HistoryArchiveConfig,
@@ -108,7 +109,6 @@ __all__ = [
     'ByteSize',
     'CacheConfig',
     'CacheExchangeConfig',
-    'CircuitBreakerConfig',
     'ConfigModel',
     'ConnectionsConfig',
     'ConsulConnectionConfig',
@@ -126,11 +126,12 @@ __all__ = [
     'HistoryConfig',
     'HttpSinkConfig',
     'IOConfig',
-    'KafkaConfig',
+    'KafkaConnectionConfig',
     'KafkaSinkConfig',
     'KafkaSourceConfig',
     'LoggingConfig',
     'MetricsConfig',
+    'MongoConnectionConfig',
     'MongoSinkConfig',
     'MongoStatementConfig',
     'OffloadConfig',
@@ -142,10 +143,12 @@ __all__ = [
     'ResilienceConfig',
     'RuntimeHealthConfig',
     'SharedConfig',
+    'SinkDefaults',
     'SinkInstanceConfig',
     'SinkPolicy',
     'SinksConfig',
     'SourcesConfig',
+    'StartupAlignConfig',
     'StorageConfig',
     'TimelineColorRule',
     'TimelineEventType',

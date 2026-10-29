@@ -16,15 +16,17 @@ from drakkar.config import (
     MongoSinkConfig,
     PostgresSinkConfig,
     RedisSinkConfig,
-    SinkPolicy,
     SinksConfig,
 )
+from drakkar.config.sinks import DEFAULT_SINK_POLICY, DEFAULTED_POLICY_KEYS
+from tests.conftest import kafka_connections
 from tests.test_config_contract import FIXTURE
 
 
 def _config(**sections) -> DrakkarConfig:
     """A loadable config: one enabled source, bundle fetching off, plus ``sections``."""
     sections.setdefault('sources', {'kafka': {'enabled': True}})
+    sections['connections'] = {**kafka_connections(), **sections.get('connections', {})}
     ui = sections.setdefault('ui', {})
     ui.setdefault('release', {'enabled': False})
     return DrakkarConfig(**sections)
@@ -33,6 +35,35 @@ def _config(**sections) -> DrakkarConfig:
 def _kafka_sinks(**instances: dict) -> dict:
     """``sinks`` with Kafka sink instances named by the keyword, each with a topic."""
     return {'kafka': {name: {'topic': 'out', **settings} for name, settings in instances.items()}}
+
+
+def test_sink_reads_defaults_when_key_not_given():
+    config = _config(
+        sinks={
+            'defaults': {
+                'on_failure': 'skip',
+                'max_retries': 5,
+                'delivery_timeout': '10s',
+                'breaker_failures': 3,
+                'breaker_cooldown': '1m',
+            },
+            **_kafka_sinks(results={}),
+        }
+    )
+
+    policy = config.sinks.policy_of('kafka', 'results')
+
+    assert policy.on_failure == 'skip'
+    assert policy.max_retries == 5
+    assert policy.delivery_timeout == 10.0
+    assert policy.breaker_failures == 3
+    assert policy.breaker_cooldown == 60.0
+
+
+def test_sink_key_given_as_default_value_wins_over_defaults():
+    config = _config(sinks={'defaults': {'max_retries': 5}, **_kafka_sinks(results={'max_retries': 2})})
+
+    assert config.sinks.policy_of('kafka', 'results').max_retries == 2
 
 
 def _load_error(**sections) -> str:
@@ -45,25 +76,26 @@ def _load_error(**sections) -> str:
     'instance',
     [
         KafkaSinkConfig(topic='out'),
-        PostgresSinkConfig(dsn='postgresql://db.example/drakkar'),
-        MongoSinkConfig(uri='mongodb://db.example', database='drakkar'),
+        PostgresSinkConfig(),
+        MongoSinkConfig(database='drakkar'),
         HttpSinkConfig(url='https://api.example.com/results'),
         RedisSinkConfig(),
         FileSinkConfig(base_path='/data/out'),
     ],
     ids=lambda instance: type(instance).__name__,
 )
-def test_defaults_dlq_two_retries_no_dependencies(instance):
-    assert instance.on_failure == 'dlq'
-    assert instance.max_retries == 2
+def test_an_instance_of_every_type_gives_no_policy_key_by_default(instance):
+    assert [getattr(instance, key) for key in DEFAULTED_POLICY_KEYS] == [None] * len(DEFAULTED_POLICY_KEYS)
     assert instance.depends_on == []
 
 
 def test_policy_of_reads_the_declared_policy():
     config = _config(sinks=_kafka_sinks(results={'on_failure': 'skip', 'max_retries': 5}, audit={}))
 
-    assert config.sinks.policy_of('kafka', 'results') == SinkPolicy(on_failure='skip', max_retries=5, depends_on=())
-    assert config.sinks.policy_of('kafka', 'audit') == SinkPolicy(on_failure='dlq', max_retries=2, depends_on=())
+    assert config.sinks.policy_of('kafka', 'results') == DEFAULT_SINK_POLICY.model_copy(
+        update={'on_failure': 'skip', 'max_retries': 5}
+    )
+    assert config.sinks.policy_of('kafka', 'audit') == DEFAULT_SINK_POLICY
 
 
 def test_on_failure_refuses_other_values():
@@ -143,11 +175,11 @@ def test_instance_checks_come_before_references():
 def test_dependency_graph_and_instance_path():
     sinks = {
         'kafka': {'results': {'topic': 'out', 'depends_on': ['postgres/main-db', 'http/webhook']}},
-        'postgres': {'main-db': {'dsn': 'postgresql://db.example/drakkar'}},
+        'postgres': {'main-db': {}},
         'http': {'webhook': {'url': 'https://hooks.example', 'depends_on': ['postgres/main-db']}},
     }
 
-    config = _config(sinks=sinks)
+    config = _config(sinks=sinks, connections={'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}})
 
     assert config.sinks.dependency_graph() == {
         'http/webhook': ['postgres/main-db'],
@@ -177,10 +209,10 @@ NEW_VALIDATION_CASES = [
     'executor_on_failure_unknown',
 ]
 NEW_LOAD_VALUE_CASES = [
-    'sink_on_failure_default_dlq',
-    'sink_max_retries_default_two',
+    'sink_on_failure_not_given',
+    'sink_max_retries_not_given',
     'sink_depends_on_default_empty',
-    'http_sink_max_retries_default_two',
+    'http_sink_max_retries_not_given',
     'sink_max_retries_whole_float',
     'sink_depends_on_loads',
     'executor_on_failure_default_skip',
