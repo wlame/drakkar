@@ -200,7 +200,7 @@ than a default that would be wrong:
 | Recorder `worker_config` row | `source_topic` and `consumer_group` are written empty. The schema does not change. |
 | Recorder `worker_state` row | No assigned partitions, count 0, not paused, nothing queued. |
 | Message probe | The request must carry a `topic`. Without one the probe answers 400 `topic is required: the Kafka source is disabled on this worker`. |
-| [Kafka read API](kafka-read.md) aliases | `source` answers 404 with `alias 'source' is not available: the Kafka source is disabled`. `dlq` resolves only when `dlq.topic` is set, and otherwise answers `alias 'dlq' is not available: the DLQ is disabled (set dlq.enabled and dlq.topic)`. Sink-instance aliases still work. |
+| [Kafka read API](kafka-read.md) aliases | `source` answers 404 with `alias 'source' is not available: the Kafka source is disabled`. `dlq` resolves only when `dlq.topic` is set, and otherwise answers `alias 'dlq' is not available: the DLQ is disabled (set dlq.enabled, and dlq.topic when the Kafka source is off)`. Sink-instance aliases still work. |
 | `/readyz` | Reports `not_started` until the HTTP source is bound. No partition reasons appear. |
 
 ## Custom sources

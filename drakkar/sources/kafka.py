@@ -119,7 +119,7 @@ class KafkaSource:
             await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
 
         self.consumer = KafkaConsumer(
-            connection=config.connections.kafka[config.sources.kafka.connection],
+            connection=config.declared_connection('sources.kafka.connection', 'kafka', config.sources.kafka.connection),
             source=config.sources.kafka,
             on_assign=self.on_assign,
             on_revoke=self.on_revoke,

@@ -93,8 +93,8 @@ MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
 # HTTP transport limits. Uvicorn sets none of these by default, so a
 # client that dribbled bytes — or simply opened connections and left them —
 # could pin connections and memory in the process that also runs the
-# pipeline AND answers the Kubernetes probes. Values mirror
-# ``internal/uiserver/server.go`` exactly, so a mixed fleet behaves the same.
+# pipeline AND answers the Kubernetes probes. The same values are used on
+# every worker of a fleet, so all of them behave alike.
 #
 # Note that ``/ws`` is exempt from the keep-alive reaper: an upgraded
 # WebSocket is not a keep-alive HTTP connection.
@@ -221,23 +221,6 @@ class UIDeps:
         frequently do this) is reflected immediately without a page reload.
         """
         return self.drakkar_app.cache_engine is not None
-
-    def kafka_ui_message_url(self, topic: str, partition: int, offset: int) -> str:
-        """Build a Kafka-UI deep-link URL for a single message.
-
-        Returns '' when the Kafka source is off, or its connection has no
-        ``ui_url`` or ``ui_cluster_name``, so callers can treat it as a
-        feature toggle. The ``%3A%3A`` literal is the URL-encoded form of
-        ``::`` that Kafka-UI expects in the seekTo parameter.
-        """
-        kcfg = self.drakkar_app._config.kafka_source_connection
-        if kcfg is None or not kcfg.ui_url or not kcfg.ui_cluster_name or not topic:
-            return ''
-        base = kcfg.ui_url.rstrip('/')
-        cluster = quote(kcfg.ui_cluster_name, safe='')
-        topic_q = quote(str(topic), safe='')
-        seek = f'{int(partition)}%3A%3A{int(offset)}'
-        return f'{base}/ui/clusters/{cluster}/all-topics/{topic_q}/messages?seekType=OFFSET&seekTo={seek}&limit=1'
 
     # --- Auth ---
 

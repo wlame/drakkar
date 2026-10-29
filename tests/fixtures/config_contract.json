@@ -2242,7 +2242,7 @@
       "value": 90.0
     },
     {
-      "name": "startup_align_enabled_default",
+      "name": "startup_align_default",
       "yaml": {},
       "path": "sources.kafka.startup_align.enabled",
       "value": true

@@ -527,9 +527,9 @@ def test_resolve_dlq_coordinates_uses_derived_topic(replay_module, tmp_path):
         '  topic: ""\n'
     )
 
-    topic, brokers = replay_module._resolve_dlq_coordinates(str(config_file))
-    assert topic == 'search-requests_dlq'
-    assert brokers == 'kafka:9092'
+    dlq = replay_module._resolve_dlq_coordinates(str(config_file))
+    assert dlq.topic == 'search-requests_dlq'
+    assert dlq.brokers == 'kafka:9092'
 
 
 def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
@@ -552,9 +552,9 @@ def test_resolve_dlq_coordinates_explicit_overrides(replay_module, tmp_path):
         '  topic: "custom-dlq"\n'
     )
 
-    topic, brokers = replay_module._resolve_dlq_coordinates(str(config_file))
-    assert topic == 'custom-dlq'
-    assert brokers == 'other-cluster:9092'
+    dlq = replay_module._resolve_dlq_coordinates(str(config_file))
+    assert dlq.topic == 'custom-dlq'
+    assert dlq.brokers == 'other-cluster:9092'
 
 
 def test_resolve_dlq_coordinates_raises_when_topic_cannot_be_derived(replay_module, tmp_path):
@@ -596,3 +596,77 @@ async def test_main_dry_run_happy_path(replay_module, tmp_path):
 
     assert exit_code == 0
     fake_producer_cls.assert_not_called()
+
+
+_SECURED_DLQ_CONFIG = (
+    'connections:\n'
+    '  kafka:\n'
+    '    main:\n'
+    '      brokers: "secured:9093"\n'
+    '      client_config:\n'
+    '        socket.timeout.ms: "5000"\n'
+    '        client.id: "from-connection"\n'
+    '      security:\n'
+    '        protocol: SASL_SSL\n'
+    '        sasl_mechanism: PLAIN\n'
+    '        sasl_username: replayer\n'
+    '        sasl_password: s3cret\n'
+    'sources:\n'
+    '  kafka:\n'
+    '    enabled: true\n'
+    '    topic: "requests"\n'
+    '    consumer_group: "grp"\n'
+    'dlq:\n'
+    '  topic: "requests_dlq"\n'
+    '  client_config:\n'
+    '    socket.timeout.ms: "9000"\n'
+)
+
+
+def _write_secured_config(tmp_path) -> str:
+    config_file = tmp_path / 'secured.yaml'
+    config_file.write_text(_SECURED_DLQ_CONFIG)
+    return str(config_file)
+
+
+async def test_main_reads_and_produces_with_the_dlq_connection_settings(replay_module, tmp_path):
+    """The reader and the producer both get the connection's security and client config, the DLQ's own on top."""
+    fake_producer_cls = MagicMock()
+    with (
+        patch.object(replay_module, 'Producer', fake_producer_cls),
+        patch.object(replay_module, 'read_dlq_entries', return_value=_async_iter([])) as reader,
+    ):
+        exit_code = await replay_module.main(
+            ['--dlq-config', _write_secured_config(tmp_path), '--target-topic=replayed']
+        )
+
+    assert exit_code == 0
+    reader_kwargs = reader.call_args.kwargs
+    assert reader_kwargs['security'].protocol == 'SASL_SSL'
+    assert reader_kwargs['client_config'] == {'socket.timeout.ms': '9000', 'client.id': 'from-connection'}
+    producer_config = fake_producer_cls.call_args.args[0]
+    assert producer_config['bootstrap.servers'] == 'secured:9093'
+    assert producer_config['security.protocol'] == 'SASL_SSL'
+    assert producer_config['sasl.username'] == 'replayer'
+    assert producer_config['socket.timeout.ms'] == '9000'
+    assert producer_config['client.id'] == 'from-connection'
+
+
+async def test_main_sends_no_dlq_credentials_to_another_target_cluster(replay_module, tmp_path):
+    """A producer aimed at another cluster by --target-brokers gets the brokers alone, never the DLQ's credentials."""
+    fake_producer_cls = MagicMock()
+    with (
+        patch.object(replay_module, 'Producer', fake_producer_cls),
+        patch.object(replay_module, 'read_dlq_entries', return_value=_async_iter([])),
+    ):
+        exit_code = await replay_module.main(
+            [
+                '--dlq-config',
+                _write_secured_config(tmp_path),
+                '--target-topic=replayed',
+                '--target-brokers=elsewhere:9092',
+            ]
+        )
+
+    assert exit_code == 0
+    assert fake_producer_cls.call_args.args[0] == {'bootstrap.servers': 'elsewhere:9092'}

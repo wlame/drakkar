@@ -175,7 +175,10 @@ async def test_message_dlq_alias_404_names_the_disabled_dlq():
     async with _client(config=_http_only_config()) as client:
         resp = await client.get('/api/v1/debug/kafka/dlq/message?partition=0&offset=0')
     assert resp.status_code == 404
-    assert resp.json()['detail'] == "alias 'dlq' is not available: the DLQ is disabled (set dlq.enabled and dlq.topic)"
+    assert (
+        resp.json()['detail']
+        == "alias 'dlq' is not available: the DLQ is disabled (set dlq.enabled, and dlq.topic when the Kafka source is off)"
+    )
 
 
 async def test_message_source_alias_still_resolves_when_kafka_source_enabled(monkeypatch):

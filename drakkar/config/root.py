@@ -307,12 +307,26 @@ class DrakkarConfig(BaseSettings):
     def kafka_source_connection(self) -> KafkaConnectionConfig | None:
         """The connection of the Kafka source; ``None`` when the source is off."""
         source = self.sources.kafka
-        return self.connections.kafka[source.connection] if source.enabled else None
+        if not source.enabled:
+            return None
+        return self.declared_connection('sources.kafka.connection', 'kafka', source.connection)
 
     @property
     def dlq_connection(self) -> KafkaConnectionConfig | None:
         """The connection of the DLQ; ``None`` when no DLQ producer is built."""
-        return self.connections.kafka[self.dlq.connection] if self.dlq_enabled else None
+        if not self.dlq_enabled:
+            return None
+        return self.declared_connection('dlq.connection', self.dlq.provider, self.dlq.connection)
+
+    def declared_connection(self, path: str, kind: str, name: str) -> Any:
+        """The connection ``name`` of the service ``kind``, read at run time.
+
+        Config load checks every connection the file names. A hook can name one
+        later (a sink it adds, a ``dlq.topic`` it sets), so a read at run time
+        fails with the same message as the load: ``<path> '<name>' is not
+        defined under connections.<kind>``.
+        """
+        return _require_declared_connection(path, kind, name, self.connections)
 
     @property
     def resolved_consumer_group(self) -> str:
@@ -437,8 +451,8 @@ class DrakkarConfig(BaseSettings):
         )
 
 
-def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> None:
-    """Fail when ``connections`` does not declare ``name`` under the kind ``kind``.
+def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> Any:
+    """Return the entry ``name`` under the kind ``kind``; fail when ``connections`` does not declare it.
 
     ``path`` is the config path of the ``connection`` key, for the message. ``kind``
     is a field name of ``ConnectionsConfig``.
@@ -446,6 +460,7 @@ def _require_declared_connection(path: str, kind: str, name: str, connections: C
     declared: dict[str, Any] = getattr(connections, kind)
     if name not in declared:
         raise ValueError(f"{path} '{name}' is not defined under connections.{kind}")
+    return declared[name]
 
 
 def _require_provider_connection(path: str, provider: str, name: str, connections: ConnectionsConfig) -> None:

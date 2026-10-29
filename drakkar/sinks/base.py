@@ -12,13 +12,16 @@ from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
+from drakkar.config.sinks import SinkDefaults
 from drakkar.metrics import sink_circuit_open, sink_circuit_trips
 
 # The defaults of ``sinks.defaults``, for sinks constructed outside a
-# ``SinkManager`` (tests, standalone use).
-DEFAULT_DELIVERY_TIMEOUT_SECONDS = 30.0
-DEFAULT_BREAKER_FAILURES = 5
-DEFAULT_BREAKER_COOLDOWN_SECONDS = 30.0
+# ``SinkManager`` (tests, standalone use). Read from the config model, so
+# there is one place that states them.
+_SINK_DEFAULTS = SinkDefaults()
+DEFAULT_DELIVERY_TIMEOUT_SECONDS: float = _SINK_DEFAULTS.delivery_timeout
+DEFAULT_BREAKER_FAILURES: int = _SINK_DEFAULTS.breaker_failures
+DEFAULT_BREAKER_COOLDOWN_SECONDS: float = _SINK_DEFAULTS.breaker_cooldown
 
 PayloadT = TypeVar('PayloadT', bound=BaseModel)
 

@@ -442,7 +442,9 @@ class AppLifecycle:
             # Only a client on another connection can diverge.
             if connection_name == config.sources.kafka.connection:
                 continue
-            message = describe_mixed_security(config.connections.kafka[connection_name].security, consumer_security)
+            message = describe_mixed_security(
+                config.declared_connection(f'{label}.connection', 'kafka', connection_name).security, consumer_security
+            )
             if message:
                 await log.awarning(
                     'kafka_security_mismatch',

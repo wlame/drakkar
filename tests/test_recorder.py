@@ -4634,11 +4634,10 @@ async def test_event_columns_pin_matches_live_table(tmp_path):
 
     The constant is the contract for every SELECT-*-pass-through surface
     (/ws, /api/v1/events, /api/v1/trace, /api/v1/trace-by-label) and for
-    on-disk interop between workers; the same list is pinned
-    (internal/recorder/schema.go EventColumns) and the normative copy
-    lives in drakkar-ui/docs/api-contract-v1.md. If this test fails, the
-    schema changed without updating the pinned contract — update all
-    three together or revert.
+    on-disk interop between workers; every implementation pins the same
+    list, and the normative copy lives in drakkar-ui/docs/api-contract-v1.md.
+    If this test fails, the schema changed without updating the pinned
+    contract — update all of them together or revert.
     """
     from drakkar.recorder.schema import EVENT_COLUMNS, SCHEMA_EVENTS
 

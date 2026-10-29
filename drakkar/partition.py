@@ -1040,7 +1040,7 @@ class PartitionProcessor:
                 category='partition',
                 partition=self._partition_id,
                 offset=msg.offset,
-                reason='on_parse_error=dlq but the DLQ write was not confirmed',
+                reason='on_parse_error=dlq but the message was not written to the DLQ',
                 action='ALERT: unparseable message dropped (dlq.on_send_failure=drop)',
             )
             self._offset_tracker.complete(msg.offset)

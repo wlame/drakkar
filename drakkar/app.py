@@ -689,22 +689,34 @@ class DrakkarApp:
         section.
         """
         sinks = self._config.sinks
-        connections = self._config.connections
-
         for name, cfg in sinks.kafka.items():
             self._sink_manager.register(
-                KafkaSink(name, cfg, connections.kafka[cfg.connection]), policy=self._sink_policy('kafka', name)
+                KafkaSink(
+                    name,
+                    cfg,
+                    self._config.declared_connection(f'sinks.kafka.{name}.connection', 'kafka', cfg.connection),
+                ),
+                policy=self._sink_policy('kafka', name),
             )
 
         for name, cfg in sinks.postgres.items():
             self._sink_manager.register(
-                PostgresSink(name, cfg, connections.postgres[cfg.connection]),
+                PostgresSink(
+                    name,
+                    cfg,
+                    self._config.declared_connection(f'sinks.postgres.{name}.connection', 'postgres', cfg.connection),
+                ),
                 policy=self._sink_policy('postgres', name),
             )
 
         for name, cfg in sinks.mongo.items():
             self._sink_manager.register(
-                MongoSink(name, cfg, connections.mongo[cfg.connection]), policy=self._sink_policy('mongo', name)
+                MongoSink(
+                    name,
+                    cfg,
+                    self._config.declared_connection(f'sinks.mongo.{name}.connection', 'mongo', cfg.connection),
+                ),
+                policy=self._sink_policy('mongo', name),
             )
 
         for name, cfg in sinks.http.items():
@@ -712,7 +724,12 @@ class DrakkarApp:
 
         for name, cfg in sinks.redis.items():
             self._sink_manager.register(
-                RedisSink(name, cfg, connections.redis[cfg.connection]), policy=self._sink_policy('redis', name)
+                RedisSink(
+                    name,
+                    cfg,
+                    self._config.declared_connection(f'sinks.redis.{name}.connection', 'redis', cfg.connection),
+                ),
+                policy=self._sink_policy('redis', name),
             )
 
         for name, cfg in sinks.filesystem.items():

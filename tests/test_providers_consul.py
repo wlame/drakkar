@@ -225,7 +225,7 @@ def test_session_ttl_rounds_a_fractional_half_up_to_whole_seconds():
         'a/..',
     ],
 )
-def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_shape(prefix):
+def test_check_state_prefix_refuses_a_prefix_outside_the_allowed_shape(prefix):
     with pytest.raises(ValueError) as info:
         check_state_prefix(prefix)
 
@@ -236,7 +236,7 @@ def test_check_key_prefix_refuses_a_prefix_outside_the_allowed_shape(prefix):
 
 
 @pytest.mark.parametrize('prefix', ['drakkar', 'ops/fleet', 'A_b-c.d/e', '..x', 'a/...', 'v1.2/x..'])
-def test_check_key_prefix_accepts_a_prefix_inside_the_allowed_shape(prefix):
+def test_check_state_prefix_accepts_a_prefix_inside_the_allowed_shape(prefix):
     check_state_prefix(prefix)
 
 

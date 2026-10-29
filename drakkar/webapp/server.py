@@ -130,8 +130,8 @@ _SEMAPHORE_ACQUIRE_PROBE_SECONDS = 0.001
 # HTTP transport limits. Uvicorn sets none of these by default, so a
 # client that dribbled bytes — or simply opened connections and left them —
 # could pin connections, tasks and memory in the process that also runs the
-# pipeline. Values mirror ``internal/webapp/server.go`` exactly, so a mixed
-# fleet behaves the same.
+# pipeline. The same values are used on every worker of a fleet, so all of
+# them behave alike.
 #
 # Constants rather than config: there is nothing here for an operator to
 # trade off, and the one dimension that IS deployment-specific — how large
@@ -288,7 +288,7 @@ class WebApp:
             port=self._config.port,
             path=self._config.path,
             clients_count=len(self._config.clients),
-            sinks_enabled=self._config.deliver_to_sinks,
+            deliver_to_sinks=self._config.deliver_to_sinks,
         )
         if unauth:
             # Emit a distinct warning when every

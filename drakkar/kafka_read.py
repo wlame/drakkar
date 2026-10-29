@@ -106,7 +106,7 @@ class AliasTarget:
 # name that was never registered).
 _DISABLED_ALIAS_REASONS: dict[str, str] = {
     'source': 'the Kafka source is disabled',
-    'dlq': 'the DLQ is disabled (set dlq.enabled and dlq.topic)',
+    'dlq': 'the DLQ is disabled (set dlq.enabled, and dlq.topic when the Kafka source is off)',
 }
 
 # The alias names the framework owns. Reserved whether or not the source and
@@ -161,7 +161,7 @@ def build_alias_table(config: DrakkarConfig) -> dict[str, AliasTarget]:
                 'the sink still delivers, but it is not readable under this alias',
             )
             continue
-        sink_connection = config.connections.kafka[sink.connection]
+        sink_connection = config.declared_connection(f'sinks.kafka.{name}.connection', 'kafka', sink.connection)
         table[name] = AliasTarget(
             alias=name,
             kind='sink',

@@ -58,12 +58,14 @@ import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import structlog
 from confluent_kafka import Producer
 
 from drakkar.config import load_config
+from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 from drakkar.sinks.dlq import DEFAULT_FLUSH_TIMEOUT_SECONDS, DLQEntry, read_dlq_entries
 from drakkar.sinks.dlq_record import Header
 from drakkar.sinks.kafka_delivery import (
@@ -199,12 +201,23 @@ def _entry_selected(entry: DLQEntry, *, pattern: str, stage: str | None) -> bool
     return _entry_matches_filter(entry, pattern)
 
 
-def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
-    """Resolve (topic, brokers) for the DLQ reader from a Drakkar config file.
+@dataclass(frozen=True)
+class DlqCoordinates:
+    """Where the DLQ lives and how to reach it: the topic and the settings of its connection."""
+
+    topic: str
+    brokers: str
+    security: KafkaSecurityConfig
+    client_config: Mapping[str, str]
+
+
+def _resolve_dlq_coordinates(config_path: str) -> DlqCoordinates:
+    """Resolve the DLQ topic and its connection from a Drakkar config file.
 
     Applies the same fallback rules the runtime framework uses:
       - topic: ``dlq.topic`` when set, else ``{sources.kafka.topic}_dlq``
-      - brokers: the ``brokers`` of the connection ``dlq.connection`` names
+      - brokers and security: those of the connection ``dlq.connection`` names
+      - client config: that connection's, then ``dlq.client_config`` on top
     """
     cfg = load_config(config_path)
     connection = cfg.dlq_connection
@@ -214,7 +227,12 @@ def _resolve_dlq_coordinates(config_path: str) -> tuple[str, str]:
         )
     if not connection.brokers:
         raise ValueError(f'cannot derive DLQ brokers: connections.kafka.{cfg.dlq.connection}.brokers is empty')
-    return cfg.resolved_dlq_topic, connection.brokers
+    return DlqCoordinates(
+        topic=cfg.resolved_dlq_topic,
+        brokers=connection.brokers,
+        security=connection.security,
+        client_config=connection.client_config_with(cfg.dlq.client_config),
+    )
 
 
 class ReplayPublisher:
@@ -287,6 +305,9 @@ async def run(
     stats: ReplayStats | None = None,
     producer: Producer | None = None,
     flush_timeout_seconds: float = DEFAULT_FLUSH_TIMEOUT_SECONDS,
+    dlq_security: KafkaSecurityConfig | None = None,
+    dlq_client_config: Mapping[str, str] | None = None,
+    target_uses_dlq_connection: bool = True,
 ) -> ReplayStats:
     """Drive the actual read-and-republish loop.
 
@@ -294,6 +315,11 @@ async def run(
     iterator and a fake producer without going through argparse / config
     loading. Tests inject ``producer``; in the real CLI path it is built
     here from ``target_brokers``.
+
+    ``dlq_security`` and ``dlq_client_config`` are the settings of the DLQ's
+    connection. They go to the reader, and to the producer too while
+    ``target_uses_dlq_connection`` is true (the target is the DLQ's own
+    cluster): credentials of one cluster are not sent to another.
     """
     stats = stats or ReplayStats()
     stop_requested = False
@@ -321,11 +347,23 @@ async def run(
             raise ValueError('--target-topic is required unless --dry-run is set.')
         publish_topic = target_topic
         if producer is None:
-            producer = Producer({'bootstrap.servers': target_brokers})
+            producer = Producer(
+                merge_client_config(
+                    {'bootstrap.servers': target_brokers},
+                    (dlq_security if target_uses_dlq_connection else None) or KafkaSecurityConfig(),
+                    dlq_client_config if target_uses_dlq_connection else None,
+                )
+            )
         publisher = ReplayPublisher(producer, flush_timeout_seconds=flush_timeout_seconds)
 
     try:
-        async for entry in read_dlq_entries(topic=dlq_topic, brokers=dlq_brokers, limit=limit):
+        async for entry in read_dlq_entries(
+            topic=dlq_topic,
+            brokers=dlq_brokers,
+            limit=limit,
+            security=dlq_security,
+            client_config=dlq_client_config,
+        ):
             if stop_requested:
                 break
             stats.read += 1
@@ -421,19 +459,19 @@ async def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        dlq_topic, dlq_brokers = _resolve_dlq_coordinates(args.dlq_config)
+        dlq = _resolve_dlq_coordinates(args.dlq_config)
     except (FileNotFoundError, ValueError) as exc:
         print(f'config error: {exc}', file=sys.stderr)
         return 2
 
-    target_brokers = args.target_brokers or dlq_brokers
+    target_brokers = args.target_brokers or dlq.brokers
 
     if not args.dry_run and not args.target_topic:
         print('--target-topic is required unless --dry-run is set.', file=sys.stderr)
         return 2
 
     print(
-        f'reading dlq topic={dlq_topic!r} brokers={dlq_brokers!r} '
+        f'reading dlq topic={dlq.topic!r} brokers={dlq.brokers!r} '
         f'target={args.target_topic!r} dry_run={args.dry_run} '
         f'limit={args.limit} stage={args.stage!r} filter={args.filter!r}',
         file=sys.stderr,
@@ -442,8 +480,11 @@ async def main(argv: list[str] | None = None) -> int:
     stats = ReplayStats()
     try:
         await run(
-            dlq_topic=dlq_topic,
-            dlq_brokers=dlq_brokers,
+            dlq_topic=dlq.topic,
+            dlq_brokers=dlq.brokers,
+            dlq_security=dlq.security,
+            dlq_client_config=dlq.client_config,
+            target_uses_dlq_connection=target_brokers == dlq.brokers,
             target_topic=args.target_topic,
             target_brokers=target_brokers,
             limit=args.limit,

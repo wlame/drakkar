@@ -17,6 +17,7 @@ from drakkar.config import (
     ConsulConnectionConfig,
     DrakkarConfig,
     KafkaConnectionConfig,
+    KafkaSinkConfig,
     PostgresConnectionConfig,
     RedisConnectionConfig,
     deep_merge,
@@ -448,3 +449,25 @@ def test_a_connection_client_config_gives_way_to_the_consumer_on_a_shared_key():
     connection = KafkaConnectionConfig(client_config={'acks': '1', 'linger.ms': '5'})
 
     assert connection.client_config_with({'acks': 'all'}) == {'acks': 'all', 'linger.ms': '5'}
+
+
+def test_a_dlq_topic_set_after_load_on_an_http_only_worker_names_the_missing_connection(load):
+    """A hook may set ``dlq.topic`` on a worker that declared no Kafka connection; the read fails like the load."""
+    config = load({'sources': {'kafka': {'enabled': False}, 'http': {'enabled': True}}})
+    config.connections.kafka.clear()
+    assert config.dlq_connection is None
+
+    config.dlq.topic = 'named-dlq'
+
+    with pytest.raises(ValueError, match=re.escape("dlq.connection 'main' is not defined under connections.kafka")):
+        _ = config.dlq_connection
+
+
+def test_a_sink_added_after_load_names_the_missing_connection(load):
+    """A sink a hook adds on an undeclared connection fails with the path of its ``connection`` key."""
+    config = load()
+    config.sinks.kafka['results'] = KafkaSinkConfig(topic='out', connection='other')
+    app = DrakkarApp(handler=PlainHandler(), config=config)
+
+    with pytest.raises(ValueError, match=re.escape("sinks.kafka.results.connection 'other' is not defined")):
+        app._build_sinks()

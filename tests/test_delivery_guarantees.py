@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel as BM
+from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
 from drakkar.config import (
@@ -243,6 +244,33 @@ async def test_policy_dlq_send_failure_drop_mode_commits_and_counts(echo_pool):
 
     assert not proc.offset_tracker.has_pending()
     assert dlq_dropped_payloads.labels(partition='0')._value.get() == before + 1
+
+
+async def test_policy_dlq_with_the_dlq_off_logs_that_no_write_was_made(echo_pool):
+    """With no DLQ writer wired (``dlq.enabled`` off) the drop log says the message was not written, not that a write failed."""
+    handler = TypedHandler()
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+        on_parse_error='dlq',
+        dlq_send=None,
+    )
+    proc.enqueue(make_msg(offset=5, value=b'broken'))
+    with capture_logs() as logs:
+        proc.start()
+        await wait_for(lambda: any(c[1] == 6 for c in committed))
+        await proc.stop()
+
+    [dropped] = [line for line in logs if line['event'] == 'dlq_failure_payloads_dropped']
+    assert dropped['reason'] == 'on_parse_error=dlq but the message was not written to the DLQ'
 
 
 async def test_policy_raise_stops_partition_without_commit(echo_pool):

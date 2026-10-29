@@ -4869,55 +4869,6 @@ async def test_readyz_with_auth_token_configured_still_accessible(debug_config, 
 
 
 # ---------------------------------------------------------------------------
-# Kafka-UI deep-link builder
-# ---------------------------------------------------------------------------
-
-
-class TestKafkaUiMessageUrl:
-    """``UIDeps.kafka_ui_message_url`` — feature-toggle + URL shape."""
-
-    def _make_deps(self, mock_recorder, mock_app) -> UIDeps:
-        cfg = make_ui_config(enabled=True, port=8080)
-        return UIDeps(
-            config=cfg,
-            recorder=mock_recorder,
-            drakkar_app=mock_app,
-        )
-
-    def test_returns_empty_string_when_kafka_ui_not_configured(self, mock_recorder, mock_app):
-        """Missing ui_url/ui_cluster_name acts as a feature toggle — ''."""
-        deps = self._make_deps(mock_recorder, mock_app)
-        assert deps.kafka_ui_message_url('topic-a', 0, 42) == ''
-
-    def test_returns_empty_string_with_the_kafka_source_off(self, mock_recorder, mock_app):
-        """The deep links belong to the source's connection, and an HTTP-only worker may declare none."""
-        mock_app._config = DrakkarConfig(sources={'http': {'enabled': True}})
-        deps = self._make_deps(mock_recorder, mock_app)
-
-        assert deps.kafka_ui_message_url('topic-a', 0, 42) == ''
-
-    def test_builds_seek_url_with_encoded_cluster_and_topic(self, mock_recorder, mock_app):
-        """Configured Kafka-UI base + cluster produce the seekTo deep link,
-        URL-encoding the cluster name and topic."""
-        mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui.internal:8080/'
-        mock_app._config.connections.kafka['main'].ui_cluster_name = 'prod cluster'
-        deps = self._make_deps(mock_recorder, mock_app)
-
-        url = deps.kafka_ui_message_url('events.raw', 3, 1200)
-
-        assert url == (
-            'http://kafka-ui.internal:8080/ui/clusters/prod%20cluster/all-topics/'
-            'events.raw/messages?seekType=OFFSET&seekTo=3%3A%3A1200&limit=1'
-        )
-
-    def test_returns_empty_string_for_empty_topic(self, mock_recorder, mock_app):
-        mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui.internal:8080'
-        mock_app._config.connections.kafka['main'].ui_cluster_name = 'prod'
-        deps = self._make_deps(mock_recorder, mock_app)
-        assert deps.kafka_ui_message_url('', 0, 0) == ''
-
-
-# ---------------------------------------------------------------------------
 # dispatch_bounded: main-loop timeout degrades instead of hanging
 # ---------------------------------------------------------------------------
 
