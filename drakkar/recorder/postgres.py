@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from drakkar.config.connections import PostgresConnectionConfig
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.providers.postgres import recorder_table_name
-from drakkar.recorder.schema import EVENT_COLUMNS
+from drakkar.recorder.schema import EVENT_COLUMNS, EventType
 
 # What a NUL character becomes: Postgres ``text`` refuses U+0000, and
 # subprocess output can hold it.
@@ -40,7 +40,18 @@ BIGINT_MAX = 2**63 - 1
 # Positions in a row tuple (``EVENT_COLUMNS`` order, the id first).
 _EVENT_INDEX = EVENT_COLUMNS.index('event')
 _METADATA_INDEX = EVENT_COLUMNS.index('metadata')
-_OUTPUT_INDEXES = frozenset((EVENT_COLUMNS.index('stdout'), EVENT_COLUMNS.index('stderr')))
+_STDOUT_INDEX = EVENT_COLUMNS.index('stdout')
+_STDERR_INDEX = EVENT_COLUMNS.index('stderr')
+_OUTPUT_INDEXES = frozenset((_STDOUT_INDEX, _STDERR_INDEX))
+
+# What joins the head and the tail of a cut value; ``removed`` is the number
+# of UTF-8 bytes left out.
+OUTPUT_CUT_MARKER = '\n...[cut {removed} bytes]...\n'
+# The UTF-8 codec of the cut. ``surrogatepass`` keeps a lone surrogate as it
+# is, so a value the client cannot encode still fails its COPY as before
+# instead of failing the record builder.
+_UTF8 = 'utf-8'
+_SURROGATE_PASS = 'surrogatepass'
 
 QueuedPair = tuple[int, tuple]
 
@@ -51,7 +62,9 @@ class RecorderPostgresSettings:
 
     ``connection_name`` is the entry under ``connections.postgres`` and
     ``connection`` its settings; ``queue_max_bytes`` is
-    ``recorder.postgres.max_queue``.
+    ``recorder.postgres.max_queue``. ``max_output`` (bytes of one stdout or
+    stderr value) and ``max_size`` (bytes of the whole table) are 0 for no
+    limit.
     """
 
     connection_name: str
@@ -59,6 +72,8 @@ class RecorderPostgresSettings:
     table_prefix: str
     retention_hours: int
     store_completed_output: bool
+    max_output: int
+    max_size: int
     batch_rows: int
     queue_max_bytes: int
     resilience: ResilienceConfig
@@ -127,20 +142,62 @@ def _plain_text(value: str) -> str:
     return str.replace(value, NUL_CHARACTER, REPLACEMENT_CHARACTER)
 
 
-def build_record(row: tuple, *, cluster: str, worker: str, instance: str, store_completed_output: bool) -> tuple:
+def cut_output(text: str, max_output: int) -> str:
+    """Return ``text`` cut to at most ``max_output`` UTF-8 bytes of its own, or as it is.
+
+    A value of more bytes keeps a head of at most ``max_output // 2`` bytes
+    and a tail of at most the rest of the limit, each ending or starting at
+    a character boundary, joined by :data:`OUTPUT_CUT_MARKER` with the number
+    of bytes removed. ``0`` is no limit. The marker is not counted in the
+    limit.
+    """
+    # Every character takes at least one byte and at most four, so the
+    # length alone settles most values without encoding them.
+    if max_output == 0 or len(text) * 4 <= max_output:
+        return text
+    encoded = text.encode(_UTF8, _SURROGATE_PASS)
+    if len(encoded) <= max_output:
+        return text
+    head_budget = max_output // 2
+    tail_budget = max_output - head_budget
+    # ``ignore`` drops only the partial character at the cut edge: the bytes
+    # in between are whole characters.
+    head = encoded[:head_budget].decode(_UTF8, 'ignore')
+    tail = encoded[len(encoded) - tail_budget :].decode(_UTF8, 'ignore')
+    removed = len(encoded) - len(head.encode(_UTF8, _SURROGATE_PASS)) - len(tail.encode(_UTF8, _SURROGATE_PASS))
+    return head + OUTPUT_CUT_MARKER.format(removed=removed) + tail
+
+
+def _output_value(value: str | None, *, keep: bool, max_output: int) -> str | None:
+    """The ``stdout`` or ``stderr`` value written: ``None`` unless kept, else plain text cut to ``max_output``."""
+    if not keep or value is None:
+        return None
+    return cut_output(_plain_text(value), max_output)
+
+
+def build_record(
+    row: tuple, *, cluster: str, worker: str, instance: str, store_completed_output: bool, max_output: int
+) -> tuple:
     """Return the 24 values of one row in ``COPY_COLUMNS`` order.
 
     The writer identity comes first, then the 20 event columns as they are
     (every text value as plain text with its NULs replaced), then the trace
-    offsets. Without ``store_completed_output`` the ``stdout`` and ``stderr`` values
-    are ``None``; ``stdout_size`` and ``metadata`` keep their values.
+    offsets. Without ``store_completed_output`` the ``stdout`` and ``stderr``
+    values are ``None``, except the ``stderr`` of a ``task_failed`` row. A
+    written ``stdout`` or ``stderr`` is cut by :func:`cut_output` to
+    ``max_output``. No other column is ever cut: ``stdout_size`` and
+    ``metadata`` keep their values.
     """
+    # The two output columns are set below, so their texts are replaced and measured once.
     columns = [
-        None
-        if (not store_completed_output and index in _OUTPUT_INDEXES)
-        else (_plain_text(value) if isinstance(value, str) else value)
+        None if index in _OUTPUT_INDEXES else (_plain_text(value) if isinstance(value, str) else value)
         for index, value in enumerate(row)
     ]
+    # A failed task keeps its stderr even without ``store_completed_output``:
+    # it is the one text that says why the task failed.
+    keeps_stderr = store_completed_output or row[_EVENT_INDEX] == EventType.TASK_FAILED
+    columns[_STDOUT_INDEX] = _output_value(row[_STDOUT_INDEX], keep=store_completed_output, max_output=max_output)
+    columns[_STDERR_INDEX] = _output_value(row[_STDERR_INDEX], keep=keeps_stderr, max_output=max_output)
     trace_offsets = trace_offsets_from_metadata(row[_EVENT_INDEX], row[_METADATA_INDEX])
     return (_plain_text(cluster), _plain_text(worker), _plain_text(instance), *columns, trace_offsets)
 

@@ -37,7 +37,8 @@ PERSISTENCE_NONE: Persistence = 'none'
 PERSISTENCE_SQLITE: Persistence = 'sqlite'
 PERSISTENCE_POSTGRES: Persistence = 'postgres'
 
-MIB = 1024 * 1024
+KIB = 1024
+MIB = 1024 * KIB
 HOURS_PER_DAY = 24
 SECONDS_PER_HOUR = 3600
 
@@ -49,6 +50,14 @@ TABLE_PREFIX_MESSAGE = (
     "recorder.postgres.table_prefix '{value}' must be empty, or a lower-case letter followed by "
     'at most 23 lower-case letters, digits or underscores'
 )
+
+# The least non-zero limits of one output value and of the whole Postgres
+# table. Below 1KiB a cut value would be mostly marker; below 64MiB the size
+# cap would drop hours that hold almost nothing.
+MIN_MAX_OUTPUT_BYTES = KIB
+MIN_MAX_SIZE_BYTES = 64 * MIB
+MAX_OUTPUT_MESSAGE = 'recorder.postgres.max_output must be 0 or at least 1KiB'
+MAX_SIZE_MESSAGE = 'recorder.postgres.max_size must be 0 or at least 64MiB'
 
 # Archives are the only recorder artifact nothing else reclaims, so the
 # default has to be a horizon rather than "forever": a worker left alone
@@ -388,17 +397,25 @@ class RecorderPostgresConfig(ConfigModel):
     )
     store_completed_output: bool = Field(
         default=False,
-        description='Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL.',
+        description=(
+            'Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL, '
+            'except the stderr of a task_failed row, which is always kept.'
+        ),
     )
     max_output: ByteSize = Field(
         default=65536,
-        ge=0,
-        description='Longest stdout or stderr value written to the table. 0 = no limit.',
+        description=(
+            'Longest stdout or stderr value written to the table, in UTF-8 bytes: 0 = no limit, or at least 1KiB. '
+            'A longer value keeps its first and last half, joined by a line that says how many bytes were cut.'
+        ),
     )
     max_size: ByteSize = Field(
         default=0,
-        ge=0,
-        description='Largest total size of the table. 0 = no limit.',
+        description=(
+            'Largest total size of the table: 0 = no limit, or at least 64MiB. The partition upkeep drops the '
+            'oldest hours until the table is under it, but never the current hour or later ones. The worker that '
+            'runs the upkeep applies its own value, so workers that share a table should use one value.'
+        ),
     )
     batch_rows: int = Field(
         default=5000,
@@ -419,6 +436,22 @@ class RecorderPostgresConfig(ConfigModel):
         default_factory=ResilienceConfig,
         description='Timeout, retries, backoff and breaker of the recorder calls to Postgres.',
     )
+
+    @field_validator('max_output')
+    @classmethod
+    def _check_max_output(cls, value: int) -> int:
+        """Refuse a limit between 0 and 1KiB with the pinned message."""
+        if value != 0 and value < MIN_MAX_OUTPUT_BYTES:
+            raise ValueError(MAX_OUTPUT_MESSAGE)
+        return value
+
+    @field_validator('max_size')
+    @classmethod
+    def _check_max_size(cls, value: int) -> int:
+        """Refuse a size between 0 and 64MiB with the pinned message."""
+        if value != 0 and value < MIN_MAX_SIZE_BYTES:
+            raise ValueError(MAX_SIZE_MESSAGE)
+        return value
 
     @field_validator('table_prefix')
     @classmethod

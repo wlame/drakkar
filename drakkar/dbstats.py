@@ -39,7 +39,7 @@ BUSY_TIMEOUT_MS = 5000
 class OwnFileStats:
     """In-memory statistics of the worker's own files, refreshed incrementally.
 
-    One instance per UI server; requests run :meth:`measure` from worker
+    One instance per API server; requests run :meth:`measure` from worker
     threads, so the cache is guarded by a lock.
     """
 

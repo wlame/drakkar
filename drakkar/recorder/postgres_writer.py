@@ -11,7 +11,10 @@ One run (:meth:`PostgresWriter.run_once`):
 
 1. start when not started yet: open the pool, then make the table available;
    a failure ends the run and the next run tries again;
-2. the partition upkeep when it is due; its outcome never ends the run;
+2. the partition upkeep when it is due; its outcome never ends the run. It
+   creates the partitions ahead, drops the hours past the stored retention,
+   and with ``recorder.postgres.max_size`` above 0 drops the oldest hours
+   before the current one while the table is larger than that;
 3. until the slot and the queue are empty: form a chunk into the slot when it
    is empty, and COPY it. A written chunk empties the slot and the loop goes
    on, so a backlog drains as fast as Postgres takes it; any other outcome
@@ -37,7 +40,7 @@ import concurrent.futures
 import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -45,7 +48,12 @@ import asyncpg
 import structlog
 
 from drakkar.config.connections import PostgresConnectionConfig
-from drakkar.metrics import recorder_postgres_dropped_rows, recorder_postgres_queue_rows, recorder_postgres_rows_written
+from drakkar.metrics import (
+    recorder_postgres_dropped_rows,
+    recorder_postgres_partitions_dropped,
+    recorder_postgres_queue_rows,
+    recorder_postgres_rows_written,
+)
 from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.postgres import (
     COPY_COLUMNS,
@@ -84,6 +92,8 @@ LOG_CATEGORY = 'recorder'
 DROP_REASON_REJECTED = 'rejected'
 DROP_REASON_NO_PARTITION = 'no_partition'
 DROP_REASON_SHUTDOWN = 'shutdown'
+PARTITION_DROP_REASON_RETENTION = 'retention'
+PARTITION_DROP_REASON_SIZE = 'size'
 COPY_REJECTED_LOG_KEY = 'copy_rejected'
 # How long the thread's loop gets to finish the coroutines it cancels when it
 # ends. Shorter than the least wait of a stop for the thread, so a thread that
@@ -115,13 +125,19 @@ PARTITIONS_BEHIND_HOURS = 1
 
 @dataclass(frozen=True)
 class UpkeepActions:
-    """What one upkeep changes: the partitions to create (name, from, to) and the ones to drop, each ascending."""
+    """What one upkeep changes, each list ascending.
+
+    ``create`` holds (name, from, to) of the partitions to create, ``drop``
+    the partitions past the stored retention, and ``drop_for_size`` the
+    partitions dropped to bring the table under ``max_size``.
+    """
 
     create: list[tuple[str, int, int]]
     drop: list[str]
+    drop_for_size: list[str] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.create or self.drop)
+        return bool(self.create or self.drop or self.drop_for_size)
 
 
 def upkeep_actions(table: str, now: float, stored_retention: int | None, listed: Sequence[str]) -> UpkeepActions:
@@ -147,6 +163,43 @@ def upkeep_actions(table: str, now: float, stored_retention: int | None, listed:
         partition_name(table, hour) for hour in sorted(listed_hours) if (hour + 1) * SECONDS_PER_HOUR <= expired_before
     ]
     return UpkeepActions(create=create, drop=drop)
+
+
+def measured_partitions(table: str, listed: Sequence[str], dropped: Sequence[str]) -> list[str]:
+    """Return the listed partitions of ``table`` that the retention keeps, ascending: the names the size cap measures.
+
+    A listed name that is not a partition name of ``table`` is not measured,
+    so a table of another shape never makes this one drop its history.
+    """
+    gone = set(dropped)
+    return sorted(name for name in listed if parse_partition_hour(table, name) is not None and name not in gone)
+
+
+def size_drops(table: str, now: float, measured: Sequence[str], sizes: dict[str, int], max_size: int) -> list[str]:
+    """Return the oldest partitions to drop, ascending, so the table gets to at most ``max_size`` bytes.
+
+    ``sizes`` is the answer of ``partition_sizes`` for ``measured``; a name
+    it does not hold counts as 0. While the total of ``measured`` is above
+    ``max_size``, the oldest hour goes. The hour of ``now`` and later hours
+    are never dropped, so the cap can leave the table above ``max_size``.
+    ``max_size`` 0 drops nothing.
+    """
+    if max_size == 0:
+        return []
+    current_hour = int(now // SECONDS_PER_HOUR)
+    total = sum(sizes.get(name, 0) for name in measured)
+    candidates = sorted(
+        (hour, name)
+        for name in measured
+        if (hour := parse_partition_hour(table, name)) is not None and hour < current_hour
+    )
+    drop: list[str] = []
+    for _, name in candidates:
+        if total <= max_size:
+            break
+        drop.append(name)
+        total -= sizes.get(name, 0)
+    return drop
 
 
 class PostgresLoopThread:
@@ -334,12 +387,18 @@ class PostgresWriter:
         result = await self._caller.call('partitions', self._upkeep_attempt)
         if result.ok and result.value:
             actions: UpkeepActions = result.value
+            # Counted only here, after the commit: a rolled-back upkeep dropped nothing.
+            recorder_postgres_partitions_dropped.labels(reason=PARTITION_DROP_REASON_RETENTION).inc(len(actions.drop))
+            recorder_postgres_partitions_dropped.labels(reason=PARTITION_DROP_REASON_SIZE).inc(
+                len(actions.drop_for_size)
+            )
             await logger.ainfo(
                 'recorder_postgres_partitions_changed',
                 category=LOG_CATEGORY,
                 table=self._settings.qualified_table,
                 created=sorted(name for name, _, _ in actions.create),
                 dropped=sorted(actions.drop),
+                dropped_for_size=sorted(actions.drop_for_size),
             )
 
     async def _upkeep_attempt(self) -> UpkeepActions | None:
@@ -347,9 +406,10 @@ class PostgresWriter:
 
         The try-lock is a transaction lock, so the loser only commits. The
         server's clock sets the hours, so every writer of the table agrees on
-        them whatever its own clock says. Partitions are dropped only by the
-        retention stored in the table comment, never by this worker's own
-        setting.
+        them whatever its own clock says. The retention drops follow the
+        retention stored in the table comment, never this worker's own
+        setting; the size drops follow this worker's own ``max_size``, so the
+        workers that share a table should give it one value.
         """
         try:
             return await self._upkeep_statements()
@@ -385,13 +445,26 @@ class PostgresWriter:
                         to=to,
                     )
                 )
-            for name in actions.drop:
-                await conn.execute(
-                    render_recorder(
-                        PARTITION_DDL_TEMPLATES['drop'], schema=settings.schema, table=settings.table, partition=name
-                    )
+            await self._drop_partitions(conn, actions.drop)
+            if settings.max_size > 0:
+                measured = measured_partitions(settings.table, listed, actions.drop)
+                rows = await conn.fetch(RECORDER_STATEMENT_TEMPLATES['partition_sizes'], settings.schema, measured)
+                sizes = {row[0]: row[1] for row in rows}
+                actions = replace(
+                    actions, drop_for_size=size_drops(settings.table, now, measured, sizes, settings.max_size)
                 )
+                await self._drop_partitions(conn, actions.drop_for_size)
         return actions
+
+    async def _drop_partitions(self, conn: Any, names: Sequence[str]) -> None:
+        """Drop the partitions ``names`` in order, inside the upkeep's transaction."""
+        settings = self._settings
+        for name in names:
+            await conn.execute(
+                render_recorder(
+                    PARTITION_DDL_TEMPLATES['drop'], schema=settings.schema, table=settings.table, partition=name
+                )
+            )
 
     def _restart_when_table_missing(self, exc: asyncpg.PostgresError) -> None:
         """Make the next run start the writer again after a missing-table error, so the table is made available."""
@@ -427,6 +500,7 @@ class PostgresWriter:
                 worker=self._worker,
                 instance=self._instance,
                 store_completed_output=self._settings.store_completed_output,
+                max_output=self._settings.max_output,
             )
             for _, row in pairs
         ]

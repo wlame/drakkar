@@ -235,6 +235,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Output and size limits for the recorder table in Postgres.** A `task_failed` row
+  always keeps its `stderr`, also with `recorder.postgres.store_completed_output: false`.
+  `recorder.postgres.max_output` (default `64KiB`, `0` or at least `1KiB`) cuts each
+  `stdout` and `stderr` value to its first and last half, at character boundaries, joined
+  by `...[cut <n> bytes]...`; `metadata` is never cut. `recorder.postgres.max_size`
+  (default `0`, `0` or at least `64MiB`) makes the partition upkeep drop the oldest hours,
+  never the current one, while the table is larger; the upkeep holder's own value applies.
+  New metric `drakkar_recorder_postgres_partitions_dropped_total{reason}` (`retention`,
+  `size`); `recorder_postgres_partitions_changed` gains `dropped_for_size`.
 - **Failure policy, retry budget and dependencies per sink.** Every sink
   instance takes `on_failure` (`dlq` or `skip`, default
   `dlq`), `max_retries` (0 to 10, default 2) and `depends_on` (a list of

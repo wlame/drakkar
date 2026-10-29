@@ -62,13 +62,22 @@ async def _no_sleep(_seconds: float) -> None:
     return None
 
 
-def _settings(*, manage_schema: bool = True, table_prefix: str = '', pool_max: int = 4) -> RecorderPostgresSettings:
+def _settings(
+    *,
+    manage_schema: bool = True,
+    table_prefix: str = '',
+    pool_max: int = 4,
+    store_completed_output: bool = False,
+    max_output: int = 0,
+) -> RecorderPostgresSettings:
     return RecorderPostgresSettings(
         connection_name='main',
         connection=PostgresConnectionConfig(dsn=DSN, manage_schema=manage_schema, pool_min=2, pool_max=pool_max),
         table_prefix=table_prefix,
         retention_hours=6,
-        store_completed_output=False,
+        store_completed_output=store_completed_output,
+        max_output=max_output,
+        max_size=0,
         batch_rows=BATCH_ROWS,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -238,6 +247,35 @@ async def test_written_chunk_counts_rows_and_a_backlog_drains_in_one_run():
     assert fake.copied_ids() == list(range(1, 251))
     assert _counter(recorder_postgres_rows_written) == written_before + 250
     assert _counter(recorder_postgres_queue_rows) == 0
+
+
+@pytest.mark.parametrize(
+    ('store_completed_output', 'expected_stdout', 'expected_stderr'),
+    [
+        (True, 'a' * 512 + '\n...[cut 1488 bytes]...\n' + 'z' * 512, 'boom'),
+        (False, None, 'boom'),
+    ],
+    ids=['with_completed_output', 'without_completed_output'],
+)
+async def test_written_records_follow_the_output_settings(store_completed_output, expected_stdout, expected_stderr):
+    fake = RecorderFakePostgres()
+    writer = _writer(fake, store_completed_output=store_completed_output, max_output=1024)
+    values = {
+        'id': 1,
+        'ts': 1.5,
+        'dt': 'dt',
+        'event': 'task_failed',
+        'origin': 'kafka',
+        'stdout': 'a' * 1000 + 'z' * 1512,
+        'stderr': 'boom',
+    }
+    writer._queue.append([(1, tuple(values.get(column) for column in EVENT_COLUMNS))])
+
+    await writer.run_once()
+
+    (record,) = fake.copied
+    by_column = dict(zip(COPY_COLUMNS, record, strict=True))
+    assert (by_column['stdout'], by_column['stderr']) == (expected_stdout, expected_stderr)
 
 
 async def test_unique_violation_counts_as_written():

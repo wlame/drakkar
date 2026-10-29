@@ -138,7 +138,7 @@ class _LagWindow:
     """Per-second {max, avg} lag aggregates in a bounded ring buffer.
 
     Appends happen once per tick from the heartbeat task; reads come from
-    the UI server thread — everything is guarded by one uncontended lock
+    the API server thread — everything is guarded by one uncontended lock
     (a few ns per tick when nobody is reading). Deliberately NOT guarded
     by the event loop: the /runtime/health endpoint must stay readable
     from another thread while the loop itself is stalled.
@@ -634,7 +634,7 @@ class RuntimeHealthMonitor:
     def snapshot(self) -> dict[str, Any]:
         """Current state + lag history for the /runtime/health endpoint.
 
-        Thread-safe and loop-free on purpose: it must answer from the UI
+        Thread-safe and loop-free on purpose: it must answer from the API
         server thread even while the event loop is stalled. ``unit_count``
         is therefore -1 here (counting tasks needs the loop); the census
         endpoint reports exact numbers when the loop is responsive.

@@ -169,6 +169,11 @@ RECORDER_STATEMENT_TEMPLATES: dict[str, str] = {
         'SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid '
         'WHERE i.inhparent = to_regclass($1) ORDER BY c.relname'
     ),
+    # $1 is the schema and $2 the partition names; a name with no table is not answered.
+    'partition_sizes': (
+        'SELECT c.relname, pg_total_relation_size(c.oid) FROM pg_class c '
+        'JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = ANY($2::text[])'
+    ),
     # Three branches, each served by its own index, joined by UNION ALL; the
     # key-only DISTINCT ON removes a row two branches found without hashing the
     # output texts. No join back to the table: with many partitions that join

@@ -805,7 +805,7 @@ recorder_memory_write_failures = Counter(
 )
 
 # The recorder Postgres table (persistence ``postgres``): the P queue, the
-# rows stage P wrote, and the rows that never got there.
+# rows stage P wrote, the rows that never got there, and the dropped partitions.
 recorder_postgres_queue_rows = Gauge(
     'drakkar_recorder_postgres_queue_rows',
     'Rows waiting to be written to the recorder Postgres table',
@@ -819,6 +819,15 @@ recorder_postgres_rows_written = Counter(
 recorder_postgres_dropped_rows = Counter(
     'drakkar_recorder_postgres_dropped_rows_total',
     'Rows that never reached the recorder Postgres table, by reason',
+    ['reason'],
+)
+
+# Partitions the upkeep dropped: ``retention`` for an hour past the stored
+# retention, ``size`` for the oldest hours while the table is above
+# ``recorder.postgres.max_size``.
+recorder_postgres_partitions_dropped = Counter(
+    'drakkar_recorder_postgres_partitions_dropped_total',
+    'Recorder Postgres partitions dropped, by reason',
     ['reason'],
 )
 

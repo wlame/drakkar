@@ -1410,6 +1410,8 @@ def _postgres_settings() -> RecorderPostgresSettings:
         table_prefix='',
         retention_hours=6,
         store_completed_output=False,
+        max_output=0,
+        max_size=0,
         batch_rows=100,
         queue_max_bytes=128 * memstore.MIB,
         resilience=ResilienceConfig(),

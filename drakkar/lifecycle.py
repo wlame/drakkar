@@ -162,6 +162,8 @@ def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSetting
         table_prefix=section.table_prefix,
         retention_hours=section.initial_retention,
         store_completed_output=section.store_completed_output,
+        max_output=section.max_output,
+        max_size=section.max_size,
         batch_rows=section.batch_rows,
         queue_max_bytes=section.max_queue,
         resilience=section.resilience,

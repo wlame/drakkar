@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import RecorderConfig
+from drakkar.config import APIConfig, LoggingConfig, RecorderConfig, UIConfig
 from drakkar.config.recorder import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
@@ -146,9 +146,11 @@ _LAST_BREATH_REGISTERED = False
 # columns, 100k bind parameters, comfortably inside SQLite's limits.
 FLUSH_CHUNK_ROWS = 5_000
 
-# The constructor defaults of the values a worker reads from other config sections.
-DEFAULT_API_PORT = 8080
-DEFAULT_MIN_DURATION_MS = 500
+# The constructor defaults of the values a worker reads from other config
+# sections, taken from those sections' own defaults.
+DEFAULT_API_PORT: int = APIConfig.model_fields['port'].default
+DEFAULT_WS_MIN_DURATION_MS = round(UIConfig.model_fields['ws_min_duration'].default * 1000)
+DEFAULT_LOG_MIN_DURATION_MS = round(LoggingConfig.model_fields['min_task_duration'].default * 1000)
 # Resource samples without a recorder file, whose ``sqlite.state_interval`` paces them otherwise.
 HOST_SAMPLE_SECONDS = 10
 SECONDS_PER_HOUR = 3600
@@ -281,8 +283,8 @@ class EventRecorder(EventWriter):
         memory_enabled: bool = True,
         api_port: int = DEFAULT_API_PORT,
         api_public_url: str = '',
-        ws_min_duration_ms: int = DEFAULT_MIN_DURATION_MS,
-        log_min_duration_ms: int = DEFAULT_MIN_DURATION_MS,
+        ws_min_duration_ms: int = DEFAULT_WS_MIN_DURATION_MS,
+        log_min_duration_ms: int = DEFAULT_LOG_MIN_DURATION_MS,
         storage_dir: str = '',
         shared_dir: str = '',
         instance: str = '',

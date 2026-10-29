@@ -32,7 +32,7 @@ from drakkar.recorder.postgres import (
     row_text_bytes,
     trace_offsets_from_metadata,
 )
-from drakkar.recorder.schema import EVENT_COLUMNS
+from drakkar.recorder.schema import EVENT_COLUMNS, EventType
 from drakkar.recorder.writer import EventWriter
 from drakkar.webapp.models import WebRequestContext
 from tests.conftest import wait_for
@@ -58,6 +58,8 @@ def _settings(*, store_completed_output: bool = False, queue_max_bytes: int = 12
         table_prefix='',
         retention_hours=6,
         store_completed_output=store_completed_output,
+        max_output=0,
+        max_size=0,
         batch_rows=5000,
         queue_max_bytes=queue_max_bytes,
         resilience=ResilienceConfig(),
@@ -156,7 +158,7 @@ def _fail_memory_writes(monkeypatch, rec: EventRecorder, failures: dict[int, int
 def test_record_has_24_values_in_copy_column_order():
     row = _row(id=7, event='task_started', task_id='t1', metadata='{"source_offsets": [3]}', stdout_size=4)
 
-    record = build_record(row, cluster='', worker=WORKER, instance=INSTANCE, store_completed_output=True)
+    record = build_record(row, cluster='', worker=WORKER, instance=INSTANCE, store_completed_output=True, max_output=0)
 
     assert len(record) == len(COPY_COLUMNS) == 24
     by_column = dict(zip(COPY_COLUMNS, record, strict=True))
@@ -270,6 +272,7 @@ async def test_record_column_types_per_record_helper():
                 worker=WORKER,
                 instance=INSTANCE,
                 store_completed_output=True,
+                max_output=0,
             )
             wrong = {
                 column: type(value).__name__
@@ -283,22 +286,42 @@ async def test_record_column_types_per_record_helper():
 @pytest.mark.parametrize(('text', 'expected'), [(case['text'], case['expected']) for case in FIXTURE['text_cases']])
 def test_nul_becomes_replacement_character(text, expected):
     assert replace_nul(text) == expected
-    record = build_record(_row(args=text), cluster=text, worker=WORKER, instance=INSTANCE, store_completed_output=True)
+    record = build_record(
+        _row(args=text), cluster=text, worker=WORKER, instance=INSTANCE, store_completed_output=True, max_output=0
+    )
     assert record[0] == expected
     assert record[COPY_COLUMNS.index('args')] == expected
 
 
-def _output_row() -> tuple:
-    metadata = '{"stdin": "x", "duration": 1}'
-    return _row(event='task_complete', stdout='o\x00ut', stderr='err', stdout_size=4, metadata=metadata)
+def _output_row(event: str = EventType.TASK_COMPLETED, **fields) -> tuple:
+    values = {
+        'event': event,
+        'stdout': 'o\x00ut',
+        'stderr': 'err',
+        'stdout_size': 4,
+        'metadata': '{"stdin": "x", "duration": 1}',
+        **fields,
+    }
+    return _row(**values)
 
 
-def test_capture_output_off_nulls_only_stdout_and_stderr():
+def _output_record(row: tuple, *, store_completed_output: bool, max_output: int = 0) -> dict:
+    record = build_record(
+        row,
+        cluster=CLUSTER,
+        worker=WORKER,
+        instance=INSTANCE,
+        store_completed_output=store_completed_output,
+        max_output=max_output,
+    )
+    return dict(zip(COPY_COLUMNS, record, strict=True))
+
+
+def test_completed_row_drops_output_without_the_flag():
     row = _output_row()
 
-    record = build_record(row, cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_completed_output=False)
+    by_column = _output_record(row, store_completed_output=False)
 
-    by_column = dict(zip(COPY_COLUMNS, record, strict=True))
     assert (by_column['stdout'], by_column['stderr']) == (None, None)
     assert by_column['stdout_size'] == 4
     assert by_column['metadata'] == row[EVENT_COLUMNS.index('metadata')]
@@ -306,11 +329,61 @@ def test_capture_output_off_nulls_only_stdout_and_stderr():
     assert [by_column[column] for column in kept] == [row[EVENT_COLUMNS.index(column)] for column in kept]
 
 
-def test_capture_output_on_keeps_stdout_and_stderr():
-    record = build_record(_output_row(), cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_completed_output=True)
+def test_completed_row_keeps_output_with_the_flag():
+    by_column = _output_record(_output_row(), store_completed_output=True)
 
-    by_column = dict(zip(COPY_COLUMNS, record, strict=True))
-    assert (by_column['stdout'], by_column['stderr']) == ('o�ut', 'err')
+    assert (by_column['stdout'], by_column['stderr']) == ('o\ufffdut', 'err')
+
+
+def test_task_failed_row_keeps_stderr_without_completed_output():
+    by_column = _output_record(
+        _output_row(EventType.TASK_FAILED, stderr='Traceback\x00: boom'), store_completed_output=False
+    )
+
+    assert (by_column['stdout'], by_column['stderr']) == (None, 'Traceback\ufffd: boom')
+    assert by_column['stdout_size'] == 4
+
+
+def test_task_failed_stderr_is_cut_to_max_output_as_valid_utf8_with_the_exact_count():
+    stderr = 'é' * 1000
+    by_column = _output_record(
+        _output_row(EventType.TASK_FAILED, stderr=stderr), store_completed_output=False, max_output=1025
+    )
+
+    # 2000 bytes: a head of 512 bytes (256 characters) and a tail of 513
+    # bytes, of which only 512 hold whole characters.
+    assert by_column['stderr'] == 'é' * 256 + '\n...[cut 976 bytes]...\n' + 'é' * 256
+    assert by_column['stderr'].encode('utf-8').decode('utf-8') == by_column['stderr']
+
+
+@pytest.mark.parametrize(
+    'case', FIXTURE['output_cut_cases'], ids=[case['name'] for case in FIXTURE['output_cut_cases']]
+)
+@pytest.mark.parametrize('column', ['stdout', 'stderr'])
+def test_output_cut_cases(case, column):
+    by_column = _output_record(
+        _output_row(**{column: case['text']}), store_completed_output=True, max_output=case['max_output']
+    )
+
+    assert by_column[column] == case['expected']
+
+
+def test_output_of_one_kibibyte_keeps_half_from_each_end():
+    stdout = 'a' * 3000 + 'z' * 3000
+
+    by_column = _output_record(_output_row(stdout=stdout), store_completed_output=True, max_output=1024)
+
+    assert by_column['stdout'] == 'a' * 512 + '\n...[cut 4976 bytes]...\n' + 'z' * 512
+
+
+def test_metadata_is_never_cut():
+    metadata = json.dumps({'stdin': 'x' * 10_000, 'duration': 1})
+    args = 'y' * 10_000
+    row = _output_row(metadata=metadata, args=args)
+
+    by_column = _output_record(row, store_completed_output=True, max_output=1024)
+
+    assert (by_column['metadata'], by_column['args']) == (metadata, args)
 
 
 @pytest.mark.parametrize(
@@ -513,6 +586,8 @@ def test_settings_name_the_schema_and_the_table(prefix, table):
         table_prefix=prefix,
         retention_hours=6,
         store_completed_output=False,
+        max_output=0,
+        max_size=0,
         batch_rows=5000,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),

@@ -30,7 +30,7 @@ primitives, lists, dicts, and Pydantic models (which serialize via
 
 2. **Inspectability.** The debug UI shows cached values directly from the
    DB. JSON is human-readable; opaque binary blobs would force us to
-   embed a decoder into the UI server per type.
+   embed a decoder into the API server per type.
 
 3. **Safety.** Binary object serializers permit arbitrary code execution
    on load. Since peers can write to each other's DBs via sync, a

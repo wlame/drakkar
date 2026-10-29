@@ -65,6 +65,8 @@ recorder:
     table_prefix: ""            # "" -> <schema>.recorder_events; "heavy" -> <schema>.heavy_recorder_events
     initial_retention: 24h      # written into the table when this worker creates it
     store_completed_output: false  # send the stdout and stderr columns to Postgres
+    max_output: 64KiB           # longest stdout or stderr value; 0 = no limit
+    max_size: 0                 # largest size of the whole table; 0 = no limit
     batch_rows: 5000            # most rows in one COPY
     max_queue: 128MiB           # most text waiting for Postgres, counted in characters
     resilience: {}              # timeout, retries, backoff and breaker of the recorder calls
@@ -77,6 +79,8 @@ recorder:
 | `recorder.postgres.table_prefix` | string | `''` | empty, or `^[a-z][a-z0-9_]{0,23}$` | `DK_RECORDER__POSTGRES__TABLE_PREFIX` |
 | `recorder.postgres.initial_retention` | duration, whole hours | `24h` | `1h` to `168h` | `DK_RECORDER__POSTGRES__INITIAL_RETENTION` |
 | `recorder.postgres.store_completed_output` | boolean | `false` | | `DK_RECORDER__POSTGRES__STORE_COMPLETED_OUTPUT` |
+| `recorder.postgres.max_output` | size | `64KiB` | `0`, or at least `1KiB` | `DK_RECORDER__POSTGRES__MAX_OUTPUT` |
+| `recorder.postgres.max_size` | size | `0` | `0`, or at least `64MiB` | `DK_RECORDER__POSTGRES__MAX_SIZE` |
 | `recorder.postgres.batch_rows` | whole number | 5000 | 100 to 50000 | `DK_RECORDER__POSTGRES__BATCH_ROWS` |
 | `recorder.postgres.max_queue` | size | `128MiB` | `16MiB` to `1GiB` | `DK_RECORDER__POSTGRES__MAX_QUEUE` |
 | `recorder.postgres.resilience.*` | the shared resilience block | `5s`, 2 retries, `200ms`, `5s`, breaker 5 / `30s` | its rules | `DK_RECORDER__POSTGRES__RESILIENCE__<KEY>` |
@@ -108,6 +112,13 @@ rotation check, whatever `ui.enabled` says. A bad prefix fails with:
 
 ```
 ui.recorder.postgres.table_prefix '<value>' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores
+```
+
+A limit below its bound fails with one of these:
+
+```
+recorder.postgres.max_output must be 0 or at least 1KiB
+recorder.postgres.max_size must be 0 or at least 64MiB
 ```
 
 The config summary line shows ` recorder=postgres` after ` storage=...` and
@@ -235,8 +246,13 @@ one transaction:
    ahead.
 6. With a stored retention of `R` hours, it drops every partition whose hour
    ended at least `R` hours ago. Without one, it drops nothing.
-7. It commits and logs `recorder_postgres_partitions_changed` when it created
-   or dropped a partition.
+7. With `max_size` above 0, it reads the size of the partitions that are
+   left and drops the oldest hours while the table is larger than
+   `max_size` (see [The size cap](#the-size-cap)). With `max_size: 0` it
+   sends no size statement.
+8. It commits and logs `recorder_postgres_partitions_changed` when it created
+   or dropped a partition. `dropped` names the partitions of the retention,
+   `dropped_for_size` those of the size cap.
 
 A partition name that is not the table name, `_p` and a valid UTC hour is not
 the upkeep's, and the upkeep leaves it alone.
@@ -278,6 +294,35 @@ The next upkeep drops by the new value.
 
 Why at most 168 hours: there is one partition per hour, the history search
 visits every partition, and each partition costs locks and planning time.
+
+## The size cap
+
+`recorder.postgres.max_size` puts a limit on the size of the whole table,
+for a database whose disk is smaller than the retention needs. `0` (the
+default) is no limit; any other value is at least `64MiB`.
+
+After the retention drops, the upkeep reads the size of each partition that
+is left with one statement:
+
+```sql
+SELECT c.relname, pg_total_relation_size(c.oid) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = ANY($2::text[])
+```
+
+`$1` is the schema and `$2` the partition names of the table, in ascending
+order. The size of a partition includes its indexes. Names that are not the
+upkeep's (see above) are not measured. While the total is above `max_size`,
+the upkeep drops the oldest hour, in the same transaction as the other
+drops. It never drops the current hour or a later one, so a table whose
+current hour alone is larger than `max_size` stays above it. It never
+deletes single rows.
+
+The worker that holds the try-lock applies its own `max_size`, not a value
+stored with the table. Workers that share a table take turns in the upkeep,
+so give them one value.
+
+A size cap drops history before the retention does. Each drop counts on
+`drakkar_recorder_postgres_partitions_dropped_total{reason="size"}`; a
+steady rate there means the table is too small for its retention.
 
 ## Schema management and ownership
 
@@ -330,7 +375,8 @@ The command cannot print partitions; they depend on the time.
 Size the database before you turn the mode on. The numbers below assume about
 1200 tasks per second on a busy worker and 3 to 5 rows per task, so up to 5000
 rows per second per worker, and about 0.5 KB per row with
-`store_output: false` (the row and its share of the key and the indexes).
+`store_completed_output: false` (the row and its share of the key and the
+indexes).
 
 | | rows per second | data per second | per hour | at the default 6 h | per day |
 |---|---|---|---|---|---|
@@ -353,16 +399,41 @@ Two kinds of settings cut the volume:
 - The recorder filters `ui.recorder.event_min_duration_ms` and
   `output_min_duration_ms` act before the memory store. They also shorten the
   live view and the memory store.
-- `ui.recorder.postgres.store_output` acts on Postgres only (see below).
+- `recorder.postgres.store_completed_output` and `max_output` act on
+  Postgres only (see below), and `max_size` bounds the whole table (see
+  [The size cap](#the-size-cap)).
 
 `drakkar_recorder_postgres_rows_written_total` and the size of the table give
 the real numbers.
 
-## Output columns: `store_output`
+## Output columns: `store_completed_output` and `max_output`
 
-With `store_output: false` (the default), stage P writes `stdout` and
-`stderr` as `NULL`. `stdout_size` stays. Nothing else changes: `metadata`
-keeps its bytes, so a table row has the same `metadata` as the memory row.
+With `store_completed_output: false` (the default), stage P writes `stdout`
+and `stderr` as `NULL`, except one value: a `task_failed` row always keeps
+its `stderr`, because it says why the task failed. `stdout_size` stays.
+Nothing else changes: `metadata` keeps its bytes, so a table row has the
+same `metadata` as the memory row.
+
+`max_output` (default `64KiB`) bounds every `stdout` and `stderr` value that
+stage P writes, the `stderr` of a failed task included. A value of more UTF-8
+bytes than the limit keeps its first half and its last half, each cut at a
+character boundary, so the text stays valid UTF-8. A marker line between the
+two halves says how many bytes are missing. A value of `128KiB` with the
+default limit is written as:
+
+```
+<the first 32KiB>
+...[cut 65536 bytes]...
+<the last 32KiB>
+```
+
+The first half is at most half the limit (rounded down), and the last half
+at most the rest of it. The count is of the bytes removed; the marker itself
+is not counted in the limit. NUL characters are replaced before the value is
+measured. `0` is no limit; any other value is at least `1KiB`. Only `stdout`
+and `stderr` are cut: `metadata`, `args` and every other column are written
+whole. Runtime health events (`runtime_stall` with its stacks and the rest)
+keep their `metadata` whole too.
 
 Stdin inside `metadata` follows the existing recorder rules:
 `ui.recorder.store_stdin` (default off) for `task_started`, and the capped
@@ -370,8 +441,8 @@ stdin of `task_failed` (at most `ui.recorder.stdin_max_bytes`, default 64
 KiB). To keep stdin out of Postgres, keep `store_stdin` off and lower
 `stdin_max_bytes`.
 
-With `store_output: true`, rows with output can be many KB each. Size the
-database again.
+With `store_completed_output: true`, a row with output holds up to
+`max_output` of `stdout` and as much of `stderr`. Size the database again.
 
 ## Connections per worker
 
@@ -436,6 +507,7 @@ Metrics and log events of the write path:
 | `drakkar_recorder_postgres_queue_rows` | gauge | Rows waiting to be written to the recorder Postgres table (the queue plus the chunk in the slot) |
 | `drakkar_recorder_postgres_rows_written_total` | counter | Rows written to the recorder Postgres table |
 | `drakkar_recorder_postgres_dropped_rows_total` | counter, `reason` | Rows that never reached the recorder Postgres table, by reason: `queue_full`, `rejected`, `no_partition` (the last error was `23514`), `shutdown` |
+| `drakkar_recorder_postgres_partitions_dropped_total` | counter, `reason` | Recorder Postgres partitions dropped, by reason: `retention` (past the stored retention), `size` (by the size cap). Counted when the upkeep commits. |
 | `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`, `drakkar_provider_breaker_open` | provider metrics | with `feature="recorder"`, `provider="postgres"`, `op` = `start`, `copy`, `partitions` |
 | `recorder_postgres_rows_dropped` | warning | `reason`, `rows`, `error` (empty for `queue_full` and `shutdown`); at most one line per 60 s per reason |
 | `recorder_postgres_copy_rejected` | warning | `sqlstate`, `error`, `rows`, `final_failures`; at most one line per 60 s |

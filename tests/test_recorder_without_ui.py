@@ -300,6 +300,8 @@ async def test_stage_p_runs_with_no_memory_store():
         table_prefix='',
         retention_hours=24,
         store_completed_output=False,
+        max_output=0,
+        max_size=0,
         batch_rows=100,
         queue_max_bytes=16 * 1024 * 1024,
         resilience=ResilienceConfig(max_retries=0),
@@ -462,8 +464,9 @@ async def test_history_search_with_recorder_off_reads_no_folder(tmp_path, monkey
 # --- runtime health data and the Postgres row builder ---
 
 
+@pytest.mark.parametrize('max_output', [0, 1024], ids=['no_output_limit', 'output_limit'])
 @pytest.mark.parametrize('store_completed_output', [True, False], ids=['with_output', 'without_output'])
-def test_runtime_stall_stacks_survive_the_postgres_row_builder(store_completed_output):
+def test_runtime_stall_stacks_survive_the_postgres_row_builder(store_completed_output, max_output):
     metadata = json.dumps({'duration_ms': 1500.0, 'stacks': 'x' * 300_000})
     row = tuple(
         {'id': 1, 'ts': 1.0, 'dt': 'd', 'event': EventType.RUNTIME_STALL, 'metadata': metadata}.get(column)
@@ -471,7 +474,12 @@ def test_runtime_stall_stacks_survive_the_postgres_row_builder(store_completed_o
     )
 
     record = build_record(
-        row, cluster=CLUSTER, worker=WORKER, instance='i', store_completed_output=store_completed_output
+        row,
+        cluster=CLUSTER,
+        worker=WORKER,
+        instance='i',
+        store_completed_output=store_completed_output,
+        max_output=max_output,
     )
 
     assert record[3 + EVENT_COLUMNS.index('metadata')] == metadata

@@ -62,6 +62,8 @@ def _settings(*, table_prefix: str = '') -> RecorderPostgresSettings:
         table_prefix=table_prefix,
         retention_hours=6,
         store_completed_output=False,
+        max_output=0,
+        max_size=0,
         batch_rows=100,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -187,7 +189,9 @@ async def test_trace_history_postgres_sends_the_cluster_with_nul_replaced_as_the
     )
 
     (fetch,) = [call for call in fake.calls if call[0] == 'fetch']
-    stored = build_record(_event_row(), cluster=cluster, worker=WORKER, instance='i', store_completed_output=False)[0]
+    stored = build_record(
+        _event_row(), cluster=cluster, worker=WORKER, instance='i', store_completed_output=False, max_output=0
+    )[0]
     assert fetch[2][0] == stored == 'fast\ufffdcluster'
 
 

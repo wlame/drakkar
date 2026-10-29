@@ -18,7 +18,8 @@ attribute operation.
 The fake also answers the partition upkeep: ``try_lock`` answers
 ``try_lock_answer``, ``server_now`` answers ``server_now`` (the worker's wall
 clock when it is ``None``), ``retention_read`` answers ``retention_comment``,
-and ``partitions_list`` lists ``partitions``. A partition create or drop
+``partitions_list`` lists ``partitions``, and ``partition_sizes`` answers
+the asked names found in ``sizes``. A partition create or drop
 changes ``partitions`` when its transaction commits; ``fail_partition_ddl``
 makes the next ones raise. With ``require_partition`` a COPY of a record
 whose ``ts`` hour has no partition raises the check violation a real server
@@ -77,6 +78,7 @@ class RecorderFakePostgres:
         self.server_now: float | None = None
         self.retention_comment: str | None = 'retention_hours=6'
         self.partitions: set[str] = set()
+        self.sizes: dict[str, int] = {}
         self.partition_ddl_failures: list[BaseException] = []
         self.require_partition = False
         self.connections: list[FakeConnection] = []
@@ -196,11 +198,14 @@ class FakeConnection:
             return server.retention_comment
         raise AssertionError(f'statement not known to the fake: {sql}')
 
-    async def fetch(self, sql: str, *args: Any) -> list[tuple[str]]:
+    async def fetch(self, sql: str, *args: Any) -> list[Any]:
         server = self._server
         server.calls.append(('fetch', sql, args))
         if sql == RECORDER_STATEMENT_TEMPLATES['partitions_list']:
             return [(name,) for name in sorted(server.partitions)]
+        if sql == RECORDER_STATEMENT_TEMPLATES['partition_sizes']:
+            _, names = args
+            return [(name, server.sizes[name]) for name in names if name in server.sizes]
         if sql.startswith(TRACE_PREFIX):
             if server.hang_trace:
                 await asyncio.sleep(HANG_SECONDS)

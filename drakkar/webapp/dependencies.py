@@ -159,7 +159,7 @@ def _extract_bearer_token(request: Request) -> tuple[str, bool]:
         # for anyone who can reach the ingress. Configured tokens are
         # validated ASCII (WebClientConfig), so a non-ASCII one cannot
         # match anything anyway; the honest answer is 401. Same guard the
-        # UI server already had.
+        # API server already had.
         return '', True
     return token, True
 

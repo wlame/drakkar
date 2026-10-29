@@ -272,6 +272,8 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
                 'table_prefix': 'fast',
                 'initial_retention': '12h',
                 'store_completed_output': True,
+                'max_output': '2KiB',
+                'max_size': '1GiB',
                 'batch_rows': 200,
                 'max_queue': '32MiB',
                 'resilience': {'max_retries': 1},
@@ -291,6 +293,7 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
             'rec.fast_recorder_events',
         )
         assert (settings.retention_hours, settings.store_completed_output, settings.batch_rows) == (12, True, 200)
+        assert (settings.max_output, settings.max_size) == (2048, 1024 * 1024 * 1024)
         assert settings.queue_max_bytes == 32 * 1024 * 1024
         assert settings.resilience.max_retries == 1
         await wait_for(lambda: len(fake.opened) == 1)

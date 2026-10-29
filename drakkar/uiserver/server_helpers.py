@@ -62,7 +62,7 @@ def hook_flags(handler: object) -> dict[str, bool]:
     results those hooks would receive, so the detection lives next to the
     handler base class and both callers read it from there.
     """
-    # Imported here rather than at module scope: handler.py reaches the UI
+    # Imported here rather than at module scope: handler.py reaches the API
     # server only through app.py's wiring, but the other direction is live.
     from drakkar.handler import overridden_completion_hooks
 

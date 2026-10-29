@@ -15,7 +15,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from drakkar.config import PostgresConnectionConfig, ResilienceConfig
-from drakkar.metrics import provider_calls, recorder_postgres_dropped_rows
+from drakkar.metrics import provider_calls, recorder_postgres_dropped_rows, recorder_postgres_partitions_dropped
 from drakkar.providers.postgres import (
     PARTITION_DDL_TEMPLATES,
     PARTITION_MAINTENANCE_SECONDS,
@@ -28,7 +28,13 @@ from drakkar.providers.postgres import (
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings
-from drakkar.recorder.postgres_writer import PostgresWriter, UpkeepActions, upkeep_actions
+from drakkar.recorder.postgres_writer import (
+    PostgresWriter,
+    UpkeepActions,
+    measured_partitions,
+    size_drops,
+    upkeep_actions,
+)
 from drakkar.recorder.schema import EVENT_COLUMNS
 from tests.recorder_pg_fake import RecorderFakePostgres
 
@@ -42,6 +48,7 @@ FIXTURE = json.loads(
     (Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text(), parse_constant=_refuse_constant
 )
 UPKEEP_CASES = FIXTURE['recorder']['upkeep_cases']
+SIZE_UPKEEP_CASES = FIXTURE['recorder']['size_upkeep_cases']
 
 DSN = 'postgresql://drakkar:secret@db:5432/drakkar'
 TABLE = 'recorder_events'
@@ -67,13 +74,17 @@ async def _no_sleep(_seconds: float) -> None:
     return None
 
 
-def _writer(fake: RecorderFakePostgres, clock: FakeClock, queue: PostgresQueue | None = None) -> PostgresWriter:
+def _writer(
+    fake: RecorderFakePostgres, clock: FakeClock, queue: PostgresQueue | None = None, *, max_size: int = 0
+) -> PostgresWriter:
     settings = RecorderPostgresSettings(
         connection_name='main',
         connection=PostgresConnectionConfig(dsn=DSN),
         table_prefix='',
         retention_hours=CONFIGURED_RETENTION_HOURS,
         store_completed_output=False,
+        max_output=0,
+        max_size=max_size,
         batch_rows=100,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -130,6 +141,13 @@ def _dropped() -> dict[str, float]:
     return {reason: recorder_postgres_dropped_rows.labels(reason=reason)._value.get() for reason in DROP_REASONS}
 
 
+def _partitions_dropped() -> dict[str, float]:
+    return {
+        reason: recorder_postgres_partitions_dropped.labels(reason=reason)._value.get()
+        for reason in ('retention', 'size')
+    }
+
+
 # --- which partitions ---
 
 
@@ -141,6 +159,35 @@ def test_upkeep_actions_cases(case):
         create=[tuple(entry) for entry in case['created']],
         drop=list(case['dropped']),
     )
+
+
+@pytest.mark.parametrize('case', SIZE_UPKEEP_CASES, ids=[case['name'] for case in SIZE_UPKEEP_CASES])
+def test_size_upkeep_cases(case):
+    actions = upkeep_actions(case['table'], case['now'], case['retention'], case['listed'])
+    measured = measured_partitions(case['table'], case['listed'], actions.drop)
+    answered = {name: size for name, size in case['sizes'].items() if name in measured}
+
+    dropped_for_size = size_drops(case['table'], case['now'], measured, answered, case['max_size'])
+
+    assert (actions.create, actions.drop, dropped_for_size) == (
+        [tuple(entry) for entry in case['create']],
+        case['drop'],
+        case['dropped_for_size'],
+    )
+    current_hour = int(case['now'] // SECONDS_PER_HOUR)
+    assert partition_name(case['table'], current_hour) not in dropped_for_size
+
+
+def test_measured_partitions_are_the_kept_partitions_of_the_table_ascending():
+    listed = [
+        *_names(SERVER_HOUR, SERVER_HOUR - 9, SERVER_HOUR - 2),
+        'recorder_events_old',
+        'fast_recorder_events_p2026110310',
+    ]
+
+    measured = measured_partitions(TABLE, listed, _names(SERVER_HOUR - 9))
+
+    assert measured == _names(SERVER_HOUR - 2, SERVER_HOUR)
 
 
 def test_upkeep_actions_creates_hours_h_minus_1_to_h_plus_3():
@@ -336,7 +383,8 @@ async def test_upkeep_logs_partitions_changed_only_on_change():
     assert len(fake.statements('try_lock')) == 2
     changed = _logs(captured, 'recorder_postgres_partitions_changed')
     assert [
-        (line['log_level'], line['category'], line['table'], line['created'], line['dropped']) for line in changed
+        (line['log_level'], line['category'], line['table'], line['created'], line['dropped'], line['dropped_for_size'])
+        for line in changed
     ] == [
         (
             'info',
@@ -344,6 +392,7 @@ async def test_upkeep_logs_partitions_changed_only_on_change():
             QUALIFIED_TABLE,
             _names(*range(SERVER_HOUR - 1, SERVER_HOUR + 4)),
             _names(old_hour),
+            [],
         )
     ]
     assert _logs(captured, 'recorder_postgres_retention_mismatch') == []
@@ -421,3 +470,110 @@ async def test_check_violation_is_cured_by_the_next_upkeep_and_the_same_records_
     assert second[4] == first[4]
     assert fake.copied_ids() == [1, 2, 3]
     assert _dropped() == dropped_before
+
+
+# --- the size cap ---
+
+MIB_BYTES = 1024 * 1024
+CAP = 64 * MIB_BYTES
+
+
+@pytest.mark.parametrize('max_size', [0, CAP], ids=['no_cap', 'cap'])
+async def test_size_statement_runs_only_with_max_size(max_size):
+    fake = _fake(partitions=set(_names(*range(SERVER_HOUR - 3, SERVER_HOUR + 4))))
+    writer = _writer(fake, FakeClock(), max_size=max_size)
+
+    await writer.run_once()
+
+    expected = (
+        []
+        if max_size == 0
+        else [
+            (
+                'fetch',
+                RECORDER_STATEMENT_TEMPLATES['partition_sizes'],
+                ('drakkar', _names(*range(SERVER_HOUR - 3, SERVER_HOUR + 4))),
+            )
+        ]
+    )
+    assert fake.statements('partition_sizes') == expected
+
+
+async def test_size_cap_drops_the_oldest_hours_after_the_retention_drops_and_logs_them():
+    # Hours 06 and 07 ended more than the 6 stored hours ago; 08 to 17 are
+    # measured, and the oldest before the current hour go one by one.
+    listed = _names(*range(SERVER_HOUR - 8, SERVER_HOUR + 4))
+    sizes = {name: 30 * MIB_BYTES for name in listed}
+    fake = _fake(partitions=set(listed), sizes=sizes)
+    writer = _writer(fake, FakeClock(), max_size=CAP)
+
+    with capture_logs() as captured:
+        await writer.run_once()
+
+    # Ten partitions of 30 MiB stay after the retention: still above the cap
+    # when every hour before the current one is gone.
+    for_size = _names(*range(SERVER_HOUR - 6, SERVER_HOUR))
+    retention = _names(SERVER_HOUR - 8, SERVER_HOUR - 7)
+    drops = [
+        render_recorder(PARTITION_DDL_TEMPLATES['drop'], schema='drakkar', table=TABLE, partition=name)
+        for name in [*retention, *for_size]
+    ]
+    upkeep_calls = fake.calls[fake.calls.index(('BEGIN',)) :]
+    sizes_call = ('fetch', RECORDER_STATEMENT_TEMPLATES['partition_sizes'], ('drakkar', listed[2:]))
+    assert upkeep_calls[-len(drops) - 2 :] == [
+        *[('execute', text, ()) for text in drops[:2]],
+        sizes_call,
+        *[('execute', text, ()) for text in drops[2:]],
+        ('COMMIT',),
+    ]
+    assert fake.partitions == set(_names(*range(SERVER_HOUR, SERVER_HOUR + 4)))
+    (changed,) = _logs(captured, 'recorder_postgres_partitions_changed')
+    assert (changed['created'], changed['dropped'], changed['dropped_for_size']) == ([], retention, for_size)
+
+
+async def test_size_cap_never_drops_the_current_hour_or_later():
+    listed = _names(*range(SERVER_HOUR - 2, SERVER_HOUR + 4))
+    fake = _fake(partitions=set(listed), sizes={name: 100 * MIB_BYTES for name in listed})
+    writer = _writer(fake, FakeClock(), max_size=CAP)
+
+    await writer.run_once()
+
+    assert fake.partitions == set(_names(*range(SERVER_HOUR, SERVER_HOUR + 4)))
+
+
+async def test_partitions_dropped_metric_counts_by_reason():
+    listed = _names(*range(SERVER_HOUR - 8, SERVER_HOUR + 4))
+    fake = _fake(partitions=set(listed), sizes={name: 30 * MIB_BYTES for name in listed})
+    clock = FakeClock()
+    writer = _writer(fake, clock, max_size=CAP)
+    before = _partitions_dropped()
+
+    await writer.run_once()
+
+    after = _partitions_dropped()
+    assert (after['retention'] - before['retention'], after['size'] - before['size']) == (2, 6)
+
+
+async def test_a_failed_size_drop_rolls_back_and_counts_no_partition():
+    listed = _names(*range(SERVER_HOUR - 3, SERVER_HOUR + 4))
+    fake = _fake(partitions=set(listed), sizes={name: 30 * MIB_BYTES for name in listed})
+    fake.fail_partition_ddl(asyncpg.exceptions.LockNotAvailableError('canceling statement due to lock timeout'))
+    writer = _writer(fake, FakeClock(), max_size=CAP)
+    before = _partitions_dropped()
+
+    with capture_logs() as captured:
+        await writer.run_once()
+
+    assert ('ROLLBACK',) in fake.calls
+    assert fake.partitions == set(listed)
+    assert _partitions_dropped() == before
+    assert _logs(captured, 'recorder_postgres_partitions_changed') == []
+
+
+async def test_lost_try_lock_measures_nothing():
+    fake = _fake(try_lock_answer=False, partitions=set(_names(SERVER_HOUR - 3)), sizes={})
+    writer = _writer(fake, FakeClock(), max_size=CAP)
+
+    await writer.run_once()
+
+    assert fake.statements('partition_sizes') == []

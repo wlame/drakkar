@@ -95,7 +95,7 @@ class WSSubscriber:
         Set by the client so a page pays only for the events it renders.
 
     ``queue``
-        Thread-safe hand-off from the main loop (which records) to the UI
+        Thread-safe hand-off from the main loop (which records) to the API
         server thread (which sends), carrying :class:`LiveEvent` wrappers.
         Prefer the accessors below over touching it directly.
 

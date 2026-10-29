@@ -386,6 +386,18 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
+      "name": "recorder_off_with_provider_postgres",
+      "yaml": {
+        "recorder": {
+          "enabled": false,
+          "provider": "postgres"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
       "name": "dlq_switched_off",
       "yaml": {
         "dlq": {
@@ -1638,6 +1650,50 @@
       "path": "recorder.postgres.initial_retention"
     },
     {
+      "name": "postgres_max_output_below_one_kibibyte",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_output": "1023B"
+          }
+        }
+      },
+      "message": "recorder.postgres.max_output must be 0 or at least 1KiB"
+    },
+    {
+      "name": "postgres_max_output_one_byte",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_output": "1B"
+          }
+        }
+      },
+      "message": "recorder.postgres.max_output must be 0 or at least 1KiB"
+    },
+    {
+      "name": "postgres_max_size_below_64_mebibytes",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_size": "63MiB"
+          }
+        }
+      },
+      "message": "recorder.postgres.max_size must be 0 or at least 64MiB"
+    },
+    {
+      "name": "postgres_max_size_one_byte_below_64_mebibytes",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_size": "67108863B"
+          }
+        }
+      },
+      "message": "recorder.postgres.max_size must be 0 or at least 64MiB"
+    },
+    {
       "name": "sink_on_failure_unknown",
       "yaml": {
         "sinks": {
@@ -2407,6 +2463,42 @@
       "yaml": {},
       "path": "recorder.postgres.store_completed_output",
       "value": false
+    },
+    {
+      "name": "postgres_max_output_zero_is_no_limit",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_output": 0
+          }
+        }
+      },
+      "path": "recorder.postgres.max_output",
+      "value": 0
+    },
+    {
+      "name": "postgres_max_output_one_kibibyte",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_output": "1KiB"
+          }
+        }
+      },
+      "path": "recorder.postgres.max_output",
+      "value": 1024
+    },
+    {
+      "name": "postgres_max_size_64_mebibytes",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "max_size": "64MiB"
+          }
+        }
+      },
+      "path": "recorder.postgres.max_size",
+      "value": 67108864
     },
     {
       "name": "postgres_batch_rows_default",
