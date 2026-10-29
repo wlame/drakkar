@@ -883,8 +883,10 @@ The archive pass now has two scopes. See
 archives of its own scope. If a worker changes scope, delete its old archives by hand once
 you no longer need them. Their sealed files are already gone.
 
-**Log events:** `recorder_archive_pass_abandoned` has a second `detail` text for the own
-scope, `the pass ends after the window in progress`.
+**Log events and metrics:** `recorder_archive_pass_abandoned` has a second `detail` text for
+the own scope, `the pass ends after the window in progress`. The help texts of
+`drakkar_recorder_archive_bytes`, `drakkar_recorder_archive_files` and
+`drakkar_recorder_archive_failures_total` changed.
 
 **In code:** `archive_task_runs` is `archive_scope`, which answers `cluster`, `worker` or
 `None`. `PeriodicRoster.runs_archive` is `PeriodicRoster.archive_scope`. `run_archive_pass`

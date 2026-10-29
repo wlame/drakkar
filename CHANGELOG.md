@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `breaker_failures`, `breaker_cooldown`, with units; the `breaker` block is gone.
 - **`recorder_started` has no `ignored_keys` field, and `db_path` is empty when there is no file.**
 - **Metric help texts name the current keys.** The help of
-  `drakkar_recorder_requeue_overflow_total`, `drakkar_recorder_archive_bytes` and
+  `drakkar_recorder_requeue_overflow_total`, `drakkar_recorder_archive_bytes`,
+  `drakkar_recorder_archive_files`, `drakkar_recorder_archive_failures_total` and
   `drakkar_recorder_annotations_dropped_total` changed.
 - **A service is declared once under `connections`.** The root `kafka:` section
   is gone: brokers, security, `client_config` and the Kafka-UI links live in

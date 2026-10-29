@@ -905,16 +905,17 @@ recorder_requeue_overflow = Counter(
 recorder_archive_bytes = Gauge(
     'drakkar_recorder_archive_bytes',
     (
-        'Total size on disk of this cluster compressed recorder archives in '
-        'its history folder. Bounded by recorder.archive.retention; grows '
-        'without limit while that is 0.'
+        'Total size on disk of the compressed recorder archives of this cluster, and of this '
+        'worker when it archives its own files, in its history folder. Bounded by '
+        'recorder.archive.retention; grows without limit while that is 0.'
     ),
 )
 
 recorder_archive_files = Gauge(
     'drakkar_recorder_archive_files',
     (
-        'Number of this cluster compressed recorder archives in its history folder. '
+        'Number of compressed recorder archives of this cluster, and of this worker when it '
+        'archives its own files, in its history folder. '
         'Read together with drakkar_recorder_archive_bytes to tell a slow '
         'accumulation of small windows from a few very large ones.'
     ),
@@ -939,7 +940,7 @@ recorder_seal_failures = Counter(
 
 recorder_archive_failures = Counter(
     'drakkar_recorder_archive_failures_total',
-    'Archive passes that failed after taking the archive lock.',
+    'Archive passes that did not finish cleanly.',
 )
 
 

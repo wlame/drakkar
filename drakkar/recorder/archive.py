@@ -658,7 +658,7 @@ def _archive_window(target: _PassTarget, window: ArchiveWindow) -> bool:
 
 
 def _fence(fence: ThreadFence | None, name: str) -> None:
-    """Stop the pass when the election no longer confirms the slot's lease; a pass with no election has no check."""
+    """Stop the pass when the election does not confirm the slot's lease; a pass with no election has no check."""
     if fence is not None and not fence.is_held():
         raise ArchiveFencedError(name, fence.loss_reason, fence.provider_name)
 
