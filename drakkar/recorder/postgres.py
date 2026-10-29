@@ -47,9 +47,9 @@ _OUTPUT_INDEXES = frozenset((_STDOUT_INDEX, _STDERR_INDEX))
 # What joins the head and the tail of a cut value; ``removed`` is the number
 # of UTF-8 bytes left out.
 OUTPUT_CUT_MARKER = '\n...[cut {removed} bytes]...\n'
-# The UTF-8 codec of the cut. ``surrogatepass`` keeps a lone surrogate as it
-# is, so a value the client cannot encode still fails its COPY as before
-# instead of failing the record builder.
+# The UTF-8 codec of the cut. ``surrogatepass`` lets a value with a lone
+# surrogate be measured, so the record builder never raises; an uncut value
+# keeps it and fails its COPY as a value the client cannot encode.
 _UTF8 = 'utf-8'
 _SURROGATE_PASS = 'surrogatepass'
 
