@@ -52,11 +52,13 @@ from drakkar.app import (
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.cluster_tasks import (
+    ARCHIVE_SCOPE_CLUSTER,
+    ARCHIVE_SCOPE_WORKER,
     ClusterElection,
     ClusterHashChecker,
     ClusterTask,
     SlotContext,
-    archive_task_runs,
+    archive_scope,
     run_cluster_task,
 )
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
@@ -77,7 +79,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.periodic import STARTUP_NO_AUTODISCOVER, SYSTEM_CLOCK, Clock, run_periodic_task
+from drakkar.periodic import STARTUP_NO_AUTODISCOVER, SYSTEM_CLOCK, Clock, run_own_system_task, run_periodic_task
 from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import ResilientCaller, describe_error
@@ -90,7 +92,7 @@ from drakkar.recorder.election import (
 )
 from drakkar.recorder.history import history_dir
 from drakkar.recorder.postgres import RecorderPostgresSettings
-from drakkar.schedule import DEFAULT_CLUSTER
+from drakkar.schedule import ARCHIVE_TASK_NAME, DEFAULT_CLUSTER
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
 from drakkar.timeline_events import TimelineEventEmitter
@@ -610,9 +612,9 @@ class AppLifecycle:
             return
         # Archives are the one recorder artifact nothing else reclaims,
         # so "keep forever" is stated at startup rather than discovered
-        # when a volume fills. Only a worker that runs the archive task
+        # when a volume fills. Only a worker that runs archive passes
         # produces them.
-        if archive_task_runs(config):
+        if archive_scope(config) is not None:
             warn_if_archives_unbounded(
                 config.recorder.archive,
                 history_dir(config.resolved_shared_dir, app._cluster_name),
@@ -664,7 +666,7 @@ class AppLifecycle:
         Runs after ``on_startup`` and before any connection opens, the
         registry starts or a sink connects, so the registry card carries the
         definition hash from its first publish. The election serves every
-        cluster task, ``history.archive`` included when the worker runs it.
+        cluster task, ``history.archive`` included when the worker runs it as one.
 
         Raises:
             ValueError: a cluster task is declared while ``autodiscover`` is off.
@@ -1018,12 +1020,33 @@ class AppLifecycle:
         app._periodic_tasks.append(task)
 
     def _start_archive_task(self) -> None:
-        """Start the slot loop of the system cluster task ``history.archive``, when the roster says the worker runs it."""
+        """Start the slot loop of ``history.archive`` in the scope the roster chose, if it chose one."""
         app = self._app
         roster = app._periodic_roster
-        if roster is None or not roster.runs_archive or app._recorder is None:
+        if roster is None or app._recorder is None:
             return
-        self._start_cluster_task(app._recorder.archive_cluster_task())
+        if roster.archive_scope == ARCHIVE_SCOPE_CLUSTER:
+            self._start_cluster_task(app._recorder.archive_cluster_task())
+        elif roster.archive_scope == ARCHIVE_SCOPE_WORKER:
+            self._start_own_archive_task(app._recorder)
+
+    def _start_own_archive_task(self, recorder: EventRecorder) -> None:
+        """Start the slot loop of ``history.archive`` over this worker's own files, with no election."""
+        app = self._app
+        archive = app._config.recorder.archive
+        task = asyncio.create_task(
+            run_own_system_task(
+                ARCHIVE_TASK_NAME,
+                recorder.run_own_archive_pass,
+                interval=archive.effective_interval,
+                cron=archive.cron,
+                recorder=recorder,
+                clock=self._clock,
+            ),
+            name=f'periodic:{ARCHIVE_TASK_NAME}',
+        )
+        watch_periodic_loop(task, ARCHIVE_TASK_NAME)
+        app._periodic_tasks.append(task)
 
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.

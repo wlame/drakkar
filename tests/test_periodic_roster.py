@@ -93,9 +93,9 @@ def test_roster_hash_includes_history_archive_only_when_it_runs():
     without_archive = _roster()
     with_archive = _roster(archive=True)
 
-    assert not without_archive.runs_archive
+    assert without_archive.archive_scope is None
     assert ARCHIVE_TASK_NAME not in without_archive.cluster_task_names
-    assert with_archive.runs_archive
+    assert with_archive.archive_scope == 'cluster'
     assert with_archive.cluster_task_names == ['rebuild_index', 'refresh_rates', ARCHIVE_TASK_NAME]
     assert with_archive.definitions[-1] == ClusterTaskDefinition(
         name=ARCHIVE_TASK_NAME, interval=3600, cron=None, lease_seconds=60
@@ -301,7 +301,8 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
 
     app._lifecycle._start_archive_task()
 
-    assert app._periodic_roster is not None and app._periodic_roster.runs_archive is started
+    assert app._periodic_roster is not None
+    assert (app._periodic_roster.archive_scope == 'cluster') is started
     assert started_tasks == ([app._recorder.archive_cluster_task.return_value] if started else [])
 
 
@@ -326,5 +327,5 @@ def test_cluster_hash_of_a_none_worker_equals_the_hash_with_archive_disabled():
     none_roster = resolve_periodic_roster(RatesHandler(), none_worker)
     off_roster = resolve_periodic_roster(RatesHandler(), archive_off)
 
-    assert not none_roster.runs_archive
+    assert none_roster.archive_scope is None
     assert none_roster.cluster_hash == off_roster.cluster_hash

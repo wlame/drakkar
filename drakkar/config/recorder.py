@@ -234,8 +234,9 @@ class RecorderArchiveConfig(ConfigModel):
     enabled: bool = Field(
         default=True,
         description=(
-            'Fold sealed recorder files into one compressed archive per cluster and window, then '
-            'delete the files. Off, nothing removes sealed files.'
+            'Fold sealed recorder files into one compressed archive per window, then delete the files. '
+            'The archive covers the whole cluster with autodiscover on and storage.shared_dir set, else '
+            "only this worker's files. Off, nothing removes sealed files."
         ),
     )
     window: WholeHours = Field(
@@ -271,7 +272,8 @@ class RecorderArchiveConfig(ConfigModel):
         description=(
             'Time between archive slots, aligned to the epoch, a whole number of seconds and at least '
             f'{MIN_CLUSTER_INTERVAL_SECONDS}s. Give at most one of interval and cron; with neither, a '
-            'slot every 1h. At each slot one worker of the cluster runs an archive pass.'
+            'slot every 1h. At each slot one worker of the cluster runs an archive pass, or each worker '
+            'runs one over its own files.'
         ),
     )
     cron: str | None = Field(
@@ -286,7 +288,7 @@ class RecorderArchiveConfig(ConfigModel):
         description=(
             f'Lease of the archive slot, a whole number of seconds from {MIN_LEASE_SECONDS} to '
             f'{MAX_LEASE_SECONDS}. The holder refreshes it while its pass runs; a lease that nobody '
-            'refreshed for this long is taken over.'
+            "refreshed for this long is taken over. Not used by a pass over a worker's own files."
         ),
     )
     sweep_after: WholeSeconds = Field(

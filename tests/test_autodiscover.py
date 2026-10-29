@@ -9,7 +9,7 @@ from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
 from drakkar.cache import CacheEngine
-from drakkar.cluster_tasks import archive_task_runs
+from drakkar.cluster_tasks import archive_scope
 from drakkar.config import AutodiscoverConfig, CacheConfig, CacheExchangeConfig, DrakkarConfig
 from drakkar.fleet.provider import RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -154,21 +154,22 @@ async def test_worker_with_autodiscover_off_publishes_no_card_and_runs_no_electi
 
     assert app.fleet is None
     assert app._cluster_election is None
-    assert not archive_task_runs(app._config)
+    assert archive_scope(app._config) == 'worker'
     assert app._periodic_roster.definitions == ()
     assert not shared.exists()
     assert logs == []
 
 
-def test_the_archive_runs_only_with_autodiscover_on(tmp_path):
+def test_the_archive_is_a_cluster_task_only_with_autodiscover_on(tmp_path):
     off = _app(tmp_path, storage={'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')})
     on = _app(tmp_path, **_filesystem_on(tmp_path))
 
     off._lifecycle._build_periodic_roster()
     on._lifecycle._build_periodic_roster()
 
-    assert not off._periodic_roster.runs_archive
-    assert on._periodic_roster.runs_archive
+    assert off._periodic_roster.archive_scope == 'worker'
+    assert off._periodic_roster.cluster_task_names == []
+    assert on._periodic_roster.archive_scope == 'cluster'
     assert on._periodic_roster.cluster_task_names == [ARCHIVE_TASK_NAME]
 
 

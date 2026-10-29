@@ -76,6 +76,13 @@ def next_cron_slot(now: float, expr: str) -> int:
     return next_cron_fire(expr, math.floor(now))
 
 
+def next_task_slot(now: float, *, interval: int | None, cron: str | None) -> int:
+    """The first slot of a task's schedule strictly after ``now`` truncated to the second."""
+    if interval is not None:
+        return next_interval_slot(now, interval)
+    return next_cron_slot(now, cron or '')
+
+
 def task_scope(cluster: str, name: str) -> str:
     """The election scope of task ``name`` in ``cluster``: ``<sanitized cluster>/<name>``."""
     return f'{sanitize_cluster(cluster)}/{name}'

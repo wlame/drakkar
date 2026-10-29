@@ -16,8 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breakers. The root sections `fleet` and `periodic` are gone. With it off, a worker
   publishes no card, reads no peers and runs no election, and a declared cluster task fails
   startup. `autodiscover.provider filesystem needs storage.shared_dir`: the fallback to
-  `storage.dir` is gone. An unknown provider fails the load. A worker with it off runs no
-  `history.archive` task.
+  `storage.dir` is gone. An unknown provider fails the load.
+- **The archive has two scopes.** With `autodiscover.enabled` and `storage.shared_dir` set,
+  a pass covers the whole cluster with an election, as `history.archive` in the definition
+  hash. In every other case it runs at the same slots with no election, no lease and no hash
+  entry, takes only this worker's sealed files and writes
+  `<cluster>-<worker>-<from>__<to>.db.gz`; retention and the sweep touch only that worker's
+  names. `ui.enabled` is not part of the gate. The `cluster` of an archive row is the folder
+  name. `archive_task_runs` is `archive_scope`; `PeriodicRoster.runs_archive` is
+  `archive_scope`; `run_archive_pass` takes `only_worker` and `fence` is optional.
+  `recorder_archive_pass_abandoned` has a second `detail` for this scope. The wizard no
+  longer turns the archive off on several hosts without a folder.
 - **`fleet.cache_exchange` is `cache.exchange`.** With autodiscover off it does nothing and
   logs `cache_exchange_off_no_autodiscover` once. `CacheEngine` takes no `exchange` argument.
 - **Log events.** `periodic_cluster_check_off` and `fleet_registry_disabled_no_dir` are

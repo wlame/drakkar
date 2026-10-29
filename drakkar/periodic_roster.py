@@ -4,8 +4,8 @@ The roster is built once at startup, after ``on_startup`` and before any
 connection opens, the registry starts or a sink connects. It discovers the
 handler's ``@periodic`` methods and splits them into worker tasks and cluster tasks.
 It also holds the definitions of every enabled cluster task (``history.archive``
-included when the worker runs it) and their hash, which the worker publishes
-in its registry card from the first publish.
+included when the worker runs it as a cluster task) and their hash, which the
+worker publishes in its registry card from the first publish.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from drakkar.cluster_tasks import archive_task_runs
+from drakkar.cluster_tasks import ARCHIVE_SCOPE_CLUSTER, ArchiveScope, archive_scope
 from drakkar.periodic import PeriodicMeta, discover_periodic_tasks
 from drakkar.schedule import ARCHIVE_TASK_NAME, DEFAULT_LEASE_SECONDS, ClusterTaskDefinition, cluster_tasks_hash
 
@@ -43,26 +43,27 @@ class RosterTask:
 class PeriodicRoster:
     """The worker's enabled periodic tasks and the hash of its cluster task definitions.
 
-    ``definitions`` holds the user cluster tasks and, when ``runs_archive``,
-    the system task ``history.archive``. ``runs_archive`` is the one place
-    that decides whether this worker runs ``history.archive``; the worker
-    starts its loop only then.
+    ``definitions`` holds the user cluster tasks and, when ``archive_scope``
+    is ``cluster``, the system task ``history.archive``. ``archive_scope`` is
+    the one place that decides how this worker runs ``history.archive``: as a
+    cluster task, over its own files with no election and no hash entry
+    (``worker``), or not at all (``None``).
     """
 
     worker_tasks: tuple[RosterTask, ...]
     cluster_tasks: tuple[RosterTask, ...]
-    runs_archive: bool
+    archive_scope: ArchiveScope | None
     definitions: tuple[ClusterTaskDefinition, ...]
     cluster_hash: str
 
     @property
     def cluster_task_count(self) -> int:
-        """How many cluster tasks this worker runs, ``history.archive`` included."""
+        """How many cluster tasks this worker runs, ``history.archive`` included when it is one."""
         return len(self.definitions)
 
     @property
     def cluster_task_names(self) -> list[str]:
-        """The names of every cluster task this worker runs: the user tasks, then ``history.archive``."""
+        """The names of every cluster task this worker runs: the user tasks, then ``history.archive`` when it is one."""
         return [definition.name for definition in self.definitions]
 
 
@@ -96,12 +97,12 @@ def resolve_periodic_roster(handler: object, config: DrakkarConfig) -> PeriodicR
         _cluster_task(declared[definition.name][0], declared[definition.name][1], definition)
         for definition in user_definitions
     )
-    runs_archive = archive_task_runs(config)
-    definitions = user_definitions + ((archive_definition(config),) if runs_archive else ())
+    scope = archive_scope(config)
+    definitions = user_definitions + ((archive_definition(config),) if scope == ARCHIVE_SCOPE_CLUSTER else ())
     return PeriodicRoster(
         worker_tasks=worker_tasks,
         cluster_tasks=cluster_tasks,
-        runs_archive=runs_archive,
+        archive_scope=scope,
         definitions=definitions,
         cluster_hash=cluster_tasks_hash(definitions),
     )

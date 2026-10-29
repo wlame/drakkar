@@ -21,7 +21,13 @@ import structlog
 
 from drakkar.cronexpr import CRON_FIELDS_MESSAGE, next_cron_fire, validate_cron
 from drakkar.metrics import periodic_task_duration, periodic_task_runs
-from drakkar.schedule import MAX_LEASE_SECONDS, MIN_CLUSTER_INTERVAL_SECONDS, MIN_LEASE_SECONDS, TASK_NAME_PATTERN
+from drakkar.schedule import (
+    MAX_LEASE_SECONDS,
+    MIN_CLUSTER_INTERVAL_SECONDS,
+    MIN_LEASE_SECONDS,
+    TASK_NAME_PATTERN,
+    next_task_slot,
+)
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -358,3 +364,31 @@ async def run_periodic_task(
             await sleep_until(clock, last_fire)
         if await run_task_once(name, coro_fn, recorder=recorder, system=system, on_error=on_error, log=log):
             return
+
+
+async def run_own_system_task(
+    name: str,
+    coro_fn: Callable[[], Awaitable[Any]],
+    *,
+    interval: int | None,
+    cron: str | None,
+    recorder: EventRecorder | None = None,
+    clock: Clock = SYSTEM_CLOCK,
+) -> None:
+    """Run a framework task on this worker alone, at the slots of its schedule, until cancelled.
+
+    The slots are those a cluster task of the same schedule has, aligned to the
+    epoch, but no election decides who runs them. Slots that pass during a run
+    are skipped, and a slot never runs twice, even when the clock steps back. A
+    failed run is logged and the next slot runs as usual. The run is a system
+    row with no slot and no cluster scope.
+    """
+    schedule: dict[str, int | str] = {'interval_seconds': interval} if interval is not None else {'cron': cron or ''}
+    log = logger.bind(periodic_task=name, **schedule)
+    await log.ainfo('periodic_task_started', category='periodic', scope='worker')
+    last_slot = 0
+    while True:
+        # max() keeps a clock that stepped back from returning the slot just run.
+        last_slot = next_task_slot(max(clock.time(), last_slot), interval=interval, cron=cron)
+        await sleep_until(clock, last_slot)
+        await run_task_once(name, coro_fn, recorder=recorder, system=True, on_error='continue', log=log)

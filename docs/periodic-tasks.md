@@ -257,11 +257,11 @@ The details of each provider are on
 [Local databases](local-databases.md#the-election-provider).
 
 The provider is made at startup only when the worker runs at least one
-cluster task, and it starts at the first slot that needs it, not at worker
+cluster task (an archive over a worker's [own files](local-databases.md#archive-scopes)
+is not one), and it starts at the first slot that needs it, not at worker
 start. Tasks whose first slots come in the same second start it once. It
 stops at shutdown, after the recorder. Cluster tasks need no UI: a worker
-with `ui.enabled: false` runs them too (only the archive needs the
-recorder).
+with `ui.enabled: false` runs them too.
 
 ## Startup
 
@@ -286,8 +286,8 @@ startup: such workers share the lock scope `default`.
 ## Definition hash
 
 Every worker computes a hash of the cluster tasks it runs: the enabled user
-cluster tasks, and `history.archive` when the worker
-runs it (never with `ui.recorder.persistence: none`). Two workers of one cluster with different hashes run different
+cluster tasks, and `history.archive` when the worker runs it
+[over the whole cluster](local-databases.md#archive-scopes). Two workers of one cluster with different hashes run different
 schedules or leases for their cluster tasks, which usually means a rolling
 change that is not finished, or a config that differs by mistake.
 
@@ -326,27 +326,35 @@ its latest run was a cluster run, else `worker`.
 
 ## The archive: `history.archive`
 
-The archive pass is a system cluster task named `history.archive`. Its slots
-come from `history.archive.interval` (default 3600, a whole number of at
-least 30) or `history.archive.cron`, and its lease from
-`history.archive.lease_seconds` (default 60). A worker runs it when the UI
-is on (the recorder exists), `history.archive.enabled` is true, the
-recorder persistence is `sqlite` (set, or derived from a non-empty
-`storage.dir`) and `storage.dir` is set. A worker with `persistence: none`
-writes no recorder file, so it does not run the archive and leaves
-`history.archive` out of its definition hash. It still reads the sealed
-history of its cluster when a shared folder resolves.
+The archive pass is a system task named `history.archive`. Its slots come
+from `recorder.archive.interval` (default `1h`, a whole number of seconds and
+at least 30) or `recorder.archive.cron`. A worker runs it when
+`recorder.enabled` is true, `recorder.provider` is `sqlite`,
+`recorder.archive.enabled` is true and `storage.dir` is set. Any other worker
+does not run it and leaves `history.archive` out of its definition hash. It
+still reads the sealed history of its cluster when a shared folder resolves.
 
-Mixed persistence in one cluster is a misconfiguration. The `none` workers
-hash differently from the `sqlite` workers, so the workers list shows
-`cluster_tasks_match: false` and the workers log `periodic_cluster_mismatch`
-(see [Definition hash](#definition-hash)). Give every worker of a cluster the
-same persistence.
+The task has [two scopes](local-databases.md#archive-scopes):
 
-The worker that wins a slot runs the archive pass; every other worker
-updates the archive footprint gauges at that slot. The pass checks its lease
-before each publish and each delete. See
-[Archiving](local-databases.md#archiving).
+- **The whole cluster**, with `autodiscover.enabled` and `storage.shared_dir`
+  set. `history.archive` is a cluster task with the lease
+  `recorder.archive.lease` (default `1m`). The worker that wins a slot runs
+  the archive pass; every other worker updates the archive footprint gauges
+  at that slot. The pass checks its lease before each publish and each delete.
+  The task is part of the definition hash.
+- **This worker's own files**, in every other case. The task runs at the same
+  slots with no election and no lease. It is not a cluster task: it needs no
+  `autodiscover`, it is not part of the definition hash, and it counts nothing
+  in `drakkar_periodic_cluster_slots_total`. Its `periodic_run` row is a system
+  row with no `scope`.
+
+Different archive settings in one cluster are a misconfiguration. Workers that
+run the cluster task hash differently from workers that do not, so the workers
+list shows `cluster_tasks_match: false` and the workers log
+`periodic_cluster_mismatch` (see [Definition hash](#definition-hash)). Give
+every worker of a cluster the same settings.
+
+See [Archiving](local-databases.md#archiving).
 
 The three cache loops (`cache.flush`, `cache.cleanup`, `cache.sync`) are
 worker-scope system tasks: every worker runs its own.

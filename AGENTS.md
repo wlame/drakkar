@@ -49,6 +49,9 @@ breaking change, never a refactor:
   `<storage.shared_dir>/tasks/<cluster>/<task>.lock`
   (`tests/fixtures/history_meta.json`) — workers of other releases read the
   meta files and take over each other's locks
+- the archive names of both scopes and the rule of a worker's own sealed files
+  (`tests/fixtures/history_meta.json`) — workers that share a folder must not
+  take each other's files
 - the worker registry card (schema 1, `tests/fixtures/fleet_card.json`,
   including `features.periodic.cluster_hash`) and the filesystem provider
   layout (`<dir>/workers/<sanitized worker>.json`, temp file plus rename) —

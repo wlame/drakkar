@@ -11,7 +11,7 @@ fan-out live in sibling modules:
 - :mod:`drakkar.recorder.sealing` — sealing a closed file (rollback
   journal, meta file) and moving it into the shared history folder.
 - :mod:`drakkar.recorder.archive` — window math + the archive pass that
-  folds sealed files into compressed per-cluster archives.
+  folds sealed files into compressed archives.
 - :mod:`drakkar.recorder.fanout`  — the live ``/ws`` fan-out: subscriber
   set, per-client queues, deferred ``task_started`` events.
 
@@ -184,8 +184,10 @@ POSTGRES_STOP_ANSWER_SECONDS = 0.1
 # The bound of the pool close and of the thread join when the stop has no deadline.
 POSTGRES_STOP_STEP_SECONDS = 5.0
 
-# The ``detail`` of ``recorder_archive_pass_abandoned``; the text is part of the log contract.
+# The ``detail`` of ``recorder_archive_pass_abandoned``, for a pass with a lease and one
+# over this worker's own files; the texts are part of the log contract.
 ARCHIVE_PASS_ABANDONED_DETAIL = 'the pass is fenced at its next check and its lease expires on its own'
+ARCHIVE_OWN_PASS_ABANDONED_DETAIL = 'the pass ends after the window in progress'
 
 
 def _event_weight(event: dict) -> int:
@@ -320,8 +322,9 @@ class EventRecorder(EventWriter):
         when the pool opens).
 
         The archive pass runs as the cluster task
-        :meth:`archive_cluster_task` returns; the worker's election decides
-        which worker of the cluster runs each slot.
+        :meth:`archive_cluster_task` returns, where the worker's election
+        decides which worker of the cluster runs each slot, or through
+        :meth:`run_own_archive_pass` over this worker's own files.
         """
         if persistence == PERSISTENCE_SQLITE and not storage_dir:
             raise ValueError('recorder: persistence sqlite needs a storage_dir')
@@ -466,6 +469,7 @@ class EventRecorder(EventWriter):
         self._archive_executor: ThreadPoolExecutor | None = None
         # The pass the executor runs or last ran, for stop() to wait on.
         self._archive_pass_future: Future[None] | None = None
+        self._archive_pass_abandoned_detail = ARCHIVE_PASS_ABANDONED_DETAIL
         # The footprint observation the executor runs or last ran.
         self._footprint_future: Future[None] | None = None
         # How long a leftover must be untouched before it is sealed; an
@@ -2140,12 +2144,10 @@ class EventRecorder(EventWriter):
             self._start_sealing()
 
     def archive_cluster_task(self) -> ClusterTask:
-        """The system cluster task ``history.archive``.
+        """The system cluster task ``history.archive``, for a pass over the whole cluster.
 
         Whether the worker runs it is decided by its periodic roster
-        (``PeriodicRoster.runs_archive``): archiving on, a storage folder,
-        and the recorder enabled with provider ``sqlite`` (only then are
-        files sealed).
+        (``PeriodicRoster.archive_scope``).
 
         A won slot runs the archive pass on the recorder's own archive
         thread and waits for it; the pass checks the slot's lease through a
@@ -2177,6 +2179,19 @@ class EventRecorder(EventWriter):
         fence = ThreadFence(
             ctx.lease, election.caller, asyncio.get_running_loop(), provider_name=election.provider_name
         )
+        await self._run_pass_in_archive_thread(fence=fence)
+
+    async def run_own_archive_pass(self) -> None:
+        """Run one archive pass over this worker's own files in the archive thread, with no election."""
+        if self._archive_stop.is_set():
+            return
+        self._archive_pass_abandoned_detail = ARCHIVE_OWN_PASS_ABANDONED_DETAIL
+        await self._run_pass_in_archive_thread(only_worker=self._worker_name)
+
+    async def _run_pass_in_archive_thread(
+        self, *, fence: ThreadFence | None = None, only_worker: str | None = None
+    ) -> None:
+        """Run one archive pass in the archive thread and wait for it."""
         # Kept so stop() can wait for a pass that runs on in its thread after
         # the slot loop is cancelled, before the worker stops the election.
         self._archive_pass_future = self._archive_thread().submit(
@@ -2187,6 +2202,7 @@ class EventRecorder(EventWriter):
                 instance=self._instance,
                 archive=self._archive,
                 fence=fence,
+                only_worker=only_worker,
                 stop=self._archive_stop,
             )
         )
@@ -2225,9 +2241,10 @@ class EventRecorder(EventWriter):
         shutdown steps after the recorder need), or at once when less is
         left. Without a ``deadline`` it lasts until the pass ends. A pass that
         outlives the wait is left to finish on its own and logged as
-        ``recorder_archive_pass_abandoned``. It is fenced at its next check,
-        because a provider refuses every call after its ``stop`` (and every
-        check fails once the loop is closed), and its lease runs out.
+        ``recorder_archive_pass_abandoned``. A pass with a lease is fenced at
+        its next check, because a provider refuses every call after its
+        ``stop`` (and every check fails once the loop is closed), and its lease
+        runs out. A pass over this worker's own files ends after its window.
         """
         running = self._archive_pass_future
         if running is None or running.done():
@@ -2243,7 +2260,7 @@ class EventRecorder(EventWriter):
                 'recorder_archive_pass_abandoned',
                 category='recorder',
                 waited_seconds=round(time.monotonic() - started, 3),
-                detail=ARCHIVE_PASS_ABANDONED_DETAIL,
+                detail=self._archive_pass_abandoned_detail,
             )
             return
         # Marks the error read; the slot whose loop was cancelled logs it (see _run_archive_slot).

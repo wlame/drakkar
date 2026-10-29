@@ -183,9 +183,10 @@ def test_list_archives_parses_name_into_fields(tmp_path):
     start = datetime(2026, 7, 14, tzinfo=UTC).timestamp()
     end = datetime(2026, 7, 15, tzinfo=UTC).timestamp()
     name = archive_file_name(CLUSTER, start, end)
-    (tmp_path / name).write_bytes(b'x' * 10)
+    folder = history_folder(tmp_path)
+    (folder / name).write_bytes(b'x' * 10)
 
-    (info,) = list_archives(str(tmp_path))
+    (info,) = list_archives(str(folder))
 
     assert (info.name, info.cluster, info.from_ts, info.to_ts, info.size_bytes) == (name, CLUSTER, start, end, 10)
 

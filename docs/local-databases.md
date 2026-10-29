@@ -43,7 +43,8 @@ A worker uses two folders:
 |---|---|
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | A **sealed** recorder file: rollback journal, no sidecars, never changes again. |
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json` | The [meta file](#the-meta-file) of that sealed file: its statistics, written once by the owner. |
-| `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
+| `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive of the whole cluster: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
+| `history/<cluster>/<cluster>-<worker>-<from>__<to>.db.gz` | Archive of one worker's own files, with the sanitized worker name. See [The two scopes](#archive-scopes). |
 | `tasks/<cluster>/<task>.lock` | The [task lock](#the-task-lock) of a cluster periodic task (the archive's is `history.archive.lock`), made by the `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster holds the slot. The same folder holds the clock markers `.clock.<instance>`. |
 | `merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` | The result of a merge started from the UI. Deleted after `history.merged_retention_days`; see [Merge results expire](#merge-results-expire). |
 | `fleet/workers/<worker>.json` | Registry card of the `filesystem` provider. See [Fleet registry](fleet.md). |
@@ -62,7 +63,8 @@ Rules:
 - **Of the history folders, a worker writes only into the one of its own
   cluster.** It publishes its sealed files there. The worker that holds the
   lease of an archive slot (with the default provider: the task lock) also
-  writes the archives there and deletes the sealed files it archived.
+  writes the archives there and deletes the sealed files it archived. In the
+  [own scope](#archive-scopes), each worker does this for its own files only.
 - Timestamp format in recorder filenames is exactly
   `%Y-%m-%d__%H_%M_%S` (UTC).
 - DB files and meta files are created with `0600` permissions. The worker
@@ -527,34 +529,72 @@ the same bytes, for any implementation. An example:
 
 ## Archiving
 
-Age-based and count-based retention (the old `retention_hours` /
-`retention_max_events` keys) are gone. In their place, a periodic
-**archive pass** folds each finished UTC time window's sealed files into
-one compressed, merged database per cluster, and deletes only the sealed
+A periodic **archive pass** folds each finished UTC time window's sealed
+files into one compressed, merged database, and deletes only the sealed
 files it successfully merged. A worker's pass works only inside the history
-folder of its own cluster, `<shared.dir>/history/<cluster>/`. The window
-math, file names and the protocol of the default lock
-(`drakkar/recorder/archive.py`, `drakkar/recorder/task_lock.py`) are part
-of the on-disk spec, so a fleet sharing one `shared.dir` archives correctly
-no matter which worker does the work for a given cluster.
+folder of its own cluster, `<dir>/history/<cluster>/`, where `<dir>` is
+`storage.shared_dir`, else `storage.dir`. The window math, file names and the
+protocol of the default lock (`drakkar/recorder/archive.py`,
+`drakkar/recorder/task_lock.py`) are part of the on-disk spec, so a fleet
+sharing one `storage.shared_dir` archives correctly no matter which worker
+does the work for a given cluster.
+
+### The two scopes {#archive-scopes}
+
+A worker runs archive passes when `recorder.enabled` is true,
+`recorder.provider` is `sqlite`, `recorder.archive.enabled` is true and
+`storage.dir` is set. `ui.enabled` plays no part. The scope of its passes
+follows from two settings:
+
+| | Whole cluster | Own files |
+|---|---|---|
+| **When** | `autodiscover.enabled` is true and `storage.shared_dir` is set | Every other case |
+| **Takes** | Every sealed file in `<shared_dir>/history/<cluster>/` | The sealed files of this worker in `<dir>/history/<cluster>/` |
+| **Archive name** | `<cluster>-<from>__<to>.db.gz` | `<cluster>-<worker>-<from>__<to>.db.gz` |
+| **Who runs a slot** | One worker of the cluster, by [election](#the-election-provider) | Each worker, for itself. No election, no lease, no lock |
+| **Retention deletes** | Archives named `<cluster>-<from>__<to>.db.gz` | Archives of this worker only |
+| **`recorder.archive.lease`** | Used | Not used |
+| **[Definition hash](periodic-tasks.md#definition-hash)** | Has `history.archive` | Does not have it |
+| **The `periodic_run` row** | System row, `scope: cluster` and `slot` | System row, no `scope` and no `slot` |
+
+A sealed file is a worker's own when its name minus the time stamp, sanitized,
+equals the sanitized worker name exactly: the worker `w` never takes a file of
+the worker `w-1`, and the same rule holds for archives in retention and for
+work files in the sweep. So several workers can share one folder in the own
+scope, and a pass of one takes and deletes nothing of another. The two scopes
+also leave each other's archives alone. Both scopes prune the merge results in
+`<dir>/merged/` by age, when that folder exists.
+
+The own scope suits a worker with its own disk, a worker with a folder that
+other workers do not see, and any worker with `autodiscover` off. A folder that
+workers share is safe in either scope, but the own scope gives one archive per
+worker for each window.
+
+The gauges `drakkar_recorder_archive_bytes` and
+`drakkar_recorder_archive_files` count the archives of the cluster. In the own
+scope they also count the archives of this worker, and not those of other
+workers.
 
 ### When the pass runs: archive slots {#archive-slots}
 
-The archive pass is the system [cluster periodic task](periodic-tasks.md)
-`history.archive`. It runs only on a worker with `ui.enabled`,
-`history.archive.enabled`, `ui.recorder.persistence` `sqlite` (derived or
-set) and a `storage.dir`. A `none` worker does not take part in the archive
-election. Its slots are the same on every worker of the cluster:
+The archive pass is named `history.archive`. Its slots are the same in both
+[scopes](#archive-scopes) and on every worker:
 
-- `history.archive.interval` (default 3600): a slot at every whole multiple
+- `recorder.archive.interval` (default `1h`): a slot at every whole multiple
   of that many seconds since 1970-01-01T00:00:00Z, so at the top of each
-  UTC hour by default. A whole number of at least 30.
-- or `history.archive.cron`: a five-field UTC cron expression in the
+  UTC hour by default. A whole number of seconds, at least 30.
+- or `recorder.archive.cron`: a five-field UTC cron expression in the
   [accepted subset](periodic-tasks.md#cron), for example `'15 */2 * * *'`.
   Give at most one of `interval` and `cron`.
 
-At each slot every worker of the cluster asks the
-[election provider](#the-election-provider) for the lease of the scope
+In the own scope the worker runs the pass at each slot, on its own archive
+thread, and updates the footprint gauges at the start of the pass. A pass that
+runs longer than the interval skips the slots that pass meanwhile.
+
+In the cluster scope the pass is a system
+[cluster periodic task](periodic-tasks.md), and at each slot every worker of
+the cluster asks the [election provider](#the-election-provider) for the lease
+of the scope
 `<cluster>/history.archive`. The worker that gets it runs the pass in the
 background, on its own archive thread; the others skip the slot and lose
 nothing, because any window still due is picked up at a later slot. Every
@@ -564,22 +604,19 @@ that slot, when its archive thread is idle. The rules of the slot (the
 10-second acquire window, the 20-second minimum hold, no catch-up of missed
 slots) are on [Periodic Tasks](periodic-tasks.md#cluster-tasks-the-slot-rule).
 
-A worker runs the archive task when the UI is on (the recorder exists),
-`history.archive.enabled` is true and `storage.dir` is set. The rotation
-only rotates and seals; it starts no pass. A pass that runs longer than the
-interval skips the slots that pass meanwhile.
+The rotation only rotates and seals; it starts no pass. A pass that runs
+longer than the interval skips the slots that pass meanwhile.
 
 ```yaml
-history:
+recorder:
   archive:
-    interval: 1800               # a slot every 30 minutes; or cron: '0 */6 * * *'
-    lease_seconds: 60            # how long the lease of a dead archiver lives
-    sweep_after_seconds: 7200    # the age of work files the pass deletes
+    interval: 30m      # a slot every 30 minutes; or cron: '0 */6 * * *'
+    lease: 1m          # how long the lease of a dead archiver lives (cluster scope)
+    sweep_after: 2h    # the age of work files the pass deletes
 ```
 
 A worker that stops ends its pass after the window in progress and skips
-expiry and pruning; the windows left stay due for the next pass of any
-worker. At a clean stop the recorder lets the pass in progress end its
+expiry and pruning; the windows left stay due for the next pass. At a clean stop the recorder lets the pass in progress end its
 window. A pass ends only between windows, so the wait has no fixed limit.
 While a worker registry runs, the wait keeps
 `autodiscover.resilience.timeout_seconds` of the time left for the card
@@ -587,9 +624,11 @@ withdraw that comes after the recorder: it ends when the time left is down
 to that value, or at once when less is left. Without a registry it can use
 all the time left. A pass that is still running then is left to end on its
 own and logged as `recorder_archive_pass_abandoned` (fields
-`waited_seconds` and `detail`). The election provider then stops with the
-time that is left. A provider refuses every call after its stop, so the
-abandoned pass is fenced at its next check, and its lease runs out.
+`waited_seconds` and `detail`). In the cluster scope the election provider
+then stops with the time that is left. A provider refuses every call after its
+stop, so the abandoned pass is fenced at its next check, and its lease runs
+out. In the own scope there is no lease: the abandoned pass ends after the
+window in progress.
 
 ### Defaults walkthrough
 

@@ -845,20 +845,23 @@ byte-level spec. The short version:
   window closes). Archives themselves are deleted once their window ended
   more than `retention_days` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
-- **One worker runs the pass at each archive slot.** The pass is the
-  system [cluster task](periodic-tasks.md) `history.archive`: its slots come
-  from `history.archive.interval` (default 3600 seconds, aligned to the
-  epoch) or `history.archive.cron`, and the worker that wins the slot runs
-  the pass in the background, on the history folder of its own cluster
-  only. Every other worker updates the footprint gauges at that slot. The
-  rotation only seals; it starts no pass.
+- **The pass has [two scopes](local-databases.md#archive-scopes).** With
+  `autodiscover.enabled` and `storage.shared_dir` set, one worker runs the pass
+  at each archive slot over the whole cluster: the pass is the system
+  [cluster task](periodic-tasks.md) `history.archive`, and every other worker
+  updates the footprint gauges at that slot. In every other case each worker
+  runs the pass at each slot over its own files, with no election, and writes
+  `<cluster>-<worker>-<from>__<to>.db.gz`. The slots come from
+  `recorder.archive.interval` (default `1h`, aligned to the epoch) or
+  `recorder.archive.cron`. The pass runs in the background, on the history
+  folder of its own cluster only. The rotation only seals; it starts no pass.
 - **Windows key on file start time, not event time.** A sealed file
   belongs to the window holding its own start timestamp; an archive can
   carry a handful of events timestamped slightly past its own window end.
 - **Only sealed files are candidates.** Every `*.db` in a cluster history
   folder is sealed and never changes, so the pass needs no in-use check and
   reads its sources with `immutable=1`.
-- **One archiver per slot.** At each slot every worker of the cluster asks
+- **One archiver per slot in the cluster scope.** At each slot every worker of the cluster asks
   the election provider for the lease of `<cluster>/history.archive`; one
   wins, and the others skip the slot and lose nothing. With the default
   `filesystem` provider the lease is the file

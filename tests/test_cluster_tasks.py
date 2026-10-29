@@ -1266,10 +1266,10 @@ def _archive_config(**recorder):
     )
 
 
-def test_archive_task_runs_is_true_with_a_recorder_file_and_a_storage_dir():
-    assert cluster_tasks.archive_task_runs(_archive_config(provider='sqlite'))
-    assert cluster_tasks.archive_task_runs(_archive_config())
+def test_archive_scope_is_set_with_a_recorder_file_and_a_storage_dir():
+    assert cluster_tasks.archive_scope(_archive_config(provider='sqlite')) == 'cluster'
+    assert cluster_tasks.archive_scope(_archive_config()) == 'cluster'
 
 
-def test_archive_task_runs_is_false_with_none():
-    assert not cluster_tasks.archive_task_runs(_archive_config(enabled=False))
+def test_archive_scope_is_none_with_the_recorder_off():
+    assert cluster_tasks.archive_scope(_archive_config(enabled=False)) is None

@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from drakkar import cluster_tasks as cluster_tasks_module
 from drakkar.app import DrakkarApp
-from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_task_runs
+from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_scope
 from drakkar.config import DrakkarConfig
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry
@@ -288,12 +288,12 @@ def test_no_cluster_task_builds_no_election(tmp_path):
     ],
     ids=['autodiscover-off', 'recorder-off', 'memory-only', 'archiving-off'],
 )
-def test_election_is_built_only_when_the_archive_runs(tmp_path, overrides):
+def test_election_is_built_only_when_the_archive_has_cluster_scope(tmp_path, overrides):
     app = _app(tmp_path, **overrides)
 
     app._lifecycle._build_periodic_roster()
 
-    assert not archive_task_runs(app._config)
+    assert archive_scope(app._config) != 'cluster'
     assert app._cluster_election is None
 
 

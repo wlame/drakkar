@@ -1,5 +1,5 @@
 {
-  "_comment": "History meta file (schema 1) and task lock body, shared byte-for-byte by every implementation. meta/bytes: what an owner writes next to a sealed recorder file (sorted keys, compact separators, raw UTF-8, no trailing newline; first/last_event_ts null when the file has no events). lock/lock_bytes: the body of a task lock file tasks/<cluster>/<task>.lock. epochs: float epoch seconds and their canonical text — microseconds = round half to even of ts * 1e6 on the IEEE double, then YYYY-MM-DDTHH:MM:SS.ffffffZ. mtimes_ns: integer nanosecond file mtimes (modified_at of the databases answer) and their text — truncated to the microsecond.",
+  "_comment": "History meta file (schema 1) and task lock body, shared byte-for-byte by every implementation. meta/bytes: what an owner writes next to a sealed recorder file (sorted keys, compact separators, raw UTF-8, no trailing newline; first/last_event_ts null when the file has no events). lock/lock_bytes: the body of a task lock file tasks/<cluster>/<task>.lock. epochs: float epoch seconds and their canonical text — microseconds = round half to even of ts * 1e6 on the IEEE double, then YYYY-MM-DDTHH:MM:SS.ffffffZ. mtimes_ns: integer nanosecond file mtimes (modified_at of the databases answer) and their text — truncated to the microsecond. archive_names: the archive of one window, from and to in epoch seconds; worker null is a pass over the whole cluster (<cluster>-<from>__<to>.db.gz), a worker is a pass over that worker's own files (<cluster>-<worker>-<from>__<to>.db.gz); both names are sanitized, the bounds are UTC with minute precision. own_sealed_files: whether a sealed file belongs to a worker: the file name minus its time stamp, sanitized, equals the sanitized worker name exactly.",
   "meta": {
     "schema": 1,
     "worker": "search-worker-3",
@@ -99,6 +99,90 @@
     {
       "ns": 1700000000000000999,
       "text": "2023-11-14T22:13:20.000000Z"
+    }
+  ],
+  "archive_names": [
+    {
+      "cluster": "search",
+      "worker": null,
+      "from": 1760313600.0,
+      "to": 1760400000.0,
+      "name": "search-2025-10-13_00-00__2025-10-14_00-00.db.gz"
+    },
+    {
+      "cluster": "search",
+      "worker": "w",
+      "from": 1760313600.0,
+      "to": 1760400000.0,
+      "name": "search-w-2025-10-13_00-00__2025-10-14_00-00.db.gz"
+    },
+    {
+      "cluster": "search",
+      "worker": "w-1",
+      "from": 1760313600.0,
+      "to": 1760400000.0,
+      "name": "search-w-1-2025-10-13_00-00__2025-10-14_00-00.db.gz"
+    },
+    {
+      "cluster": "a/b c",
+      "worker": "node.example",
+      "from": 1760313600.0,
+      "to": 1760317200.0,
+      "name": "a_b_c-node_example-2025-10-13_00-00__2025-10-13_01-00.db.gz"
+    },
+    {
+      "cluster": "",
+      "worker": "w",
+      "from": 1760313600.0,
+      "to": 1760400000.0,
+      "name": "default-w-2025-10-13_00-00__2025-10-14_00-00.db.gz"
+    }
+  ],
+  "own_sealed_files": [
+    {
+      "worker": "w",
+      "file": "w-2025-10-13__08_00_00.db",
+      "own": true
+    },
+    {
+      "worker": "w",
+      "file": "w-1-2025-10-13__08_00_00.db",
+      "own": false
+    },
+    {
+      "worker": "w-1",
+      "file": "w-1-2025-10-13__08_00_00.db",
+      "own": true
+    },
+    {
+      "worker": "w-1",
+      "file": "w-2025-10-13__08_00_00.db",
+      "own": false
+    },
+    {
+      "worker": "w",
+      "file": "xw-2025-10-13__08_00_00.db",
+      "own": false
+    },
+    {
+      "worker": "w",
+      "file": "w.db",
+      "own": false
+    },
+    {
+      "worker": "w",
+      "file": "w-2025-10-13.db",
+      "own": false
+    },
+    {
+      "worker": "node.example",
+      "file": "node.example-2025-10-13__08_00_00.db",
+      "own": true
+    },
+    {
+      "worker": "node_example",
+      "file": "node_example-2025-10-13__08_00_00.db",
+      "own": true
     }
   ]
 }

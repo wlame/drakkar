@@ -852,4 +852,40 @@ through this change when it keeps its provider and its folder or connection.
 - With `autodiscover` off, an enabled `cache.exchange` logs
   `cache_exchange_off_no_autodiscover` once, and the peer route answers as it does
   for a switched-off exchange.
-- A worker with `autodiscover` off runs no `history.archive` task.
+
+## The archive scope {#archive-scope}
+
+The archive pass now has two scopes. See
+[The two scopes](local-databases.md#archive-scopes).
+
+- With `autodiscover.enabled` and `storage.shared_dir` set, a pass covers the whole
+  cluster, as before. It runs with an election, and it writes
+  `<cluster>-<from>__<to>.db.gz`.
+- In every other case, a pass covers only this worker's files. It runs at the same slots
+  with no election and no lease, and it writes `<cluster>-<worker>-<from>__<to>.db.gz`.
+  `history.archive` is then not in the definition hash, and the worker counts nothing in
+  `drakkar_periodic_cluster_slots_total` for it.
+
+**What to do:**
+
+1. Find workers that have `autodiscover` off, or that have no `storage.shared_dir`. Their
+   archive now takes the worker's own sealed files in `<dir>/history/<cluster>/`, where
+   `<dir>` is `storage.shared_dir`, else `storage.dir`. To keep the sealed files instead,
+   set `recorder.archive.enabled: false`.
+2. If a tool reads the archive folder, let it also accept the name with a worker. The name
+   does not tell the cluster, because cluster names and worker names can both hold `-`.
+   Take the cluster from the folder. The `cluster` field of the archive rows in
+   `/api/v1/debug/databases` is now the folder name.
+3. Delete a line such as `recorder: {archive: {enabled: false}}` that you added only because
+   the workers have no shared folder. Each worker can now archive its own files.
+
+**Archives that stay in the folder after a change of scope:** a pass deletes only the
+archives of its own scope. If a worker changes scope, delete its old archives by hand once
+you no longer need them. Their sealed files are already gone.
+
+**Log events:** `recorder_archive_pass_abandoned` has a second `detail` text for the own
+scope, `the pass ends after the window in progress`.
+
+**In code:** `archive_task_runs` is `archive_scope`, which answers `cluster`, `worker` or
+`None`. `PeriodicRoster.runs_archive` is `PeriodicRoster.archive_scope`. `run_archive_pass`
+takes `only_worker`, and `fence` is optional. `archive_file_name` takes `worker`.

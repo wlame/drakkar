@@ -30,7 +30,7 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -55,8 +55,7 @@ from drakkar.recorder.election import (
 from drakkar.schedule import (
     ACQUIRE_WINDOW_SECONDS,
     MIN_HOLD_SECONDS,
-    next_cron_slot,
-    next_interval_slot,
+    next_task_slot,
     task_scope,
 )
 
@@ -73,6 +72,11 @@ SLOT_HELD_ELSEWHERE = 'held_elsewhere'
 SLOT_LATE = 'late'
 SLOT_ELECTION_FAILED = 'election_failed'
 
+# What one archive pass covers: every worker's files, or this worker's own.
+ArchiveScope = Literal['cluster', 'worker']
+ARCHIVE_SCOPE_CLUSTER: ArchiveScope = 'cluster'
+ARCHIVE_SCOPE_WORKER: ArchiveScope = 'worker'
+
 # A peer's definition hash counts only in this exact form; anything else is unknown.
 _CLUSTER_HASH = re.compile(r'[0-9a-f]{16}')
 
@@ -82,19 +86,24 @@ _ALREADY_STARTED = CallResult(ok=True, value=None, outcome=OUTCOME_OK, attempts=
 _STOPPED = CallResult(ok=False, value=None, outcome=OUTCOME_NOT_STARTED, attempts=0)
 
 
-def archive_task_runs(config: DrakkarConfig) -> bool:
-    """Whether this worker runs the system cluster task ``history.archive``.
+def archive_scope(config: DrakkarConfig) -> ArchiveScope | None:
+    """What the archive pass of this worker covers; ``None`` when it runs no pass.
 
-    It needs autodiscover on (the task has an election), archiving on, the
-    recorder enabled with provider ``sqlite`` (only then are files sealed), and a
-    storage folder whose sealed files reach the shared history folder.
+    A pass needs archiving on, the recorder enabled with provider ``sqlite``
+    (only then are files sealed) and a storage folder. It covers the whole
+    cluster, as the system cluster task ``history.archive`` with an election,
+    when autodiscover is on and a shared folder holds the files of every
+    worker. Otherwise it covers this worker's own files, with no election.
     """
-    return (
-        config.autodiscover.enabled
-        and config.resolved_persistence == PERSISTENCE_SQLITE
-        and config.recorder.archive.enabled
-        and bool(config.storage.dir)
-    )
+    if (
+        config.resolved_persistence != PERSISTENCE_SQLITE
+        or not config.recorder.archive.enabled
+        or not config.storage.dir
+    ):
+        return None
+    if config.autodiscover.enabled and config.storage.shared_dir:
+        return ARCHIVE_SCOPE_CLUSTER
+    return ARCHIVE_SCOPE_WORKER
 
 
 class ClusterElection:
@@ -361,9 +370,7 @@ class ClusterTask:
 
     def next_slot(self, now: float) -> int:
         """The first slot of this task strictly after ``now`` truncated to the second."""
-        if self.interval is not None:
-            return next_interval_slot(now, self.interval)
-        return next_cron_slot(now, self.cron or '')
+        return next_task_slot(now, interval=self.interval, cron=self.cron)
 
 
 async def run_cluster_task(
