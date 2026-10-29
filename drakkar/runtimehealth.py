@@ -296,7 +296,7 @@ class RuntimeHealthMonitor:
         self._episode: _Episode | None = None
         self._recent_episodes: deque[dict[str, Any]] = deque(maxlen=50)
         # Kernel thread id of the loop thread, for /proc/self/task/<tid>/stat
-        # CPU reads from the sampler/UI threads. Set in start().
+        # CPU reads from the sampler and API server threads. Set in start().
         self._loop_native_tid: int | None = None
         # Opt-in probe bookkeeping: capture happens on the sampler thread,
         # but recording must run on the loop — captured probes queue here

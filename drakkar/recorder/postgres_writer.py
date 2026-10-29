@@ -14,7 +14,7 @@ One run (:meth:`PostgresWriter.run_once`):
 2. the partition upkeep when it is due; its outcome never ends the run. It
    creates the partitions ahead, drops the hours past the stored retention,
    and with ``recorder.postgres.max_size`` above 0 drops the oldest hours
-   before the current one while the table is larger than that;
+   before the previous one while the table is larger than that;
 3. until the slot and the queue are empty: form a chunk into the slot when it
    is empty, and COPY it. A written chunk empties the slot and the loop goes
    on, so a backlog drains as fast as Postgres takes it; any other outcome
@@ -180,18 +180,21 @@ def size_drops(table: str, now: float, measured: Sequence[str], sizes: dict[str,
 
     ``sizes`` is the answer of ``partition_sizes`` for ``measured``; a name
     it does not hold counts as 0. While the total of ``measured`` is above
-    ``max_size``, the oldest hour goes. The hour of ``now`` and later hours
-    are never dropped, so the cap can leave the table above ``max_size``.
-    ``max_size`` 0 drops nothing.
+    ``max_size``, the oldest hour goes. The hour before the hour of ``now``
+    and every later hour are never dropped: the upkeep keeps that previous
+    hour for rows of a clock that is a little late, and a cap that dropped
+    it would make the next upkeep create it again. So the cap can leave the
+    table above ``max_size`` by up to two hours of writes. ``max_size`` 0
+    drops nothing.
     """
     if max_size == 0:
         return []
-    current_hour = int(now // SECONDS_PER_HOUR)
+    first_kept_hour = int(now // SECONDS_PER_HOUR) - PARTITIONS_BEHIND_HOURS
     total = sum(sizes.get(name, 0) for name in measured)
     candidates = sorted(
         (hour, name)
         for name in measured
-        if (hour := parse_partition_hour(table, name)) is not None and hour < current_hour
+        if (hour := parse_partition_hour(table, name)) is not None and hour < first_kept_hour
     )
     drop: list[str] = []
     for _, name in candidates:

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 #
 # The sleep is adaptive rather than fixed. A fixed 20ms cost 50 wakeups per
 # second per connection even on a completely idle worker — ten open tabs
-# meant 500 pointless wakeups/s on the UI thread. Backing off to
+# meant 500 pointless wakeups/s on the API server thread. Backing off to
 # WS_DRAIN_SLEEP_MAX while nothing arrives makes idle dashboards nearly free,
 # and resetting to WS_DRAIN_SLEEP_MIN on the first event keeps live latency
 # unchanged while events are actually flowing (under load the queue is never

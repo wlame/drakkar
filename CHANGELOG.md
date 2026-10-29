@@ -241,7 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stdout` and `stderr` value to its first and last half, at character boundaries, joined
   by `...[cut <n> bytes]...`; `metadata` is never cut. `recorder.postgres.max_size`
   (default `0`, `0` or at least `64MiB`) makes the partition upkeep drop the oldest hours,
-  never the current one, while the table is larger; the upkeep holder's own value applies.
+  never the previous or the current one, while the table is larger, so the table can stay
+  above it by up to two hours of writes; the upkeep holder's own value applies.
   New metric `drakkar_recorder_postgres_partitions_dropped_total{reason}` (`retention`,
   `size`); `recorder_postgres_partitions_changed` gains `dropped_for_size`.
 - **Failure policy, retry budget and dependencies per sink.** Every sink

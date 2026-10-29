@@ -413,8 +413,9 @@ class RecorderPostgresConfig(ConfigModel):
         default=0,
         description=(
             'Largest total size of the table: 0 = no limit, or at least 64MiB. The partition upkeep drops the '
-            'oldest hours until the table is under it, but never the current hour or later ones. The worker that '
-            'runs the upkeep applies its own value, so workers that share a table should use one value.'
+            'oldest hours until the table is under it, but never the previous hour, the current hour or later '
+            'ones, so the table can stay above it by up to two hours of writes. The worker that runs the upkeep '
+            'applies its own value, so workers that share a table should use one value.'
         ),
     )
     batch_rows: int = Field(

@@ -166,6 +166,7 @@ def test_size_upkeep_cases(case):
     actions = upkeep_actions(case['table'], case['now'], case['retention'], case['listed'])
     measured = measured_partitions(case['table'], case['listed'], actions.drop)
     answered = {name: size for name, size in case['sizes'].items() if name in measured}
+    assert measured == case['asked']
 
     dropped_for_size = size_drops(case['table'], case['now'], measured, answered, case['max_size'])
 
@@ -175,7 +176,8 @@ def test_size_upkeep_cases(case):
         case['dropped_for_size'],
     )
     current_hour = int(case['now'] // SECONDS_PER_HOUR)
-    assert partition_name(case['table'], current_hour) not in dropped_for_size
+    kept = {partition_name(case['table'], hour) for hour in range(current_hour - 1, current_hour + 4)}
+    assert kept.isdisjoint(dropped_for_size)
 
 
 def test_measured_partitions_are_the_kept_partitions_of_the_table_ascending():
@@ -501,7 +503,7 @@ async def test_size_statement_runs_only_with_max_size(max_size):
 
 async def test_size_cap_drops_the_oldest_hours_after_the_retention_drops_and_logs_them():
     # Hours 06 and 07 ended more than the 6 stored hours ago; 08 to 17 are
-    # measured, and the oldest before the current hour go one by one.
+    # measured, and the oldest before the previous hour go one by one.
     listed = _names(*range(SERVER_HOUR - 8, SERVER_HOUR + 4))
     sizes = {name: 30 * MIB_BYTES for name in listed}
     fake = _fake(partitions=set(listed), sizes=sizes)
@@ -511,8 +513,8 @@ async def test_size_cap_drops_the_oldest_hours_after_the_retention_drops_and_log
         await writer.run_once()
 
     # Ten partitions of 30 MiB stay after the retention: still above the cap
-    # when every hour before the current one is gone.
-    for_size = _names(*range(SERVER_HOUR - 6, SERVER_HOUR))
+    # when every hour before the previous one is gone.
+    for_size = _names(*range(SERVER_HOUR - 6, SERVER_HOUR - 1))
     retention = _names(SERVER_HOUR - 8, SERVER_HOUR - 7)
     drops = [
         render_recorder(PARTITION_DDL_TEMPLATES['drop'], schema='drakkar', table=TABLE, partition=name)
@@ -526,19 +528,19 @@ async def test_size_cap_drops_the_oldest_hours_after_the_retention_drops_and_log
         *[('execute', text, ()) for text in drops[2:]],
         ('COMMIT',),
     ]
-    assert fake.partitions == set(_names(*range(SERVER_HOUR, SERVER_HOUR + 4)))
+    assert fake.partitions == set(_names(*range(SERVER_HOUR - 1, SERVER_HOUR + 4)))
     (changed,) = _logs(captured, 'recorder_postgres_partitions_changed')
     assert (changed['created'], changed['dropped'], changed['dropped_for_size']) == ([], retention, for_size)
 
 
-async def test_size_cap_never_drops_the_current_hour_or_later():
+async def test_size_cap_never_drops_the_previous_hour_or_later():
     listed = _names(*range(SERVER_HOUR - 2, SERVER_HOUR + 4))
     fake = _fake(partitions=set(listed), sizes={name: 100 * MIB_BYTES for name in listed})
     writer = _writer(fake, FakeClock(), max_size=CAP)
 
     await writer.run_once()
 
-    assert fake.partitions == set(_names(*range(SERVER_HOUR, SERVER_HOUR + 4)))
+    assert fake.partitions == set(_names(*range(SERVER_HOUR - 1, SERVER_HOUR + 4)))
 
 
 async def test_partitions_dropped_metric_counts_by_reason():
@@ -551,7 +553,7 @@ async def test_partitions_dropped_metric_counts_by_reason():
     await writer.run_once()
 
     after = _partitions_dropped()
-    assert (after['retention'] - before['retention'], after['size'] - before['size']) == (2, 6)
+    assert (after['retention'] - before['retention'], after['size'] - before['size']) == (2, 5)
 
 
 async def test_a_failed_size_drop_rolls_back_and_counts_no_partition():

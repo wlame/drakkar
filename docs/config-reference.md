@@ -669,7 +669,7 @@ recorder:
     max_output: 64KiB              # longest stdout or stderr value in the table, in UTF-8 bytes; 0 = no limit, else at
                                    # least 1KiB; a longer value keeps its first and last half. env: DK_RECORDER__POSTGRES__MAX_OUTPUT
     max_size: 0                    # largest total size of the table; 0 = no limit, else at least 64MiB; the upkeep drops
-                                   # the oldest hours, never the current one. env: DK_RECORDER__POSTGRES__MAX_SIZE
+                                   # the oldest hours, never the previous or the current one. env: DK_RECORDER__POSTGRES__MAX_SIZE
     batch_rows: 5000               # most rows in one COPY, 100-50000. env: DK_RECORDER__POSTGRES__BATCH_ROWS
     max_queue: 128MiB              # most text waiting for Postgres, 16MiB to 1GiB. env: DK_RECORDER__POSTGRES__MAX_QUEUE
     resilience: {}                 # the shared resilience block: timeout, max_retries, backoff, max_backoff,

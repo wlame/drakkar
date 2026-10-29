@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import APIConfig, LoggingConfig, RecorderConfig, UIConfig
+from drakkar.config import APIConfig, LoggingConfig, RecorderConfig, RecorderMemoryConfig, UIConfig
 from drakkar.config.recorder import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
@@ -89,7 +89,6 @@ from drakkar.recorder.history import history_dir
 from drakkar.recorder.memstore import (
     EVICT_MIN_INTERVAL_SECONDS,
     MEMORY_CLOSE_WAIT_SECONDS,
-    MIB,
     EvictionResult,
     MemoryCoverage,
     MemoryStore,
@@ -151,6 +150,11 @@ FLUSH_CHUNK_ROWS = 5_000
 DEFAULT_API_PORT: int = APIConfig.model_fields['port'].default
 DEFAULT_WS_MIN_DURATION_MS = round(UIConfig.model_fields['ws_min_duration'].default * 1000)
 DEFAULT_LOG_MIN_DURATION_MS = round(LoggingConfig.model_fields['min_task_duration'].default * 1000)
+# The memory store bounds come from ``recorder.memory``; the worker passes the
+# row cap of all its executor slots, so the default row cap is one slot's share.
+DEFAULT_MEMORY_WINDOW_SECONDS: int = RecorderMemoryConfig.model_fields['window'].default
+DEFAULT_MEMORY_MAX_ROWS: int = RecorderMemoryConfig.model_fields['rows_per_executor'].default
+DEFAULT_MEMORY_MAX_BYTES: int = RecorderMemoryConfig.model_fields['max_size'].default
 # Resource samples without a recorder file, whose ``sqlite.state_interval`` paces them otherwise.
 HOST_SAMPLE_SECONDS = 10
 SECONDS_PER_HOUR = 3600
@@ -288,9 +292,9 @@ class EventRecorder(EventWriter):
         storage_dir: str = '',
         shared_dir: str = '',
         instance: str = '',
-        memory_window_seconds: int = 120,
-        memory_max_rows: int = 3000,
-        memory_max_bytes: int = 256 * MIB,
+        memory_window_seconds: int = DEFAULT_MEMORY_WINDOW_SECONDS,
+        memory_max_rows: int = DEFAULT_MEMORY_MAX_ROWS,
+        memory_max_bytes: int = DEFAULT_MEMORY_MAX_BYTES,
         postgres: RecorderPostgresSettings | None = None,
         postgres_open_pool: OpenPool | None = None,
     ) -> None:
@@ -361,7 +365,7 @@ class EventRecorder(EventWriter):
         # The file queue: ``(id, row tuple)`` pairs that stage M handed on
         # and stage F has not yet written to the file. The id
         # rides next to the row, never inside the event dict: the fan-out may
-        # encode that dict on the UI thread at any time.
+        # encode that dict on the API server thread at any time.
         self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.max_buffer_rows)
         # The P queue: the same pairs on their way to the Postgres table,
         # bounded by count and by text size; only with ``postgres``.
@@ -1011,7 +1015,7 @@ class EventRecorder(EventWriter):
 
         The event dict is never changed after this call: its row id is
         assigned later, by stage M, and rides next to the row. The fan-out
-        may encode the same dict on the UI thread at any time.
+        may encode the same dict on the API server thread at any time.
 
         Nothing is appended when no table would ever take the event
         (``capture.events`` off, or no store at all), nor for ``skip_db`` events.

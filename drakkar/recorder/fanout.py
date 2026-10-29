@@ -51,7 +51,7 @@ class LiveEvent:
     same dict, making serialization cost scale with tab count.
 
     Encoding is deferred to first read rather than done at fan-out, which
-    keeps it on the UI-server thread instead of the main loop — the
+    keeps it on the API server thread instead of the main loop — the
     pipeline pays only for one small object allocation per event.
 
     Two coroutines on the UI loop can reach :attr:`text` before either
@@ -65,7 +65,7 @@ class LiveEvent:
     def __init__(self, event: dict) -> None:
         # Stripped here rather than at encode time. This wrapper sits in every
         # interested subscriber's queue — up to ``WS_SUBSCRIBER_QUEUE_SIZE``
-        # deep — until the UI thread drains it, so holding the raw event would
+        # deep — until the API server thread drains it, so holding the raw event would
         # pin the whole captured stdout and stderr of every queued task. One
         # throttled browser tab on a slow link could keep gigabytes alive that
         # way, on top of the recorder buffer, and take the worker out with it.
@@ -103,7 +103,7 @@ class WSSubscriber:
         Events discarded because ``queue`` was full. The ``/ws`` route
         reports and clears this, letting the browser resync deliberately
         instead of drifting out of sync with no signal. Incremented from the
-        main loop and cleared from the UI thread; a lost increment across
+        main loop and cleared from the API server thread; a lost increment across
         that boundary would at worst delay one resync by a frame, so the
         plain ``int`` needs no lock.
     """
@@ -161,7 +161,7 @@ class WSFanout:
 
     Every method runs on the main (pipeline) loop except
     :meth:`subscribe` / :meth:`unsubscribe`, which the ``/ws`` route calls
-    from the UI-server thread — see :meth:`broadcast` for why that is safe.
+    from the API server thread — see :meth:`broadcast` for why that is safe.
     """
 
     def __init__(self, ws_min_duration_ms: float) -> None:
@@ -193,7 +193,7 @@ class WSFanout:
             max(ws_min_duration_ms / 1000.0, 0.001),
         )
 
-    # --- subscriber registry (called from the UI-server thread) ---
+    # --- subscriber registry (called from the API server thread) ---
 
     def subscribe(self, event_types: Collection[str] | None = None) -> WSSubscriber:
         """Subscribe to the live event stream.
@@ -225,7 +225,7 @@ class WSFanout:
         """Push ``event`` to every interested subscriber, dropping when full.
 
         Iterates a **snapshot** of the subscriber set, not the set itself.
-        ``subscribe``/``unsubscribe`` run on the UI-server thread (inside the
+        ``subscribe``/``unsubscribe`` run on the API server thread (inside the
         ``/ws`` route) while this runs on the main loop, so iterating the live
         set raises ``RuntimeError: Set changed size during iteration`` the
         moment a browser tab opens or closes mid-fan-out. That exception would
@@ -238,7 +238,7 @@ class WSFanout:
         Every interested subscriber receives the **same** :class:`LiveEvent`
         wrapper, so the event is JSON-encoded once regardless of how many
         browsers are connected, and the encode itself happens later on the
-        UI thread rather than here on the pipeline loop.
+        API server thread rather than here on the pipeline loop.
 
         Subscribers that filtered the event out are skipped before the
         wrapper is even allocated, so a page that renders only the executor

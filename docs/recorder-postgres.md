@@ -312,8 +312,10 @@ SELECT c.relname, pg_total_relation_size(c.oid) FROM pg_class c JOIN pg_namespac
 order. The size of a partition includes its indexes. Names that are not the
 upkeep's (see above) are not measured. While the total is above `max_size`,
 the upkeep drops the oldest hour, in the same transaction as the other
-drops. It never drops the current hour or a later one, so a table whose
-current hour alone is larger than `max_size` stays above it. It never
+drops. It never drops the previous hour, the current hour or a later one:
+the upkeep keeps the previous hour for rows of a clock that is a little
+late. So the table can stay above `max_size` by up to two hours of writes,
+and a `max_size` smaller than two hours of writes cannot be met. It never
 deletes single rows.
 
 The worker that holds the try-lock applies its own `max_size`, not a value
