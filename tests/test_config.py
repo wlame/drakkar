@@ -338,10 +338,7 @@ def test_metrics_config_rejects_invalid_port():
 
 def test_ui_config_defaults():
     cfg = make_ui_config()
-    assert cfg.recorder.max_buffer == 50_000
     assert cfg.max_rows == 5000
-    assert cfg.recorder.flush_interval_seconds == 5
-    assert cfg.recorder.rotation_interval_hours == 1
 
 
 def test_link_bases_strips_trailing_slash_and_validates_scheme():

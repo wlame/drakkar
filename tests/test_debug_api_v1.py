@@ -24,6 +24,7 @@ from structlog.testing import capture_logs
 from drakkar.config import (
     DrakkarConfig,
     PostgresConnectionConfig,
+    RecorderConfig,
     ResilienceConfig,
     TimelineColorRule,
     TimelineLabels,
@@ -118,7 +119,7 @@ def make_client(cfg, recorder, app) -> AsyncClient:
 
 @pytest.fixture
 async def client(debug_config, mock_recorder, mock_app):
-    mock_recorder.config = debug_config
+    mock_recorder.config = RecorderConfig()
     async with make_client(debug_config, mock_recorder, mock_app) as c:
         yield c
 
@@ -127,7 +128,7 @@ async def client(debug_config, mock_recorder, mock_app):
 async def client_with_link_bases(tmp_path, mock_recorder, mock_app):
     cfg = make_ui_config(enabled=True, port=8080, link_bases={'jira': 'https://jira.internal.example.com'})
     mock_app.config_summary = '[test-worker]'
-    mock_recorder.config = cfg
+    mock_recorder.config = RecorderConfig()
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app) as c:
         yield c
@@ -153,7 +154,7 @@ async def client_with_pages(tmp_path, mock_recorder, mock_app):
     )
     mock_app.ui_pages = build_pages([page])
     cfg = make_ui_config(enabled=True, port=8080)
-    mock_recorder.config = cfg
+    mock_recorder.config = RecorderConfig()
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app) as c:
         yield c
@@ -209,7 +210,7 @@ class TestSingleAPISurface:
         (tmp_path / 'history' / 'main').mkdir(parents=True)
         (tmp_path / 'history' / 'main' / 'w1.db').write_bytes(b'sqlite-bytes')
         cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path / 'storage')
         mock_recorder.shared_dir = str(tmp_path)
 
@@ -228,7 +229,7 @@ class TestSingleAPISurface:
         (tmp_path / 'history' / 'search-fleet').mkdir(parents=True)
         (tmp_path / 'history' / 'search-fleet' / name).write_bytes(b'gzip-bytes')
         cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path / 'storage')
         mock_recorder.shared_dir = str(tmp_path)
 
@@ -281,7 +282,7 @@ class TestV1Auth:
 
     def _make_authed_client(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         return make_client(cfg, mock_recorder, mock_app)
 
@@ -347,7 +348,7 @@ class TestApiV1Partitions:
         proc.queue_size = 4
         proc.offset_tracker.pending_count = 2
         mock_app.processors = {0: proc}
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/partitions')
@@ -392,7 +393,7 @@ class TestApiV1Partitions:
         consumer = MagicMock()
         consumer.get_partition_lag = AsyncMock(return_value={0: {'committed': 10, 'high_watermark': 15, 'lag': 5}})
         mock_app._consumer = consumer
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/partitions')
@@ -585,7 +586,7 @@ class TestApiV1LiveOverview:
         offload_pool = MagicMock()
         offload_pool.snapshot.return_value = {'running': 1, 'queued': 3, 'max_threads': 2}
         mock_app._offload_pool = offload_pool
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
@@ -606,7 +607,7 @@ class TestApiV1LiveOverview:
         proc._arrange_labels = [f'label-{i}' for i in range(12)]
         mock_app.processors = {0: proc}
         mock_app._executor_pool.running_task_ids = {'task-run'}
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
@@ -634,7 +635,7 @@ class TestApiV1LiveOverview:
                 return None
 
         mock_app.handler = H()
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
         assert resp.json()['hook_flags'] == {
@@ -647,7 +648,7 @@ class TestApiV1LiveOverview:
         mock_app._config.connections.kafka['main'].ui_url = 'http://kafka-ui:8080/'
         mock_app._config.connections.kafka['main'].ui_cluster_name = 'local'
         mock_app._config.sources.kafka.topic = 'events-in'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
         data = resp.json()
@@ -771,7 +772,7 @@ class TestDownloadFilenameHardening:
         folder.mkdir(parents=True)
         (folder / bad_name).write_bytes(b'sqlite-bytes')
         cfg = make_ui_config(enabled=True, port=8080)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.shared_dir = str(tmp_path)
 
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -827,7 +828,7 @@ class TestTraceByLabelEmptyParams:
 class TestApiV1Identity:
     async def test_shape_without_cluster(self, debug_config, mock_recorder, mock_app):
         mock_app.config_summary = '[test-worker] topic=input-events group=drakkar-workers'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
         assert resp.status_code == 200
@@ -861,7 +862,7 @@ class TestApiV1Identity:
         bundle_dir.mkdir()
         (bundle_dir / 'index.html').write_text('<html></html>')
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         fastapi_app = create_ui_app(
             debug_config,
             mock_recorder,
@@ -884,7 +885,7 @@ class TestApiV1Identity:
         server-rendered pages in 1.19.
         """
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
             data = (await c.get('/api/v1/identity')).json()
@@ -894,7 +895,7 @@ class TestApiV1Identity:
     async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._cluster_name = 'main'
         mock_app.config_summary = '[test-worker/main] topic=input-events'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
         assert resp.json()['cluster'] == 'main'
@@ -902,7 +903,7 @@ class TestApiV1Identity:
     async def test_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             assert (await c.get('/api/v1/identity')).status_code == 401
@@ -919,7 +920,7 @@ class TestApiV1Identity:
         renderers_path.write_text('export default {}\n')
         cfg = make_ui_config(enabled=True, port=8080, custom_renderers_path=str(renderers_path))
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
@@ -927,7 +928,7 @@ class TestApiV1Identity:
 
     async def test_identity_reports_default_timeline(self, debug_config, mock_recorder, mock_app):
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
         timeline = resp.json()['timeline']
@@ -953,7 +954,7 @@ class TestApiV1Identity:
         )
         cfg = make_ui_config(enabled=True, port=8080, timeline=timeline_cfg)
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
@@ -1049,7 +1050,7 @@ class TestApiV1Identity:
             link_bases={'jira': 'https://jira.internal.example.com'},
         )
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             data = (await c.get('/api/v1/identity')).json()
@@ -1071,7 +1072,7 @@ class TestApiV1Identity:
             docs=docs_cfg,
         )
         mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             data = (await c.get('/api/v1/identity')).json()
@@ -1102,7 +1103,7 @@ class TestApiV1Pages:
 
     async def test_pages_endpoint_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             assert (await c.get('/api/v1/pages')).status_code == 401
@@ -1128,7 +1129,7 @@ class TestDashboardLinks:
 
     async def test_links_present_with_prometheus_url(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, prometheus_url='http://prom:9090')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/dashboard')
@@ -1156,7 +1157,7 @@ class TestDashboardLinks:
             prometheus_url='http://prom:9090',
             prometheus_cluster_label='cluster="main"',
         )
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/dashboard')
@@ -1170,7 +1171,7 @@ class TestDashboardLinks:
     async def test_custom_links_alone_enable_key_and_pass_verbatim(self, tmp_path, mock_recorder, mock_app):
         custom = [{'name': 'Grafana', 'url': 'http://grafana/{worker_id}'}]
         cfg = make_ui_config(enabled=True, port=8080, custom_links=custom)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/dashboard')
@@ -1183,7 +1184,7 @@ class TestDashboardLinks:
 
     async def test_legacy_alias_carries_links_too(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, prometheus_url='http://prom:9090')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
             legacy = await c.get('/api/v1/dashboard')
@@ -1245,7 +1246,7 @@ class TestApiV1LiveOverviewCounts:
         proc._arranging = False
         mock_app.processors = {0: proc}
         mock_app._executor_pool.running_task_ids = {'task-0', 'task-1'}
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
@@ -1266,7 +1267,7 @@ class TestApiV1LiveOverviewCounts:
         proc._arranging = False
         mock_app.processors = {0: proc}
         mock_app._executor_pool.running_task_ids = {'partition-task', 'webapp-task-1', 'webapp-task-2'}
-        mock_recorder.config = debug_config
+        mock_recorder.config = RecorderConfig()
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
@@ -1281,7 +1282,7 @@ async def test_probe_endpoint_sheds_excess_waiters_with_429(debug_config, mock_r
     from drakkar.uiserver import runner as runner_module
 
     monkeypatch.setattr(runner_module, 'MAX_PROBE_WAITERS', 0)
-    mock_recorder.config = debug_config
+    mock_recorder.config = RecorderConfig()
 
     async with make_client(debug_config, mock_recorder, mock_app) as c:
         resp = await c.post('/api/v1/debug/probe', json={'value': '{}'})
@@ -1380,7 +1381,7 @@ async def test_debug_periodic_groups_carry_scope(tmp_path, debug_config, mock_re
     mock_recorder._db = db
     mock_recorder.file_reader_db = db
     mock_recorder.flush = AsyncMock()
-    mock_recorder.config = debug_config
+    mock_recorder.config = RecorderConfig()
     mock_recorder.storage_dir = str(tmp_path)
 
     try:
@@ -1410,7 +1411,7 @@ def _postgres_settings() -> RecorderPostgresSettings:
         connection=PostgresConnectionConfig(dsn='postgresql://drakkar:secret@db:5432/drakkar'),
         table_prefix='',
         retention_hours=6,
-        store_output=False,
+        store_completed_output=False,
         batch_rows=100,
         queue_max_bytes=128 * memstore.MIB,
         resilience=ResilienceConfig(),
@@ -1423,11 +1424,11 @@ async def started_recorder(tmp_path):
     recorders: list[EventRecorder] = []
 
     async def start(
-        persistence: str, *, store_events: bool = True, events: int = 3, base_ts: float | None = None
+        persistence: str, *, capture_events: bool = True, events: int = 3, base_ts: float | None = None
     ) -> EventRecorder:
         storage = tmp_path / 'storage'
         storage.mkdir(exist_ok=True)
-        config = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60, store_events=store_events)
+        config = RecorderConfig(flush_interval='60s', capture={'events': capture_events})
         rec = EventRecorder(
             config,
             worker_name=MEMORY_WORKER,
@@ -1459,7 +1460,7 @@ async def _databases(rec: EventRecorder) -> dict:
     app = MagicMock()
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
-    async with make_client(rec.config, rec, app) as c:
+    async with make_client(make_ui_config(), rec, app) as c:
         resp = await c.get('/api/v1/debug/databases')
     assert resp.status_code == 200
     return resp.json()
@@ -1482,7 +1483,7 @@ async def test_download_live_defaults_to_memory_and_databases_has_one_memory_row
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
-    async with make_client(rec.config, rec, app) as c:
+    async with make_client(make_ui_config(), rec, app) as c:
         databases = (await c.get('/api/v1/debug/databases')).json()
         download = await c.get('/api/v1/debug/download-live')
         file_download = await c.get('/api/v1/debug/download-live', params={'source': 'file'})
@@ -1512,7 +1513,7 @@ async def test_postgres_worker_answers_live_and_label_reads_from_memory(started_
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
-    async with make_client(rec.config, rec, app) as c:
+    async with make_client(make_ui_config(), rec, app) as c:
         trace = (await c.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 1})).json()
         by_label = (await c.get('/api/v1/debug/trace-by-label', params={'key': 'color', 'value': 'red'})).json()
         label_keys = (await c.get('/api/v1/debug/label-keys')).json()
@@ -1539,8 +1540,8 @@ async def test_databases_memory_row_numbers(started_recorder):
     assert row['cluster_name'] == 'search'
 
 
-async def test_databases_with_store_events_false_has_file_rows_only(started_recorder):
-    rec = await started_recorder('sqlite', store_events=False)
+async def test_databases_with_capture_events_off_has_file_rows_only(started_recorder):
+    rec = await started_recorder('sqlite', capture_events=False)
 
     own = (await _databases(rec))['own']
 
@@ -1587,14 +1588,14 @@ async def test_databases_and_download_after_stop_answer_empty_shapes(started_rec
     # the stop): the guard answers nothing and no empty store is created.
     store = rec.memory_store
     await store.close()
-    async with make_client(rec.config, rec, app) as c:
+    async with make_client(make_ui_config(), rec, app) as c:
         racing = (await c.get('/api/v1/debug/databases')).json()
         racing_download = await c.get('/api/v1/debug/download-live')
     with contextlib.closing(sqlite3.connect(store.uri, uri=True)) as raw:
         assert raw.execute("SELECT name FROM sqlite_master WHERE name = 'events'").fetchall() == []
 
     await rec.stop()
-    async with make_client(rec.config, rec, app) as c:
+    async with make_client(make_ui_config(), rec, app) as c:
         stopped = (await c.get('/api/v1/debug/databases')).json()
         stopped_download = await c.get('/api/v1/debug/download-live')
 

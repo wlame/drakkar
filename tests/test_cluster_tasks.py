@@ -268,7 +268,7 @@ def logs(monkeypatch) -> RecordingLogger:
 
 def make_caller(logger: Any = None, provider: str = PROVIDER, **resilience: Any) -> SpyCaller:
     return SpyCaller(
-        ResilienceConfig(**{'retries': 0, **resilience}),
+        ResilienceConfig(**{'max_retries': 0, **resilience}),
         feature='election',
         provider=provider,
         category='periodic',
@@ -1085,7 +1085,7 @@ def test_thread_fence_that_gets_no_answer_in_time_reads_as_unconfirmed(monkeypat
     monkeypatch.setattr(election_mod, 'BRIDGE_SLACK_SECONDS', 0.0)
     provider = ScriptedElection()
     with _loop_in_thread() as loop:
-        caller = make_caller(timeout_seconds=0.01)
+        caller = make_caller(timeout='10ms')
         election = ClusterElection(provider, caller, provider_name=PROVIDER, context=CONTEXT)
         lease = SlotLease(election, scope=task_scope(CLUSTER, 'fence_slow'), lease_seconds=60)
         fence = _fence(lease, loop)
@@ -1131,7 +1131,7 @@ async def test_cluster_slots_recover_after_the_breaker_cooldown_without_a_restar
     clock = VirtualClock(NOW)
     provider = _FailsFirstStarts(clock, failures=2)
     caller = ResilientCaller(
-        ResilienceConfig(retries=0, breaker={'failure_threshold': 2, 'cooldown_seconds': 40}),
+        ResilienceConfig(max_retries=0, breaker_failures=2, breaker_cooldown='40s'),
         feature='election',
         provider='recovering',
         category='periodic',
@@ -1253,21 +1253,22 @@ async def test_mismatch_logs_again_for_a_peer_that_left_the_listing_and_came_bac
     assert len(log.named('periodic_cluster_mismatch')) == 2
 
 
-def _archive_config(**ui_recorder):
+def _archive_config(**recorder):
     from drakkar.config import DrakkarConfig
 
     return DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
-        ui={'enabled': True, 'release': {'enabled': False}, 'recorder': ui_recorder},
+        ui={'enabled': True, 'release': {'enabled': False}},
+        recorder=recorder,
     )
 
 
 def test_archive_task_runs_is_true_with_a_recorder_file_and_a_storage_dir():
-    assert cluster_tasks.archive_task_runs(_archive_config(persistence='sqlite'))
+    assert cluster_tasks.archive_task_runs(_archive_config(provider='sqlite'))
     assert cluster_tasks.archive_task_runs(_archive_config())
 
 
 def test_archive_task_runs_is_false_with_none():
-    assert not cluster_tasks.archive_task_runs(_archive_config(persistence='none'))
+    assert not cluster_tasks.archive_task_runs(_archive_config(enabled=False))

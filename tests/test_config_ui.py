@@ -1,6 +1,6 @@
 """Tests for the merged first-class ``ui.*`` config section.
 
-Covers the three-tier shape (server / ``ui.recorder`` / ``ui.release``)
+Covers the two-tier shape (server / ``ui.release``)
 and nested ``DK_UI__*`` env overrides.
 """
 
@@ -9,14 +9,14 @@ from pydantic import ValidationError
 
 from drakkar.config import (
     DrakkarConfig,
+    RecorderConfig,
     UIConfig,
-    UIRecorderConfig,
     UIReleaseConfig,
 )
 from tests.conftest import kafka_connections
 
 
-def test_ui_defaults_match_old_debug_defaults():
+def test_ui_defaults():
     ui = UIConfig()
     assert ui.enabled is True
     assert ui.host == '127.0.0.1'
@@ -31,58 +31,52 @@ def test_ui_defaults_match_old_debug_defaults():
     assert ui.custom_links == []
 
 
-def test_recorder_defaults_match_old_debug_defaults():
-    rec = UIRecorderConfig()
-    assert rec.store_events is True
-    assert rec.store_config is True
-    assert rec.store_state is True
-    assert rec.state_sync_interval_seconds == 10
-    assert rec.rotation_interval_hours == 1
-    assert rec.store_output is True
-    assert rec.flush_interval_seconds == 5
-    assert rec.max_buffer == 50_000
-    assert rec.max_flush_retries == 3
-    assert rec.event_min_duration_ms == 0
-    assert rec.output_min_duration_ms == 500
+def test_recorder_defaults():
+    rec = RecorderConfig()
+    assert rec.capture.events is True
+    assert rec.capture.config is True
+    assert rec.sqlite.state_snapshots is True
+    assert rec.sqlite.state_interval == 10
+    assert rec.sqlite.rotation_interval == 1
+    assert rec.capture.output is True
+    assert rec.flush_interval == 5
+    assert rec.max_buffer_rows == 50_000
+    assert rec.sqlite.max_flush_retries == 3
+    assert rec.capture.min_event_duration == 0
+    assert rec.capture.min_output_duration == 0.5
 
 
-def test_recorder_rotation_interval_hours_rejects_below_one():
+def test_recorder_rotation_interval_rejects_below_one_hour():
     with pytest.raises(ValidationError):
-        UIRecorderConfig(rotation_interval_hours=0)
+        RecorderConfig(sqlite={'rotation_interval': 0})
 
 
 def test_annotation_defaults():
-    rec = UIRecorderConfig()
-    assert rec.annotations_enabled is True
-    assert rec.annotation_max_bytes == 16_384
-    assert rec.annotation_max_bytes_per_call == 262_144
-    assert rec.annotation_log_max_bytes == 2048
+    annotations = RecorderConfig().annotations
+    assert annotations.enabled is True
+    assert annotations.max_size == 16_384
+    assert annotations.max_size_per_call == 262_144
+    assert annotations.max_log_size == 2048
 
 
-@pytest.mark.parametrize(
-    'field',
-    ['annotation_max_bytes', 'annotation_max_bytes_per_call', 'annotation_log_max_bytes'],
-)
-def test_annotation_byte_caps_accept_zero_as_unlimited(field: str):
-    assert getattr(UIRecorderConfig(**{field: 0}), field) == 0
+@pytest.mark.parametrize('field', ['max_size', 'max_size_per_call', 'max_log_size'])
+def test_annotation_size_caps_accept_zero_as_unlimited(field: str):
+    assert getattr(RecorderConfig(annotations={field: 0}).annotations, field) == 0
 
 
-@pytest.mark.parametrize(
-    'field',
-    ['annotation_max_bytes', 'annotation_max_bytes_per_call', 'annotation_log_max_bytes'],
-)
-def test_annotation_byte_caps_reject_negative(field: str):
+@pytest.mark.parametrize('field', ['max_size', 'max_size_per_call', 'max_log_size'])
+def test_annotation_size_caps_reject_negative(field: str):
     with pytest.raises(ValidationError):
-        UIRecorderConfig(**{field: -1})
+        RecorderConfig(annotations={field: '-1B'})
 
 
 def test_annotation_env_override(monkeypatch):
-    monkeypatch.setenv('DK_UI__RECORDER__ANNOTATIONS_ENABLED', 'false')
-    monkeypatch.setenv('DK_UI__RECORDER__ANNOTATION_MAX_BYTES', '4096')
+    monkeypatch.setenv('DK_RECORDER__ANNOTATIONS__ENABLED', 'false')
+    monkeypatch.setenv('DK_RECORDER__ANNOTATIONS__MAX_SIZE', '4KiB')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
-    assert cfg.ui.recorder.annotations_enabled is False
-    assert cfg.ui.recorder.annotation_max_bytes == 4096
+    assert cfg.recorder.annotations.enabled is False
+    assert cfg.recorder.annotations.max_size == 4096
 
 
 def test_release_defaults():
@@ -104,12 +98,12 @@ def test_auth_token_stripped_on_load():
 
 
 def test_env_nested_override(monkeypatch):
-    monkeypatch.setenv('DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS', '7')
+    monkeypatch.setenv('DK_RECORDER__FLUSH_INTERVAL', '7s')
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'false')
     monkeypatch.setenv('DK_UI__PORT', '9001')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
-    assert cfg.ui.recorder.flush_interval_seconds == 7
+    assert cfg.recorder.flush_interval == 7
     assert cfg.ui.release.check_update is False
     assert cfg.ui.port == 9001
 

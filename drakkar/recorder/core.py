@@ -49,8 +49,8 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 
-from drakkar.config import HistoryArchiveConfig, UIConfig
-from drakkar.config.ui import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
+from drakkar.config import RecorderConfig
+from drakkar.config.recorder import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
@@ -145,6 +145,13 @@ _LAST_BREATH_REGISTERED = False
 # instead of the whole buffer. 5k rows is ~4 ms of tuple building and, at 20
 # columns, 100k bind parameters, comfortably inside SQLite's limits.
 FLUSH_CHUNK_ROWS = 5_000
+
+# The constructor defaults of the values a worker reads from other config sections.
+DEFAULT_API_PORT = 8080
+DEFAULT_MIN_DURATION_MS = 500
+# Resource samples without a recorder file, whose ``sqlite.state_interval`` paces them otherwise.
+HOST_SAMPLE_SECONDS = 10
+SECONDS_PER_HOUR = 3600
 
 # The event columns a row tuple takes from the event dict; the recorder
 # puts the id in front.
@@ -257,25 +264,26 @@ class EventRecorder(EventWriter):
     this recorder ever opens its live file.
 
     Which tables are created depends on config flags:
-    - ``store_events`` -> ``events`` table
-    - ``store_config`` -> ``worker_config`` table (enables autodiscovery)
-    - ``store_state`` -> ``worker_state`` table (periodic snapshots)
+    - ``capture.events`` -> ``events`` table
+    - ``capture.config`` -> ``worker_config`` table (enables autodiscovery)
+    - ``sqlite.state_snapshots`` -> ``worker_state`` table (periodic snapshots)
     """
-
-    MAX_BUFFER = 50_000  # default, overridden by config.ui.recorder.max_buffer
 
     def __init__(
         self,
-        config: UIConfig,
+        config: RecorderConfig,
         worker_name: str = 'worker',
         cluster_name: str = '',
         *,
         persistence: Persistence,
+        memory_enabled: bool = True,
+        api_port: int = DEFAULT_API_PORT,
+        api_public_url: str = '',
+        ws_min_duration_ms: int = DEFAULT_MIN_DURATION_MS,
+        log_min_duration_ms: int = DEFAULT_MIN_DURATION_MS,
         storage_dir: str = '',
         shared_dir: str = '',
         instance: str = '',
-        archive: HistoryArchiveConfig | None = None,
-        merged_retention_days: int = 0,
         memory_window_seconds: int = 120,
         memory_max_rows: int = 3000,
         memory_max_bytes: int = 256 * MIB,
@@ -287,20 +295,22 @@ class EventRecorder(EventWriter):
         ``persistence`` is the effective mode: ``'sqlite'`` writes the
         recorder file in ``storage_dir``, ``'none'`` writes no file. The
         caller passes ``DrakkarConfig.resolved_persistence``; the recorder
-        never derives it. ``storage_dir`` is the worker's own folder
-        (``storage.dir``); ``'sqlite'`` needs it. ``shared_dir`` is the
-        folder every worker of the fleet sees (``shared.dir``); sealed files
-        go to its ``history/<cluster>/``, and it falls back to
-        ``storage_dir``. Both folders resolve the same way in either mode.
-        ``instance`` names this process in the meta files (random when
-        empty). ``archive`` is ``history.archive``; the defaults apply when
-        omitted. ``merged_retention_days`` is how long the archive pass keeps
-        UI merge results (0 keeps them).
+        never derives it. ``memory_enabled`` says whether this recorder keeps
+        the memory store that serves the UI; without it, rows still get their
+        ids and go on to the file or the Postgres queue. ``api_port`` and
+        ``api_public_url`` fill the ``worker_config`` row. ``ws_min_duration_ms``
+        and ``log_min_duration_ms`` are the shortest task the live stream shows
+        and the shortest task that gets a slow-task log line. ``storage_dir`` is
+        the worker's own folder (``storage.dir``); ``'sqlite'`` needs it.
+        ``shared_dir`` is the folder every worker of the cluster sees
+        (``storage.shared_dir``); sealed files go to its ``history/<cluster>/``,
+        and it falls back to ``storage_dir``. Both folders resolve the same way
+        in either mode. ``instance`` names this process in the meta files
+        (random when empty).
 
         ``memory_window_seconds``, ``memory_max_rows`` and
-        ``memory_max_bytes`` bound the memory store, which holds the recent
-        events whenever ``store_events`` is on: its time window, its row cap
-        (the caller multiplies the per-executor cap by the executor count)
+        ``memory_max_bytes`` bound the memory store: its time window, its row
+        cap (the caller multiplies the per-executor cap by the executor count)
         and its data budget in bytes.
 
         ``postgres`` holds the table settings of the ``'postgres'`` mode,
@@ -317,10 +327,13 @@ class EventRecorder(EventWriter):
             raise ValueError('recorder: persistence sqlite needs a storage_dir')
         if persistence == PERSISTENCE_POSTGRES and postgres is None:
             raise ValueError('recorder: persistence postgres needs postgres settings')
-        super().__init__(config)
+        super().__init__(config, ws_min_duration_ms=ws_min_duration_ms, log_min_duration_ms=log_min_duration_ms)
         self._persistence: Persistence = persistence
+        self._memory_enabled = memory_enabled
+        self._api_port = api_port
+        self._api_public_url = api_public_url
         self._has_file: bool = persistence == PERSISTENCE_SQLITE
-        # Whether the rows stage M wrote go on somewhere: to the file queue
+        # Whether the rows stage M took go on somewhere: to the file queue
         # (``sqlite``) or to the P queue (``postgres``).
         self._has_downstream: bool = persistence in (PERSISTENCE_SQLITE, PERSISTENCE_POSTGRES)
         self._postgres = postgres if persistence == PERSISTENCE_POSTGRES else None
@@ -329,27 +342,26 @@ class EventRecorder(EventWriter):
         self._storage_dir = storage_dir
         self._shared_dir = shared_dir or storage_dir
         self._instance = instance or secrets.token_hex(8)
-        self._archive = archive if archive is not None else HistoryArchiveConfig()
-        self._merged_retention_days = merged_retention_days
+        self._archive = config.archive
         self._memory_window_seconds = memory_window_seconds
         self._memory_max_rows = memory_max_rows
         self._memory_max_bytes = memory_max_bytes
-        # The memory store; opened in start() when store_events is on,
-        # closed last in stop().
+        # The memory store; opened in start() when this recorder keeps one
+        # and capture.events is on, closed last in stop().
         self._memory_store: MemoryStore | None = None
-        # The intake: events recorded and not yet written to the memory
-        # store. ``_record`` appends (from the main loop and the webapp
+        # The intake: events recorded and not yet taken by stage M.
+        # ``_record`` appends (from the main loop and the webapp
         # loop thread); only stage M pops, on the main loop.
-        self._intake: deque[dict] = deque(maxlen=config.recorder.max_buffer)
-        # The file queue: ``(id, row tuple)`` pairs that stage M wrote to the
-        # memory store and stage F has not yet written to the file. The id
+        self._intake: deque[dict] = deque(maxlen=config.max_buffer_rows)
+        # The file queue: ``(id, row tuple)`` pairs that stage M handed on
+        # and stage F has not yet written to the file. The id
         # rides next to the row, never inside the event dict: the fan-out may
         # encode that dict on the UI thread at any time.
-        self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.recorder.max_buffer)
+        self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.max_buffer_rows)
         # The P queue: the same pairs on their way to the Postgres table,
         # bounded by count and by text size; only with ``postgres``.
         self._pg_queue: PostgresQueue | None = (
-            PostgresQueue(max_rows=config.recorder.max_buffer, max_bytes=self._postgres.queue_max_bytes)
+            PostgresQueue(max_rows=config.max_buffer_rows, max_bytes=self._postgres.queue_max_bytes)
             if self._postgres is not None
             else None
         )
@@ -359,7 +371,7 @@ class EventRecorder(EventWriter):
         self._pg_wakeup = asyncio.Event()
         self._postgres_open_pool = postgres_open_pool
         # Stage P: its writer and the thread whose loop runs it; made in
-        # start() when there is a P queue and a memory store to feed it.
+        # start() when there is a P queue and events to feed it.
         self._pg_thread: PostgresLoopThread | None = None
         self._pg_writer: PostgresWriter | None = None
         self._postgres_task: asyncio.Task | None = None
@@ -374,9 +386,9 @@ class EventRecorder(EventWriter):
         # under-counting falls back to the interval.
         self._buffered_bytes = 0
         # Whether an appended event will ever reach a table: with
-        # ``store_events`` off there is no memory store and no file table,
-        # so an append would only fill the deque and count drops forever.
-        self._persists_events: bool = self._store.store_events
+        # ``capture.events`` off, or with no memory store and no durable
+        # store, an append would only fill the deque and count drops forever.
+        self._persists_events: bool = self._capture.events and (memory_enabled or self._has_downstream)
         # Row ids, one counter for the process lifetime, assigned when stage
         # M pops a chunk (one consumer under ``_memory_lock`` gives one
         # order; ``_record`` runs on two threads). ``_last_id`` is the last
@@ -543,16 +555,13 @@ class EventRecorder(EventWriter):
         return history_dir(self._shared_dir, self._cluster_name) if self._shared_dir else ''
 
     @property
-    def config(self) -> UIConfig:
-        """Read-only access to the UI config — lets the UI server inspect
-        ``recorder.store_events`` / ``ws_min_duration_ms`` without reaching
-        into the private ``_config`` attribute.
-        """
+    def config(self) -> RecorderConfig:
+        """Read-only access to the recorder config, for the UI server."""
         return self._config
 
     @property
     def memory_store(self) -> MemoryStore | None:
-        """The memory store; ``None`` before start, after stop, or with ``store_events`` off."""
+        """The memory store; ``None`` before start, after stop, or when this recorder keeps none."""
         return self._memory_store
 
     @property
@@ -693,11 +702,11 @@ class EventRecorder(EventWriter):
         schemaless would otherwise let a concurrent stage F hit
         ``no such table: events``.
         """
-        if self._store.store_events:
+        if self._capture.events:
             await db.executescript(SCHEMA_EVENTS)
-        if self._store.store_config:
+        if self._capture.config:
             await db.executescript(SCHEMA_WORKER_CONFIG)
-        if self._store.store_state:
+        if self._config.sqlite.state_snapshots:
             await db.executescript(SCHEMA_WORKER_STATE)
         await db.commit()
 
@@ -746,10 +755,10 @@ class EventRecorder(EventWriter):
 
     async def start(self) -> None:
         self._running = True
-        if self._store.store_events:
-            # Before the file: the memory store holds the recent events in
-            # either mode. A SQLite library without memdb fails the start.
-            store = MemoryStore(self._instance, store_config=self._store.store_config)
+        if self._memory_enabled and self._capture.events:
+            # Before the file: the memory store holds the recent events for
+            # the UI. A SQLite library without memdb fails the start.
+            store = MemoryStore(self._instance, store_config=self._capture.config)
             try:
                 await store.open()
             except BaseException:
@@ -800,7 +809,7 @@ class EventRecorder(EventWriter):
                 # date schema below. The exception is intentionally left
                 # uncaught so it propagates through ``AppLifecycle._async_run``
                 # and aborts worker startup.
-                if self._store.store_events:
+                if self._capture.events:
                     await self._verify_events_schema(self._db, self._db_path)
                 await self._create_schema(self._db)
                 # Open the dedicated reader connection AFTER schema creation
@@ -822,12 +831,12 @@ class EventRecorder(EventWriter):
                 await self._close_memory_store()
                 self._running = False
                 raise
-            if self._store.store_events:
+            if self._capture.events:
                 self._file_task = asyncio.create_task(self._file_loop())
                 self._watch_background_task(self._file_task, 'file_flush')
             self._rotation_task = asyncio.create_task(self._rotation_loop())
             self._watch_background_task(self._rotation_task, 'rotation')
-            if self._store.store_state:
+            if self._config.sqlite.state_snapshots:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
                 self._watch_background_task(self._state_task, 'state_sync')
             if not self._archive.enabled:
@@ -838,10 +847,10 @@ class EventRecorder(EventWriter):
                     category='recorder',
                     folder=self.history_dir,
                     hint='sealed recorder database files are never deleted automatically; '
-                    'prune the folder yourself or set history.archive.enabled: true',
+                    'prune the folder yourself or set recorder.archive.enabled: true',
                 )
-        if self._memory_store is not None:
-            # In either mode: the memory store holds the recent events.
+        if self._persists_events:
+            # Stage M runs with a memory store, a durable store, or both.
             self._memory_task = asyncio.create_task(self._memory_loop())
             self._watch_background_task(self._memory_task, 'memory_flush')
             if self._pg_queue is not None:
@@ -888,26 +897,18 @@ class EventRecorder(EventWriter):
     def _started_fields(self) -> dict[str, Any]:
         """The mode and memory fields of ``recorder_started``.
 
-        The memory bounds appear only when there is a memory store
-        (``store_events``). With ``postgres``, ``postgres_connection`` and
-        ``postgres_table`` (schema-qualified) name the table. Without a
-        file, ``ignored_keys`` lists the keys that only act on a recorder
-        file: ``rotation_interval_hours`` always, ``store_state`` when it is
-        on.
+        The memory bounds appear only when there is a memory store. With
+        ``postgres``, ``postgres_connection`` and ``postgres_table``
+        (schema-qualified) name the table.
         """
         fields: dict[str, Any] = {'persistence': self._persistence}
-        if self._store.store_events:
+        if self._memory_enabled and self._capture.events:
             fields['memory_window_seconds'] = self._memory_window_seconds
             fields['memory_max_rows'] = self._memory_max_rows
             fields['memory_max_bytes'] = self._memory_max_bytes
         if self._postgres is not None:
             fields['postgres_connection'] = self._postgres.connection_name
             fields['postgres_table'] = self._postgres.qualified_table
-        if not self._has_file:
-            ignored = ['rotation_interval_hours']
-            if self._store.store_state:
-                ignored.append('store_state')
-            fields['ignored_keys'] = sorted(ignored)
         return fields
 
     async def _close_memory_store(self, wait_seconds: float | None = None) -> None:
@@ -1006,8 +1007,8 @@ class EventRecorder(EventWriter):
         assigned later, by stage M, and rides next to the row. The fan-out
         may encode the same dict on the UI thread at any time.
 
-        Nothing is appended with ``store_events`` off (no table would ever
-        take the event), nor for ``skip_db`` events.
+        Nothing is appended when no table would ever take the event
+        (``capture.events`` off, or no store at all), nor for ``skip_db`` events.
 
         Observability: when the intake is already at capacity, the next
         append silently evicts the oldest entry. That case is detected
@@ -1042,7 +1043,7 @@ class EventRecorder(EventWriter):
           values have embedded credentials stripped.
         """
         self._drakkar_config = drakkar_config
-        if not self._store.store_config:
+        if not self._capture.config:
             return
         row = self._config_row(drakkar_config)
         await self._write_config_to_memory(row)
@@ -1084,13 +1085,13 @@ class EventRecorder(EventWriter):
 
     async def _write_config_to_file(self) -> None:
         """Write the worker_config row into the current file only (a new file after a rotation)."""
-        if self._drakkar_config is None or not self._db or not self._store.store_config:
+        if self._drakkar_config is None or not self._db or not self._capture.config:
             return
         await self._insert_config_row(self._db, self._config_row(self._drakkar_config))
 
     def _config_row(self, drakkar_config: DrakkarConfig) -> list[Any]:
         """The values of worker_config row 1, secrets redacted."""
-        env_vars = {name: sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
+        env_vars = {name: sanitize_env_value(name, os.environ.get(name, '')) for name in self._capture.env_vars}
         sinks: dict[str, list[str]] = {}
         sinks_cfg = drakkar_config.sinks
         if sinks_cfg:
@@ -1113,8 +1114,8 @@ class EventRecorder(EventWriter):
             self._worker_name,
             self._cluster_name or None,
             detect_worker_ip(),
-            self._config.port,
-            self._config.public_url or None,
+            self._api_port,
+            self._api_public_url or None,
             redact_url(kafka_brokers),
             source_topic,
             consumer_group,
@@ -1146,7 +1147,7 @@ class EventRecorder(EventWriter):
 
     async def _state_sync_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._store.state_sync_interval_seconds)
+            await asyncio.sleep(self._config.sqlite.state_interval)
             # Same per-iteration guard as the memory loop: one bad snapshot
             # (a state provider that raises, a locked DB) must not end the
             # loop and freeze ``worker_state`` for the rest of the run.
@@ -1173,7 +1174,7 @@ class EventRecorder(EventWriter):
         ``/proc`` source simply omits that field.
         """
         while self._running:
-            await asyncio.sleep(self._store.state_sync_interval_seconds)
+            await asyncio.sleep(self._host_sample_seconds())
             # Same per-iteration guard as the other loops: one bad sample
             # must not end the sampler for the rest of the run.
             try:
@@ -1187,6 +1188,10 @@ class EventRecorder(EventWriter):
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
+
+    def _host_sample_seconds(self) -> int:
+        """The sampling interval: ``sqlite.state_interval`` with a recorder file, a fixed one otherwise."""
+        return self._config.sqlite.state_interval if self._has_file else HOST_SAMPLE_SECONDS
 
     def _resource_sample(self) -> None:
         """Record one ``resource_sample`` event from the host sampler.
@@ -1204,7 +1209,7 @@ class EventRecorder(EventWriter):
         )
 
     async def _sync_state(self) -> None:
-        if not self._has_file or not self._db or not self._store.store_state:
+        if not self._has_file or not self._db or not self._config.sqlite.state_snapshots:
             return
         app_state = self._state_provider() if self._state_provider else {}
         now = time.time()
@@ -1422,15 +1427,15 @@ class EventRecorder(EventWriter):
         is what keeps them.
 
         The file queue goes first (its rows already carry ids), then the
-        intake with fresh ids, so the file keeps id order. Without a file
-        it does nothing: the memory store dies with the process.
+        intake with fresh ids, so the file keeps id order; no memory store is
+        involved. Without a file it does nothing.
 
         Best-effort by design: a short busy timeout, every failure path
         silent. Cannot fire on SIGKILL / OOM — the watchdog file covers
         detecting those, and whatever the last periodic write wrote is
         what remains.
         """
-        if not self._running or not self._has_file or not self._db_path or not self._store.store_events:
+        if not self._running or not self._has_file or not self._db_path or not self._capture.events:
             return
         if not self._file_queue and not self._intake:
             return
@@ -1537,11 +1542,11 @@ class EventRecorder(EventWriter):
         watch_bytes: bool,
         wakeup: asyncio.Event | None = None,
     ) -> None:
-        """Wait out ``flush_interval_seconds``, or return early on a burst.
+        """Wait out ``flush_interval``, or return early on a burst.
 
         The interval alone is not enough at high event rates: a producer
         filling ``queue`` faster than one interval's worth would reach
-        ``max_buffer`` and start evicting between ticks. Returning as soon
+        ``max_buffer_rows`` and start evicting between ticks. Returning as soon
         as it is half full turns that into an early write instead of lost
         events. ``watch_bytes`` also returns at the payload high-water mark
         of the intake, and ``wakeup`` when that event is set. The intake is
@@ -1550,7 +1555,7 @@ class EventRecorder(EventWriter):
         across loops; ``wakeup`` is set on the main loop only.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._store.flush_interval_seconds
+        deadline = loop.time() + self._config.flush_interval
         maxlen = queue.maxlen
         high_water = maxlen // 2 if maxlen is not None else None
         while self._running:
@@ -1599,7 +1604,7 @@ class EventRecorder(EventWriter):
         assert thread is not None and writer is not None
         while self._running:
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._pg_wakeup.wait(), self._store.flush_interval_seconds)
+                await asyncio.wait_for(self._pg_wakeup.wait(), self._config.flush_interval)
             self._pg_wakeup.clear()
             try:
                 await thread.run(writer.run_once, None)
@@ -1632,12 +1637,13 @@ class EventRecorder(EventWriter):
         )
 
     async def _stage_memory(self, evict_min_interval: float) -> None:
-        """Stage M: give the intake rows their ids, write them to the memory store, then evict.
+        """Stage M: give the intake rows their ids, write them to the memory store if there is one, hand them on.
 
         Pops the intake in chunks of at most ``FLUSH_CHUNK_ROWS``. For each
-        chunk: assign ids, build the row tuples once, write and commit them,
-        then, with a file or Postgres, append the ``(id, row)`` pairs to the
-        file queue or the P queue.
+        chunk: assign ids, build the row tuples once, write and commit them
+        when this recorder keeps a memory store, then, with a file or
+        Postgres, append the ``(id, row)`` pairs to the file queue or the P
+        queue. With a memory store, an eviction pass ends the stage.
         A chunk that fails follows the failure rules of
         :meth:`_write_memory_chunk`; a transient failure stops the stage
         and skips the eviction pass (the next tick runs both).
@@ -1645,16 +1651,18 @@ class EventRecorder(EventWriter):
         (0 for the loops, rotation and stop).
         """
         async with self._memory_lock:
-            store = self._memory_store
-            if store is None or not store.is_open:
-                return
-            writer = store.writer
-            if not await self._settle_previous_chunk(writer):
-                # A gap or an open transaction is still there: writing now
-                # would break the one contiguous id range. The next tick
-                # tries again; the intake keeps its rows.
-                self._update_buffer_gauge()
-                return
+            writer: aiosqlite.Connection | None = None
+            if self._memory_enabled:
+                store = self._memory_store
+                if store is None or not store.is_open:
+                    return
+                writer = store.writer
+                if not await self._settle_previous_chunk(writer):
+                    # A gap or an open transaction is still there: writing now
+                    # would break the one contiguous id range. The next tick
+                    # tries again; the intake keeps its rows.
+                    self._update_buffer_gauge()
+                    return
             # Snapshot the depth: events appended while this stage awaits
             # ride along on the next tick rather than extending this one
             # indefinitely under a fast producer.
@@ -1670,12 +1678,16 @@ class EventRecorder(EventWriter):
                 first_id = self._next_id
                 self._next_id += take
                 rows = [_row_tuple(first_id + index, entry) for index, entry in enumerate(batch)]
-                if not await self._write_memory_chunk(writer, batch, rows):
+                if writer is None:
+                    self._hand_on(rows)
+                    # No store write gives the loop a turn here, and a full intake is many chunks.
+                    await asyncio.sleep(0)
+                elif not await self._write_memory_chunk(writer, batch, rows):
                     completed = False
                     break
             self._update_buffer_gauge()
             await self._log_postgres_queue_drops()
-            if completed:
+            if completed and writer is not None:
                 await self._evict(evict_min_interval)
 
     async def _evict(self, evict_min_interval: float) -> None:
@@ -1798,7 +1810,6 @@ class EventRecorder(EventWriter):
         the writer back first either way.
         """
         first_id = rows[0][0]
-        last_id = rows[-1][0]
         settled = False
         try:
             await writer.executemany(INSERT_EVENT_SQL, rows)
@@ -1842,10 +1853,14 @@ class EventRecorder(EventWriter):
                 else:
                     self._requeue_front(self._intake, batch)
                     self._next_id = first_id
-        self._last_id = last_id
+        self._hand_on(rows)
+        return True
+
+    def _hand_on(self, rows: list[tuple]) -> None:
+        """Note the chunk's last id and give its ``(id, row)`` pairs to the file or the P queue, if there is one."""
+        self._last_id = rows[-1][0]
         if self._has_downstream:
             self._append_downstream([(row[0], row) for row in rows])
-        return True
 
     def _keep_rows_without_memory(self, rows: list[tuple]) -> None:
         """Account for a chunk that did not reach the memory store: the downstream queue and a gap.
@@ -1964,8 +1979,8 @@ class EventRecorder(EventWriter):
 
         Chunking bounds what a write that keeps failing can lose: a chunk
         that still fails after ``max_flush_retries`` is dropped from the
-        file only (the memory store already holds its rows). See
-        ``docs/observability.md`` for the ``max_buffer`` sizing rule.
+        file only (a memory store already holds its rows). See
+        ``docs/observability.md`` for the ``max_buffer_rows`` sizing rule.
         """
         if not self._has_file:
             return
@@ -2030,7 +2045,7 @@ class EventRecorder(EventWriter):
             # in shifts, which beats dropping them.
             self._flush_failures += 1
             recorder_flush_retries.inc()
-            if self._flush_failures >= self._store.max_flush_retries:
+            if self._flush_failures >= self._config.sqlite.max_flush_retries:
                 # Give up on this chunk: drop it and reset the counter so the
                 # next chunk starts from a clean slate. Bookkeeping runs
                 # before the ``await`` on the logger so a cancellation during
@@ -2056,7 +2071,7 @@ class EventRecorder(EventWriter):
                 'recorder_flush_retry',
                 category='recorder',
                 attempt=self._flush_failures,
-                max_retries=self._store.max_flush_retries,
+                max_retries=self._config.sqlite.max_flush_retries,
                 batch_size=len(batch),
                 error=str(exc),
             )
@@ -2105,7 +2120,7 @@ class EventRecorder(EventWriter):
 
     async def _rotation_loop(self) -> None:
         while self._running:
-            await self._sleep(self._store.rotation_interval_hours * 3600)
+            await self._sleep(self._config.sqlite.rotation_interval * SECONDS_PER_HOUR)
             # Same guard as the memory loop: one failed rotation must cost a
             # single interval, not every rotation from here on.
             try:
@@ -2129,8 +2144,8 @@ class EventRecorder(EventWriter):
 
         Whether the worker runs it is decided by its periodic roster
         (``PeriodicRoster.runs_archive``): archiving on, a storage folder,
-        the effective persistence ``sqlite`` (only then are files sealed),
-        and the UI on (the recorder exists only then).
+        and the recorder enabled with provider ``sqlite`` (only then are
+        files sealed).
 
         A won slot runs the archive pass on the recorder's own archive
         thread and waits for it; the pass checks the slot's lease through a
@@ -2148,7 +2163,7 @@ class EventRecorder(EventWriter):
             run=self._run_archive_slot,
             interval=self._archive.effective_interval,
             cron=self._archive.cron,
-            lease_seconds=self._archive.lease_seconds,
+            lease_seconds=self._archive.lease,
             on_error='continue',
             system=True,
             on_skip=self._observe_footprint_when_idle,
@@ -2171,7 +2186,6 @@ class EventRecorder(EventWriter):
                 cluster=self._cluster_name,
                 instance=self._instance,
                 archive=self._archive,
-                merged_retention_days=self._merged_retention_days,
                 fence=fence,
                 stop=self._archive_stop,
             )

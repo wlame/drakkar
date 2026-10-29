@@ -32,7 +32,7 @@ import aiosqlite
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import UIConfig, WebAppConfig, WebClientConfig
+from drakkar.config import RecorderConfig, WebAppConfig, WebClientConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -46,7 +46,6 @@ from drakkar.recorder.schema import (
 )
 from drakkar.webapp.dependencies import make_authenticate, make_rate_limit
 from drakkar.webapp.models import WebRequestContext
-from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
 # Helpers — minimal recorder + webapp fixtures
@@ -55,16 +54,11 @@ from tests.conftest import make_ui_config
 WORKER_NAME = 'webapp-recorder-test-worker'
 
 
-def _make_debug_config(tmp_path, **overrides) -> UIConfig:
-    """Build a minimal ``UIConfig`` with an explicit ``db_dir``."""
-    defaults = {
-        'enabled': True,
-        'store_output': False,
-        # Tight flush so tests don't have to advance time.
-        'flush_interval_seconds': 60,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
+def _make_debug_config(tmp_path, **overrides) -> RecorderConfig:
+    """Build a minimal ``RecorderConfig``."""
+    capture = {'output': False, **overrides.pop('capture', {})}
+    # A slow flush, so tests flush by hand.
+    return RecorderConfig(**{'flush_interval': '60s', 'capture': capture, **overrides})
 
 
 def _make_request_ctx(client: str = 'anonymous', request_id: str = 'req_t_0001') -> WebRequestContext:

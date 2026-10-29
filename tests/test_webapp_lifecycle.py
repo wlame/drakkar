@@ -113,6 +113,7 @@ def _build_config(*, http_enabled: bool, kafka_enabled: bool = True) -> DrakkarC
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
         storage={'dir': ''},
+        recorder={'enabled': False},
         ui={'enabled': False, 'release': {'enabled': False}},
         runtime_health={'enabled': False},
     )

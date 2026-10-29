@@ -1,36 +1,37 @@
-"""The resilience block: defaults and the cross-field check."""
+"""The resilience block: defaults, units and the cross-field check."""
 
 import pytest
 from pydantic import ValidationError
 
-from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
+from drakkar.config.resilience import ResilienceConfig, validate_resilience
 
 
 def test_defaults_match_the_spec():
     cfg = ResilienceConfig()
 
-    assert (cfg.timeout_seconds, cfg.retries, cfg.backoff_seconds, cfg.backoff_max_seconds) == (5.0, 2, 0.2, 5.0)
-    assert isinstance(cfg.breaker, BreakerConfig)
-    assert (cfg.breaker.failure_threshold, cfg.breaker.cooldown_seconds) == (5, 30.0)
+    assert (cfg.timeout, cfg.max_retries, cfg.backoff, cfg.max_backoff) == (5.0, 2, 0.2, 5.0)
+    assert (cfg.breaker_failures, cfg.breaker_cooldown) == (5, 30.0)
 
 
-def test_backoff_max_below_base_names_both_paths():
-    cfg = ResilienceConfig(backoff_max_seconds=0.1)
+def test_max_backoff_below_backoff_names_both_paths():
+    cfg = ResilienceConfig(max_backoff='100ms')
 
     with pytest.raises(
         ValueError,
-        match=r'x\.resilience\.backoff_max_seconds \(0\.1\) must be >= x\.resilience\.backoff_seconds \(0\.2\)',
+        match=r'x\.resilience\.max_backoff \(100ms\) must be >= x\.resilience\.backoff \(200ms\)',
     ):
         validate_resilience('x.resilience', cfg)
 
 
-def test_backoff_max_equal_to_base_is_accepted():
-    validate_resilience('x.resilience', ResilienceConfig(backoff_seconds=0.5, backoff_max_seconds=0.5))
+def test_max_backoff_equal_to_backoff_is_accepted():
+    validate_resilience('x.resilience', ResilienceConfig(backoff='500ms', max_backoff='500ms'))
 
 
 @pytest.mark.parametrize(
-    'overrides', [{'failure_threshold': 0}, {'cooldown_seconds': -1.0}], ids=['threshold', 'cooldown']
+    'overrides',
+    [{'breaker_failures': 0}, {'breaker_cooldown': '-1s'}, {'timeout': 0}, {'timeout': 5}, {'max_retries': -1}],
+    ids=['failures', 'cooldown', 'timeout_zero', 'timeout_no_unit', 'retries'],
 )
-def test_breaker_rejects_values_out_of_range(overrides):
+def test_resilience_rejects_values_out_of_range(overrides):
     with pytest.raises(ValidationError):
-        BreakerConfig(**overrides)
+        ResilienceConfig(**overrides)

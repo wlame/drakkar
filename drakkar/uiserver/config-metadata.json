@@ -1408,14 +1408,14 @@
     },
     {
       "key": "ui",
-      "title": "UI / Flight Recorder (ui:)",
-      "doc_anchor": "ui-flight-recorder-ui",
+      "title": "UI (ui:)",
+      "doc_anchor": "ui-ui",
       "entries": [
         {
           "path": "ui.enabled",
           "env": "DK_UI__ENABLED",
-          "description": "Enable the whole UI feature: the server, flight-recorder persistence, and bundle serving.",
-          "full_description": "Enable the whole UI feature: the server, flight-recorder persistence, and bundle serving. Off skips all of it.",
+          "description": "Enable the UI feature: the server and the bundle serving.",
+          "full_description": "Enable the UI feature: the server and the bundle serving. Off skips both, and the recorder keeps no memory store.",
           "type": "boolean",
           "default": true,
           "secret": false,
@@ -1475,7 +1475,7 @@
           "path": "ui.merge_enabled",
           "env": "DK_UI__MERGE_ENABLED",
           "description": "Serve ``POST /api/v1/debug/merge``.",
-          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of ``shared.dir``, kept for ``history.merged_retention_days``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
+          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of the shared folder, kept for ``recorder.archive.merged_retention``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
           "type": "boolean",
           "default": true,
           "secret": false,
@@ -1498,16 +1498,6 @@
           "full_description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list. Empty derives http://<ip>:<port> from the bind address.",
           "type": "string",
           "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.expose_env_vars",
-          "env": "DK_UI__EXPOSE_ENV_VARS",
-          "description": "Environment variable names captured into the worker_config snapshot — for recording deployment metadata like GIT_SHA or K8S_POD_NAME.",
-          "full_description": "Environment variable names captured into the worker_config snapshot — for recording deployment metadata like GIT_SHA or K8S_POD_NAME.",
-          "type": "array",
-          "default": [],
           "secret": false,
           "group": "ui"
         },
@@ -1633,336 +1623,6 @@
             300,
             900
           ],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.persistence",
-          "env": "DK_UI__RECORDER__PERSISTENCE",
-          "description": "Where recorder events live besides the memory store: sqlite writes recorder files into storage.dir; none keeps events in memory only.",
-          "full_description": "Where recorder events live besides the memory store: sqlite writes recorder files into storage.dir; none keeps events in memory only. Unset, it is sqlite when storage.dir is set and none when it is empty. sqlite with an empty storage.dir fails the load. postgres writes the events to a table named by the postgres section and is never derived.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.memory.window_seconds",
-          "env": "DK_UI__RECORDER__MEMORY__WINDOW_SECONDS",
-          "description": "Keep recorder events in memory for this many seconds.",
-          "full_description": "Keep recorder events in memory for this many seconds.",
-          "type": "integer",
-          "default": 120,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.memory.rows_per_executor",
-          "env": "DK_UI__RECORDER__MEMORY__ROWS_PER_EXECUTOR",
-          "description": "Row cap per executor slot: the store holds at most this many rows times executor.max_executors.",
-          "full_description": "Row cap per executor slot: the store holds at most this many rows times executor.max_executors. The cap does not scale with the window; a longer window needs a larger value (rows per executor per window is about 4 x window / average task seconds).",
-          "type": "integer",
-          "default": 3000,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.memory.max_mib",
-          "env": "DK_UI__RECORDER__MEMORY__MAX_MIB",
-          "description": "Budget for the data in the memory store, in MiB (pages in use).",
-          "full_description": "Budget for the data in the memory store, in MiB (pages in use). It bounds the data, not the memory the store holds; free pages and one write stage can exceed it. At most 512 so the store stays under the 1 GiB limit of the SQLite in-memory database.",
-          "type": "integer",
-          "default": 256,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.connection",
-          "env": "DK_UI__RECORDER__POSTGRES__CONNECTION",
-          "description": "Name of the entry under connections.postgres that holds the DSN and the schema.",
-          "full_description": "Name of the entry under connections.postgres that holds the DSN and the schema.",
-          "type": "string",
-          "default": "main",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.table_prefix",
-          "env": "DK_UI__RECORDER__POSTGRES__TABLE_PREFIX",
-          "description": "Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.",
-          "full_description": "Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.retention_hours",
-          "env": "DK_UI__RECORDER__POSTGRES__RETENTION_HOURS",
-          "description": "Hours of history the table keeps.",
-          "full_description": "Hours of history the table keeps. Read only when this worker creates the table; after that the value stored with the table rules. At most 168: one partition per hour, and a trace search visits every partition.",
-          "type": "integer",
-          "default": 6,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.store_output",
-          "env": "DK_UI__RECORDER__POSTGRES__STORE_OUTPUT",
-          "description": "Send the stdout and stderr columns to Postgres.",
-          "full_description": "Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL.",
-          "type": "boolean",
-          "default": false,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.batch_rows",
-          "env": "DK_UI__RECORDER__POSTGRES__BATCH_ROWS",
-          "description": "Most rows in one COPY.",
-          "full_description": "Most rows in one COPY.",
-          "type": "integer",
-          "default": 5000,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.queue_max_mib",
-          "env": "DK_UI__RECORDER__POSTGRES__QUEUE_MAX_MIB",
-          "description": "Most text, in MiB, waiting for Postgres, counted in characters of text.",
-          "full_description": "Most text, in MiB, waiting for Postgres, counted in characters of text. When full, the oldest rows are dropped and counted.",
-          "type": "integer",
-          "default": 128,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.timeout_seconds",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__TIMEOUT_SECONDS",
-          "description": "Time limit for one attempt of a provider operation.",
-          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "number",
-          "default": 5.0,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.retries",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__RETRIES",
-          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
-          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
-          "type": "integer",
-          "default": 2,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.backoff_seconds",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__BACKOFF_SECONDS",
-          "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to backoff_max_seconds.",
-          "type": "number",
-          "default": 0.2,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.backoff_max_seconds",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__BACKOFF_MAX_SECONDS",
-          "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff_seconds.",
-          "type": "number",
-          "default": 5.0,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.breaker.failure_threshold",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__BREAKER__FAILURE_THRESHOLD",
-          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.postgres.resilience.breaker.cooldown_seconds",
-          "env": "DK_UI__RECORDER__POSTGRES__RESILIENCE__BREAKER__COOLDOWN_SECONDS",
-          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.store_events",
-          "env": "DK_UI__RECORDER__STORE_EVENTS",
-          "description": "Write processing events to the events table.",
-          "full_description": "Write processing events to the events table. Off, the live WebSocket view still streams, but History, Trace, and task queries return nothing.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.store_config",
-          "env": "DK_UI__RECORDER__STORE_CONFIG",
-          "description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
-          "full_description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.store_state",
-          "env": "DK_UI__RECORDER__STORE_STATE",
-          "description": "Periodically snapshot worker counters (uptime, partitions, pool utilization, queue depth) to the worker_state table.",
-          "full_description": "Periodically snapshot worker counters (uptime, partitions, pool utilization, queue depth) to the worker_state table. Used only with sqlite; with none and postgres the key loads and is ignored.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.state_sync_interval_seconds",
-          "env": "DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS",
-          "description": "Seconds between worker_state snapshots — also the heartbeat cadence worker liveness is judged by.",
-          "full_description": "Seconds between worker_state snapshots — also the heartbeat cadence worker liveness is judged by.",
-          "type": "integer",
-          "default": 10,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.rotation_interval_hours",
-          "env": "DK_UI__RECORDER__ROTATION_INTERVAL_HOURS",
-          "description": "How often to roll over to a new SQLite file.",
-          "full_description": "How often to roll over to a new SQLite file. Used only with sqlite; with none and postgres the key loads and is ignored.",
-          "type": "integer",
-          "default": 1,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.store_output",
-          "env": "DK_UI__RECORDER__STORE_OUTPUT",
-          "description": "Store subprocess stdout/stderr content in task events.",
-          "full_description": "Store subprocess stdout/stderr content in task events. Off drops output content from all of them.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.store_stdin",
-          "env": "DK_UI__RECORDER__STORE_STDIN",
-          "description": "Store each task's stdin content (capped at stdin_max_bytes) in the task_started event metadata, so the debug UI can show exactly what a task consumed.",
-          "full_description": "Store each task's stdin content (capped at stdin_max_bytes) in the task_started event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the task_failed event, regardless of this flag.",
-          "type": "boolean",
-          "default": false,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.stdin_max_bytes",
-          "env": "DK_UI__RECORDER__STDIN_MAX_BYTES",
-          "description": "Byte cap for stored stdin content (store_stdin, and the always-on failed-task capture).",
-          "full_description": "Byte cap for stored stdin content (store_stdin, and the always-on failed-task capture). 0 = unlimited. Truncation is flagged as stdin_truncated in the event metadata.",
-          "type": "integer",
-          "default": 65536,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.flush_interval_seconds",
-          "env": "DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS",
-          "description": "Seconds between recorder buffer flushes: the tick of the memory loop and the file loop, and of the Postgres loop with postgres.",
-          "full_description": "Seconds between recorder buffer flushes: the tick of the memory loop and the file loop, and of the Postgres loop with postgres.",
-          "type": "integer",
-          "default": 5,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.max_buffer",
-          "env": "DK_UI__RECORDER__MAX_BUFFER",
-          "description": "In-memory event buffer capacity.",
-          "full_description": "In-memory event buffer capacity. When full, the oldest events are evicted and counted in drakkar_recorder_dropped_events_total. The intake buffer and, with sqlite, the file queue each hold at most this many rows; with postgres, the Postgres queue holds at most this many rows too.",
-          "type": "integer",
-          "default": 50000,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.max_flush_retries",
-          "env": "DK_UI__RECORDER__MAX_FLUSH_RETRIES",
-          "description": "Consecutive failed flush attempts tolerated per batch before it is dropped (counted in drakkar_recorder_flush_batches_dropped_total).",
-          "full_description": "Consecutive failed flush attempts tolerated per batch before it is dropped (counted in drakkar_recorder_flush_batches_dropped_total). Used only with sqlite; with none and postgres the key loads and is ignored.",
-          "type": "integer",
-          "default": 3,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.event_min_duration_ms",
-          "env": "DK_UI__RECORDER__EVENT_MIN_DURATION_MS",
-          "description": "Minimum task duration (ms) to persist a task event at all.",
-          "full_description": "Minimum task duration (ms) to persist a task event at all. 0 persists everything.",
-          "type": "integer",
-          "default": 0,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.output_min_duration_ms",
-          "env": "DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS",
-          "description": "Minimum task duration (ms) to include args/stdout/stderr in the persisted event.",
-          "full_description": "Minimum task duration (ms) to include args/stdout/stderr in the persisted event. Faster tasks keep their row without output data.",
-          "type": "integer",
-          "default": 500,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.annotations_enabled",
-          "env": "DK_UI__RECORDER__ANNOTATIONS_ENABLED",
-          "description": "Accept handler annotations (self.annotate(...)) and write them to the events table.",
-          "full_description": "Accept handler annotations (self.annotate(...)) and write them to the events table.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.annotation_max_bytes",
-          "env": "DK_UI__RECORDER__ANNOTATION_MAX_BYTES",
-          "description": "Byte cap for one annotation payload; larger payloads are dropped whole.",
-          "full_description": "Byte cap for one annotation payload; larger payloads are dropped whole. 0 disables the cap.",
-          "type": "integer",
-          "default": 16384,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.annotation_max_bytes_per_call",
-          "env": "DK_UI__RECORDER__ANNOTATION_MAX_BYTES_PER_CALL",
-          "description": "Total annotation bytes one hook invocation may write; further payloads past it are dropped.",
-          "full_description": "Total annotation bytes one hook invocation may write; further payloads past it are dropped. 0 disables the cap.",
-          "type": "integer",
-          "default": 262144,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.recorder.annotation_log_max_bytes",
-          "env": "DK_UI__RECORDER__ANNOTATION_LOG_MAX_BYTES",
-          "description": "Cap on the payload copy included in the warning log when an annotation is dropped.",
-          "full_description": "Cap on the payload copy included in the warning log when an annotation is dropped. 0 disables the cap.",
-          "type": "integer",
-          "default": 2048,
           "secret": false,
           "group": "ui"
         },
@@ -2127,26 +1787,6 @@
           "group": "ui"
         },
         {
-          "path": "ui.trace.history_max_files",
-          "env": "DK_UI__TRACE__HISTORY_MAX_FILES",
-          "description": "Most sealed history files one trace request with history=1 opens, newest first.",
-          "full_description": "Most sealed history files one trace request with history=1 opens, newest first. Ignored with postgres.",
-          "type": "integer",
-          "default": 256,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.trace.history_max_seconds",
-          "env": "DK_UI__TRACE__HISTORY_MAX_SECONDS",
-          "description": "Time limit for one trace request with history=1; the file history search stops and returns what it found.",
-          "full_description": "Time limit for one trace request with history=1; the file history search stops and returns what it found. With ui.recorder.persistence: postgres it is also the time limit of the Postgres history search (capped at 3600 s); a search past the limit answers 503 and returns no rows.",
-          "type": "number",
-          "default": 10.0,
-          "secret": false,
-          "group": "ui"
-        },
-        {
           "path": "ui.docs.site_dir",
           "env": "DK_UI__DOCS__SITE_DIR",
           "description": "Directory of a prebuilt static docs site served at /docs/.",
@@ -2234,125 +1874,508 @@
           "path": "storage.dir",
           "env": "DK_STORAGE__DIR",
           "description": "Folder for this worker's own files (live recorder file, cache file, crash marker).",
-          "full_description": "Folder for this worker's own files (live recorder file, cache file, crash marker). Only this worker opens them. The worker creates it with mode 0700. Empty: no own files and no cache file; the recorder keeps recent events in memory only (persistence none), or in memory and in Postgres with persistence postgres.",
+          "full_description": "Folder for this worker's own files (live recorder file, cache file, crash marker). Only this worker opens them. The worker creates it with mode 0700. Empty: no own files and no cache file; recorder.provider sqlite then fails the load.",
           "type": "string",
           "default": "/tmp/drakkar",
+          "secret": false,
+          "group": "storage"
+        },
+        {
+          "path": "storage.shared_dir",
+          "env": "DK_STORAGE__SHARED_DIR",
+          "description": "Folder that every worker of the cluster sees (for example a ReadWriteMany volume): registry cards, sealed history, archives and merge results.",
+          "full_description": "Folder that every worker of the cluster sees (for example a ReadWriteMany volume): registry cards, sealed history, archives and merge results. Empty means the same folder as dir, which is right for workers on one host.",
+          "type": "string",
+          "default": "",
           "secret": false,
           "group": "storage"
         }
       ]
     },
     {
-      "key": "shared",
-      "title": "Shared folder (shared:)",
-      "doc_anchor": "shared-folder-shared",
+      "key": "recorder",
+      "title": "Flight recorder (recorder:)",
+      "doc_anchor": "flight-recorder-recorder",
       "entries": [
         {
-          "path": "shared.dir",
-          "env": "DK_SHARED__DIR",
-          "description": "Folder that every worker of the fleet sees (for example a ReadWriteMany volume): registry cards, sealed history, daily archives and merge results.",
-          "full_description": "Folder that every worker of the fleet sees (for example a ReadWriteMany volume): registry cards, sealed history, daily archives and merge results. Empty means the same folder as storage.dir, which is right for workers on one host.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "shared"
-        }
-      ]
-    },
-    {
-      "key": "history",
-      "title": "History and archives (history:)",
-      "doc_anchor": "history-and-archives-history",
-      "entries": [
-        {
-          "path": "history.archive.enabled",
-          "env": "DK_HISTORY__ARCHIVE__ENABLED",
-          "description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files.",
-          "full_description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files. Off, nothing removes sealed files. Used only with ui.recorder.persistence sqlite; with none the history.archive keys load and are ignored.",
+          "path": "recorder.enabled",
+          "env": "DK_RECORDER__ENABLED",
+          "description": "Durable recording in the store provider names.",
+          "full_description": "Durable recording in the store provider names. Off, nothing is written to a file or a table; with the UI on, the recorder still holds the recent events in memory for it.",
           "type": "boolean",
           "default": true,
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.window_hours",
-          "env": "DK_HISTORY__ARCHIVE__WINDOW_HOURS",
-          "description": "Width of one archive window in hours; must be >= ui.recorder.rotation_interval_hours.",
-          "full_description": "Width of one archive window in hours; must be >= ui.recorder.rotation_interval_hours.",
-          "type": "integer",
-          "default": 24,
+          "path": "recorder.provider",
+          "env": "DK_RECORDER__PROVIDER",
+          "description": "Where durable recording goes: sqlite writes recorder files into storage.dir, which must be set; postgres writes a table named by the postgres block, and storage.dir may be empty.",
+          "full_description": "Where durable recording goes: sqlite writes recorder files into storage.dir, which must be set; postgres writes a table named by the postgres block, and storage.dir may be empty.",
+          "type": "string",
+          "default": "sqlite",
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.due_after_hours",
-          "env": "DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS",
-          "description": "A window is archived this many hours after it ends, so late files of that window are still in it; must be >= ui.recorder.rotation_interval_hours.",
-          "full_description": "A window is archived this many hours after it ends, so late files of that window are still in it; must be >= ui.recorder.rotation_interval_hours.",
-          "type": "integer",
-          "default": 48,
+          "path": "recorder.flush_interval",
+          "env": "DK_RECORDER__FLUSH_INTERVAL",
+          "description": "Time between recorder flushes, a whole number of seconds: the tick of the memory stage and of the file or Postgres stage.",
+          "full_description": "Time between recorder flushes, a whole number of seconds: the tick of the memory stage and of the file or Postgres stage.",
+          "type": "duration",
+          "default": "5s",
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.retention_days",
-          "env": "DK_HISTORY__ARCHIVE__RETENTION_DAYS",
-          "description": "How long archives are kept before deletion.",
-          "full_description": "How long archives are kept before deletion. Defaults to 30 days so a worker cannot fill its disk unattended. 0 = keep archives forever (a startup warning names the choice); any other value must cover the due delay plus one window (retention_days * 24 >= due_after_hours + window_hours).",
+          "path": "recorder.max_buffer_rows",
+          "env": "DK_RECORDER__MAX_BUFFER_ROWS",
+          "description": "Rows the intake holds, and the file or Postgres queue too.",
+          "full_description": "Rows the intake holds, and the file or Postgres queue too. When full, the oldest are evicted and counted in drakkar_recorder_dropped_events_total.",
           "type": "integer",
-          "default": 30,
+          "default": 50000,
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.interval",
-          "env": "DK_HISTORY__ARCHIVE__INTERVAL",
-          "description": "Seconds between archive slots, aligned to the epoch, a whole number of at least 30.",
-          "full_description": "Seconds between archive slots, aligned to the epoch, a whole number of at least 30. Give at most one of interval and cron; with neither, a slot every 3600 seconds. At each slot one worker of the cluster runs an archive pass.",
+          "path": "recorder.memory.window",
+          "env": "DK_RECORDER__MEMORY__WINDOW",
+          "description": "Keep recorder events in memory for this long.",
+          "full_description": "Keep recorder events in memory for this long.",
+          "type": "duration",
+          "default": "2m",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.memory.rows_per_executor",
+          "env": "DK_RECORDER__MEMORY__ROWS_PER_EXECUTOR",
+          "description": "Row cap per executor slot: the store holds at most this many rows times executor.max_executors.",
+          "full_description": "Row cap per executor slot: the store holds at most this many rows times executor.max_executors. The cap does not scale with the window; a longer window needs a larger value (rows per executor per window is about 4 x window / average task seconds).",
           "type": "integer",
+          "default": 3000,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.memory.max_size",
+          "env": "DK_RECORDER__MEMORY__MAX_SIZE",
+          "description": "Budget for the data in the memory store (pages in use), from 16MiB to 512MiB.",
+          "full_description": "Budget for the data in the memory store (pages in use), from 16MiB to 512MiB. It bounds the data, not the memory the store holds; free pages and one write stage can exceed it. At most 512MiB so the store stays under the 1 GiB limit of the SQLite in-memory database.",
+          "type": "size",
+          "default": "256MiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.events",
+          "env": "DK_RECORDER__CAPTURE__EVENTS",
+          "description": "Write processing events.",
+          "full_description": "Write processing events. Off, no event row goes anywhere, runtime health events included: the live WebSocket view still streams, but History, Trace, and task queries return nothing.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.config",
+          "env": "DK_RECORDER__CAPTURE__CONFIG",
+          "description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
+          "full_description": "Write the worker config snapshot to the worker_config table, so every recorder file names the worker and cluster that wrote it (history, merges, archives).",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.output",
+          "env": "DK_RECORDER__CAPTURE__OUTPUT",
+          "description": "Keep subprocess stdout/stderr content in task events.",
+          "full_description": "Keep subprocess stdout/stderr content in task events. Off drops output content from all of them.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.stdin",
+          "env": "DK_RECORDER__CAPTURE__STDIN",
+          "description": "Keep each task's stdin content (capped at max_stdin) in the task_started event metadata, so the debug UI can show exactly what a task consumed.",
+          "full_description": "Keep each task's stdin content (capped at max_stdin) in the task_started event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always keep their stdin (capped) on the task_failed event, regardless of this flag.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.max_stdin",
+          "env": "DK_RECORDER__CAPTURE__MAX_STDIN",
+          "description": "Size cap for kept stdin content (stdin, and the always-on failed-task capture).",
+          "full_description": "Size cap for kept stdin content (stdin, and the always-on failed-task capture). 0 = no limit. A cut is flagged as stdin_truncated in the event metadata.",
+          "type": "size",
+          "default": "64KiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.min_event_duration",
+          "env": "DK_RECORDER__CAPTURE__MIN_EVENT_DURATION",
+          "description": "Shortest task duration whose task event is written at all.",
+          "full_description": "Shortest task duration whose task event is written at all. 0 writes everything.",
+          "type": "duration",
+          "default": "0",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.min_output_duration",
+          "env": "DK_RECORDER__CAPTURE__MIN_OUTPUT_DURATION",
+          "description": "Shortest task duration whose args/stdout/stderr go into the written event.",
+          "full_description": "Shortest task duration whose args/stdout/stderr go into the written event. Faster tasks keep their row without output data.",
+          "type": "duration",
+          "default": "500ms",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.capture.env_vars",
+          "env": "DK_RECORDER__CAPTURE__ENV_VARS",
+          "description": "Environment variable names captured into the worker_config table — for recording deployment metadata like GIT_SHA or K8S_POD_NAME.",
+          "full_description": "Environment variable names captured into the worker_config table — for recording deployment metadata like GIT_SHA or K8S_POD_NAME.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.annotations.enabled",
+          "env": "DK_RECORDER__ANNOTATIONS__ENABLED",
+          "description": "Accept handler annotations (self.annotate(...)) and write them to the events table.",
+          "full_description": "Accept handler annotations (self.annotate(...)) and write them to the events table.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.annotations.max_size",
+          "env": "DK_RECORDER__ANNOTATIONS__MAX_SIZE",
+          "description": "Size cap for one annotation payload; larger payloads are dropped whole.",
+          "full_description": "Size cap for one annotation payload; larger payloads are dropped whole. 0 = no limit.",
+          "type": "size",
+          "default": "16KiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.annotations.max_size_per_call",
+          "env": "DK_RECORDER__ANNOTATIONS__MAX_SIZE_PER_CALL",
+          "description": "Total annotation size one hook invocation may write; further payloads are dropped.",
+          "full_description": "Total annotation size one hook invocation may write; further payloads are dropped. 0 = no limit.",
+          "type": "size",
+          "default": "256KiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.annotations.max_log_size",
+          "env": "DK_RECORDER__ANNOTATIONS__MAX_LOG_SIZE",
+          "description": "Cap on the payload copy in the warning log when an annotation is dropped.",
+          "full_description": "Cap on the payload copy in the warning log when an annotation is dropped. 0 = no limit.",
+          "type": "size",
+          "default": "2KiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.sqlite.rotation_interval",
+          "env": "DK_RECORDER__SQLITE__ROTATION_INTERVAL",
+          "description": "How often to roll over to a new SQLite file, a whole number of hours.",
+          "full_description": "How often to roll over to a new SQLite file, a whole number of hours.",
+          "type": "duration",
+          "default": "1h",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.sqlite.max_flush_retries",
+          "env": "DK_RECORDER__SQLITE__MAX_FLUSH_RETRIES",
+          "description": "Consecutive failed flush attempts tolerated per batch before it is dropped (counted in drakkar_recorder_flush_batches_dropped_total).",
+          "full_description": "Consecutive failed flush attempts tolerated per batch before it is dropped (counted in drakkar_recorder_flush_batches_dropped_total).",
+          "type": "integer",
+          "default": 3,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.sqlite.state_snapshots",
+          "env": "DK_RECORDER__SQLITE__STATE_SNAPSHOTS",
+          "description": "Periodically snapshot worker counters (uptime, partitions, pool utilization, queue depth) to the worker_state table.",
+          "full_description": "Periodically snapshot worker counters (uptime, partitions, pool utilization, queue depth) to the worker_state table.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.sqlite.state_interval",
+          "env": "DK_RECORDER__SQLITE__STATE_INTERVAL",
+          "description": "Time between worker_state snapshots and between resource samples, a whole number of seconds; also the heartbeat cadence worker liveness is judged by.",
+          "full_description": "Time between worker_state snapshots and between resource samples, a whole number of seconds; also the heartbeat cadence worker liveness is judged by. Without provider sqlite, resource samples come every 10s.",
+          "type": "duration",
+          "default": "10s",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.enabled",
+          "env": "DK_RECORDER__ARCHIVE__ENABLED",
+          "description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files.",
+          "full_description": "Fold sealed recorder files into one compressed archive per cluster and window, then delete the files. Off, nothing removes sealed files.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.window",
+          "env": "DK_RECORDER__ARCHIVE__WINDOW",
+          "description": "Width of one archive window, a whole number of hours; must be >= recorder.sqlite.rotation_interval.",
+          "full_description": "Width of one archive window, a whole number of hours; must be >= recorder.sqlite.rotation_interval.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.due_after",
+          "env": "DK_RECORDER__ARCHIVE__DUE_AFTER",
+          "description": "A window is archived this long after it ends, so late files of that window are still in it; a whole number of hours, >= recorder.sqlite.rotation_interval.",
+          "full_description": "A window is archived this long after it ends, so late files of that window are still in it; a whole number of hours, >= recorder.sqlite.rotation_interval.",
+          "type": "duration",
+          "default": "2d",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.retention",
+          "env": "DK_RECORDER__ARCHIVE__RETENTION",
+          "description": "How long archives are kept before deletion, a whole number of days.",
+          "full_description": "How long archives are kept before deletion, a whole number of days. Defaults to 30 days so a worker cannot fill its disk unattended. 0 = keep archives for ever (a startup warning names the choice); any other value must cover due_after plus one window.",
+          "type": "duration",
+          "default": "30d",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.merged_retention",
+          "env": "DK_RECORDER__ARCHIVE__MERGED_RETENTION",
+          "description": "The archive pass deletes merge results from the UI older than this.",
+          "full_description": "The archive pass deletes merge results from the UI older than this. 0 = never.",
+          "type": "duration",
+          "default": "32d",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.archive.interval",
+          "env": "DK_RECORDER__ARCHIVE__INTERVAL",
+          "description": "Time between archive slots, aligned to the epoch, a whole number of seconds and at least 30s.",
+          "full_description": "Time between archive slots, aligned to the epoch, a whole number of seconds and at least 30s. Give at most one of interval and cron; with neither, a slot every 1h. At each slot one worker of the cluster runs an archive pass.",
+          "type": "duration",
           "default": null,
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.cron",
-          "env": "DK_HISTORY__ARCHIVE__CRON",
+          "path": "recorder.archive.cron",
+          "env": "DK_RECORDER__ARCHIVE__CRON",
           "description": "Five-field UTC cron expression for the archive slots, instead of interval.",
           "full_description": "Five-field UTC cron expression for the archive slots, instead of interval. Give at most one of interval and cron.",
           "type": "string",
           "default": null,
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.lease_seconds",
-          "env": "DK_HISTORY__ARCHIVE__LEASE_SECONDS",
-          "description": "Lease of the archive slot in seconds, a whole number from 40 to 86400.",
-          "full_description": "Lease of the archive slot in seconds, a whole number from 40 to 86400. The holder refreshes it while its pass runs; a lease that nobody refreshed for this long is taken over.",
-          "type": "integer",
-          "default": 60,
+          "path": "recorder.archive.lease",
+          "env": "DK_RECORDER__ARCHIVE__LEASE",
+          "description": "Lease of the archive slot, a whole number of seconds from 40 to 86400.",
+          "full_description": "Lease of the archive slot, a whole number of seconds from 40 to 86400. The holder refreshes it while its pass runs; a lease that nobody refreshed for this long is taken over.",
+          "type": "duration",
+          "default": "1m",
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.archive.sweep_after_seconds",
-          "env": "DK_HISTORY__ARCHIVE__SWEEP_AFTER_SECONDS",
-          "description": "An archive work file older than this many seconds belongs to a dead archiver and is removed.",
-          "full_description": "An archive work file older than this many seconds belongs to a dead archiver and is removed. At least 60.",
-          "type": "integer",
-          "default": 7200,
+          "path": "recorder.archive.sweep_after",
+          "env": "DK_RECORDER__ARCHIVE__SWEEP_AFTER",
+          "description": "An archive work file older than this belongs to a dead archiver and is removed.",
+          "full_description": "An archive work file older than this belongs to a dead archiver and is removed. At least 60s.",
+          "type": "duration",
+          "default": "2h",
           "secret": false,
-          "group": "history"
+          "group": "recorder"
         },
         {
-          "path": "history.merged_retention_days",
-          "env": "DK_HISTORY__MERGED_RETENTION_DAYS",
-          "description": "Merge results from the UI are deleted after this many days.",
-          "full_description": "Merge results from the UI are deleted after this many days. 0 = never delete.",
-          "type": "integer",
-          "default": 32,
+          "path": "recorder.postgres.connection",
+          "env": "DK_RECORDER__POSTGRES__CONNECTION",
+          "description": "Name of the entry under connections.postgres that holds the DSN and the schema.",
+          "full_description": "Name of the entry under connections.postgres that holds the DSN and the schema.",
+          "type": "string",
+          "default": "main",
           "secret": false,
-          "group": "history"
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.table_prefix",
+          "env": "DK_RECORDER__POSTGRES__TABLE_PREFIX",
+          "description": "Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.",
+          "full_description": "Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.initial_retention",
+          "env": "DK_RECORDER__POSTGRES__INITIAL_RETENTION",
+          "description": "How long the table keeps history, a whole number of hours from 1h to 168h.",
+          "full_description": "How long the table keeps history, a whole number of hours from 1h to 168h. Read only when this worker creates the table; after that the value stored with the table rules. At most 168h: one partition per hour, and a trace search visits every partition.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.store_completed_output",
+          "env": "DK_RECORDER__POSTGRES__STORE_COMPLETED_OUTPUT",
+          "description": "Send the stdout and stderr columns to Postgres.",
+          "full_description": "Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.max_output",
+          "env": "DK_RECORDER__POSTGRES__MAX_OUTPUT",
+          "description": "Longest stdout or stderr value written to the table.",
+          "full_description": "Longest stdout or stderr value written to the table. 0 = no limit.",
+          "type": "size",
+          "default": "64KiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.max_size",
+          "env": "DK_RECORDER__POSTGRES__MAX_SIZE",
+          "description": "Largest total size of the table.",
+          "full_description": "Largest total size of the table. 0 = no limit.",
+          "type": "size",
+          "default": "0",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.batch_rows",
+          "env": "DK_RECORDER__POSTGRES__BATCH_ROWS",
+          "description": "Most rows in one COPY.",
+          "full_description": "Most rows in one COPY.",
+          "type": "integer",
+          "default": 5000,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.max_queue",
+          "env": "DK_RECORDER__POSTGRES__MAX_QUEUE",
+          "description": "Most text waiting for Postgres, from 16MiB to 1GiB, counted in characters of text.",
+          "full_description": "Most text waiting for Postgres, from 16MiB to 1GiB, counted in characters of text. When full, the oldest rows are dropped and counted.",
+          "type": "size",
+          "default": "128MiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.timeout",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__TIMEOUT",
+          "description": "Time limit for one attempt of a provider operation.",
+          "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
+          "type": "duration",
+          "default": "5s",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.max_retries",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__MAX_RETRIES",
+          "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
+          "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.backoff",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__BACKOFF",
+          "description": "Wait before the first retry.",
+          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
+          "type": "duration",
+          "default": "200ms",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.max_backoff",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__MAX_BACKOFF",
+          "description": "Longest wait between two attempts.",
+          "full_description": "Longest wait between two attempts. Must be >= backoff.",
+          "type": "duration",
+          "default": "5s",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.breaker_failures",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__BREAKER_FAILURES",
+          "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
+          "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
+          "type": "integer",
+          "default": 5,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.postgres.resilience.breaker_cooldown",
+          "env": "DK_RECORDER__POSTGRES__RESILIENCE__BREAKER_COOLDOWN",
+          "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
+          "type": "duration",
+          "default": "30s",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.search.max_files",
+          "env": "DK_RECORDER__SEARCH__MAX_FILES",
+          "description": "Most sealed history files one history search opens, newest first.",
+          "full_description": "Most sealed history files one history search opens, newest first. Used only with provider sqlite.",
+          "type": "integer",
+          "default": 256,
+          "secret": false,
+          "group": "recorder"
+        },
+        {
+          "path": "recorder.search.timeout",
+          "env": "DK_RECORDER__SEARCH__TIMEOUT",
+          "description": "Time limit for one history search.",
+          "full_description": "Time limit for one history search. With provider sqlite the search stops and returns what it found. With provider postgres the limit is capped at 1h, and a search past it answers 503 and returns no rows.",
+          "type": "duration",
+          "default": "10s",
+          "secret": false,
+          "group": "recorder"
         }
       ]
     },
@@ -2364,8 +2387,8 @@
         {
           "path": "periodic.election.provider",
           "env": "DK_PERIODIC__ELECTION__PROVIDER",
-          "description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session).",
-          "full_description": "Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session). Every worker of a cluster must use the same provider.",
+          "description": "Election provider: filesystem (a lock file in storage.shared_dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session).",
+          "full_description": "Election provider: filesystem (a lock file in storage.shared_dir), postgres (a row in a table of the database named by periodic.election.connection), redis (a key on the Redis server named by periodic.election.connection), consul (a key of the Consul agent named by periodic.election.connection, held by a session). Every worker of a cluster must use the same provider.",
           "type": "string",
           "default": "filesystem",
           "secret": false,
@@ -2382,18 +2405,18 @@
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.timeout_seconds",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT_SECONDS",
+          "path": "periodic.election.resilience.timeout",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT",
           "description": "Time limit for one attempt of a provider operation.",
           "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "number",
-          "default": 5.0,
+          "type": "duration",
+          "default": "5s",
           "secret": false,
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.retries",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__RETRIES",
+          "path": "periodic.election.resilience.max_retries",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES",
           "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
           "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
           "type": "integer",
@@ -2402,28 +2425,28 @@
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.backoff_seconds",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_SECONDS",
+          "path": "periodic.election.resilience.backoff",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF",
           "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to backoff_max_seconds.",
-          "type": "number",
-          "default": 0.2,
+          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
+          "type": "duration",
+          "default": "200ms",
           "secret": false,
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.backoff_max_seconds",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS",
+          "path": "periodic.election.resilience.max_backoff",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__MAX_BACKOFF",
           "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff_seconds.",
-          "type": "number",
-          "default": 5.0,
+          "full_description": "Longest wait between two attempts. Must be >= backoff.",
+          "type": "duration",
+          "default": "5s",
           "secret": false,
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.breaker.failure_threshold",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD",
+          "path": "periodic.election.resilience.breaker_failures",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_FAILURES",
           "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
           "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
           "type": "integer",
@@ -2432,12 +2455,12 @@
           "group": "periodic"
         },
         {
-          "path": "periodic.election.resilience.breaker.cooldown_seconds",
-          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS",
+          "path": "periodic.election.resilience.breaker_cooldown",
+          "env": "DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_COOLDOWN",
           "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
           "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "number",
-          "default": 30.0,
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "periodic"
         }
@@ -2451,8 +2474,8 @@
         {
           "path": "fleet.registry.provider",
           "env": "DK_FLEET__REGISTRY__PROVIDER",
-          "description": "Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when shared.dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker).",
-          "full_description": "Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when shared.dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.",
+          "description": "Registry provider: filesystem (cards in <storage.shared_dir>/fleet, or <storage.dir>/fleet when storage.shared_dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker).",
+          "full_description": "Registry provider: filesystem (cards in <storage.shared_dir>/fleet, or <storage.dir>/fleet when storage.shared_dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.",
           "type": "string",
           "default": "filesystem",
           "secret": false,
@@ -2509,18 +2532,18 @@
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.timeout_seconds",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS",
+          "path": "fleet.registry.resilience.timeout",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT",
           "description": "Time limit for one attempt of a provider operation.",
           "full_description": "Time limit for one attempt of a provider operation. Retries get their own limit each.",
-          "type": "number",
-          "default": 5.0,
+          "type": "duration",
+          "default": "5s",
           "secret": false,
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.retries",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__RETRIES",
+          "path": "fleet.registry.resilience.max_retries",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__MAX_RETRIES",
           "description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error).",
           "full_description": "Extra attempts after the first one, made only for a transient error (a timeout, a connection or other OS error). Any other error ends the operation at once. 0 = a single attempt.",
           "type": "integer",
@@ -2529,28 +2552,28 @@
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.backoff_seconds",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_SECONDS",
+          "path": "fleet.registry.resilience.backoff",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__BACKOFF",
           "description": "Wait before the first retry.",
-          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to backoff_max_seconds.",
-          "type": "number",
-          "default": 0.2,
+          "full_description": "Wait before the first retry. The wait doubles for each further retry, up to max_backoff.",
+          "type": "duration",
+          "default": "200ms",
           "secret": false,
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.backoff_max_seconds",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_MAX_SECONDS",
+          "path": "fleet.registry.resilience.max_backoff",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__MAX_BACKOFF",
           "description": "Longest wait between two attempts.",
-          "full_description": "Longest wait between two attempts. Must be >= backoff_seconds.",
-          "type": "number",
-          "default": 5.0,
+          "full_description": "Longest wait between two attempts. Must be >= backoff.",
+          "type": "duration",
+          "default": "5s",
           "secret": false,
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.breaker.failure_threshold",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER__FAILURE_THRESHOLD",
+          "path": "fleet.registry.resilience.breaker_failures",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER_FAILURES",
           "description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
           "full_description": "Consecutive failed operations before the breaker opens; while open, operations are skipped without a call.",
           "type": "integer",
@@ -2559,12 +2582,12 @@
           "group": "fleet"
         },
         {
-          "path": "fleet.registry.resilience.breaker.cooldown_seconds",
-          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER__COOLDOWN_SECONDS",
+          "path": "fleet.registry.resilience.breaker_cooldown",
+          "env": "DK_FLEET__REGISTRY__RESILIENCE__BREAKER_COOLDOWN",
           "description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
           "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
-          "type": "number",
-          "default": 30.0,
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "fleet"
         },

@@ -12,7 +12,7 @@ import pytest
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
-from drakkar.config.resilience import BreakerConfig, ResilienceConfig
+from drakkar.config.resilience import ResilienceConfig
 from drakkar.providers.resilience import CallResult, RateLimitedLog, ResilientCaller
 
 FEATURE = 'registry'
@@ -69,11 +69,12 @@ class BlockingLogger:
 
 def _config(**overrides) -> ResilienceConfig:
     values = {
-        'timeout_seconds': 1.0,
-        'retries': 2,
-        'backoff_seconds': 0.2,
-        'backoff_max_seconds': 0.3,
-        'breaker': BreakerConfig(failure_threshold=2, cooldown_seconds=10.0),
+        'timeout': '1s',
+        'max_retries': 2,
+        'backoff': '200ms',
+        'max_backoff': '300ms',
+        'breaker_failures': 2,
+        'breaker_cooldown': '10s',
     }
     return ResilienceConfig(**{**values, **overrides})
 
@@ -163,8 +164,8 @@ async def test_a_transient_error_is_retried_with_doubling_capped_backoff(make_ca
     ('overrides', 'expected'),
     [
         ({}, 3 * 1.0 + 0.2 + 0.3),
-        ({'retries': 0}, 1.0),
-        ({'retries': 3, 'backoff_seconds': 0.0, 'backoff_max_seconds': 0.0}, 4 * 1.0),
+        ({'max_retries': 0}, 1.0),
+        ({'max_retries': 3, 'backoff': 0, 'max_backoff': 0}, 4 * 1.0),
     ],
     ids=['capped-backoff', 'no-retries', 'no-backoff'],
 )
@@ -192,7 +193,7 @@ async def test_a_timeout_on_the_last_attempt_is_outcome_timeout(make_caller, sle
     async def never_returns():
         await asyncio.Event().wait()
 
-    result = await make_caller(timeout_seconds=0.01).call(OP, never_returns)
+    result = await make_caller(timeout='10ms').call(OP, never_returns)
 
     assert result.outcome == 'timeout'
     assert result.attempts == 3
@@ -240,7 +241,7 @@ async def test_a_make_call_that_raises_before_returning_an_awaitable_fails_like_
 async def test_a_huge_retry_count_does_not_overflow_the_backoff(make_caller, slept):
     call = ScriptedCall(ConnectionError('refused'))
 
-    result = await make_caller(retries=1100, breaker=BreakerConfig(failure_threshold=100)).call(OP, call)
+    result = await make_caller(max_retries=1100, breaker_failures=100).call(OP, call)
 
     assert result.attempts == 1101
     assert max(slept) == 0.3
@@ -620,7 +621,7 @@ async def test_unknown_outcomes_and_zero_attempts_are_rejected(make_caller):
 )
 async def test_the_failure_log_describes_errors_that_have_no_text_of_their_own(make_caller, failure, expected_text):
     with capture_logs() as logs:
-        await make_caller(retries=0).call(OP, ScriptedCall(failure))
+        await make_caller(max_retries=0).call(OP, ScriptedCall(failure))
 
     assert [entry['error'] for entry in logs if entry['event'] == 'provider_call_failed'] == [expected_text]
 
@@ -635,7 +636,7 @@ async def test_the_failure_log_describes_errors_that_have_no_text_of_their_own(m
 )
 async def test_the_failure_log_removes_credentials_from_the_error_text(make_caller, failure):
     with capture_logs() as logs:
-        await make_caller(retries=0).call(OP, ScriptedCall(failure))
+        await make_caller(max_retries=0).call(OP, ScriptedCall(failure))
 
     (error,) = [entry['error'] for entry in logs if entry['event'] == 'provider_call_failed']
     assert error == 'could not connect to postgresql://***:***@h/db?password=***'
@@ -644,7 +645,7 @@ async def test_the_failure_log_removes_credentials_from_the_error_text(make_call
 
 
 async def test_failures_log_once_a_minute_per_operation_with_the_suppressed_count(make_caller, clock, provider):
-    caller = make_caller(breaker=BreakerConfig(failure_threshold=100))
+    caller = make_caller(breaker_failures=100)
     failing = ScriptedCall(ValueError('bad'))
 
     with capture_logs() as first_window:
@@ -666,7 +667,7 @@ async def test_failures_log_once_a_minute_per_operation_with_the_suppressed_coun
 
 
 async def test_log_lines_carry_the_category_of_the_feature(clock, provider):
-    config = _config(breaker=BreakerConfig(failure_threshold=1, cooldown_seconds=10.0))
+    config = _config(breaker_failures=1, breaker_cooldown='10s')
     caller = ResilientCaller(config, feature=FEATURE, provider=provider, category='recorder', now_monotonic=clock)
 
     with capture_logs() as logs:

@@ -68,12 +68,12 @@ class PeriodicRoster:
 
 def archive_definition(config: DrakkarConfig) -> ClusterTaskDefinition:
     """The definition of the system cluster task ``history.archive`` under ``config``."""
-    archive = config.history.archive
+    archive = config.recorder.archive
     return ClusterTaskDefinition(
         name=ARCHIVE_TASK_NAME,
         interval=archive.effective_interval,
         cron=archive.cron,
-        lease_seconds=archive.lease_seconds,
+        lease_seconds=archive.lease,
     )
 
 

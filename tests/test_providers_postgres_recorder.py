@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from drakkar.config.ui import TABLE_PREFIX_RE
+from drakkar.config.recorder import TABLE_PREFIX_RE
 from drakkar.providers import postgres
 from drakkar.providers.postgres import (
     COPY_COLUMNS,

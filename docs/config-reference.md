@@ -400,16 +400,16 @@ logging:
 
 ---
 
-## UI / Flight Recorder (`ui:`)
+## UI (`ui:`)
 
 📚 [Deep details](configuration.md#ui-flight-recorder-ui) · [Authentication](configuration.md#authentication) · [Operator UI](observability.md#operator-ui)
 
-The largest section. Provides the operator web UI, a SQLite-backed event log (`ui.recorder.*`), drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming, worker autodiscovery, and Prometheus deep-links.
+The largest section. Provides the operator web UI, drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming, worker autodiscovery, and Prometheus deep-links. The event log is the [flight recorder](#flight-recorder-recorder).
 
 ```yaml
 ui:
   # --- Server ---
-  enabled: true                    # master switch for the whole UI feature. env: DK_UI__ENABLED
+  enabled: true                    # master switch for the server and the bundle; the recorder does not depend on it. env: DK_UI__ENABLED
   host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_UI__HOST
   port: 8080                       # 1–65535. env: DK_UI__PORT
   public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
@@ -426,7 +426,7 @@ ui:
   probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
   merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
-                                   # <shared.dir>/merged/, deleted after history.merged_retention_days.
+                                   # <storage.shared_dir>/merged/, deleted after recorder.archive.merged_retention.
                                    # false = 403. env: DK_UI__MERGE_ENABLED
   kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
@@ -436,10 +436,6 @@ ui:
     enabled: false                 # serve the pause API + Live-page control. env: DK_UI__CONSUME_PAUSE__ENABLED
     durations_seconds: [15, 60, 300, 900]  # preset buttons; API accepts any 1..3600s.
                                    # env: DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS (JSON list)
-
-  # --- Deployment metadata ---
-  expose_env_vars: []              # env vars captured into worker_config table. YAML only.
-                                   # e.g. ['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']
 
   # --- Presentation ---
   max_rows: 5000                   # max rows returned by UI list endpoints. env: DK_UI__MAX_ROWS
@@ -470,60 +466,6 @@ ui:
   custom_renderers_path: ''        # path to a JS module served at /api/v1/ui/renderers.js. env: DK_UI__CUSTOM_RENDERERS_PATH
                                    # '' = off. Must exist at boot when set. Referenced from
                                    # probe_field(view='custom', renderer=...) / Column(renderer=...).
-
-  # --- Flight recorder (memory store + optional files in storage.dir or a Postgres table;
-  #     see recent-events.md and recorder-postgres.md) ---
-  recorder:
-    persistence: null                # none | sqlite | postgres | null. null = sqlite when storage.dir is set, none when it is ''.
-                                     # sqlite with storage.dir: '' fails the load. postgres is never derived; it needs
-                                     # postgres.connection declared under connections.postgres, and the summary line
-                                     # shows ' recorder=postgres'. env: DK_UI__RECORDER__PERSISTENCE
-    postgres:                        # used only with persistence: postgres (see recorder-postgres.md)
-      connection: main               # name under connections.postgres. env: DK_UI__RECORDER__POSTGRES__CONNECTION
-      table_prefix: ''               # '' -> <schema>.recorder_events; 'heavy' -> <schema>.heavy_recorder_events;
-                                     # [a-z][a-z0-9_]{0,23}. env: DK_UI__RECORDER__POSTGRES__TABLE_PREFIX
-      retention_hours: 6             # 1-168; written into the table comment when this worker creates the table.
-                                     # env: DK_UI__RECORDER__POSTGRES__RETENTION_HOURS
-      store_output: false            # send stdout and stderr to Postgres. env: DK_UI__RECORDER__POSTGRES__STORE_OUTPUT
-      batch_rows: 5000               # most rows in one COPY, 100-50000. env: DK_UI__RECORDER__POSTGRES__BATCH_ROWS
-      queue_max_mib: 128             # most text waiting for Postgres, 16-1024 MiB. env: DK_UI__RECORDER__POSTGRES__QUEUE_MAX_MIB
-      resilience: {}                 # the shared resilience block, feature recorder.
-                                     # env: DK_UI__RECORDER__POSTGRES__RESILIENCE__<KEY>
-    memory:
-      window_seconds: 120            # keep events in memory this long, 10-86400. env: DK_UI__RECORDER__MEMORY__WINDOW_SECONDS
-      rows_per_executor: 3000        # row cap = this x executor.max_executors, 100-1000000; about
-                                     # 4 x window / average task seconds. env: DK_UI__RECORDER__MEMORY__ROWS_PER_EXECUTOR
-      max_mib: 256                   # data budget of the memory store, 16-512 MiB. env: DK_UI__RECORDER__MEMORY__MAX_MIB
-    store_events: true               # write per-message events (off = no memory store). env: DK_UI__RECORDER__STORE_EVENTS
-    store_config: true               # write worker config into each file (history attribution). env: DK_UI__RECORDER__STORE_CONFIG
-    store_state: true                # periodic worker-state snapshots (sqlite only). env: DK_UI__RECORDER__STORE_STATE
-    state_sync_interval_seconds: 10  # snapshot frequency. env: DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS
-
-    # --- Database rotation & archiving (see docs/local-databases.md#archiving) ---
-    rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour (sqlite only). env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
-                                     # Archiving settings live in history.archive (see History and archives below).
-
-    # --- Output (stdout/stderr) capture ---
-    store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT
-    store_stdin: false               # store each task's stdin (capped) in task_started
-                                     # metadata; failures always store it. env: DK_UI__RECORDER__STORE_STDIN
-    stdin_max_bytes: 65536           # byte cap for stored stdin, 0 = unlimited.
-                                     # env: DK_UI__RECORDER__STDIN_MAX_BYTES
-    flush_interval_seconds: 5        # tick of the memory, file and Postgres loops. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
-    max_buffer: 50000                # capacity of the intake, the file queue and the Postgres queue, each.
-                                     # env: DK_UI__RECORDER__MAX_BUFFER
-    max_flush_retries: 3             # retries on transient file errors (sqlite only). env: DK_UI__RECORDER__MAX_FLUSH_RETRIES
-    event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_UI__RECORDER__EVENT_MIN_DURATION_MS
-    output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS
-
-    # --- Handler annotations (see annotations.md; 0 disables a byte cap) ---
-    annotations_enabled: true        # record self.annotate(...) rows in the events table. env: DK_UI__RECORDER__ANNOTATIONS_ENABLED
-    annotation_max_bytes: 16384      # cap per annotation payload; oversize records drop whole.
-                                     # env: DK_UI__RECORDER__ANNOTATION_MAX_BYTES
-    annotation_max_bytes_per_call: 262144  # total annotation bytes one hook invocation may add.
-                                     # env: DK_UI__RECORDER__ANNOTATION_MAX_BYTES_PER_CALL
-    annotation_log_max_bytes: 2048   # cap on the payload copy in the drop-warning log line.
-                                     # env: DK_UI__RECORDER__ANNOTATION_LOG_MAX_BYTES
 
   # --- drakkar-ui bundle fetching (never fatal; with nothing cached the worker runs API-only) ---
   release:
@@ -556,13 +498,6 @@ ui:
     events: []                       # declared custom timeline event types (see ui-timeline-events.md); max 50.
                                      # YAML only.
                                      # e.g. [{name: deploy, kind: marker, color: purple, action: link, link: "{grafana}/d?from={ts_ms}"}]
-
-  # --- Trace search over sealed history (Trace page, history part) ---
-  trace:
-    history_max_files: 256           # most sealed files one trace request with history=1 opens; not used with
-                                     # persistence: postgres. env: DK_UI__TRACE__HISTORY_MAX_FILES
-    history_max_seconds: 10          # time limit for that request; with postgres also the server statement limit
-                                     # (at most 3600). env: DK_UI__TRACE__HISTORY_MAX_SECONDS
 
   # --- Operator docs site served at /docs/ + contextual anchors (see ui-docs.md) ---
   docs:
@@ -598,49 +533,117 @@ cache:
 
 📚 [Upgrading](upgrading.md) · [Local databases](local-databases.md)
 
-This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them.
+This worker's own files (the live recorder file, the cache file, the crash marker), and the folder every worker of one cluster sees (registry cards, sealed history, archives, merge results).
 
 ```yaml
 storage:
-  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = memory-only (no own files;
-                                   # the recorder mode derives to none). env: DK_STORAGE__DIR
+  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = no own files, and
+                                   # recorder.provider sqlite then fails the load. env: DK_STORAGE__DIR
+  shared_dir: ''                   # '' = the same folder as dir (one host). env: DK_STORAGE__SHARED_DIR
 ```
 
 ---
 
-## Shared folder (`shared:`)
+## Flight recorder (`recorder:`)
 
-The folder every worker of one fleet sees: registry cards, sealed history, daily archives, merge results.
+📚 [Recent events](recent-events.md) · [Postgres history](recorder-postgres.md) · [Archiving](local-databases.md#archiving)
 
-```yaml
-shared:
-  dir: ''                          # '' = the same folder as storage.dir (one host). env: DK_SHARED__DIR
-```
+Durable recording of what the worker does. It does not depend on the UI. The memory store exists to serve the UI, so it follows `ui.enabled`:
 
----
-
-## History and archives (`history:`)
-
-📚 [Archiving](local-databases.md#archiving)
+| `ui.enabled` | `recorder.enabled` | Recorder object | Memory store | Durable store |
+|---|---|---|---|---|
+| off | off | none | no | no: main loop only |
+| on | off | yes | yes | no: the UI shows the memory window |
+| off | on | yes | no | yes |
+| on | on | yes | yes | yes |
 
 ```yaml
-history:
+recorder:
+  enabled: true                    # durable recording. Off: no file and no table; a trace with history=1 answers the
+                                   # memory rows. env: DK_RECORDER__ENABLED
+  provider: sqlite                 # sqlite (needs storage.dir) | postgres (needs postgres.connection declared under
+                                   # connections.postgres). env: DK_RECORDER__PROVIDER
+  flush_interval: 5s               # whole seconds; tick of the memory, file and Postgres loops. env: DK_RECORDER__FLUSH_INTERVAL
+  max_buffer_rows: 50000           # capacity of the intake, the file queue and the Postgres queue, each.
+                                   # env: DK_RECORDER__MAX_BUFFER_ROWS
+
+  # --- The memory store (exists only with ui.enabled) ---
+  memory:
+    window: 2m                     # keep events in memory this long, 10s to 24h, whole seconds. env: DK_RECORDER__MEMORY__WINDOW
+    rows_per_executor: 3000        # row cap = this x executor.max_executors, 100-1000000; about
+                                   # 4 x window / average task seconds. env: DK_RECORDER__MEMORY__ROWS_PER_EXECUTOR
+    max_size: 256MiB               # data budget of the memory store, 16MiB to 512MiB. env: DK_RECORDER__MEMORY__MAX_SIZE
+
+  # --- What the recorder keeps ---
+  capture:
+    events: true                   # off: no event rows anywhere, runtime health events included. env: DK_RECORDER__CAPTURE__EVENTS
+    config: true                   # write worker config into each file (history attribution). env: DK_RECORDER__CAPTURE__CONFIG
+    output: true                   # include subprocess output in events. env: DK_RECORDER__CAPTURE__OUTPUT
+    stdin: false                   # store each task's stdin (capped) in task_started metadata; failures always
+                                   # store it. env: DK_RECORDER__CAPTURE__STDIN
+    max_stdin: 64KiB               # size cap for stored stdin, 0 = no limit. env: DK_RECORDER__CAPTURE__MAX_STDIN
+    min_event_duration: 0          # shortest task whose event is written; 0 = all. env: DK_RECORDER__CAPTURE__MIN_EVENT_DURATION
+    min_output_duration: 500ms     # shortest task whose stdout/stderr go into the event.
+                                   # env: DK_RECORDER__CAPTURE__MIN_OUTPUT_DURATION
+    env_vars: []                   # env vars captured into the worker_config table; e.g. ['GIT_SHA', 'K8S_POD_NAME'].
+                                   # env: DK_RECORDER__CAPTURE__ENV_VARS (JSON list)
+
+  # --- Handler annotations (see annotations.md; 0 = no limit) ---
+  annotations:
+    enabled: true                  # record self.annotate(...) rows in the events table. env: DK_RECORDER__ANNOTATIONS__ENABLED
+    max_size: 16KiB                # cap per annotation payload; oversize records drop whole. env: DK_RECORDER__ANNOTATIONS__MAX_SIZE
+    max_size_per_call: 256KiB      # total annotation size one hook invocation may add.
+                                   # env: DK_RECORDER__ANNOTATIONS__MAX_SIZE_PER_CALL
+    max_log_size: 2KiB             # cap on the payload copy in the drop-warning log line. env: DK_RECORDER__ANNOTATIONS__MAX_LOG_SIZE
+
+  # --- Recorder files; used only with provider sqlite ---
+  sqlite:
+    rotation_interval: 1h          # how often to rotate the file, whole hours. env: DK_RECORDER__SQLITE__ROTATION_INTERVAL
+    max_flush_retries: 3           # retries on transient file errors. env: DK_RECORDER__SQLITE__MAX_FLUSH_RETRIES
+    state_snapshots: true          # periodic worker-state snapshots. env: DK_RECORDER__SQLITE__STATE_SNAPSHOTS
+    state_interval: 10s            # snapshot and resource-sample frequency, whole seconds.
+                                   # env: DK_RECORDER__SQLITE__STATE_INTERVAL
+
+  # --- Archives of sealed files; used only with provider sqlite (see local-databases.md#archiving) ---
   archive:
-    enabled: true                  # fold recorder files into one .db.gz per cluster and window. env: DK_HISTORY__ARCHIVE__ENABLED
-    window_hours: 24               # archive window; must be >= ui.recorder.rotation_interval_hours. env: DK_HISTORY__ARCHIVE__WINDOW_HOURS
-    due_after_hours: 48            # a window is archived this long after it ends; must be >= rotation_interval_hours.
-                                   # env: DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS
-    retention_days: 30             # delete archives older than this; 0 = keep forever. Must cover
-                                   # due_after_hours + window_hours. env: DK_HISTORY__ARCHIVE__RETENTION_DAYS
-    interval: null                 # seconds between archive slots, aligned to the epoch; at least 30. With neither
-                                   # interval nor cron, a slot every 3600 s. env: DK_HISTORY__ARCHIVE__INTERVAL
+    enabled: true                  # fold recorder files into one .db.gz per cluster and window. env: DK_RECORDER__ARCHIVE__ENABLED
+    window: 24h                    # archive window, whole hours; must be >= sqlite.rotation_interval. env: DK_RECORDER__ARCHIVE__WINDOW
+    due_after: 48h                 # a window is archived this long after it ends, whole hours; must be >=
+                                   # sqlite.rotation_interval. env: DK_RECORDER__ARCHIVE__DUE_AFTER
+    retention: 30d                 # delete archives older than this, whole days; 0 = keep for ever. Must cover
+                                   # due_after + window. env: DK_RECORDER__ARCHIVE__RETENTION
+    merged_retention: 32d          # delete UI merge results older than this, whole days; 0 = never.
+                                   # env: DK_RECORDER__ARCHIVE__MERGED_RETENTION
+    interval: null                 # time between archive slots, aligned to the epoch, whole seconds, at least 30s.
+                                   # With neither interval nor cron, a slot every 1h. env: DK_RECORDER__ARCHIVE__INTERVAL
     cron: null                     # five-field UTC cron for the archive slots instead of interval; give at most one.
-                                   # env: DK_HISTORY__ARCHIVE__CRON
-    lease_seconds: 60              # lease of an archive slot, 40 to 86400; refreshed while the pass runs, taken over
-                                   # when nobody refreshed it this long. env: DK_HISTORY__ARCHIVE__LEASE_SECONDS
-    sweep_after_seconds: 7200      # archive work files older than this belong to a dead archiver and are removed;
-                                   # at least 60. env: DK_HISTORY__ARCHIVE__SWEEP_AFTER_SECONDS
-  merged_retention_days: 32        # delete UI merge results older than this; 0 = never. env: DK_HISTORY__MERGED_RETENTION_DAYS
+                                   # env: DK_RECORDER__ARCHIVE__CRON
+    lease: 1m                      # lease of an archive slot, 40s to 24h, whole seconds; refreshed while the pass runs,
+                                   # taken over when nobody refreshed it this long. env: DK_RECORDER__ARCHIVE__LEASE
+    sweep_after: 2h                # archive work files older than this belong to a dead archiver and are removed;
+                                   # at least 60s, whole seconds. env: DK_RECORDER__ARCHIVE__SWEEP_AFTER
+
+  # --- The events table; used only with provider postgres (see recorder-postgres.md) ---
+  postgres:
+    connection: main               # name under connections.postgres. env: DK_RECORDER__POSTGRES__CONNECTION
+    table_prefix: ''               # '' -> <schema>.recorder_events; 'heavy' -> <schema>.heavy_recorder_events;
+                                   # [a-z][a-z0-9_]{0,23}. env: DK_RECORDER__POSTGRES__TABLE_PREFIX
+    initial_retention: 24h         # 1h to 168h, whole hours; written into the table comment when this worker creates the table.
+                                   # env: DK_RECORDER__POSTGRES__INITIAL_RETENTION
+    store_completed_output: false  # send stdout and stderr to Postgres. env: DK_RECORDER__POSTGRES__STORE_COMPLETED_OUTPUT
+    max_output: 64KiB              # longest stdout or stderr value in the table; 0 = no limit. env: DK_RECORDER__POSTGRES__MAX_OUTPUT
+    max_size: 0                    # largest total size of the table; 0 = no limit. env: DK_RECORDER__POSTGRES__MAX_SIZE
+    batch_rows: 5000               # most rows in one COPY, 100-50000. env: DK_RECORDER__POSTGRES__BATCH_ROWS
+    max_queue: 128MiB              # most text waiting for Postgres, 16MiB to 1GiB. env: DK_RECORDER__POSTGRES__MAX_QUEUE
+    resilience: {}                 # the shared resilience block: timeout, max_retries, backoff, max_backoff,
+                                   # breaker_failures, breaker_cooldown. env: DK_RECORDER__POSTGRES__RESILIENCE__<KEY>
+
+  # --- The history search of the Trace page (trace?history=1) ---
+  search:
+    max_files: 256                 # most sealed files one search opens; used only with provider sqlite.
+                                   # env: DK_RECORDER__SEARCH__MAX_FILES
+    timeout: 10s                   # time limit for one search; with postgres also the server statement limit (at most 1h).
+                                   # env: DK_RECORDER__SEARCH__TIMEOUT
 ```
 
 ---
@@ -658,13 +661,12 @@ periodic:
     connection: main               # entry of connections.<provider>; read by postgres, redis and consul.
                                    # env: DK_PERIODIC__ELECTION__CONNECTION
     resilience:                    # same keys and defaults as fleet.registry.resilience
-      timeout_seconds: 5.0         # env: DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT_SECONDS
-      retries: 2                   # env: DK_PERIODIC__ELECTION__RESILIENCE__RETRIES
-      backoff_seconds: 0.2         # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_SECONDS
-      backoff_max_seconds: 5.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF_MAX_SECONDS
-      breaker:
-        failure_threshold: 5       # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
-        cooldown_seconds: 30.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
+      timeout: 5s                  # env: DK_PERIODIC__ELECTION__RESILIENCE__TIMEOUT
+      max_retries: 2               # env: DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES
+      backoff: 200ms               # env: DK_PERIODIC__ELECTION__RESILIENCE__BACKOFF
+      max_backoff: 5s              # env: DK_PERIODIC__ELECTION__RESILIENCE__MAX_BACKOFF
+      breaker_failures: 5          # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_FAILURES
+      breaker_cooldown: 30s        # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER_COOLDOWN
 ```
 
 ---
@@ -675,7 +677,7 @@ periodic:
 
 How workers find each other and exchange cache rows. Peers pull `cluster`/`global` cache rows over HTTP from the URL on each registry card. The pipeline itself does not depend on it.
 
-**Resilience block.** `fleet.registry.resilience` and `periodic.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff_seconds` up to `backoff_max_seconds`), and a circuit breaker that skips the provider after `failure_threshold` failed operations in a row and lets one probe through after `cooldown_seconds`. The semantics are on [Fleet registry](fleet.md#resilience).
+**Resilience block.** `fleet.registry.resilience` and `periodic.election.resilience` take the same keys: a time limit per attempt, retries with doubling waits (`backoff` up to `max_backoff`), and a circuit breaker that skips the provider after `breaker_failures` failed operations in a row and lets one probe through after `breaker_cooldown`. The semantics are on [Fleet registry](fleet.md#resilience).
 
 ```yaml
 fleet:
@@ -694,17 +696,15 @@ fleet:
                                    # env: DK_FLEET__REGISTRY__OFFLINE_AFTER_SECONDS
     prune_after_seconds: 86400     # delete cards older than this; must be >= offline_after_seconds. Not used by consul.
                                    # env: DK_FLEET__REGISTRY__PRUNE_AFTER_SECONDS
-    resilience:                    # see "Resilience block" below; replaces the key timeout_seconds
-      timeout_seconds: 5.0         # time limit for one attempt. env: DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS
-      retries: 2                   # extra attempts after a transient error. env: DK_FLEET__REGISTRY__RESILIENCE__RETRIES
-      backoff_seconds: 0.2         # wait before the first retry, doubling. env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_SECONDS
-      backoff_max_seconds: 5.0     # longest wait between attempts; >= backoff_seconds.
-                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF_MAX_SECONDS
-      breaker:
-        failure_threshold: 5       # failed operations in a row that open the breaker.
-                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__FAILURE_THRESHOLD
-        cooldown_seconds: 30.0     # open time before one probe operation.
-                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__COOLDOWN_SECONDS
+    resilience:                    # see "Resilience block" below
+      timeout: 5s                  # time limit for one attempt. env: DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT
+      max_retries: 2               # extra attempts after a transient error. env: DK_FLEET__REGISTRY__RESILIENCE__MAX_RETRIES
+      backoff: 200ms               # wait before the first retry, doubling. env: DK_FLEET__REGISTRY__RESILIENCE__BACKOFF
+      max_backoff: 5s              # longest wait between attempts; >= backoff. env: DK_FLEET__REGISTRY__RESILIENCE__MAX_BACKOFF
+      breaker_failures: 5          # failed operations in a row that open the breaker.
+                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER_FAILURES
+      breaker_cooldown: 30s        # open time before one probe operation.
+                                   # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER_COOLDOWN
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS
@@ -809,7 +809,7 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 | Map key (sink instance) | `sinks.postgres.main-db.pool_max` → `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` |
 | Map key (connection) | `connections.kafka.main.brokers` → `DK_CONNECTIONS__KAFKA__MAIN__BROKERS` |
 | List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |
-| List value | `ui.expose_env_vars` → `DK_UI__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
+| List value | `recorder.capture.env_vars` → `DK_RECORDER__CAPTURE__ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
 | Dict value | `executor.env` → `DK_EXECUTOR__ENV='{"FOO":"bar"}'` (JSON) |
 
 Special cases:

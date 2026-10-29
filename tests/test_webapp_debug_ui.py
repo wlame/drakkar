@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, WebAppConfig, WebClientConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections, make_ui_config
@@ -266,8 +266,13 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
 
 async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
     """The /api/recent-tasks payload exposes origin/client_name/request_id."""
-    cfg = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60)
-    rec = EventRecorder(cfg, worker_name='wlame-worker', persistence='sqlite', storage_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080)
+    rec = EventRecorder(
+        RecorderConfig(flush_interval='60s'),
+        worker_name='wlame-worker',
+        persistence='sqlite',
+        storage_dir=str(tmp_path),
+    )
     await rec.start()
     try:
         now = time.time()
@@ -329,8 +334,13 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
 
 async def test_events_filter_by_origin(tmp_path):
     """``origin=kafka|http`` splits Kafka-origin tasks from webapp requests."""
-    cfg = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60)
-    rec = EventRecorder(cfg, worker_name='wlame-worker', persistence='sqlite', storage_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080)
+    rec = EventRecorder(
+        RecorderConfig(flush_interval='60s'),
+        worker_name='wlame-worker',
+        persistence='sqlite',
+        storage_dir=str(tmp_path),
+    )
     await rec.start()
     try:
         now = time.time()

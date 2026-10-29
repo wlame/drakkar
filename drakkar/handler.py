@@ -276,7 +276,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # no-op stub lives on the class so ``self.annotate(...)`` is callable in
     # unit tests and before startup finishes, and the framework replaces it
     # per-instance with a real ``Annotator`` when the recorder is running and
-    # ``ui.recorder.annotations_enabled`` is set. Private because users call
+    # ``recorder.annotations.enabled`` is set. Private because users call
     # the method, never the object.
     _annotator: AnnotatorLike
 

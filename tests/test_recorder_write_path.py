@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -20,7 +21,7 @@ from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.memstore import EVICT_MIN_INTERVAL_SECONDS, MemoryCoverage, PrefixDeletion
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 WORKER = 'w-1'
 SQLITE_BUSY = 5
@@ -41,11 +42,10 @@ def unique_db_paths(monkeypatch):
     )
 
 
-def _recorder(persistence: str, *, storage_dir: str = '', **ui) -> EventRecorder:
-    settings = {'enabled': True, 'store_output': False, 'flush_interval_seconds': 60}
-    settings.update(ui)
+def _recorder(persistence: str, *, storage_dir: str = '', **recorder) -> EventRecorder:
+    settings = {'flush_interval': '60s', 'capture': {'output': False}, **recorder}
     return EventRecorder(
-        make_ui_config(**settings),
+        RecorderConfig(**settings),
         worker_name=WORKER,
         cluster_name='c',
         persistence=persistence,
@@ -239,7 +239,7 @@ async def test_requeued_pair_keeps_its_id(sqlite_recorder, monkeypatch):
 
 
 async def test_hanging_file_stage_does_not_stop_the_memory_stage(tmp_path, unique_db_paths, monkeypatch):
-    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval_seconds=1, max_buffer=1000)
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval='1s', max_buffer_rows=1000)
     await rec.start()
     gate = asyncio.Event()
     try:
@@ -323,7 +323,7 @@ async def test_lock_order_memory_lock_never_inside_flush_lock(sqlite_recorder, m
 
 
 async def test_file_queue_overflow_counts_dropped_events(tmp_path, unique_db_paths):
-    rec = _recorder('sqlite', storage_dir=str(tmp_path), max_buffer=1000)
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), max_buffer_rows=1000)
     await rec.start()
     try:
         before = recorder_dropped_events._value.get()
@@ -647,7 +647,7 @@ async def test_repeated_rollback_failures_log_once_per_minute_with_the_suppresse
 
 
 async def test_stage_m_chunk_cancelled_by_stop_with_none_is_written_by_the_final_stage(monkeypatch):
-    rec = _recorder('none', flush_interval_seconds=1, max_buffer=1000)
+    rec = _recorder('none', flush_interval='1s', max_buffer_rows=1000)
     await rec.start()
     gate = asyncio.Event()
     waiting = _block_writes(monkeypatch, rec.memory_store.writer, gate)
@@ -672,7 +672,7 @@ async def test_stage_m_chunk_cancelled_by_stop_with_none_is_written_by_the_final
 async def test_stage_m_chunk_cancelled_by_stop_with_sqlite_goes_to_the_file_and_moves_the_floor(
     tmp_path, unique_db_paths, monkeypatch
 ):
-    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval_seconds=1, max_buffer=1000)
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval='1s', max_buffer_rows=1000)
     await rec.start()
     path = rec.db_path
     gate = asyncio.Event()

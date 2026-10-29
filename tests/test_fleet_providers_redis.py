@@ -25,7 +25,7 @@ from structlog.testing import capture_logs
 
 from drakkar.config.connections import ConnectionsConfig, RedisConnectionConfig
 from drakkar.config.fleet import FleetRegistryConfig
-from drakkar.config.resilience import BreakerConfig, ResilienceConfig
+from drakkar.config.resilience import ResilienceConfig
 from drakkar.fleet.card import WorkerIdentity, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -566,9 +566,7 @@ async def test_a_hung_call_ends_at_its_limit(clock, server):
 async def test_a_dead_server_opens_the_breaker_and_a_live_one_closes_it(clock, server):
     now = [100.0]
     recorder = RecordingClient(fake_client(server))
-    resilience = ResilienceConfig(
-        timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=2, cooldown_seconds=0.0)
-    )
+    resilience = ResilienceConfig(timeout='1s', max_retries=0, breaker_failures=2, breaker_cooldown=0)
     service = FleetRegistry(
         _provider(server, client=recorder),
         provider_name='redis',

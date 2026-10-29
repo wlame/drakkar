@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig, PostgresConnectionConfig, ResilienceConfig
+from drakkar.config import DrakkarConfig, PostgresConnectionConfig, RecorderConfig, ResilienceConfig
 from drakkar.providers.postgres import RECORDER_STATEMENT_TEMPLATES, render_recorder
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
@@ -61,7 +61,7 @@ def _settings(*, table_prefix: str = '') -> RecorderPostgresSettings:
         connection=PostgresConnectionConfig(dsn=DSN),
         table_prefix=table_prefix,
         retention_hours=6,
-        store_output=False,
+        store_completed_output=False,
         batch_rows=100,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -187,7 +187,7 @@ async def test_trace_history_postgres_sends_the_cluster_with_nul_replaced_as_the
     )
 
     (fetch,) = [call for call in fake.calls if call[0] == 'fetch']
-    stored = build_record(_event_row(), cluster=cluster, worker=WORKER, instance='i', store_output=False)[0]
+    stored = build_record(_event_row(), cluster=cluster, worker=WORKER, instance='i', store_completed_output=False)[0]
     assert fetch[2][0] == stored == 'fast\ufffdcluster'
 
 
@@ -387,7 +387,7 @@ def _drakkar_app() -> MagicMock:
 
 def _client(rec: EventRecorder, clock: FakeClock | None = None) -> AsyncClient:
     """A client of the debug routes alone, with the rate limit of the failure line on ``clock``."""
-    deps = UIDeps(rec.config, rec, _drakkar_app())
+    deps = UIDeps(make_ui_config(), rec, _drakkar_app())
     if clock is not None:
         deps.postgres_read_log = RateLimitedLog(clock)
     app = FastAPI()
@@ -405,10 +405,8 @@ async def started(tmp_path):
         storage.mkdir(exist_ok=True)
         shared = tmp_path / 'shared'
         shared.mkdir(exist_ok=True)
-        config = make_ui_config(enabled=True, flush_interval_seconds=60, trace={'history_max_seconds': max_seconds})
-        config.release.enabled = False
         rec = EventRecorder(
-            config,
+            RecorderConfig(flush_interval='60s', search={'timeout': f'{max_seconds}s'}),
             worker_name=WORKER,
             cluster_name=CLUSTER,
             persistence=persistence,
@@ -582,9 +580,8 @@ async def test_trace_history_postgres_error_text_has_no_dsn(started, history_fak
     assert resp.json() == FAILED_BODY
 
 
-@pytest.mark.parametrize('persistence', ['sqlite', 'none'])
-async def test_trace_history_sqlite_and_none_still_read_sealed_files(started, monkeypatch, persistence):
-    rec = await started(persistence)
+async def test_trace_history_sqlite_reads_sealed_files(started, monkeypatch):
+    rec = await started('sqlite')
     searched: list[tuple] = []
 
     def sealed_files(folder, partition, offset, *, max_files, max_seconds):

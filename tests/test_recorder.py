@@ -20,7 +20,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from drakkar.config import UIConfig
+from drakkar.config import RecorderConfig
 from drakkar.metrics import recorder_dropped_events
 from drakkar.models import (
     ExecutorError,
@@ -44,7 +44,7 @@ from drakkar.recorder.helpers import open_connection, open_reader
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.recorder.writer import _byte_len, _capped_stdin
 from drakkar.recorder.writer import logger as writer_logger
-from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, kafka_connections, make_ui_config, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, kafka_connections, wait_for
 
 
 class _RecData(BaseModel):
@@ -77,14 +77,9 @@ def unique_db_paths(monkeypatch):
     )
 
 
-def make_debug_config(tmp_path, **overrides) -> UIConfig:
-    defaults = {
-        'enabled': True,
-        'store_output': False,
-        'flush_interval_seconds': 60,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
+def make_debug_config(tmp_path, **overrides) -> RecorderConfig:
+    capture = {'output': False, **overrides.pop('capture', {})}
+    return RecorderConfig(**{'flush_interval': '60s', 'capture': capture, **overrides})
 
 
 def make_msg(partition=0, offset=0) -> SourceMessage:
@@ -413,7 +408,7 @@ def test_line_count_counts_trailing_unterminated_line(text, expected):
 
 
 async def test_record_task_completed_with_output(tmp_path):
-    config = make_debug_config(tmp_path, store_output=True)
+    config = make_debug_config(tmp_path, capture={'output': True})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -454,7 +449,7 @@ async def test_record_task_started_omits_stdin_by_default(recorder):
 
 
 async def test_record_task_started_stores_capped_stdin_when_enabled(tmp_path):
-    config = make_debug_config(tmp_path, store_stdin=True, stdin_max_bytes=10)
+    config = make_debug_config(tmp_path, capture={'stdin': True, 'max_stdin': '10B'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     try:
@@ -471,7 +466,7 @@ async def test_record_task_started_stores_capped_stdin_when_enabled(tmp_path):
 
 
 async def test_record_task_failed_always_stores_stdin(recorder):
-    # store_stdin is OFF in the fixture config — failures capture it anyway.
+    # capture.stdin is OFF in the fixture config — failures capture it anyway.
     task = make_task()
     task.stdin = 'payload line\n'
     error = ExecutorError(task=task, exit_code=1, stderr='bad input')
@@ -853,7 +848,7 @@ async def test_get_stats_empty_db(recorder):
 
 
 async def test_get_events_no_db():
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     events = await rec.get_events()
     assert events == []
@@ -866,7 +861,7 @@ async def test_record_memory_only_keeps_events_in_the_memory_store():
     """Persistence ``none`` still buffers: the memory loop drains the intake
     into the memory store, so no event counts as a drop.
     """
-    config = make_ui_config(enabled=True, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s')
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     await rec.start()
     before = recorder_dropped_events._value.get()
@@ -887,7 +882,7 @@ async def test_record_memory_only_keeps_events_in_the_memory_store():
 
 async def test_record_memory_only_still_fans_out_to_websockets():
     """The WS fan-out runs in memory-only mode as it does with a file."""
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     sub = rec.subscribe()
 
@@ -897,11 +892,11 @@ async def test_record_memory_only_still_fans_out_to_websockets():
     assert len(rec._intake) == 1
 
 
-async def test_record_store_events_off_does_not_buffer(tmp_path):
-    """Same rule with a real ``storage_dir``: ``store_events: false`` skips the
+async def test_record_capture_events_off_does_not_buffer(tmp_path):
+    """Same rule with a real ``storage_dir``: ``capture.events: false`` skips the
     flush-loop creation, so the deque would fill and never drain.
     """
-    config = make_debug_config(tmp_path, store_events=False)
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     before = recorder_dropped_events._value.get()
@@ -1508,8 +1503,10 @@ async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path,
 
 
 async def test_task_started_includes_pool_stats(tmp_path):
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t1')
@@ -1724,7 +1721,7 @@ async def test_ws_event_omits_captured_output(tmp_path):
     The live views show ``stdout_size``, not the text. Broadcasting the text
     would cost ``len(output) x connected clients`` for data nothing renders.
     """
-    config = make_debug_config(tmp_path, store_output=True)
+    config = make_debug_config(tmp_path, capture={'output': True})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2057,8 +2054,8 @@ async def test_schema_all_tables_created_by_default(tmp_path):
 
 
 async def test_schema_events_only(tmp_path):
-    """store_config=False, store_state=False → only events table."""
-    config = make_debug_config(tmp_path, store_config=False, store_state=False)
+    """capture.config=False, state_snapshots=False → only events table."""
+    config = make_debug_config(tmp_path, capture={'config': False}, sqlite={'state_snapshots': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2069,8 +2066,8 @@ async def test_schema_events_only(tmp_path):
 
 
 async def test_schema_config_only(tmp_path):
-    """store_events=False, store_state=False → only worker_config table."""
-    config = make_debug_config(tmp_path, store_events=False, store_state=False)
+    """capture.events=False, state_snapshots=False → only worker_config table."""
+    config = make_debug_config(tmp_path, capture={'events': False}, sqlite={'state_snapshots': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2081,8 +2078,8 @@ async def test_schema_config_only(tmp_path):
 
 
 async def test_schema_state_only(tmp_path):
-    """store_events=False, store_config=False → only worker_state table."""
-    config = make_debug_config(tmp_path, store_events=False, store_config=False)
+    """capture.events=False, capture.config=False → only worker_state table."""
+    config = make_debug_config(tmp_path, capture={'events': False, 'config': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2094,7 +2091,7 @@ async def test_schema_state_only(tmp_path):
 
 async def test_schema_none_creates_db_but_no_tables(tmp_path):
     """All store flags False → DB file exists but has no application tables."""
-    config = make_debug_config(tmp_path, store_events=False, store_config=False, store_state=False)
+    config = make_debug_config(tmp_path, capture={'events': False, 'config': False}, sqlite={'state_snapshots': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2163,8 +2160,14 @@ async def test_write_config_populates_single_row(tmp_path):
 
 
 async def test_write_config_stores_debug_url(tmp_path):
-    config = make_debug_config(tmp_path, public_url='http://localhost:8081/')
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config,
+        worker_name=WORKER_NAME,
+        persistence='sqlite',
+        storage_dir=str(tmp_path),
+        api_public_url='http://localhost:8081/',
+    )
     await rec.start()
 
     await rec.write_config(_make_drakkar_config())
@@ -2220,7 +2223,7 @@ async def test_write_config_cluster_name_null_when_empty(tmp_path):
 
 async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv('MY_VAR', 'hello')
-    config = make_debug_config(tmp_path, expose_env_vars=['MY_VAR', 'MISSING_VAR'])
+    config = make_debug_config(tmp_path, capture={'env_vars': ['MY_VAR', 'MISSING_VAR']})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2311,7 +2314,7 @@ async def test_write_config_redacts_sasl_kafka_brokers(tmp_path):
 
 async def test_write_config_redacts_secret_named_env_vars(tmp_path, monkeypatch):
     """Even when the operator explicitly adds a secret-named env var to
-    expose_env_vars, the VALUE must be redacted before it hits disk.
+    capture.env_vars, the VALUE must be redacted before it hits disk.
     """
     monkeypatch.setenv('DB_PASSWORD', 'supersecret')
     monkeypatch.setenv('GITHUB_TOKEN', 'ghp_abc123')
@@ -2321,7 +2324,7 @@ async def test_write_config_redacts_secret_named_env_vars(tmp_path, monkeypatch)
 
     config = make_debug_config(
         tmp_path,
-        expose_env_vars=['DB_PASSWORD', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'MY_API_KEY', 'SERVICE_NAME'],
+        capture={'env_vars': ['DB_PASSWORD', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'MY_API_KEY', 'SERVICE_NAME']},
     )
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
@@ -2348,7 +2351,7 @@ async def test_write_config_redacts_url_credentials_in_env_values(tmp_path, monk
     monkeypatch.setenv('UPSTREAM_URL', 'https://alice:pw@api.example.com/endpoint')
     monkeypatch.setenv('CACHE_URL', 'redis://:rediskey@cache:6379/0')
 
-    config = make_debug_config(tmp_path, expose_env_vars=['UPSTREAM_URL', 'CACHE_URL'])
+    config = make_debug_config(tmp_path, capture={'env_vars': ['UPSTREAM_URL', 'CACHE_URL']})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2384,8 +2387,8 @@ async def test_write_config_idempotent(tmp_path):
     await rec.stop()
 
 
-async def test_write_config_skipped_when_store_config_false(tmp_path):
-    config = make_debug_config(tmp_path, store_config=False)
+async def test_write_config_skipped_when_capture_config_off(tmp_path):
+    config = make_debug_config(tmp_path, capture={'config': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2512,8 +2515,8 @@ async def test_sync_state_accumulates_rows(tmp_path):
     await rec.stop()
 
 
-async def test_sync_state_skipped_when_store_state_false(tmp_path):
-    config = make_debug_config(tmp_path, store_state=False)
+async def test_sync_state_skipped_when_state_snapshots_off(tmp_path):
+    config = make_debug_config(tmp_path, sqlite={'state_snapshots': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     rec.set_state_provider(lambda: {'uptime_seconds': 1.0})
@@ -2541,7 +2544,7 @@ async def test_sync_state_without_provider(tmp_path):
 # --- In-memory counters ---
 
 
-async def test_counters_increment_with_store_events_true(tmp_path):
+async def test_counters_increment_with_capture_events_on(tmp_path):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
@@ -2563,9 +2566,9 @@ async def test_counters_increment_with_store_events_true(tmp_path):
     await rec.stop()
 
 
-async def test_counters_increment_with_store_events_false(tmp_path):
-    """Counters track regardless of store_events flag."""
-    config = make_debug_config(tmp_path, store_events=False)
+async def test_counters_increment_with_capture_events_off(tmp_path):
+    """Counters track regardless of capture.events."""
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2596,12 +2599,12 @@ async def test_counters_survive_flush(tmp_path):
     await rec.stop()
 
 
-# --- store_events=False behavior ---
+# --- capture.events=False behavior ---
 
 
-async def test_store_events_false_queries_return_empty(tmp_path):
-    """All query methods return empty when store_events is disabled."""
-    config = make_debug_config(tmp_path, store_events=False)
+async def test_capture_events_off_queries_return_empty(tmp_path):
+    """All query methods return empty when capture.events is off."""
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2612,13 +2615,13 @@ async def test_store_events_false_queries_return_empty(tmp_path):
     assert await rec.get_trace(partition=0, msg_offset=0) == []
     assert await rec.get_partition_summary() == []
     stats = await rec.get_stats()
-    assert stats['consumed'] == 1  # in-memory counters work regardless of store_events
+    assert stats['consumed'] == 1  # in-memory counters work regardless of capture.events
     assert stats['total_events'] == 1
     await rec.stop()
 
 
-async def test_store_events_false_no_events_table(tmp_path):
-    config = make_debug_config(tmp_path, store_events=False)
+async def test_capture_events_off_no_events_table(tmp_path):
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2626,13 +2629,13 @@ async def test_store_events_false_no_events_table(tmp_path):
     await rec.stop()
 
 
-async def test_store_events_false_flush_is_a_noop(tmp_path):
-    """With ``store_events`` off nothing is buffered in the first place, so
+async def test_capture_events_off_flush_is_a_noop(tmp_path):
+    """With ``capture.events`` off nothing is buffered in the first place, so
     a flush has nothing to drain. Replaces an earlier test that asserted the
     buffer filled and was cleared on flush — that pinned the leak in
     ``_record``, and no flush loop is even created in this mode.
     """
-    config = make_debug_config(tmp_path, store_events=False)
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     try:
@@ -2646,9 +2649,9 @@ async def test_store_events_false_flush_is_a_noop(tmp_path):
         await rec.stop()
 
 
-async def test_store_events_false_ws_broadcast_still_works(tmp_path):
+async def test_capture_events_off_ws_broadcast_still_works(tmp_path):
     """Events are broadcast to WS subscribers even without persistence."""
-    config = make_debug_config(tmp_path, store_events=False)
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2662,9 +2665,9 @@ async def test_store_events_false_ws_broadcast_still_works(tmp_path):
     await rec.stop()
 
 
-async def test_store_events_false_no_write_loops(tmp_path):
-    """Neither the memory loop nor the file loop starts when store_events=False."""
-    config = make_debug_config(tmp_path, store_events=False)
+async def test_capture_events_off_no_write_loops(tmp_path):
+    """Neither the memory loop nor the file loop starts when capture.events=False."""
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2730,13 +2733,8 @@ async def test_rotation_state_sync_uses_new_db(tmp_path, unique_db_paths):
 
 
 async def test_rotation_respects_granular_flags(tmp_path, unique_db_paths):
-    """Rotation with store_events=False still creates config/state tables."""
-    config = make_debug_config(
-        tmp_path,
-        store_events=False,
-        store_config=True,
-        store_state=True,
-    )
+    """Rotation with capture.events=False still creates config/state tables."""
+    config = make_debug_config(tmp_path, capture={'events': False, 'config': True}, sqlite={'state_snapshots': True})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -2894,8 +2892,10 @@ async def test_ws_threshold_skips_fast_task(tmp_path):
     ws_min_duration_ms defers task_started; if the task completes before
     the threshold fires, neither start nor completion reaches WS.
     """
-    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -2910,8 +2910,10 @@ async def test_ws_threshold_skips_fast_task(tmp_path):
 
 async def test_ws_threshold_broadcasts_slow_task(tmp_path):
     """Slow task — deferred start fires, then completion is broadcast too."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=10
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -2936,8 +2938,10 @@ async def test_ws_threshold_broadcasts_slow_task(tmp_path):
 
 async def test_ws_deferred_start_not_sent_immediately(tmp_path):
     """With ws_min_duration_ms>0, task_started is NOT sent to WS immediately."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -2955,8 +2959,10 @@ async def test_ws_deferred_start_not_sent_immediately(tmp_path):
 
 async def test_ws_zero_threshold_sends_start_immediately(tmp_path):
     """With ws_min_duration_ms=0, task_started goes to WS immediately."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -2972,8 +2978,10 @@ async def test_ws_zero_threshold_sends_start_immediately(tmp_path):
 
 async def test_ws_deferred_fast_fail_sends_both_events(tmp_path):
     """Failed tasks always go to WS — even fast ones. Deferred start is flushed first."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -2999,8 +3007,10 @@ async def test_ws_deferred_fast_fail_sends_both_events(tmp_path):
 
 async def test_ws_deferred_cleanup_on_stop(tmp_path):
     """Deferred WS timers are cancelled on recorder stop."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=5000)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=5000
+    )
     await rec.start()
 
     task = make_task('t-pending')
@@ -3020,8 +3030,10 @@ async def test_deferred_starts_share_one_sweep_timer(tmp_path):
     ``call_later`` callbacks on the main loop and cancel most of them, and
     CPython leaves cancelled TimerHandles in the heap until they dominate it.
     """
-    config = make_debug_config(tmp_path, ws_min_duration_ms=5000)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=5000
+    )
     await rec.start()
 
     for i in range(200):
@@ -3040,8 +3052,10 @@ async def test_deferred_starts_share_one_sweep_timer(tmp_path):
 
 async def test_deferred_sweep_broadcasts_expired_starts(tmp_path):
     """A task still running past the threshold gets its start event sent."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=10
+    )
     await rec.start()
     sub = rec.subscribe()
 
@@ -3060,8 +3074,10 @@ async def test_deferred_sweep_broadcasts_expired_starts(tmp_path):
 
 async def test_deferred_sweep_rearms_only_while_entries_remain(tmp_path):
     """An idle recorder holds no timer at all."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=10
+    )
     await rec.start()
 
     rec.record_task_started(make_task('t-1'), partition=0)
@@ -3074,8 +3090,10 @@ async def test_deferred_sweep_rearms_only_while_entries_remain(tmp_path):
 
 async def test_labels_stored_in_task_started_event(tmp_path):
     """Task labels are JSON-encoded in the task_started event buffer entry."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-labeled')
@@ -3093,8 +3111,10 @@ async def test_labels_stored_in_task_started_event(tmp_path):
 
 async def test_labels_stored_in_task_completed_event(tmp_path):
     """Task labels propagate from task through to completed event."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-labeled')
@@ -3109,8 +3129,10 @@ async def test_labels_stored_in_task_completed_event(tmp_path):
 
 async def test_labels_broadcast_via_ws(tmp_path):
     """Labels appear in WebSocket events for live UI consumption."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     q = rec.subscribe()
@@ -3126,8 +3148,10 @@ async def test_labels_broadcast_via_ws(tmp_path):
 
 async def test_labels_none_when_empty(tmp_path):
     """Empty labels dict produces None in the event (no DB bloat)."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-no-labels')
@@ -3140,8 +3164,10 @@ async def test_labels_none_when_empty(tmp_path):
 
 async def test_labels_stored_in_task_failed_event(tmp_path):
     """Task labels propagate to failed events (always sent to WS)."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     task = make_task('t-fail-labeled')
@@ -3164,8 +3190,10 @@ async def test_labels_stored_in_task_failed_event(tmp_path):
 
 async def test_labels_persisted_to_db(tmp_path):
     """Labels are written to the SQLite labels column and queryable."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-db-labels')
@@ -3183,8 +3211,10 @@ async def test_labels_persisted_to_db(tmp_path):
 
 async def test_trace_by_label_finds_matching_tasks(tmp_path):
     """trace_by_label returns all events for tasks with a matching label."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     # task with labels
@@ -3219,8 +3249,10 @@ async def test_trace_by_label_finds_matching_tasks(tmp_path):
 
 async def test_trace_by_label_returns_empty_for_no_match(tmp_path):
     """trace_by_label returns empty list when no tasks match."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-x')
@@ -3235,8 +3267,10 @@ async def test_trace_by_label_returns_empty_for_no_match(tmp_path):
 
 async def test_trace_by_label_returns_empty_for_unknown_key(tmp_path):
     """trace_by_label returns empty list for a label key that doesn't exist."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-y')
@@ -3250,8 +3284,8 @@ async def test_trace_by_label_returns_empty_for_unknown_key(tmp_path):
 
 
 async def test_event_threshold_zero_saves_all(tmp_path):
-    """event_min_duration_ms=0 (default) saves all tasks to buffer."""
-    config = make_debug_config(tmp_path, event_min_duration_ms=0)
+    """min_event_duration=0ms (default) saves all tasks to buffer."""
+    config = make_debug_config(tmp_path, capture={'min_event_duration': 0})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3263,8 +3297,8 @@ async def test_event_threshold_zero_saves_all(tmp_path):
 
 
 async def test_event_threshold_skips_fast_task(tmp_path):
-    """event_min_duration_ms=500 skips fast tasks from buffer."""
-    config = make_debug_config(tmp_path, event_min_duration_ms=500)
+    """min_event_duration=500ms skips fast tasks from buffer."""
+    config = make_debug_config(tmp_path, capture={'min_event_duration': '500ms'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3275,8 +3309,8 @@ async def test_event_threshold_skips_fast_task(tmp_path):
 
 
 async def test_event_threshold_saves_slow_task(tmp_path):
-    """event_min_duration_ms=500 saves slow tasks to buffer."""
-    config = make_debug_config(tmp_path, event_min_duration_ms=500)
+    """min_event_duration=500ms saves slow tasks to buffer."""
+    config = make_debug_config(tmp_path, capture={'min_event_duration': '500ms'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3288,7 +3322,7 @@ async def test_event_threshold_saves_slow_task(tmp_path):
 
 async def test_output_threshold_excludes_args_for_fast_task(tmp_path):
     """Fast task entry does not include args."""
-    config = make_debug_config(tmp_path, output_min_duration_ms=500)
+    config = make_debug_config(tmp_path, capture={'min_output_duration': '500ms'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3301,7 +3335,7 @@ async def test_output_threshold_excludes_args_for_fast_task(tmp_path):
 
 async def test_output_threshold_includes_args_for_slow_task(tmp_path):
     """Slow task entry includes args."""
-    config = make_debug_config(tmp_path, output_min_duration_ms=500)
+    config = make_debug_config(tmp_path, capture={'min_output_duration': '500ms'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3313,8 +3347,8 @@ async def test_output_threshold_includes_args_for_slow_task(tmp_path):
 
 
 async def test_output_threshold_excludes_stdout_stderr_for_fast_task(tmp_path):
-    """Fast task with store_output=True still excludes stdout/stderr."""
-    config = make_debug_config(tmp_path, store_output=True, output_min_duration_ms=500)
+    """Fast task with capture.output=True still excludes stdout/stderr."""
+    config = make_debug_config(tmp_path, capture={'output': True, 'min_output_duration': '500ms'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -3331,17 +3365,17 @@ async def test_output_threshold_excludes_stdout_stderr_for_fast_task(tmp_path):
     await rec.stop()
 
 
-async def test_output_threshold_store_output_false_no_stdout(tmp_path):
-    """store_output=False suppresses stdout/stderr even for slow tasks."""
-    config = make_debug_config(tmp_path, store_output=False, output_min_duration_ms=0)
+async def test_output_threshold_capture_output_off_no_stdout(tmp_path):
+    """capture.output=False suppresses stdout/stderr even for slow tasks."""
+    config = make_debug_config(tmp_path, capture={'output': False, 'min_output_duration': 0})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     rec.record_task_completed(make_slow_result(), partition=0)
 
     entry = rec._intake[0]
-    assert 'args' in entry  # output_min_duration_ms=0 so args included
-    assert 'stdout' not in entry  # store_output=False suppresses this
+    assert 'args' in entry  # min_output_duration=0ms so args included
+    assert 'stdout' not in entry  # capture.output=False suppresses this
     assert 'stderr' not in entry
     await rec.stop()
 
@@ -3350,8 +3384,10 @@ async def test_log_threshold_logs_slow_task(tmp_path):
     """Slow task triggers structlog info line."""
     from unittest.mock import patch
 
-    config = make_debug_config(tmp_path, log_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), log_min_duration_ms=500
+    )
     await rec.start()
 
     with patch.object(writer_logger, 'info') as mock_log:
@@ -3366,8 +3402,10 @@ async def test_log_threshold_skips_fast_task(tmp_path):
     """Fast task does not trigger structlog info line."""
     from unittest.mock import patch
 
-    config = make_debug_config(tmp_path, log_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), log_min_duration_ms=500
+    )
     await rec.start()
 
     with patch.object(writer_logger, 'info') as mock_log:
@@ -3381,13 +3419,10 @@ async def test_failed_with_duration_applies_thresholds(tmp_path):
     """record_task_failed with duration_seconds applies db/output thresholds
     but always sends to WS (failed tasks are never suppressed from live UI).
     """
-    config = make_debug_config(
-        tmp_path,
-        ws_min_duration_ms=500,
-        event_min_duration_ms=500,
-        output_min_duration_ms=500,
+    config = make_debug_config(tmp_path, capture={'min_event_duration': '500ms', 'min_output_duration': '500ms'})
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     task = make_task('t-fast')
@@ -3399,7 +3434,7 @@ async def test_failed_with_duration_applies_thresholds(tmp_path):
     rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
 
     # buffer has task_started (always written to DB) but not task_failed
-    # (skipped by event_min_duration_ms=500)
+    # (skipped by min_event_duration=500ms)
     assert len(rec._intake) == 1
     assert rec._intake[0]['event'] == 'task_started'
     events = []
@@ -3415,13 +3450,11 @@ async def test_failed_with_duration_applies_thresholds(tmp_path):
 async def test_failed_slow_task_recorded_with_duration(tmp_path):
     """record_task_failed with slow duration records normally."""
     config = make_debug_config(
-        tmp_path,
-        store_output=True,
-        ws_min_duration_ms=500,
-        event_min_duration_ms=500,
-        output_min_duration_ms=500,
+        tmp_path, capture={'output': True, 'min_event_duration': '500ms', 'min_output_duration': '500ms'}
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     task = make_task('t-slow')
@@ -3443,13 +3476,11 @@ async def test_failed_slow_task_recorded_with_duration(tmp_path):
 async def test_failed_without_duration_records_everything(tmp_path):
     """record_task_failed without duration records all data (safe default)."""
     config = make_debug_config(
-        tmp_path,
-        store_output=True,
-        ws_min_duration_ms=500,
-        event_min_duration_ms=500,
-        output_min_duration_ms=500,
+        tmp_path, capture={'output': True, 'min_event_duration': '500ms', 'min_output_duration': '500ms'}
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
+    )
     await rec.start()
 
     task = make_task('t-nodur')
@@ -3472,10 +3503,7 @@ async def test_failed_without_duration_records_everything(tmp_path):
 async def test_failed_output_threshold_excludes_args_stderr(tmp_path):
     """record_task_failed with fast duration excludes args and stderr."""
     config = make_debug_config(
-        tmp_path,
-        store_output=True,
-        event_min_duration_ms=0,
-        output_min_duration_ms=500,
+        tmp_path, capture={'output': True, 'min_event_duration': 0, 'min_output_duration': '500ms'}
     )
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
@@ -3496,8 +3524,10 @@ async def test_log_threshold_failed_slow_task(tmp_path):
     """Slow failed task triggers structlog info line."""
     from unittest.mock import patch
 
-    config = make_debug_config(tmp_path, log_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), log_min_duration_ms=500
+    )
     await rec.start()
 
     task = make_task('t-slow')
@@ -3515,8 +3545,10 @@ async def test_log_threshold_failed_fast_task_no_log(tmp_path):
     """Fast failed task does not trigger structlog info line."""
     from unittest.mock import patch
 
-    config = make_debug_config(tmp_path, log_min_duration_ms=500)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), log_min_duration_ms=500
+    )
     await rec.start()
 
     task = make_task('t-fast')
@@ -3531,12 +3563,10 @@ async def test_log_threshold_failed_fast_task_no_log(tmp_path):
 
 async def test_counters_always_increment_regardless_of_thresholds(tmp_path):
     """Counters increment even when events are filtered by thresholds."""
-    config = make_debug_config(
-        tmp_path,
-        event_min_duration_ms=500,
-        ws_min_duration_ms=500,
+    config = make_debug_config(tmp_path, capture={'min_event_duration': '500ms'})
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=500
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     rec.record_task_completed(make_fast_result('t1'), partition=0)
@@ -3547,20 +3577,22 @@ async def test_counters_always_increment_regardless_of_thresholds(tmp_path):
 
     assert rec.counters['completed'] == 2
     assert rec.counters['failed'] == 1
-    # buffer should be empty (fast tasks, event_min_duration_ms=500)
+    # buffer should be empty (fast tasks, min_event_duration=500ms)
     assert len(rec._intake) == 0
     await rec.stop()
 
 
 async def test_threshold_boundary_exact_match(tmp_path):
     """Task with duration exactly at threshold is included."""
-    config = make_debug_config(
-        tmp_path,
+    config = make_debug_config(tmp_path, capture={'min_output_duration': '500ms'})
+    rec = EventRecorder(
+        config,
+        worker_name=WORKER_NAME,
+        persistence='sqlite',
+        storage_dir=str(tmp_path),
         ws_min_duration_ms=500,
-        output_min_duration_ms=500,
         log_min_duration_ms=500,
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     task = make_task('t-boundary')
@@ -3583,15 +3615,15 @@ async def test_threshold_boundary_exact_match(tmp_path):
 
 async def test_threshold_zero_means_include_all(tmp_path):
     """All thresholds set to 0 means everything is recorded."""
-    config = make_debug_config(
-        tmp_path,
-        store_output=True,
+    config = make_debug_config(tmp_path, capture={'output': True, 'min_event_duration': 0, 'min_output_duration': 0})
+    rec = EventRecorder(
+        config,
+        worker_name=WORKER_NAME,
+        persistence='sqlite',
+        storage_dir=str(tmp_path),
         log_min_duration_ms=0,
         ws_min_duration_ms=0,
-        event_min_duration_ms=0,
-        output_min_duration_ms=0,
     )
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
     q = rec.subscribe()
@@ -3684,7 +3716,7 @@ async def test_recorder_buffer_gauge_reflects_zero_after_flush(tmp_path):
 
 
 async def test_recorder_dropped_events_increments_on_overflow(tmp_path):
-    """Appends past ``max_buffer`` increment ``recorder_dropped_events_total``.
+    """Appends past ``max_buffer_rows`` increment ``recorder_dropped_events_total``.
 
     A ``deque(maxlen=N)`` silently evicts the leftmost entry on every
     over-cap append. The recorder now detects this case **before** the
@@ -3693,7 +3725,7 @@ async def test_recorder_dropped_events_increments_on_overflow(tmp_path):
     from drakkar.metrics import recorder_dropped_events
 
     # Tiny buffer makes the overflow test cheap and deterministic.
-    config = make_debug_config(tmp_path, max_buffer=1000)  # field constraint: ge=1000
+    config = make_debug_config(tmp_path, max_buffer_rows=1000)  # field constraint: ge=1000
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     # Shrink post-construction to keep the test fast; validates the drop
     # path without pushing 1000+ events through the recorder.
@@ -3808,7 +3840,7 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
 # error``). Stage F takes a local snapshot of the batch BEFORE the file
 # write, and on ``OperationalError`` re-queues the snapshot at the FRONT
 # of the file queue so the next stage F retries the same rows. After
-# ``max_flush_retries`` consecutive failures the batch is dropped and
+# ``sqlite.max_flush_retries`` consecutive failures the batch is dropped and
 # the ``drakkar_recorder_flush_batches_dropped_total`` counter ticks.
 # Each failed attempt ticks ``drakkar_recorder_flush_retries_total``.
 #
@@ -3879,7 +3911,7 @@ async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
 
 
 async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
-    """Requeue that overflows ``max_buffer`` ticks ``recorder_requeue_overflow``.
+    """Requeue that overflows ``max_buffer_rows`` ticks ``recorder_requeue_overflow``.
 
     Scenario: an OperationalError during stage F forces a re-queue via
     ``extendleft``. If stage M filled the file queue during the stage's
@@ -3944,7 +3976,7 @@ async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
 async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path):
     """Persistent ``OperationalError`` → batch dropped after N attempts.
 
-    After ``max_flush_retries`` consecutive failures we drop the batch,
+    After ``sqlite.max_flush_retries`` consecutive failures we drop the batch,
     tick the drop counter, reset the instance counter (so fresh batches
     start from zero), and leave the buffer empty — no memory leak.
     """
@@ -3954,7 +3986,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
     )
 
     # Set an explicit small retry budget so the test runs quickly.
-    config = make_debug_config(tmp_path, max_flush_retries=3)
+    config = make_debug_config(tmp_path, sqlite={'max_flush_retries': 3})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     try:
@@ -3973,7 +4005,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         dropped_before = recorder_flush_batches_dropped._value.get()
 
         # Attempts 1..N-1: re-queue each time, counter climbs.
-        for attempt in range(1, config.recorder.max_flush_retries):
+        for attempt in range(1, config.sqlite.max_flush_retries):
             await rec.flush()
             assert rec._flush_failures == attempt
             # Rows still in the file queue — no data loss yet.
@@ -3989,7 +4021,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         assert recorder_flush_batches_dropped._value.get() == dropped_before + 1
         # Retry counter ticked on every failed attempt (including the one
         # that finally tripped the drop).
-        assert recorder_flush_retries._value.get() == retries_before + config.recorder.max_flush_retries
+        assert recorder_flush_retries._value.get() == retries_before + config.sqlite.max_flush_retries
 
         # Subsequent batches with a working DB flush cleanly — retries
         # counter is fresh because we reset it on drop. Unpatch by
@@ -4063,7 +4095,7 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         # The new DB opens cleanly — no patched executemany carried over.
         # The instance counter carries over from the pre-rotation failures
         # (first _flush + the _flush inside _rotate both bumped it), but
-        # since the default ``max_flush_retries`` is 3 we still have one
+        # since the default ``sqlite.max_flush_retries`` is 3 we still have one
         # more attempt available. A successful flush resets the counter.
         await rec.flush()
         assert len(rec._file_queue) == 0
@@ -4308,8 +4340,10 @@ def test_encode_json_sort_keys_deterministic():
 
 async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
     """Local DB has matching label — returns events with worker_name attached."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-local-label')
@@ -4329,7 +4363,7 @@ async def test_cross_trace_by_label_finds_in_current_worker(tmp_path):
 
 async def test_cross_trace_by_label_returns_empty_when_no_storage_dir():
     """Without ``storage_dir`` the cross-worker fallback short-circuits to []."""
-    config = make_ui_config(enabled=True, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s')
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     await rec.start()
 
@@ -4344,8 +4378,10 @@ async def test_cross_trace_by_label_returns_empty_when_no_storage_dir():
 async def test_get_task_events_returns_chronological(tmp_path):
     """``get_task_events`` returns every event for a task in id-ascending
     (chronological) order so the debug UI can render the lifecycle."""
-    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
-    rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(
+        config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path), ws_min_duration_ms=0
+    )
     await rec.start()
 
     task = make_task('t-lifecycle')
@@ -4367,10 +4403,10 @@ async def test_get_task_events_returns_chronological(tmp_path):
     await rec.stop()
 
 
-async def test_get_task_events_empty_when_store_events_false(tmp_path):
-    """With ``store_events=False`` the events table is never created, so
+async def test_get_task_events_empty_when_capture_events_off(tmp_path):
+    """With ``capture.events=False`` the events table is never created, so
     the query short-circuits to []."""
-    config = make_debug_config(tmp_path, store_events=False)
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -4467,10 +4503,10 @@ async def test_get_events_filtered_by_since(recorder):
     assert timestamps == [200.0, 300.0]
 
 
-async def test_trace_by_label_returns_empty_when_store_events_false(tmp_path):
-    """With ``store_events=False`` the events table doesn't exist, so the
+async def test_trace_by_label_returns_empty_when_capture_events_off(tmp_path):
+    """With ``capture.events=False`` the events table doesn't exist, so the
     query path is short-circuited to [] before touching SQLite."""
-    config = make_debug_config(tmp_path, store_events=False)
+    config = make_debug_config(tmp_path, capture={'events': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -4485,7 +4521,7 @@ async def test_trace_by_label_returns_empty_when_store_events_false(tmp_path):
 async def test_cross_trace_returns_empty_when_no_storage_dir():
     """Without ``storage_dir`` ``cross_trace`` short-circuits to [] before any
     glob/symlink walk."""
-    config = make_ui_config(enabled=True, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s')
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='none', storage_dir='')
     await rec.start()
 
@@ -4529,10 +4565,10 @@ async def test_stop_logs_warning_on_writer_close_failure(tmp_path):
 
     import structlog.testing
 
-    # Disable store_state so stop()'s pre-shutdown _sync_state() doesn't try
+    # Disable state_snapshots so stop()'s pre-shutdown _sync_state() doesn't try
     # to .execute() through our exploding mock — the close-failure path is
     # what we're testing here.
-    config = make_debug_config(tmp_path, store_state=False)
+    config = make_debug_config(tmp_path, sqlite={'state_snapshots': False})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -4604,13 +4640,13 @@ async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
 
 
 async def test_config_property_returns_underlying_config(tmp_path):
-    """The ``config`` property exposes the UIConfig the recorder was
+    """The ``config`` property exposes the RecorderConfig the recorder was
     constructed with — used by the debug server to inspect settings
     without reaching into ``_config``."""
-    config = make_debug_config(tmp_path, rotation_interval_hours=12)
+    config = make_debug_config(tmp_path, sqlite={'rotation_interval': '12h'})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     assert rec.config is config
-    assert rec.config.recorder.rotation_interval_hours == 12
+    assert rec.config.sqlite.rotation_interval == 12
 
 
 async def test_flush_public_alias_drains_buffer(recorder):
@@ -4703,7 +4739,7 @@ class TestBackgroundLoopResilience:
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
         # model_copy skips validation, so the loop can tick fast without
         # the config's own ``ge=1`` floor on the interval.
-        rec._store = rec._store.model_copy(update={'flush_interval_seconds': 0.01})
+        rec._config = rec._config.model_copy(update={'flush_interval': 0.01})
         rec._running = True
 
         calls = 0
@@ -4737,7 +4773,7 @@ class TestBackgroundLoopResilience:
     async def test_rotation_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
-        rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
+        rec._config.sqlite = rec._config.sqlite.model_copy(update={'rotation_interval': 0.01 / 3600})
         rec._running = True
 
         calls = 0
@@ -4769,7 +4805,7 @@ class TestBackgroundLoopResilience:
         """The sealing job rides the rotation tick, after the swap; no archive pass does."""
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
-        rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
+        rec._config.sqlite = rec._config.sqlite.model_copy(update={'rotation_interval': 0.01 / 3600})
         rec._running = True
 
         order: list[str] = []
@@ -4795,7 +4831,7 @@ class TestBackgroundLoopResilience:
     async def test_state_sync_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
-        rec._store = rec._store.model_copy(update={'state_sync_interval_seconds': 0.01})
+        rec._config.sqlite = rec._config.sqlite.model_copy(update={'state_interval': 0.01})
         rec._running = True
 
         calls = 0
@@ -4884,7 +4920,7 @@ class TestHostSampleLoop:
         rec = EventRecorder(
             make_debug_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path)
         )
-        rec._store.state_sync_interval_seconds = 0
+        rec._config.sqlite.state_interval = 0
         calls = 0
 
         def sample():
@@ -5308,7 +5344,7 @@ async def test_queued_ws_events_do_not_pin_captured_output(recorder):
 async def output_recorder(tmp_path):
     """A recorder that stores captured output, as the shipped default does."""
     rec = EventRecorder(
-        make_debug_config(tmp_path, store_output=True),
+        make_debug_config(tmp_path, capture={'output': True}),
         worker_name=WORKER_NAME,
         persistence='sqlite',
         storage_dir=str(tmp_path),
@@ -5332,7 +5368,7 @@ async def test_the_db_buffer_still_holds_the_full_output(output_recorder):
 
 
 async def test_flush_is_triggered_by_buffered_bytes_not_only_by_event_count(output_recorder, monkeypatch):
-    """``max_buffer`` bounds the buffer by COUNT, which says nothing about its
+    """``max_buffer_rows`` bounds the buffer by COUNT, which says nothing about its
     size: a handful of tasks with large output reaches gigabytes of resident
     buffer long before it reaches half of 50 000 events.
 
@@ -5353,7 +5389,7 @@ async def test_flush_is_triggered_by_buffered_bytes_not_only_by_event_count(outp
     )
     assert output_recorder._buffered_bytes >= 100_000
 
-    # flush_interval_seconds is 60 on this fixture, so a write inside a couple
+    # flush_interval is 60s on this fixture, so a write inside a couple
     # of seconds can only have come from the byte high-water mark.
     async def flushed() -> bool:
         return len(await output_recorder.get_events(event_type='task_completed')) == 4

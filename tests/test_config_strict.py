@@ -404,7 +404,7 @@ def test_the_loader_applies_each_env_value_once_with_no_second_source(tmp_path, 
 @pytest.mark.parametrize(
     'variable, value, read, expected',
     [
-        ('DK_UI__EXPOSE_ENV_VARS', '["A","B"]', lambda c: c.ui.expose_env_vars, ['A', 'B']),
+        ('DK_RECORDER__CAPTURE__ENV_VARS', '["A","B"]', lambda c: c.recorder.capture.env_vars, ['A', 'B']),
         ('DK_EXECUTOR__ENV', '{"FOO":"bar"}', lambda c: c.executor.env, {'FOO': 'bar'}),
         ('DK_SINKS__POSTGRES__MAIN_DB__DEPENDS_ON', '[]', lambda c: c.sinks.postgres['main-db'].depends_on, []),
         ('DK_UI__CUSTOM_LINKS', '[{"name":"a","url":"b"}]', lambda c: c.ui.custom_links, [{'name': 'a', 'url': 'b'}]),
@@ -418,13 +418,13 @@ def test_a_json_text_for_a_list_or_map_field_loads(variable, value, read, expect
 
 
 def test_a_json_text_replaces_the_whole_yaml_value(tmp_path, monkeypatch):
-    tree = {'ui': {'expose_env_vars': ['X', 'Y', 'Z']}, 'executor': {'env': {'KEEP': 'no'}}}
-    monkeypatch.setenv('DK_UI__EXPOSE_ENV_VARS', '["A"]')
+    tree = {'recorder': {'capture': {'env_vars': ['X', 'Y', 'Z']}}, 'executor': {'env': {'KEEP': 'no'}}}
+    monkeypatch.setenv('DK_RECORDER__CAPTURE__ENV_VARS', '["A"]')
     monkeypatch.setenv('DK_EXECUTOR__ENV', '{"FOO":"bar"}')
 
     config = load_config(_write_config(tmp_path, tree))
 
-    assert config.ui.expose_env_vars == ['A']
+    assert config.recorder.capture.env_vars == ['A']
     assert config.executor.env == {'FOO': 'bar'}
 
 

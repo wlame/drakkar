@@ -8,6 +8,7 @@ import time
 import pytest
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import memstore as memstore_mod
 from drakkar.recorder.memstore import (
@@ -23,7 +24,6 @@ from drakkar.recorder.memstore import (
     next_store_seq,
 )
 from drakkar.recorder.schema import EVENT_COLUMNS
-from tests.conftest import make_ui_config
 
 INSTANCE = '0123456789abcdef'
 ENDLESS_QUERY = 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c'
@@ -345,9 +345,9 @@ def test_memory_coverage_rows(coverage, rows):
     assert coverage.rows == rows
 
 
-async def test_no_memory_store_with_store_events_false(tmp_path):
+async def test_no_memory_store_with_capture_events_off(tmp_path):
     rec = EventRecorder(
-        make_ui_config(store_events=False), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path)
+        RecorderConfig(capture={'events': False}), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path)
     )
     await rec.start()
     try:
@@ -359,7 +359,7 @@ async def test_no_memory_store_with_store_events_false(tmp_path):
 
 
 async def test_recorder_opens_the_memory_store_and_closes_it_at_stop():
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='none')
     assert rec.memory_reader_db is None
     await rec.start()
     stopped = False
@@ -388,7 +388,7 @@ async def test_a_failed_file_open_closes_the_memory_store(tmp_path, monkeypatch)
     def refuse(path):
         raise PermissionError('storage folder is read-only')
 
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path))
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path))
     monkeypatch.setattr('drakkar.recorder.core.secure_db_file', refuse)
     with pytest.raises(PermissionError):
         await rec.start()
@@ -401,7 +401,7 @@ async def test_a_missing_memdb_fails_the_recorder_start(monkeypatch):
         raise sqlite3.OperationalError('no such vfs: memdb')
 
     monkeypatch.setattr(memstore_mod, 'open_connection', no_memdb)
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='none')
     with pytest.raises(MemoryStoreUnavailableError):
         await rec.start()
     assert rec._memory_store is None
@@ -418,17 +418,16 @@ async def _started_line(rec: EventRecorder) -> dict:
 
 async def test_recorder_started_logs_the_memory_fields(tmp_path):
     sqlite_line = await _started_line(
-        EventRecorder(make_ui_config(), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path))
+        EventRecorder(RecorderConfig(), worker_name='w-1', persistence='sqlite', storage_dir=str(tmp_path))
     )
     assert sqlite_line['persistence'] == 'sqlite'
     assert sqlite_line['memory_window_seconds'] == 120
     assert sqlite_line['memory_max_rows'] == 3000
     assert sqlite_line['memory_max_bytes'] == 268435456
-    assert 'ignored_keys' not in sqlite_line
 
     none_line = await _started_line(
         EventRecorder(
-            make_ui_config(store_state=True),
+            RecorderConfig(sqlite={'state_snapshots': True}),
             worker_name='w-1',
             persistence='none',
             memory_window_seconds=60,
@@ -441,15 +440,9 @@ async def test_recorder_started_logs_the_memory_fields(tmp_path):
     assert none_line['memory_window_seconds'] == 60
     assert none_line['memory_max_rows'] == 800
     assert none_line['memory_max_bytes'] == 16777216
-    assert none_line['ignored_keys'] == ['rotation_interval_hours', 'store_state']
-
-    plain_none_line = await _started_line(
-        EventRecorder(make_ui_config(store_state=False), worker_name='w-1', persistence='none')
-    )
-    assert plain_none_line['ignored_keys'] == ['rotation_interval_hours']
 
     no_events_line = await _started_line(
-        EventRecorder(make_ui_config(store_events=False), worker_name='w-1', persistence='none')
+        EventRecorder(RecorderConfig(capture={'events': False}), worker_name='w-1', persistence='none')
     )
     assert no_events_line['persistence'] == 'none'
     for key in ('memory_window_seconds', 'memory_max_rows', 'memory_max_bytes'):
@@ -513,7 +506,7 @@ async def test_close_with_a_zero_wait_does_not_wait_for_a_counted_reader():
 
 
 async def test_stop_with_almost_no_time_left_does_not_wait_for_a_counted_reader():
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='none')
     await rec.start()
     entered = threading.Event()
     release = threading.Event()
@@ -538,7 +531,7 @@ async def test_stop_with_almost_no_time_left_does_not_wait_for_a_counted_reader(
 
 
 async def test_memory_store_property_follows_the_recorder_lifetime():
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='none')
     assert rec.memory_store is None
     await rec.start()
     try:
@@ -550,7 +543,7 @@ async def test_memory_store_property_follows_the_recorder_lifetime():
 
 
 async def test_closing_the_memory_store_waits_for_a_memory_stage_in_flight():
-    rec = EventRecorder(make_ui_config(), worker_name='w-1', persistence='none')
+    rec = EventRecorder(RecorderConfig(), worker_name='w-1', persistence='none')
     await rec.start()
     store = rec.memory_store
     # A memory stage in flight holds the memory lock.

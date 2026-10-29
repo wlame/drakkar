@@ -2022,6 +2022,7 @@ async def test_ui_disabled_warns_that_probes_are_unserved(test_config):
     """The UI server is the ONLY probe surface — disabling it must be loud."""
     cfg = test_config.model_copy(deep=True)
     cfg.ui.enabled = False
+    cfg.recorder.enabled = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     with capture_logs() as cap:
@@ -2320,13 +2321,13 @@ async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tm
         await app._cache_engine.stop()
 
 
-async def test_start_cache_enables_peer_sync_without_own_store_config(test_config, tmp_path):
-    """The own ``ui.recorder.store_config`` only decides what the recorder
+async def test_start_cache_enables_peer_sync_without_capturing_config(test_config, tmp_path):
+    """The own ``recorder.capture.config`` only decides what the recorder
     writes into its own file; it must not switch off the cache exchange."""
     cfg = test_config.model_copy(deep=True)
     cfg.cache.enabled = True
     cfg.storage.dir = str(tmp_path)
-    cfg.ui.recorder.store_config = False
+    cfg.recorder.capture.config = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     await app._lifecycle._start_cache()
@@ -2357,12 +2358,13 @@ async def test_start_cache_wires_the_exchange_settings(test_config, tmp_path):
 # --- annotator wiring ---
 
 
-def _wire_and_get_annotator(test_config, *, recorder, **recorder_overrides):
+def _wire_and_get_annotator(test_config, *, recorder, annotations=None, events=True):
     """Run the lifecycle's annotator wiring and return the installed object."""
     from drakkar.lifecycle import AppLifecycle
 
-    for key, value in recorder_overrides.items():
-        setattr(test_config.ui.recorder, key, value)
+    for key, value in (annotations or {}).items():
+        setattr(test_config.recorder.annotations, key, value)
+    test_config.recorder.capture.events = events
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._recorder = recorder
     AppLifecycle(app)._wire_annotator()
@@ -2388,17 +2390,17 @@ def test_wire_annotator_keeps_stub_without_recorder(test_config):
 def test_wire_annotator_keeps_stub_when_annotations_disabled(test_config):
     from drakkar.annotations import NoOpAnnotator
 
-    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), annotations_enabled=False)
+    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), annotations={'enabled': False})
 
     assert isinstance(annotator, NoOpAnnotator)
 
 
 def test_wire_annotator_keeps_stub_when_events_are_not_stored(test_config):
-    # Without store_events the recorder never starts a flush loop, so
+    # Without capture.events the recorder never starts a flush loop, so
     # annotations would only fill the bounded buffer and be evicted.
     from drakkar.annotations import NoOpAnnotator
 
-    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), store_events=False)
+    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), events=False)
 
     assert isinstance(annotator, NoOpAnnotator)
 
@@ -2407,9 +2409,7 @@ def test_wire_annotator_passes_configured_budgets(test_config):
     annotator = _wire_and_get_annotator(
         test_config,
         recorder=MagicMock(),
-        annotation_max_bytes=99,
-        annotation_max_bytes_per_call=999,
-        annotation_log_max_bytes=9,
+        annotations={'max_size': 99, 'max_size_per_call': 999, 'max_log_size': 9},
     )
 
     assert annotator._max_bytes == 99

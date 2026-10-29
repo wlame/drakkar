@@ -7,6 +7,7 @@ import time
 import pytest
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.metrics import (
     recorder_memory_allocated_bytes,
     recorder_memory_bytes,
@@ -25,7 +26,7 @@ from drakkar.recorder.memstore import (
     read_page_numbers,
     run_eviction_pass,
 )
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 WORKER = 'w-1'
 LARGE_WINDOW_SECONDS = 86_400
@@ -40,12 +41,11 @@ def _recorder(
     window_seconds: int = LARGE_WINDOW_SECONDS,
     max_rows: int = LARGE_MAX_ROWS,
     max_bytes: int = LARGE_MAX_BYTES,
-    **ui,
+    **recorder,
 ) -> EventRecorder:
-    settings = {'enabled': True, 'store_output': False, 'flush_interval_seconds': 60}
-    settings.update(ui)
+    settings = {'flush_interval': '60s', 'capture': {'output': False}, **recorder}
     return EventRecorder(
-        make_ui_config(**settings),
+        RecorderConfig(**settings),
         worker_name=WORKER,
         cluster_name='c',
         persistence='none',
@@ -255,7 +255,7 @@ async def test_evicted_max_ts_is_the_largest_evicted_ts_over_the_process(started
 
 
 async def test_idle_memory_loop_tick_evicts_by_the_window(started):
-    rec = await started(window_seconds=1, flush_interval_seconds=1)
+    rec = await started(window_seconds=1, flush_interval='1s')
     _record(rec, [time.time()] * 3)
     await rec.flush_memory()
     assert await _memory_ids(rec) == [1, 2, 3]
@@ -296,7 +296,7 @@ async def test_ui_read_stage_evicts_at_most_once_per_second(started, monkeypatch
 async def test_worker_config_row_is_never_evicted(started):
     from drakkar.config import DrakkarConfig, ExecutorConfig
 
-    rec = await started(max_rows=0, store_config=True)
+    rec = await started(max_rows=0, capture={'config': True})
     await rec.write_config(
         DrakkarConfig(
             connections=kafka_connections(),

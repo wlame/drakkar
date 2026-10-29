@@ -73,13 +73,13 @@ def _writer(fake: RecorderFakePostgres, clock: FakeClock, queue: PostgresQueue |
         connection=PostgresConnectionConfig(dsn=DSN),
         table_prefix='',
         retention_hours=CONFIGURED_RETENTION_HOURS,
-        store_output=False,
+        store_completed_output=False,
         batch_rows=100,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
     )
     caller = ResilientCaller(
-        ResilienceConfig.model_validate({'retries': 0}),
+        ResilienceConfig.model_validate({'max_retries': 0}),
         feature='recorder',
         provider='postgres',
         category='recorder',

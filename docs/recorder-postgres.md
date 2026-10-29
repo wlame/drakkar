@@ -58,29 +58,28 @@ The DSN and the schema come from `connections.postgres.<name>` (see
 from that entry. It does not share the pool of the registry or the election.
 
 ```yaml
-ui:
-  recorder:
-    persistence: postgres         # none | sqlite | postgres | unset
-    postgres:
-      connection: main            # name under connections.postgres
-      table_prefix: ""            # "" -> <schema>.recorder_events; "heavy" -> <schema>.heavy_recorder_events
-      retention_hours: 6          # written into the table when this worker creates it
-      store_output: false         # send the stdout and stderr columns to Postgres
-      batch_rows: 5000            # most rows in one COPY
-      queue_max_mib: 128          # most text waiting for Postgres, counted in characters
+recorder:
+  provider: postgres            # sqlite | postgres
+  postgres:
+    connection: main            # name under connections.postgres
+    table_prefix: ""            # "" -> <schema>.recorder_events; "heavy" -> <schema>.heavy_recorder_events
+    initial_retention: 24h      # written into the table when this worker creates it
+    store_completed_output: false  # send the stdout and stderr columns to Postgres
+    batch_rows: 5000            # most rows in one COPY
+    max_queue: 128MiB           # most text waiting for Postgres, counted in characters
       resilience: {}              # timeout, retries, backoff and breaker of the recorder calls
 ```
 
 | Key | Type | Default | Bounds | Env |
 |---|---|---|---|---|
-| `ui.recorder.persistence` | `none`, `sqlite`, `postgres`, or unset | unset | one of the three when given | `DK_UI__RECORDER__PERSISTENCE` |
-| `ui.recorder.postgres.connection` | string | `main` | a name under `connections.postgres` | `DK_UI__RECORDER__POSTGRES__CONNECTION` |
-| `ui.recorder.postgres.table_prefix` | string | `''` | empty, or `^[a-z][a-z0-9_]{0,23}$` | `DK_UI__RECORDER__POSTGRES__TABLE_PREFIX` |
-| `ui.recorder.postgres.retention_hours` | whole number | 6 | 1 to 168 | `DK_UI__RECORDER__POSTGRES__RETENTION_HOURS` |
-| `ui.recorder.postgres.store_output` | boolean | `false` | | `DK_UI__RECORDER__POSTGRES__STORE_OUTPUT` |
-| `ui.recorder.postgres.batch_rows` | whole number | 5000 | 100 to 50000 | `DK_UI__RECORDER__POSTGRES__BATCH_ROWS` |
-| `ui.recorder.postgres.queue_max_mib` | whole number | 128 | 16 to 1024 | `DK_UI__RECORDER__POSTGRES__QUEUE_MAX_MIB` |
-| `ui.recorder.postgres.resilience.*` | the shared resilience block | 5.0 s, 2 retries, 0.2 s, 5.0 s, breaker 5 / 30 s | its rules | `DK_UI__RECORDER__POSTGRES__RESILIENCE__<KEY>` |
+| `recorder.provider` | `sqlite` or `postgres` | `sqlite` | one of the two | `DK_RECORDER__PROVIDER` |
+| `recorder.postgres.connection` | string | `main` | a name under `connections.postgres` | `DK_RECORDER__POSTGRES__CONNECTION` |
+| `recorder.postgres.table_prefix` | string | `''` | empty, or `^[a-z][a-z0-9_]{0,23}$` | `DK_RECORDER__POSTGRES__TABLE_PREFIX` |
+| `recorder.postgres.initial_retention` | duration, whole hours | `24h` | `1h` to `168h` | `DK_RECORDER__POSTGRES__INITIAL_RETENTION` |
+| `recorder.postgres.store_completed_output` | boolean | `false` | | `DK_RECORDER__POSTGRES__STORE_COMPLETED_OUTPUT` |
+| `recorder.postgres.batch_rows` | whole number | 5000 | 100 to 50000 | `DK_RECORDER__POSTGRES__BATCH_ROWS` |
+| `recorder.postgres.max_queue` | size | `128MiB` | `16MiB` to `1GiB` | `DK_RECORDER__POSTGRES__MAX_QUEUE` |
+| `recorder.postgres.resilience.*` | the shared resilience block | `5s`, 2 retries, `200ms`, `5s`, breaker 5 / `30s` | its rules | `DK_RECORDER__POSTGRES__RESILIENCE__<KEY>` |
 
 No key is secret; the DSN stays in `connections`. The whole-number keys
 accept `30.0` and refuse `30.5`. The keys load and do nothing unless the mode
@@ -296,10 +295,13 @@ When the table is missing:
   next tick tries again:
 
 ```
-table drakkar.recorder_events does not exist and connections.postgres.main.manage_schema is false; create it with: drakkar-schema postgres --schema=drakkar --recorder --retention-hours=6
+table drakkar.recorder_events does not exist and connections.postgres.main.manage_schema is false; create it with: drakkar-schema postgres --schema=drakkar --recorder --retention-hours=24
 ```
 
-The command gains ` --table-prefix=<prefix>` when the prefix is not empty.
+The command gains ` --table-prefix=<prefix>` when the prefix is not empty. It
+prints the worker's `initial_retention`, so an operator who follows the message
+gets the retention of the config. The command's own default, with no
+`--retention-hours` flag, is 6 hours.
 
 Partitions are always the upkeep's work, in both modes. Postgres lets only
 the owner of a table create or drop its partitions, so **the role of the
@@ -307,7 +309,7 @@ connection must own the events table**. When an administrator creates the
 table, make the worker role its owner:
 
 ```bash
-drakkar-schema postgres --schema=drakkar --recorder --retention-hours=6 | psql "$ADMIN_DSN"
+drakkar-schema postgres --schema=drakkar --recorder --retention-hours=24 | psql "$ADMIN_DSN"
 psql "$ADMIN_DSN" -c 'ALTER TABLE drakkar.recorder_events OWNER TO drakkar_worker'
 ```
 

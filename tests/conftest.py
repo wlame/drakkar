@@ -15,7 +15,7 @@ from drakkar import partition as partition_module
 from drakkar.cache.changes import parse_changes_query
 from drakkar.cache.models import _now_ms
 from drakkar.cache.sql import CHANGES_FIELDS, OWN_MARK_SQL, SCHEMA_CACHE_ENTRIES, changes_query
-from drakkar.config import CacheExchangeConfig, UIConfig, UIRecorderConfig
+from drakkar.config import CacheExchangeConfig, UIConfig
 from drakkar.fleet.service import PeerView
 from drakkar.models import (
     ExecutorError,
@@ -23,8 +23,6 @@ from drakkar.models import (
     ExecutorTask,
     SourceMessage,
 )
-
-_RECORDER_FIELDS = frozenset(UIRecorderConfig.model_fields)
 
 # YAML of the Kafka connection that a config with the Kafka source (and so the DLQ) on must declare.
 KAFKA_CONNECTION_YAML = 'connections:\n  kafka:\n    main: {}\n'
@@ -40,18 +38,7 @@ def kafka_connections(**settings: Any) -> dict[str, Any]:
 
 
 def make_ui_config(**kwargs) -> UIConfig:
-    """Build a ``UIConfig`` from flat kwargs, routing recorder-tier fields.
-
-    Test convenience so the many call sites that mix server settings with
-    persistence settings (``make_ui_config(port=8080, max_buffer=10)``)
-    stay one-liners. ``recorder=`` /
-    ``release=`` kwargs still pass through for tests that want the nested
-    form explicitly.
-    """
-    recorder_kwargs = {key: kwargs.pop(key) for key in list(kwargs) if key in _RECORDER_FIELDS}
-    if recorder_kwargs:
-        assert 'recorder' not in kwargs, 'mix of flat recorder kwargs and recorder= is ambiguous'
-        kwargs['recorder'] = UIRecorderConfig(**recorder_kwargs)
+    """Build a ``UIConfig`` from its keys."""
     return UIConfig(**kwargs)
 
 

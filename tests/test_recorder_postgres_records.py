@@ -12,7 +12,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from drakkar.config import PostgresConnectionConfig, ResilienceConfig
+from drakkar.config import PostgresConnectionConfig, RecorderConfig, ResilienceConfig
 from drakkar.metrics import (
     recorder_postgres_dropped_rows,
     recorder_postgres_queue_rows,
@@ -35,7 +35,7 @@ from drakkar.recorder.postgres import (
 from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.recorder.writer import EventWriter
 from drakkar.webapp.models import WebRequestContext
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import wait_for
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 WORKER = 'w-1'
@@ -51,24 +51,25 @@ RECORD_TYPES = (int, float, str, type(None))
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'fleet_providers.json').read_text())['recorder']
 
 
-def _settings(*, store_output: bool = False, queue_max_bytes: int = 128 * MIB) -> RecorderPostgresSettings:
+def _settings(*, store_completed_output: bool = False, queue_max_bytes: int = 128 * MIB) -> RecorderPostgresSettings:
     return RecorderPostgresSettings(
         connection_name='main',
         connection=PostgresConnectionConfig(dsn=DSN),
         table_prefix='',
         retention_hours=6,
-        store_output=store_output,
+        store_completed_output=store_completed_output,
         batch_rows=5000,
         queue_max_bytes=queue_max_bytes,
         resilience=ResilienceConfig(),
     )
 
 
-def _recorder(*, queue_max_bytes: int = 128 * MIB, fake: RecorderFakePostgres | None = None, **ui) -> EventRecorder:
-    settings = {'enabled': True, 'store_output': False, 'flush_interval_seconds': 60}
-    settings.update(ui)
+def _recorder(
+    *, queue_max_bytes: int = 128 * MIB, fake: RecorderFakePostgres | None = None, **recorder
+) -> EventRecorder:
+    settings = {'flush_interval': '60s', 'capture': {'output': False}, **recorder}
     return EventRecorder(
-        make_ui_config(**settings),
+        RecorderConfig(**settings),
         worker_name=WORKER,
         cluster_name=CLUSTER,
         persistence='postgres',
@@ -155,7 +156,7 @@ def _fail_memory_writes(monkeypatch, rec: EventRecorder, failures: dict[int, int
 def test_record_has_24_values_in_copy_column_order():
     row = _row(id=7, event='task_started', task_id='t1', metadata='{"source_offsets": [3]}', stdout_size=4)
 
-    record = build_record(row, cluster='', worker=WORKER, instance=INSTANCE, store_output=True)
+    record = build_record(row, cluster='', worker=WORKER, instance=INSTANCE, store_completed_output=True)
 
     assert len(record) == len(COPY_COLUMNS) == 24
     by_column = dict(zip(COPY_COLUMNS, record, strict=True))
@@ -169,7 +170,11 @@ class _CollectingRecorder(EventWriter):
     """Collects every event a helper records, with the ``dt`` the recorder adds."""
 
     def __init__(self) -> None:
-        super().__init__(make_ui_config(enabled=True, store_output=True, store_stdin=True))
+        super().__init__(
+            RecorderConfig(capture={'output': True, 'stdin': True}),
+            ws_min_duration_ms=500,
+            log_min_duration_ms=500,
+        )
         self.events: list[dict] = []
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
@@ -260,7 +265,11 @@ async def test_record_column_types_per_record_helper():
         assert writer.events, name
         for event in writer.events:
             record = build_record(
-                core_mod._row_tuple(1, event), cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_output=True
+                core_mod._row_tuple(1, event),
+                cluster=CLUSTER,
+                worker=WORKER,
+                instance=INSTANCE,
+                store_completed_output=True,
             )
             wrong = {
                 column: type(value).__name__
@@ -274,7 +283,7 @@ async def test_record_column_types_per_record_helper():
 @pytest.mark.parametrize(('text', 'expected'), [(case['text'], case['expected']) for case in FIXTURE['text_cases']])
 def test_nul_becomes_replacement_character(text, expected):
     assert replace_nul(text) == expected
-    record = build_record(_row(args=text), cluster=text, worker=WORKER, instance=INSTANCE, store_output=True)
+    record = build_record(_row(args=text), cluster=text, worker=WORKER, instance=INSTANCE, store_completed_output=True)
     assert record[0] == expected
     assert record[COPY_COLUMNS.index('args')] == expected
 
@@ -284,10 +293,10 @@ def _output_row() -> tuple:
     return _row(event='task_complete', stdout='o\x00ut', stderr='err', stdout_size=4, metadata=metadata)
 
 
-def test_store_output_false_nulls_only_stdout_and_stderr():
+def test_capture_output_off_nulls_only_stdout_and_stderr():
     row = _output_row()
 
-    record = build_record(row, cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_output=False)
+    record = build_record(row, cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_completed_output=False)
 
     by_column = dict(zip(COPY_COLUMNS, record, strict=True))
     assert (by_column['stdout'], by_column['stderr']) == (None, None)
@@ -297,8 +306,8 @@ def test_store_output_false_nulls_only_stdout_and_stderr():
     assert [by_column[column] for column in kept] == [row[EVENT_COLUMNS.index(column)] for column in kept]
 
 
-def test_store_output_true_keeps_stdout_and_stderr():
-    record = build_record(_output_row(), cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_output=True)
+def test_capture_output_on_keeps_stdout_and_stderr():
+    record = build_record(_output_row(), cluster=CLUSTER, worker=WORKER, instance=INSTANCE, store_completed_output=True)
 
     by_column = dict(zip(COPY_COLUMNS, record, strict=True))
     assert (by_column['stdout'], by_column['stderr']) == ('o�ut', 'err')
@@ -353,7 +362,7 @@ def test_oversized_row_is_dropped_alone_and_the_queued_rows_stay():
 
 
 async def test_oversized_row_counts_one_queue_full_drop():
-    rec = _recorder(max_buffer=1000, queue_max_bytes=1000)
+    rec = _recorder(max_buffer_rows=1000, queue_max_bytes=1000)
     await rec.start()
     try:
         before = _dropped('queue_full')
@@ -369,7 +378,7 @@ async def test_oversized_row_counts_one_queue_full_drop():
 
 
 async def test_queue_full_on_append_counts_and_keeps_the_newest_pairs(monkeypatch):
-    rec = _recorder(max_buffer=1000)
+    rec = _recorder(max_buffer_rows=1000)
     await rec.start()
     try:
         before = _dropped('queue_full')
@@ -465,7 +474,7 @@ async def test_cancelled_memory_write_with_postgres_goes_back_to_the_intake(post
 
 async def test_p_queue_past_half_wakes_stage_p():
     fake = RecorderFakePostgres()
-    rec = _recorder(max_buffer=1000, fake=fake)
+    rec = _recorder(max_buffer_rows=1000, fake=fake)
     await rec.start()
     try:
         _record_many(rec, 499)
@@ -482,7 +491,7 @@ async def test_p_queue_past_half_wakes_stage_p():
 
 async def test_p_queue_past_half_of_the_byte_bound_wakes_stage_p():
     fake = RecorderFakePostgres()
-    rec = _recorder(max_buffer=1000, queue_max_bytes=1000, fake=fake)
+    rec = _recorder(max_buffer_rows=1000, queue_max_bytes=1000, fake=fake)
     await rec.start()
     try:
         rec._record(_event(0, args='x' * 600))
@@ -503,7 +512,7 @@ def test_settings_name_the_schema_and_the_table(prefix, table):
         connection=connection,
         table_prefix=prefix,
         retention_hours=6,
-        store_output=False,
+        store_completed_output=False,
         batch_rows=5000,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -514,14 +523,12 @@ def test_settings_name_the_schema_and_the_table(prefix, table):
 
 def test_persistence_postgres_without_settings_raises():
     with pytest.raises(ValueError, match=r'^recorder: persistence postgres needs postgres settings$'):
-        EventRecorder(make_ui_config(enabled=True), persistence='postgres')
+        EventRecorder(RecorderConfig(), persistence='postgres')
 
 
 @pytest.mark.parametrize('persistence', ['none', 'sqlite'])
 def test_other_modes_build_no_p_queue(tmp_path, persistence):
-    rec = EventRecorder(
-        make_ui_config(enabled=True), persistence=persistence, storage_dir=str(tmp_path), postgres=_settings()
-    )
+    rec = EventRecorder(RecorderConfig(), persistence=persistence, storage_dir=str(tmp_path), postgres=_settings())
 
     assert rec._pg_queue is None
 
@@ -545,7 +552,7 @@ def test_recorder_postgres_metrics_names_and_help_texts():
 
 
 async def test_queue_full_drop_logs_once_per_minute_with_suppressed():
-    rec = _recorder(max_buffer=1000)
+    rec = _recorder(max_buffer_rows=1000)
     await rec.start()
     clock = [1000.0]
     rec._pg_drop_log = RateLimitedLog(lambda: clock[0])

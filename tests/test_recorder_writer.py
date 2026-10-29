@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from drakkar.config import UIConfig
+from drakkar.config import RecorderConfig
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask, SourceMessage
 from drakkar.recorder.writer import EventWriter
 
@@ -20,8 +20,8 @@ from drakkar.recorder.writer import EventWriter
 class CollectingWriter(EventWriter):
     """An EventWriter whose sink is a list — the whole contract a subclass owes."""
 
-    def __init__(self, config: UIConfig) -> None:
-        super().__init__(config)
+    def __init__(self, config: RecorderConfig) -> None:
+        super().__init__(config, ws_min_duration_ms=500, log_min_duration_ms=500)
         self.rows: list[tuple[dict, bool, bool]] = []
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
@@ -38,7 +38,7 @@ class CollectingWriter(EventWriter):
 
 @pytest.fixture
 def writer():
-    return CollectingWriter(UIConfig(recorder={'store_events': True}, release={'enabled': False}))
+    return CollectingWriter(RecorderConfig())
 
 
 def make_task(task_id='t1', **kwargs) -> ExecutorTask:
@@ -58,7 +58,7 @@ class TestWriterIsIndependentOfStorage:
         assert writer.last['event'] == 'committed'
 
     def test_record_is_abstract_on_the_base_class(self):
-        base = EventWriter(UIConfig(release={'enabled': False}))
+        base = EventWriter(RecorderConfig(), ws_min_duration_ms=500, log_min_duration_ms=500)
 
         with pytest.raises(NotImplementedError):
             base._record({'ts': 0.0, 'event': 'x'})
@@ -138,7 +138,7 @@ class TestDeferredStartEvents:
     """Deferral arms a timer on the running loop, so these are async."""
 
     async def test_start_is_held_back_when_a_threshold_is_set(self, writer):
-        writer._config.ws_min_duration_ms = 100
+        writer._ws_min_duration_ms = 100
 
         writer.record_task_started(make_task(), partition=0)
 
@@ -147,7 +147,7 @@ class TestDeferredStartEvents:
         assert 't1' in writer.fanout.deferred
 
     def test_start_goes_straight_out_without_a_threshold(self, writer):
-        writer._config.ws_min_duration_ms = 0
+        writer._ws_min_duration_ms = 0
 
         writer.record_task_started(make_task(), partition=0)
 
@@ -156,7 +156,7 @@ class TestDeferredStartEvents:
         assert not writer.fanout.deferred
 
     async def test_a_fast_task_suppresses_both_start_and_completion(self, writer):
-        writer._config.ws_min_duration_ms = 100
+        writer._ws_min_duration_ms = 100
         task = make_task()
         writer.record_task_started(task, partition=0)
 
@@ -170,7 +170,7 @@ class TestDeferredStartEvents:
         assert not writer.fanout.deferred
 
     async def test_a_failure_releases_the_held_start_first(self, writer):
-        writer._config.ws_min_duration_ms = 100
+        writer._ws_min_duration_ms = 100
         sub = writer.subscribe()
         task = make_task()
         writer.record_task_started(task, partition=0)

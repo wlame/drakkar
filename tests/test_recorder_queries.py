@@ -13,7 +13,7 @@ import time
 import aiosqlite
 import pytest
 
-from drakkar.config import UIConfig
+from drakkar.config import RecorderConfig
 from drakkar.recorder import queries as queries_module
 from drakkar.recorder.queries import CROSS_TRACE_MAX_FILES, EventQueries, QueryContext, _ScanBudget
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE
@@ -48,11 +48,8 @@ async def make_db(path, *, worker_name=WORKER, cluster_name=CLUSTER, events=(), 
 
 
 @pytest.fixture
-def ui_config(tmp_path):
-    return UIConfig(
-        recorder={'store_events': True, 'store_config': True},
-        release={'enabled': False},
-    )
+def recorder_config(tmp_path):
+    return RecorderConfig()
 
 
 class Ctx:
@@ -85,7 +82,7 @@ class Ctx:
 
 
 @pytest.fixture
-async def local(tmp_path, ui_config):
+async def local(tmp_path, recorder_config):
     """An EventQueries over a database with a small, known event history."""
     path = await make_db(
         tmp_path / f'{WORKER}-20260101-000000.db',
@@ -98,7 +95,7 @@ async def local(tmp_path, ui_config):
         ],
     )
     async with aiosqlite.connect(path) as db:
-        ctx = Ctx(ui_config, db, path)
+        ctx = Ctx(recorder_config, db, path)
         yield EventQueries(ctx.context), ctx
 
 
@@ -133,15 +130,15 @@ class TestGetEvents:
         assert len(first) == len(second) == 2
         assert {e['id'] for e in first}.isdisjoint({e['id'] for e in second})
 
-    async def test_returns_nothing_when_events_are_not_stored(self, tmp_path, ui_config, local):
+    async def test_returns_nothing_when_events_are_not_stored(self, tmp_path, recorder_config, local):
         queries, _ = local
-        ui_config.recorder.store_events = False
+        recorder_config.capture.events = False
 
         assert await queries.get_events() == []
 
-    async def test_returns_nothing_without_a_reader(self, ui_config):
+    async def test_returns_nothing_without_a_reader(self, recorder_config):
         ctx = QueryContext(
-            config=ui_config,
+            config=recorder_config,
             worker_name=WORKER,
             cluster_name=CLUSTER,
             persistence='sqlite',

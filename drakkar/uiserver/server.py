@@ -349,7 +349,7 @@ class UIDeps:
             _warn_degraded_read(
                 'ui_read_reader_db_absent',
                 hint='recorder has no reader connection — not started yet, '
-                'or started without event storage (ui.recorder.store_events)',
+                'or started without event storage (recorder.capture.events)',
             )
             return None
         async with db.execute(query, params) as cur:

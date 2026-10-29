@@ -42,10 +42,12 @@ class RatesKafkaHandler(KafkaOnlyHandler):
 
 def _config(*, archive: bool = False, **values) -> DrakkarConfig:
     """A config whose archive runs only when ``archive`` is true."""
+    recorder = {'enabled': archive, **values.pop('recorder', {})}
     return DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
-        ui={'enabled': archive, 'release': {'enabled': False}},
+        ui={'release': {'enabled': False}},
+        recorder=recorder,
         **values,
     )
 
@@ -109,7 +111,7 @@ def test_roster_with_no_cluster_task_hashes_the_empty_list():
 
 
 def test_archive_definition_follows_the_archive_schedule():
-    config = _config(archive=True, history={'archive': {'cron': '15 * * * *', 'lease_seconds': 300}})
+    config = _config(archive=True, recorder={'archive': {'cron': '15 * * * *', 'lease': '5m'}})
 
     assert archive_definition(config) == ClusterTaskDefinition(
         name=ARCHIVE_TASK_NAME, interval=None, cron='15 * * * *', lease_seconds=300
@@ -121,6 +123,7 @@ def _kafka_app(tmp_path, handler: object | None = None) -> DrakkarApp:
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': ''},
+        recorder={'enabled': False},
         ui={'enabled': False, 'release': {'enabled': False}},
     )
     return DrakkarApp(handler=handler if handler is not None else RatesKafkaHandler(), config=config, worker_id='w-1')
@@ -134,7 +137,7 @@ def test_roster_filesystem_without_shared_folder_fails_for_an_enabled_cluster_ta
 
     assert str(raised.value) == (
         "periodic task 'rebuild_index' has scope cluster, but the filesystem election needs a shared folder "
-        '(shared.dir or storage.dir)'
+        '(storage.shared_dir or storage.dir)'
     )
 
 
@@ -282,7 +285,7 @@ def test_archive_loop_starts_only_when_the_roster_runs_the_archive(tmp_path, arc
             sources={'kafka': {'enabled': True}},
             storage={'dir': str(tmp_path) if storage else ''},
             ui={'enabled': True, 'release': {'enabled': False}},
-            history={'archive': {'enabled': archive}},
+            recorder={'enabled': storage, 'archive': {'enabled': archive}},
         ),
         worker_id='w-1',
     )
@@ -302,14 +305,15 @@ def test_cluster_hash_of_a_none_worker_equals_the_hash_with_archive_disabled():
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
-        ui={'enabled': True, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
+        ui={'enabled': True, 'release': {'enabled': False}},
+        recorder={'enabled': False},
     )
     archive_off = DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True}},
         storage={'dir': '/data'},
         ui={'enabled': True, 'release': {'enabled': False}},
-        history={'archive': {'enabled': False}},
+        recorder={'archive': {'enabled': False}},
     )
 
     none_roster = resolve_periodic_roster(RatesHandler(), none_worker)

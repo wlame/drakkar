@@ -33,8 +33,8 @@ class FleetRegistryConfig(ConfigModel):
         default='filesystem',
         min_length=1,
         description=(
-            'Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when '
-            'shared.dir is empty), postgres (cards in a table of the database named by '
+            'Registry provider: filesystem (cards in <storage.shared_dir>/fleet, or <storage.dir>/fleet when '
+            'storage.shared_dir is empty), postgres (cards in a table of the database named by '
             'fleet.registry.connection), redis (cards in keys of the Redis server named by '
             'fleet.registry.connection), consul (cards in keys of the Consul agent named by '
             'fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.'

@@ -306,7 +306,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
 
         tasks_result, trimmed = queries.group_timeline_tasks(
             events,
-            ws_min_duration_seconds=recorder.config.ws_min_duration_ms / 1000.0,
+            ws_min_duration_seconds=config.ws_min_duration_ms / 1000.0,
             limit=limit,
         )
 
@@ -378,7 +378,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         # flushing + SELECTing against an empty table. ``recorder_select``
         # would still dispatch to the main loop and return rows, but they'd
         # always be empty.
-        if not recorder.config.recorder.store_events:
+        if not recorder.config.capture.events:
             return JSONResponse({})
 
         query, params = queries.task_state_query(task_ids)
@@ -415,7 +415,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         the read gave no answer. Callers parse metadata themselves because
         each event type has a different metadata shape.
         """
-        if not recorder.config.recorder.store_events:
+        if not recorder.config.capture.events:
             return [], None
         query, params = queries.hook_events_query(event_name=event_name, limit=limit)
         result = await deps.recorder_select(
@@ -560,7 +560,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         """
         if not req.offsets:
             return JSONResponse({})
-        if not recorder.config.recorder.store_events:
+        if not recorder.config.capture.events:
             return JSONResponse({})
         query, params = queries.sink_breakdown_query(partition=req.partition, offsets=req.offsets)
         result = await deps.recorder_select(

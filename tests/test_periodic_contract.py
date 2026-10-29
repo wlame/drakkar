@@ -18,6 +18,7 @@ from drakkar.periodic import (
     PREFIX_ARCHIVE,
     PREFIX_DECORATOR,
     RULE_ARCHIVE_INTERVAL,
+    RULE_ARCHIVE_LEASE,
     RULE_AT_MOST_ONE,
     RULE_CLUSTER_INTERVAL,
     RULE_LEASE_BOUNDS,
@@ -66,6 +67,7 @@ MESSAGE_CONSTANTS = {
     'prefix_archive': PREFIX_ARCHIVE,
     'rule_at_most_one': RULE_AT_MOST_ONE,
     'rule_archive_interval': RULE_ARCHIVE_INTERVAL,
+    'rule_archive_lease': RULE_ARCHIVE_LEASE,
     'rule_sweep_after': RULE_SWEEP_AFTER,
     'startup_no_shared_folder': STARTUP_NO_SHARED_FOLDER,
 }

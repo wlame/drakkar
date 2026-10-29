@@ -111,6 +111,11 @@
   }
 
   /** The canonical text of a duration given in milliseconds: descending terms, no zero term. */
+  // A zero threshold prints as the number 0, the one duration with no unit.
+  function minDuration(milliseconds) {
+    return milliseconds > 0 ? durationText(milliseconds) : 0;
+  }
+
   function durationText(milliseconds) {
     var units = [['d', 86400000], ['h', 3600000], ['m', 60000], ['s', 1000], ['ms', 1]];
     var remaining = milliseconds;
@@ -143,11 +148,13 @@
       },
       ui: {
         ws_min_duration_ms: c.wsMin,
-        log_min_duration_ms: c.logMin,
-        recorder: {
-          event_min_duration_ms: c.eventMin,
-          output_min_duration_ms: c.outputMin,
-          store_output: c.storeOutput
+        log_min_duration_ms: c.logMin
+      },
+      recorder: {
+        capture: {
+          min_event_duration: minDuration(c.eventMin),
+          min_output_duration: minDuration(c.outputMin),
+          output: c.storeOutput
         }
       }
     };
@@ -172,8 +179,8 @@
     add('session_timeout: ' + durationText(c.sessionTimeout), stText + ' Heartbeat every ' + durationText(c.heartbeatInterval) + ' (session/5). Kafka declares consumer dead if no heartbeat for this duration.');
     add('max_poll_interval: ' + durationText(c.maxPollInterval), 'Worst-case window: ' + c.windowSize + ' tasks * ' + c.taskTimeout + 's = ' + c.worstWindowSec + 's. 2x margin = ' + (c.worstWindowSec * 2) + 's. Kafka kicks the consumer if no poll() within this interval.');
     add('ws_min_duration_ms: ' + c.wsMin, c.wsMin > 0 ? 'Tasks faster than ' + c.wsMin + 'ms hidden from live UI. Floor is 30ms — below that, fast task WebSocket events cause buggy timeline rendering and browser performance issues. Failed tasks always shown regardless.' : '0 = show all tasks. With p80=' + p80 + 'ms, task throughput is low enough for the UI to handle.');
-    add('event_min_duration_ms: ' + c.eventMin, c.eventMin > 0 ? 'Tasks faster than ' + c.eventMin + 'ms skip SQLite storage. At ~' + Math.round(c.tasksPerSec) + ' tasks/sec, filtering prevents DB bottleneck.' : '0 = store all events. SQLite handles ~' + Math.round(c.tasksPerSec) + ' tasks/sec comfortably.');
-    add('store_output: ' + c.storeOutput, !c.storeOutput ? 'Disabled — fast task stdout is small and uninteresting. Saves ~' + Math.round(c.stdoutKb * c.tasksPerSec) + ' KB/sec of writes.' : 'Enabled — stdout/stderr valuable for debugging. Storage cost manageable at ' + Math.round(c.tasksPerSec) + ' tasks/sec.');
+    add('min_event_duration: ' + minDuration(c.eventMin), c.eventMin > 0 ? 'Tasks faster than ' + c.eventMin + 'ms skip SQLite storage. At ~' + Math.round(c.tasksPerSec) + ' tasks/sec, filtering prevents DB bottleneck.' : '0 = store all events. SQLite handles ~' + Math.round(c.tasksPerSec) + ' tasks/sec comfortably.');
+    add('capture.output: ' + c.storeOutput, !c.storeOutput ? 'Disabled — fast task stdout is small and uninteresting. Saves ~' + Math.round(c.stdoutKb * c.tasksPerSec) + ' KB/sec of writes.' : 'Enabled — stdout/stderr valuable for debugging. Storage cost manageable at ' + Math.round(c.tasksPerSec) + ' tasks/sec.');
 
     var estimates = [
       { term: 'Throughput', text: '~' + c.tasksPerSec.toFixed(1) + ' tasks/sec per worker, ~' + c.tasksPerSecCluster.toFixed(1) + ' tasks/sec cluster (' + c.workers + ' workers * ' + maxWorkers + ' slots / ' + p80s.toFixed(3) + 's)'
@@ -728,9 +735,9 @@
     function fleetExplanations(resolution) {
       var items = [];
       var history = choiceValue(table, 'history', state.history);
-      if (history.fragment) { items.push({ term: 'ui.recorder.persistence: ' + history.value, text: history.help }); }
+      if (history.fragment) { items.push({ term: 'recorder.provider: ' + history.value, text: history.help }); }
       var shared = table.shared[resolution.shared];
-      if (shared.explain) { items.push({ term: 'shared.dir', text: shared.explain, docs: shared.docs }); }
+      if (shared.explain) { items.push({ term: 'storage.shared_dir', text: shared.explain, docs: shared.docs }); }
       resolution.kinds.forEach(function (kind) {
         var connection = table.connections[kind];
         items.push({ term: 'connections.' + kind + '.main', text: connection.explain, docs: connection.docs });

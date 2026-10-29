@@ -71,11 +71,12 @@ from drakkar.recorder.sealing import INCOMING_SUFFIX
 from drakkar.schedule import sanitize_cluster
 
 if TYPE_CHECKING:
-    from drakkar.config import HistoryArchiveConfig
+    from drakkar.config import RecorderArchiveConfig
     from drakkar.recorder.election import ThreadFence
 
 logger = structlog.get_logger()
 
+SECONDS_PER_HOUR = 3600
 ARCHIVE_SUFFIX = '.db.gz'
 
 # Raw file the merge engine could not read. Renaming it takes it out of
@@ -270,7 +271,7 @@ def assign_windows(
     """Group ``paths`` into epoch-aligned windows, returning only due ones.
 
     A window ``[start, end)`` is DUE when ``now >= end + due_after_seconds``
-    (``history.archive.due_after_hours``): the delay lets every worker of
+    (``recorder.archive.due_after``): the delay lets every worker of
     the cluster seal the files that belong to it. Nothing else holds a
     window back — every file in a history folder is sealed.
 
@@ -305,8 +306,7 @@ def run_archive_pass(
     *,
     cluster: str,
     instance: str,
-    archive: HistoryArchiveConfig,
-    merged_retention_days: int,
+    archive: RecorderArchiveConfig,
     fence: ThreadFence,
     stop: threading.Event | None = None,
 ) -> None:
@@ -337,7 +337,6 @@ def run_archive_pass(
             fence,
             archive,
             merged_dir(shared_dir),
-            merged_retention_days,
             stop or threading.Event(),
         )
     except ArchiveFencedError as exc:
@@ -361,9 +360,8 @@ def _archive_locked(
     cluster: str,
     instance: str,
     fence: ThreadFence,
-    archive: HistoryArchiveConfig,
+    archive: RecorderArchiveConfig,
     merged_folder: str,
-    merged_retention_days: int,
     stop: threading.Event,
 ) -> bool:
     """The pass body, run while the slot's lease is held; False when a window failed."""
@@ -371,11 +369,11 @@ def _archive_locked(
     # Ages of files in the shared folder are measured on the file server's
     # clock, whichever provider holds the lease.
     server_now = folder_server_now(folder, instance)
-    _sweep(folder, cluster, server_now, archive.sweep_after_seconds)
+    _sweep(folder, cluster, server_now, archive.sweep_after)
     windows = assign_windows(
         list_sealed(folder),
-        archive.window_hours * 3600,
-        archive.due_after_hours * 3600,
+        archive.window * SECONDS_PER_HOUR,
+        archive.due_after * SECONDS_PER_HOUR,
         now,
     )
     completed = True
@@ -387,10 +385,10 @@ def _archive_locked(
         completed = _archive_window(folder, cluster, window, fence) and completed
     if stop.is_set():
         return completed
-    if archive.retention_days > 0:
-        _expire_archives(folder, cluster, now, archive.retention_days)
-    if merged_retention_days > 0:
-        _prune_merged(merged_folder, server_now, merged_retention_days)
+    if archive.retention > 0:
+        _expire_archives(folder, cluster, now, archive.retention)
+    if archive.merged_retention > 0:
+        _prune_merged(merged_folder, server_now, archive.merged_retention)
     return completed
 
 
@@ -669,10 +667,10 @@ def _sync_dir(folder: str) -> None:
         os.close(fd)
 
 
-def warn_if_archives_unbounded(archive: HistoryArchiveConfig, folder: str) -> None:
+def warn_if_archives_unbounded(archive: RecorderArchiveConfig, folder: str) -> None:
     """Warn at startup when archives are configured to accumulate forever.
 
-    ``history.archive.retention_days: 0`` disables expiry outright, and nothing
+    ``recorder.archive.retention: 0`` disables expiry outright, and nothing
     else in the recorder reclaims an archive. It is a legitimate choice —
     some deployments archive onto a volume they prune themselves — but it
     is the one recorder setting whose cost stays invisible until a disk
@@ -680,21 +678,21 @@ def warn_if_archives_unbounded(archive: HistoryArchiveConfig, folder: str) -> No
     discovered. Informational only: the worker starts normally, exactly
     like the unauthenticated-UI warning.
     """
-    if not archive.enabled or archive.retention_days > 0:
+    if not archive.enabled or archive.retention > 0:
         return
 
     logger.warning(
         'recorder_archives_unbounded',
         category='recorder',
         folder=folder,
-        window_hours=archive.window_hours,
+        window_hours=archive.window,
         message=(
-            f'history.archive.retention_days is 0, so compressed recorder archives in '
+            f'recorder.archive.retention is 0, so compressed recorder archives in '
             f'{folder} are kept forever and nothing reclaims that disk. Watch '
             f'drakkar_recorder_archive_bytes, prune the folder yourself, or set '
-            f'history.archive.retention_days (or DK_HISTORY__ARCHIVE__RETENTION_DAYS) '
-            f'to a number of days covering the {archive.due_after_hours}h due delay plus one '
-            f'{archive.window_hours}h window.'
+            f'recorder.archive.retention (or DK_RECORDER__ARCHIVE__RETENTION) '
+            f'to a number of days covering the {archive.due_after}h due delay plus one '
+            f'{archive.window}h window.'
         ),
     )
 

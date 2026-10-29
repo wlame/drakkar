@@ -17,6 +17,14 @@ from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
 from drakkar.config.fleet import CONNECTION_PROVIDERS, FleetConfig
 from drakkar.config.periodic import PeriodicConfig
+from drakkar.config.recorder import (
+    PERSISTENCE_NONE,
+    PERSISTENCE_POSTGRES,
+    PERSISTENCE_SQLITE,
+    Persistence,
+    RecorderConfig,
+    duration_of_hours,
+)
 from drakkar.config.runtime import (
     ExecutorConfig,
     IOConfig,
@@ -27,7 +35,7 @@ from drakkar.config.runtime import (
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
-from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
+from drakkar.config.storage import StorageConfig
 from drakkar.config.strict import (
     decode_env_json,
     deep_merge,
@@ -35,12 +43,12 @@ from drakkar.config.strict import (
     resolve_env_map_names,
     unknown_keys_message,
 )
-from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence, UIConfig
+from drakkar.config.ui import UIConfig
 from drakkar.config.webapp import WebAppConfig
 
-PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE = (
-    'ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, '
-    'or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only'
+SQLITE_WITHOUT_DIR_MESSAGE = (
+    'recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, '
+    'or set recorder.enabled to false'
 )
 
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
@@ -129,8 +137,7 @@ class DrakkarConfig(BaseSettings):
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
-    shared: SharedConfig = Field(default_factory=SharedConfig)
-    history: HistoryConfig = Field(default_factory=HistoryConfig)
+    recorder: RecorderConfig = Field(default_factory=RecorderConfig)
     periodic: PeriodicConfig = Field(default_factory=PeriodicConfig)
     fleet: FleetConfig = Field(default_factory=FleetConfig)
     connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
@@ -157,41 +164,40 @@ class DrakkarConfig(BaseSettings):
         return self
 
     @model_validator(mode='after')
-    def _validate_recorder_persistence(self) -> 'DrakkarConfig':
-        """An explicit ``sqlite`` needs a ``storage.dir``; ``postgres`` needs its connection declared.
+    def _validate_recorder_provider(self) -> 'DrakkarConfig':
+        """An enabled ``sqlite`` recorder needs a ``storage.dir``; an enabled ``postgres`` one its connection.
 
-        Both checks run whatever ``ui.enabled`` says.
+        With the recorder off, the block of its provider loads and does nothing.
         """
-        if self.ui.recorder.persistence == PERSISTENCE_SQLITE and not self.storage.dir:
-            raise ValueError(PERSISTENCE_SQLITE_WITHOUT_DIR_MESSAGE)
+        if self.resolved_persistence == PERSISTENCE_SQLITE and not self.storage.dir:
+            raise ValueError(SQLITE_WITHOUT_DIR_MESSAGE)
         if self.resolved_persistence == PERSISTENCE_POSTGRES:
             _require_declared_connection(
-                'ui.recorder.postgres.connection',
+                'recorder.postgres.connection',
                 PERSISTENCE_POSTGRES,
-                self.ui.recorder.postgres.connection,
+                self.recorder.postgres.connection,
                 self.connections,
             )
         return self
 
     @model_validator(mode='after')
-    def _validate_history_vs_rotation(self) -> 'DrakkarConfig':
+    def _validate_archive_vs_rotation(self) -> 'DrakkarConfig':
         """Archive windows and the due delay must be at least one rotation long.
 
         A window shorter than the rotation interval would be named for files
         that rotate out of it later; a due delay shorter than one rotation
         could archive a window while a file of it is still being written.
         """
-        rotation_hours = self.ui.recorder.rotation_interval_hours
-        archive = self.history.archive
-        if archive.window_hours < rotation_hours:
+        rotation = self.recorder.sqlite.rotation_interval
+        archive = self.recorder.archive
+        rotation_text = f'recorder.sqlite.rotation_interval ({duration_of_hours(rotation)})'
+        if archive.window < rotation:
             raise ValueError(
-                f'history.archive.window_hours ({archive.window_hours}) must be >= '
-                f'ui.recorder.rotation_interval_hours ({rotation_hours})'
+                f'recorder.archive.window ({duration_of_hours(archive.window)}) must be >= {rotation_text}'
             )
-        if archive.due_after_hours < rotation_hours:
+        if archive.due_after < rotation:
             raise ValueError(
-                f'history.archive.due_after_hours ({archive.due_after_hours}) must be >= '
-                f'ui.recorder.rotation_interval_hours ({rotation_hours})'
+                f'recorder.archive.due_after ({duration_of_hours(archive.due_after)}) must be >= {rotation_text}'
             )
         return self
 
@@ -247,18 +253,13 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def resolved_persistence(self) -> Persistence:
-        """The effective recorder mode: the explicit key, else ``sqlite`` with a ``storage.dir``, else ``none``.
-
-        ``postgres`` is never derived; it is the mode only when the key says so.
-        """
-        if self.ui.recorder.persistence is not None:
-            return self.ui.recorder.persistence
-        return PERSISTENCE_SQLITE if self.storage.dir else PERSISTENCE_NONE
+        """The durable store of the recorder: ``recorder.provider``, or ``none`` with the recorder off."""
+        return self.recorder.provider if self.recorder.enabled else PERSISTENCE_NONE
 
     @property
     def resolved_shared_dir(self) -> str:
-        """The folder every worker of the fleet sees: ``shared.dir``, else ``storage.dir``."""
-        return self.shared.dir or self.storage.dir
+        """The folder every worker of the cluster sees: ``storage.shared_dir``, else ``storage.dir``."""
+        return self.storage.shared_dir or self.storage.dir
 
     @property
     def resolved_registry_dir(self) -> str:
@@ -399,7 +400,8 @@ class DrakkarConfig(BaseSettings):
             cache_part = 'on:' + '/'.join(cache_tokens)
 
         storage_part = self.storage.dir or 'mem'
-        shared_token = f' shared={self.shared.dir}' if self.shared.dir and self.shared.dir != self.storage.dir else ''
+        shared_dir = self.storage.shared_dir
+        shared_token = f' shared={shared_dir}' if shared_dir and shared_dir != self.storage.dir else ''
 
         mode = self.resolved_persistence
         if mode == PERSISTENCE_POSTGRES:

@@ -24,7 +24,7 @@ import jsonschema
 import yaml
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, RecorderConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_openapi import SPEC_PATH
 from drakkar.uiserver.server import create_ui_app
@@ -560,9 +560,13 @@ async def test_databases_payload_matches_schema(tmp_path):
     schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
     storage = tmp_path / 'storage'
     storage.mkdir()
-    cfg = make_ui_config(enabled=True, port=8080, flush_interval_seconds=60)
+    cfg = make_ui_config(enabled=True, port=8080)
     recorder = EventRecorder(
-        cfg, worker_name='schema-worker', cluster_name='search', persistence='sqlite', storage_dir=str(storage)
+        RecorderConfig(flush_interval='60s'),
+        worker_name='schema-worker',
+        cluster_name='search',
+        persistence='sqlite',
+        storage_dir=str(storage),
     )
     await recorder.start()
     try:

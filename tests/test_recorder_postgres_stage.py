@@ -15,7 +15,7 @@ import asyncpg
 import pytest
 from structlog.testing import capture_logs
 
-from drakkar.config import PostgresConnectionConfig, ResilienceConfig
+from drakkar.config import PostgresConnectionConfig, RecorderConfig, ResilienceConfig
 from drakkar.metrics import (
     provider_calls,
     recorder_postgres_dropped_rows,
@@ -35,7 +35,7 @@ from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings
 from drakkar.recorder.postgres_writer import CopyOutcome, PostgresLoopThread, PostgresWriter
 from drakkar.recorder.schema import EVENT_COLUMNS
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import wait_for
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 WORKER = 'w-1'
@@ -68,7 +68,7 @@ def _settings(*, manage_schema: bool = True, table_prefix: str = '', pool_max: i
         connection=PostgresConnectionConfig(dsn=DSN, manage_schema=manage_schema, pool_min=2, pool_max=pool_max),
         table_prefix=table_prefix,
         retention_hours=6,
-        store_output=False,
+        store_completed_output=False,
         batch_rows=BATCH_ROWS,
         queue_max_bytes=128 * MIB,
         resilience=ResilienceConfig(),
@@ -89,7 +89,7 @@ def _writer(
 ) -> PostgresWriter:
     clock = clock if clock is not None else FakeClock()
     caller = ResilientCaller(
-        resilience if resilience is not None else _resilience(retries=0),
+        resilience if resilience is not None else _resilience(max_retries=0),
         feature='recorder',
         provider='postgres',
         category='recorder',
@@ -181,9 +181,7 @@ async def test_postgres_down_at_start_retries_per_tick_and_drops_only_queue_full
     fake.open_error = OSError('connection refused')
     clock = FakeClock()
     queue = PostgresQueue(max_rows=1000, max_bytes=128 * MIB)
-    writer = _writer(
-        fake, clock=clock, queue=queue, resilience=_resilience(retries=0, breaker={'failure_threshold': 3})
-    )
+    writer = _writer(fake, clock=clock, queue=queue, resilience=_resilience(max_retries=0, breaker_failures=3))
     dropped_before = _dropped()
     skipped_before = _calls('start', 'skipped_open')
 
@@ -277,7 +275,7 @@ async def test_retried_chunk_is_the_same_record_set_after_the_queue_head_changed
 async def test_kept_chunk_is_never_dropped_or_counted(failure):
     fake = RecorderFakePostgres()
     retries = 1 if failure == 'transient_after_retries' else 0
-    writer = _writer(fake, resilience=_resilience(retries=retries, breaker={'failure_threshold': 1}))
+    writer = _writer(fake, resilience=_resilience(max_retries=retries, breaker_failures=1))
     writer._queue.append(_pairs(1, 4))
     if failure == 'not_started':
         fake.open_error = OSError('connection refused')
@@ -424,7 +422,7 @@ async def test_check_violation_keeps_the_chunk_and_the_next_run_upkeeps_then_wri
 async def test_a_server_error_the_rows_did_not_cause_keeps_the_chunk_and_opens_the_breaker(error_class):
     fake = RecorderFakePostgres()
     clock = FakeClock()
-    writer = _writer(fake, clock=clock, resilience=_resilience(retries=0, breaker={'failure_threshold': 3}))
+    writer = _writer(fake, clock=clock, resilience=_resilience(max_retries=0, breaker_failures=3))
     await writer.run_once()
     writer._queue.append(_pairs(1, 4))
     fake.fail_copies(*(_final_error(error_class, 'not the rows') for _ in range(20)))
@@ -511,7 +509,7 @@ async def test_a_missing_table_in_the_upkeep_starts_the_writer_again():
 
 async def test_final_copy_error_is_not_a_breaker_failure():
     fake = RecorderFakePostgres()
-    writer = _writer(fake, resilience=_resilience(retries=0, breaker={'failure_threshold': 2}))
+    writer = _writer(fake, resilience=_resilience(max_retries=0, breaker_failures=2))
     writer._queue.append(_pairs(1, 1000))
     fake.fail_copies(*(_final_error(asyncpg.exceptions.InvalidTextRepresentationError) for _ in range(20)))
     dropped_before = _dropped()
@@ -564,7 +562,7 @@ async def test_final_of_a_writer_that_never_started_skips_and_drops_with_shutdow
 
 async def test_stop_with_the_breaker_open_makes_no_attempt():
     fake = RecorderFakePostgres()
-    writer = _writer(fake, resilience=_resilience(retries=0, breaker={'failure_threshold': 1}))
+    writer = _writer(fake, resilience=_resilience(max_retries=0, breaker_failures=1))
     writer._queue.append(_pairs(1, 4))
     fake.fail_copies(asyncpg.exceptions.ConnectionDoesNotExistError('connection lost'))
     await writer.run_once()
@@ -599,11 +597,12 @@ async def test_loop_thread_runs_coroutines_on_its_own_thread_and_stops():
 # --- the recorder ---
 
 
-def _recorder(fake: RecorderFakePostgres, *, storage_dir: str = '', table_prefix: str = '', **ui) -> EventRecorder:
-    values = {'enabled': True, 'store_output': False, 'flush_interval_seconds': 60}
-    values.update(ui)
+def _recorder(
+    fake: RecorderFakePostgres, *, storage_dir: str = '', table_prefix: str = '', **recorder
+) -> EventRecorder:
+    values = {'flush_interval': '60s', 'capture': {'output': False}, **recorder}
     return EventRecorder(
-        make_ui_config(**values),
+        RecorderConfig(**values),
         worker_name=WORKER,
         cluster_name=CLUSTER,
         persistence='postgres',
@@ -626,7 +625,7 @@ def _record(rec: EventRecorder, count: int, first: int = 0) -> None:
 
 async def test_the_memory_tick_wakes_stage_p_and_the_rows_land():
     fake = RecorderFakePostgres()
-    rec = _recorder(fake, flush_interval_seconds=1)
+    rec = _recorder(fake, flush_interval='1s')
     await rec.start()
     try:
         _record(rec, 3)
@@ -638,7 +637,7 @@ async def test_the_memory_tick_wakes_stage_p_and_the_rows_land():
 async def test_hanging_copy_does_not_stop_stage_m_or_eviction():
     fake = RecorderFakePostgres()
     fake.hang_copies()
-    rec = _recorder(fake, flush_interval_seconds=1)
+    rec = _recorder(fake, flush_interval='1s')
     rec._memory_max_rows = 50
     await rec.start()
     try:
@@ -691,7 +690,7 @@ async def test_stop_with_time_spent_gives_the_thread_its_grace_and_logs_no_threa
 
 async def test_stop_while_a_copy_attempt_hangs_returns_within_the_time_left():
     fake = RecorderFakePostgres()
-    rec = _recorder(fake, flush_interval_seconds=1)
+    rec = _recorder(fake, flush_interval='1s')
     await rec.start()
     await _start_stage_p(rec)
     fake.hang_copies()
@@ -785,9 +784,9 @@ async def test_postgres_mode_writes_no_file_in_storage_dir_and_no_last_breath(tm
     assert os.listdir(tmp_path) == []
 
 
-async def test_store_events_false_starts_no_stage_p():
+async def test_capture_events_off_starts_no_stage_p():
     fake = RecorderFakePostgres()
-    rec = _recorder(fake, store_events=False, flush_interval_seconds=1)
+    rec = _recorder(fake, capture={'events': False}, flush_interval='1s')
     await rec.start()
     try:
         await asyncio.sleep(0.05)
@@ -798,10 +797,10 @@ async def test_store_events_false_starts_no_stage_p():
     assert fake.opened == []
 
 
-@pytest.mark.parametrize('store_events', [True, False], ids=['store_events', 'no_store_events'])
-async def test_recorder_started_logs_the_postgres_fields(store_events):
+@pytest.mark.parametrize('capture_events', [True, False], ids=['capture_events', 'no_capture_events'])
+async def test_recorder_started_logs_the_postgres_fields(capture_events):
     fake = RecorderFakePostgres()
-    rec = _recorder(fake, table_prefix='fast', store_events=store_events, store_state=True)
+    rec = _recorder(fake, table_prefix='fast', capture={'events': capture_events})
 
     with capture_logs() as captured:
         await rec.start()
@@ -811,7 +810,6 @@ async def test_recorder_started_logs_the_postgres_fields(store_events):
     assert line['persistence'] == 'postgres'
     assert line['postgres_connection'] == 'main'
     assert line['postgres_table'] == 'drakkar.fast_recorder_events'
-    assert line['ignored_keys'] == ['rotation_interval_hours', 'store_state']
 
 
 def test_postgres_settings_property():
@@ -877,7 +875,7 @@ async def test_final_that_cannot_take_the_writer_in_time_drops_with_shutdown():
 
 async def test_a_failed_stage_p_run_is_logged_and_the_loop_goes_on():
     fake = RecorderFakePostgres()
-    rec = _recorder(fake, flush_interval_seconds=1)
+    rec = _recorder(fake, flush_interval='1s')
     await rec.start()
     runs: list[int] = []
 

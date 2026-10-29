@@ -1,4 +1,4 @@
-"""UI configuration: the server, the flight recorder, and the release bundle.
+"""UI configuration: the server and the release bundle.
 
 Also holds the timeline tuning models (color rules, label roles, history
 depth) and the consume-pause presets, which are UI-driven controls.
@@ -10,290 +10,6 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
-from drakkar.config.resilience import ResilienceConfig
-
-Persistence = Literal['none', 'sqlite', 'postgres']
-PERSISTENCE_NONE: Persistence = 'none'
-PERSISTENCE_SQLITE: Persistence = 'sqlite'
-PERSISTENCE_POSTGRES: Persistence = 'postgres'
-
-# The recorder table prefix: empty, or a lower-case letter and up to 23 more
-# lower-case letters, digits or underscores. Matched with ``re.fullmatch``
-# (a ``$`` anchor would accept a trailing newline).
-TABLE_PREFIX_RE = r'^[a-z][a-z0-9_]{0,23}$'
-TABLE_PREFIX_MESSAGE = (
-    "ui.recorder.postgres.table_prefix '{value}' must be empty, or a lower-case letter followed by "
-    'at most 23 lower-case letters, digits or underscores'
-)
-
-
-class UIRecorderMemoryConfig(ConfigModel):
-    """Bounds of the in-memory recorder store (used when ``ui.recorder.store_events`` is on)."""
-
-    window_seconds: int = Field(
-        default=120,
-        ge=10,
-        le=86400,
-        description='Keep recorder events in memory for this many seconds.',
-    )
-    rows_per_executor: int = Field(
-        default=3000,
-        ge=100,
-        le=1_000_000,
-        description=(
-            'Row cap per executor slot: the store holds at most this many rows times executor.max_executors. '
-            'The cap does not scale with the window; a longer window needs a larger value '
-            '(rows per executor per window is about 4 x window / average task seconds).'
-        ),
-    )
-    max_mib: int = Field(
-        default=256,
-        ge=16,
-        le=512,
-        description=(
-            'Budget for the data in the memory store, in MiB (pages in use). It bounds the data, '
-            'not the memory the store holds; free pages and one write stage can exceed it. At most 512 '
-            'so the store stays under the 1 GiB limit of the SQLite in-memory database.'
-        ),
-    )
-
-
-class UIRecorderPostgresConfig(ConfigModel):
-    """Settings of the ``postgres`` recorder mode: the table that holds the history of all workers.
-
-    The DSN and the schema come from ``connections.postgres.<connection>``. The keys load and do
-    nothing unless the effective mode is ``postgres``.
-    """
-
-    connection: str = Field(
-        default='main',
-        description='Name of the entry under connections.postgres that holds the DSN and the schema.',
-    )
-    table_prefix: str = Field(
-        default='',
-        description=(
-            'Empty for the table <schema>.recorder_events, or a lower-case letter followed by at most 23 '
-            'lower-case letters, digits or underscores for <schema>.<prefix>_recorder_events.'
-        ),
-    )
-    retention_hours: int = Field(
-        default=6,
-        ge=1,
-        le=168,
-        description=(
-            'Hours of history the table keeps. Read only when this worker creates the table; after that '
-            'the value stored with the table rules. At most 168: one partition per hour, and a trace '
-            'search visits every partition.'
-        ),
-    )
-    store_output: bool = Field(
-        default=False,
-        description='Send the stdout and stderr columns to Postgres. Off, both columns are written as NULL.',
-    )
-    batch_rows: int = Field(
-        default=5000,
-        ge=100,
-        le=50000,
-        description='Most rows in one COPY.',
-    )
-    queue_max_mib: int = Field(
-        default=128,
-        ge=16,
-        le=1024,
-        description='Most text, in MiB, waiting for Postgres, counted in characters of text. When full, the oldest rows are dropped and counted.',
-    )
-    resilience: ResilienceConfig = Field(
-        default_factory=ResilienceConfig,
-        description='Timeout, retries, backoff and breaker of the recorder calls to Postgres.',
-    )
-
-    @field_validator('table_prefix')
-    @classmethod
-    def _check_table_prefix(cls, value: str) -> str:
-        """Refuse a prefix that is not empty and not a short lower-case identifier."""
-        if value and not re.fullmatch(TABLE_PREFIX_RE, value):
-            raise ValueError(TABLE_PREFIX_MESSAGE.format(value=value))
-        return value
-
-
-class UIRecorderConfig(ConfigModel):
-    """Flight-recorder persistence settings — the UI's data store.
-
-    With ``persistence: sqlite`` the recorder also writes SQLite files into
-    ``storage.dir``; with ``none`` it keeps recent events in memory only and
-    writes no file; with ``postgres`` it also writes the events to a table in
-    Postgres (``postgres.*``). ``postgres`` is never derived: it is always
-    explicit. Unset, the mode follows ``storage.dir`` (a folder means
-    ``sqlite``, an empty ``storage.dir`` means ``none``).
-
-    Granular flags of what the recorder keeps:
-    - ``store_events``: write processing events to the ``events`` table of
-      the memory store and, with ``sqlite``, of the file (with ``postgres``,
-      the table gets the same rows). Off, there is no memory store.
-    - ``store_config``: write worker config to ``worker_config`` (names the
-      worker and cluster inside each file, for history and merges), in the
-      memory store and, with ``sqlite``, in the file.
-    - ``store_state``: periodically dump counters to ``worker_state``. Only
-      with ``sqlite``; the memory store has no ``worker_state`` table.
-    """
-
-    persistence: Persistence | None = Field(
-        default=None,
-        description=(
-            'Where recorder events live besides the memory store: sqlite writes recorder files into '
-            'storage.dir; none keeps events in memory only. Unset, it is sqlite when storage.dir is set '
-            'and none when it is empty. sqlite with an empty storage.dir fails the load. postgres writes the '
-            'events to a table named by the postgres section and is never derived.'
-        ),
-    )
-    memory: UIRecorderMemoryConfig = Field(default_factory=UIRecorderMemoryConfig)
-    postgres: UIRecorderPostgresConfig = Field(default_factory=UIRecorderPostgresConfig)
-    store_events: bool = Field(
-        default=True,
-        description=(
-            'Write processing events to the events table. Off, the live WebSocket view still '
-            'streams, but History, Trace, and task queries return nothing.'
-        ),
-    )
-    store_config: bool = Field(
-        default=True,
-        description=(
-            'Write the worker config snapshot to the worker_config table, so every recorder '
-            'file names the worker and cluster that wrote it (history, merges, archives).'
-        ),
-    )
-    store_state: bool = Field(
-        default=True,
-        description=(
-            'Periodically snapshot worker counters (uptime, partitions, pool utilization, '
-            'queue depth) to the worker_state table. Used only with sqlite; with none and postgres the key loads '
-            'and is ignored.'
-        ),
-    )
-    state_sync_interval_seconds: int = Field(
-        default=10,
-        ge=1,
-        description=(
-            'Seconds between worker_state snapshots — also the heartbeat cadence worker liveness is judged by.'
-        ),
-    )
-    rotation_interval_hours: int = Field(
-        default=1,
-        ge=1,
-        description=(
-            'How often to roll over to a new SQLite file. Used only with sqlite; with none and postgres the key '
-            'loads and is ignored.'
-        ),
-    )
-    store_output: bool = Field(
-        default=True,
-        description='Store subprocess stdout/stderr content in task events. Off drops output content from all of them.',
-    )
-    store_stdin: bool = Field(
-        default=False,
-        description=(
-            "Store each task's stdin content (capped at stdin_max_bytes) in the "
-            'task_started event metadata, so the debug UI can show exactly what a '
-            'task consumed. Off by default: on a high-fan-out workload stdin is '
-            'the largest payload the recorder would write. Failed tasks always '
-            'store their stdin (capped) on the task_failed event, regardless of '
-            'this flag.'
-        ),
-    )
-    stdin_max_bytes: int = Field(
-        default=65536,
-        ge=0,
-        description=(
-            'Byte cap for stored stdin content (store_stdin, and the always-on '
-            'failed-task capture). 0 = unlimited. Truncation is flagged as '
-            'stdin_truncated in the event metadata.'
-        ),
-    )
-    flush_interval_seconds: int = Field(
-        default=5,
-        ge=1,
-        description=(
-            'Seconds between recorder buffer flushes: the tick of the memory loop and the file loop, '
-            'and of the Postgres loop with postgres.'
-        ),
-    )
-    max_buffer: int = Field(
-        default=50_000,
-        ge=1000,
-        description=(
-            'In-memory event buffer capacity. When full, the oldest events are evicted and '
-            'counted in drakkar_recorder_dropped_events_total. The intake buffer and, with sqlite, the file queue '
-            'each hold at most this many rows; with postgres, the Postgres queue holds at most this many rows too.'
-        ),
-    )
-    # Maximum consecutive ``OperationalError`` failures tolerated on a single
-    # batch before the recorder gives up and drops it. On each failure the
-    # batch is re-queued at the front of the buffer so the next flush tick
-    # retries it; after this many attempts the batch is discarded and the
-    # ``drakkar_recorder_flush_batches_dropped_total`` counter ticks. Default
-    # 3 matches the cache engine's retry budget and keeps a persistent DB
-    # outage from leaking the buffer indefinitely.
-    max_flush_retries: int = Field(
-        default=3,
-        ge=1,
-        description=(
-            'Consecutive failed flush attempts tolerated per batch before it is dropped '
-            '(counted in drakkar_recorder_flush_batches_dropped_total). Used only with sqlite; with none and postgres '
-            'the key loads and is ignored.'
-        ),
-    )
-    event_min_duration_ms: int = Field(
-        default=0,
-        ge=0,
-        description='Minimum task duration (ms) to persist a task event at all. 0 persists everything.',
-    )
-    output_min_duration_ms: int = Field(
-        default=500,
-        ge=0,
-        description=(
-            'Minimum task duration (ms) to include args/stdout/stderr in the persisted event. '
-            'Faster tasks keep their row without output data.'
-        ),
-    )
-    # Handler annotations — diagnostic records a handler attaches to a window,
-    # message, or task from inside a hook (see drakkar.annotations). They are
-    # stored as ordinary rows in the events table, alongside everything else
-    # recorder rotation carries into the next file.
-    #
-    # ``0`` disables each byte cap. The two caps guard different resources and
-    # are deliberately not one setting: annotation_max_bytes rejects a single
-    # unreasonable payload, while annotation_max_bytes_per_call bounds what one
-    # hook invocation can add to the DB in total — without the latter, a handler
-    # annotating every message of a wide window can flood the events table
-    # with low-value rows.
-    annotations_enabled: bool = Field(
-        default=True,
-        description='Accept handler annotations (self.annotate(...)) and write them to the events table.',
-    )
-    annotation_max_bytes: int = Field(
-        default=16_384,
-        ge=0,
-        description='Byte cap for one annotation payload; larger payloads are dropped whole. 0 disables the cap.',
-    )
-    annotation_max_bytes_per_call: int = Field(
-        default=262_144,
-        ge=0,
-        description=(
-            'Total annotation bytes one hook invocation may write; further payloads past it '
-            'are dropped. 0 disables the cap.'
-        ),
-    )
-    # Cap on the payload copy written to the warning log when a record is
-    # dropped. Higher than the row itself is pointless; lower is fine. Log
-    # lines usually ship to a metered aggregator, so an uncapped copy can cost
-    # more than the row it replaced.
-    annotation_log_max_bytes: int = Field(
-        default=2048,
-        ge=0,
-        description=(
-            'Cap on the payload copy included in the warning log when an annotation is dropped. 0 disables the cap.'
-        ),
-    )
 
 
 class UIReleaseConfig(ConfigModel):
@@ -755,27 +471,6 @@ class UIDocsConfig(ConfigModel):
         return value
 
 
-class UITraceConfig(ConfigModel):
-    """Budget of one trace search over sealed history files."""
-
-    history_max_files: int = Field(
-        default=256,
-        ge=1,
-        description=(
-            'Most sealed history files one trace request with history=1 opens, newest first. Ignored with postgres.'
-        ),
-    )
-    history_max_seconds: float = Field(
-        default=10.0,
-        gt=0,
-        description=(
-            'Time limit for one trace request with history=1; the file history search stops and returns what it found. '
-            'With ui.recorder.persistence: postgres it is also the time limit of the Postgres history search '
-            '(capped at 3600 s); a search past the limit answers 503 and returns no rows.'
-        ),
-    )
-
-
 class UIConfig(ConfigModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -783,21 +478,17 @@ class UIConfig(ConfigModel):
 
     - top-level keys — the UI server itself (bind address, auth) and
       presentation settings the pages/SPA consume;
-    - ``ui.recorder.*`` — the flight-recorder store that feeds the UI
-      (:class:`UIRecorderConfig`);
     - ``ui.release.*`` — drakkar-ui bundle fetching
       (:class:`UIReleaseConfig`);
     - ``ui.probe_details.*`` — write caps for the Message Probe's
       user-defined details (:class:`UIProbeDetailsConfig`);
     - ``ui.timeline.*`` — timeline history depth, bar color rules, and
       label roles (:class:`UITimelineConfig`);
-    - ``ui.trace.*`` — the budget of a trace search over sealed history
-      (:class:`UITraceConfig`);
     - ``ui.docs.*`` — the operator docs site and its contextual anchors
       (:class:`UIDocsConfig`).
 
-    Set ``enabled: false`` to disable the whole UI feature (server,
-    recorder persistence, and bundle serving).
+    Set ``enabled: false`` to disable the server and the bundle serving.
+    The recorder does not depend on it.
 
     Every field is overridable through ``DK_UI__*`` environment variables.
     """
@@ -805,8 +496,8 @@ class UIConfig(ConfigModel):
     enabled: bool = Field(
         default=True,
         description=(
-            'Enable the whole UI feature: the server, flight-recorder persistence, and '
-            'bundle serving. Off skips all of it.'
+            'Enable the UI feature: the server and the bundle serving. Off skips both, and the recorder '
+            'keeps no memory store.'
         ),
     )
     host: str = Field(
@@ -875,8 +566,8 @@ class UIConfig(ConfigModel):
         description=(
             'Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that '
             'writes to disk: each call creates a new ``merged-<ts>-<token>.db`` '
-            'in the ``merged`` folder of ``shared.dir``, kept for '
-            '``history.merged_retention_days``. Set to false to serve 403 '
+            'in the ``merged`` folder of the shared folder, kept for '
+            '``recorder.archive.merged_retention``. Set to false to serve 403 '
             'instead — independently of ``auth_token``, per the reasoning on '
             '``probe_enabled``.'
         ),
@@ -919,13 +610,6 @@ class UIConfig(ConfigModel):
             "Externally reachable URL of this worker's UI, used for "
             'cross-worker links in the workers list. Empty derives '
             'http://<ip>:<port> from the bind address.'
-        ),
-    )
-    expose_env_vars: list[str] = Field(
-        default_factory=list,
-        description=(
-            'Environment variable names captured into the worker_config snapshot — for '
-            'recording deployment metadata like GIT_SHA or K8S_POD_NAME.'
         ),
     )
     max_rows: int = Field(
@@ -1003,11 +687,9 @@ class UIConfig(ConfigModel):
         ),
     )
     consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
-    recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
     timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
-    trace: UITraceConfig = Field(default_factory=UITraceConfig)
     docs: UIDocsConfig = Field(default_factory=UIDocsConfig)
 
     @field_validator('link_bases')

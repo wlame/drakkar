@@ -45,7 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from drakkar.config.ui import PERSISTENCE_POSTGRES
+from drakkar.config.recorder import PERSISTENCE_NONE, PERSISTENCE_POSTGRES
 from drakkar.dbstats import OwnFileStats, measure_memory_store
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder import memstore
@@ -98,7 +98,7 @@ def _has_unsafe_filename_char(filename: str) -> bool:
 
 # Names of database files the download and merge endpoints act on: the
 # sealed recorder files (``<worker>-<time>.db``) and the merge results
-# (``merged-*.db``). ``shared.dir`` is shared with other workers and the
+# (``merged-*.db``). ``storage.shared_dir`` is shared with other workers and the
 # debug UI is unauthenticated by design, so the endpoints serve only names
 # the framework writes, never any readable file a path happens to reach.
 #
@@ -326,7 +326,7 @@ def _read_chunks(handle: BinaryIO) -> Iterator[bytes]:
             yield chunk
 
 
-# The paths, relative to ``shared.dir``, that the download and merge
+# The paths, relative to the shared folder, that the download and merge
 # endpoints act on. The first segment picks the folder; the folder fixes
 # how many segments the path has and which names its last segment may
 # carry: ``history/<cluster>/<sealed>.db`` or ``history/<cluster>/<archive>``,
@@ -366,7 +366,7 @@ def _db_root(db_dir: str) -> Path | None:
     rather than trying to contain a path that has no root.
 
     Blocking: ``resolve`` is ``realpath`` (an lstat per path component), and
-    ``shared.dir`` is a network mount by design, so callers run it in a
+    the shared folder is a network mount by design, so callers run it in a
     thread, never on the loop that answers /healthz and /readyz.
     """
     if not db_dir:
@@ -382,7 +382,7 @@ def _is_safe_segment(segment: str) -> bool:
 
 
 def _shared_file_path(root: Path, relative: str) -> Path | None:
-    """``relative`` (a path inside ``shared.dir``) as a file path, or None when it is not one these endpoints serve.
+    """``relative`` (a path inside the shared folder) as a file path, or None when it is not one these endpoints serve.
 
     The path must have one of the :data:`_SHARED_PATH_SHAPES` and every
     segment must be safe. The file itself must not be a symlink, and the
@@ -666,7 +666,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """This worker's own files with measured stats, then every shared history folder.
 
         Offloaded: it lists folders on a possibly network-mounted
-        ``shared.dir`` and reads the own files with sqlite3 — /healthz and
+        the shared folder and reads the own files with sqlite3 — /healthz and
         /readyz live on this same loop.
         """
         coverage = recorder.memory_coverage()
@@ -684,7 +684,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
         # Policy gate, checked before the body is even read: merge is the
         # one UI endpoint that writes to disk (the archive pass deletes its
-        # results after ``history.merged_retention_days``). Independent of
+        # results after ``recorder.archive.merged_retention``). Independent of
         # auth_token by design — see ``UIConfig.merge_enabled``.
         if not config.merge_enabled:
             return _disabled_response('merge', 'ui.merge_enabled')
@@ -749,15 +749,16 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """
         if history and recorder.persistence == PERSISTENCE_POSTGRES and recorder.postgres_settings is not None:
             return await _trace_postgres_history(recorder.postgres_settings, partition, offset)
-        if history:
+        # With the recorder off there is no durable store to search: the answer is the memory rows.
+        if history and recorder.persistence != PERSISTENCE_NONE:
             events = await asyncio.to_thread(
                 functools.partial(
                     trace_history,
                     recorder.history_dir,
                     partition,
                     offset,
-                    max_files=config.trace.history_max_files,
-                    max_seconds=config.trace.history_max_seconds,
+                    max_files=recorder.config.search.max_files,
+                    max_seconds=recorder.config.search.timeout,
                 )
             )
             return JSONResponse(events)
@@ -779,7 +780,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                 recorder.cluster_name,
                 partition,
                 offset,
-                max_seconds=config.trace.history_max_seconds,
+                max_seconds=recorder.config.search.timeout,
                 on_close_failed=functools.partial(_log_postgres_read_failed, 'close'),
             )
         except PostgresHistoryError as exc:
@@ -928,7 +929,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     @router.get('/api/v1/debug/download/{path:path}', dependencies=[Depends(deps.require_auth)])
     async def debug_download(path: str):
-        """Download one sealed file, archive or merge result; ``path`` is relative to ``shared.dir``.
+        """Download one sealed file, archive or merge result; ``path`` is relative to the shared folder.
 
         Every refusal — a path of another shape, an unsafe segment, a link
         leading out of the folder, a missing file — answers 404.

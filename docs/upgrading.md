@@ -682,3 +682,116 @@ error tells you what is left.
 In code, these names changed: `KafkaConfig` is `KafkaConnectionConfig`,
 `CircuitBreakerConfig` is gone, and `KafkaSink`, `PostgresSink`, `MongoSink` and
 `RedisSink` take the connection as their third argument.
+
+## The flight recorder and the shared folder {#recorder}
+
+The recorder is now a root section, `recorder:`, and it does not depend on the UI.
+`ui.enabled` controls only the UI. Do these steps in order. An old key fails the
+load, so the load error tells you what is left.
+
+1. **Check workers with `ui.enabled: false`. They now record.** Such a worker used
+   to have no recorder at all. It now writes recorder files into `storage.dir`
+   (with the default `/tmp/drakkar` too), seals them and runs the archive task,
+   with no memory store. To keep the worker as it was, set `recorder.enabled: false`.
+2. **Replace `ui.recorder.persistence`.** There is no derive rule any more:
+
+    | The old value | The new keys |
+    |---|---|
+    | unset, with `storage.dir` set | nothing: `recorder.enabled` defaults to `true`, `recorder.provider` to `sqlite` |
+    | unset, with an empty `storage.dir` | `recorder.enabled: false`. This is new: with `sqlite` an empty `storage.dir` now fails the load |
+    | `none` | `recorder.enabled: false` |
+    | `sqlite` | `recorder.provider: sqlite` |
+    | `postgres` | `recorder.provider: postgres` |
+
+3. **Check a Trace search of a worker with the recorder off.** With `none`, a
+   `trace?history=1` request used to read the sealed files of the history folder. With
+   `recorder.enabled: false` it reads no folder and no table: it answers the memory rows.
+4. **Rename the keys in this table**, and write each duration or size with a unit. A
+   number with no unit fails the load, except `0`. The environment variables follow
+   the YAML paths: `DK_UI__RECORDER__MEMORY__WINDOW_SECONDS` is
+   `DK_RECORDER__MEMORY__WINDOW`.
+
+| The old key | The new key | The new value of an old one |
+|---|---|---|
+| `shared.dir` | `storage.shared_dir` | |
+| `ui.expose_env_vars` | `recorder.capture.env_vars` | |
+| `ui.trace.history_max_files` | `recorder.search.max_files` | |
+| `ui.trace.history_max_seconds` | `recorder.search.timeout` | `10.0` is `10s` |
+| `ui.recorder.flush_interval_seconds` | `recorder.flush_interval` | `5` is `5s`; whole seconds |
+| `ui.recorder.max_buffer` | `recorder.max_buffer_rows` | |
+| `ui.recorder.memory.window_seconds` | `recorder.memory.window` | `120` is `2m`; whole seconds |
+| `ui.recorder.memory.rows_per_executor` | `recorder.memory.rows_per_executor` | |
+| `ui.recorder.memory.max_mib` | `recorder.memory.max_size` | `256` is `256MiB` |
+| `ui.recorder.store_events` | `recorder.capture.events` | |
+| `ui.recorder.store_config` | `recorder.capture.config` | |
+| `ui.recorder.store_output` | `recorder.capture.output` | |
+| `ui.recorder.store_stdin` | `recorder.capture.stdin` | |
+| `ui.recorder.stdin_max_bytes` | `recorder.capture.max_stdin` | `65536` is `64KiB` |
+| `ui.recorder.event_min_duration_ms` | `recorder.capture.min_event_duration` | `0` stays `0`; `100` is `100ms` |
+| `ui.recorder.output_min_duration_ms` | `recorder.capture.min_output_duration` | `500` is `500ms` |
+| `ui.recorder.annotations_enabled` | `recorder.annotations.enabled` | |
+| `ui.recorder.annotation_max_bytes` | `recorder.annotations.max_size` | `16384` is `16KiB` |
+| `ui.recorder.annotation_max_bytes_per_call` | `recorder.annotations.max_size_per_call` | `262144` is `256KiB` |
+| `ui.recorder.annotation_log_max_bytes` | `recorder.annotations.max_log_size` | `2048` is `2KiB` |
+| `ui.recorder.rotation_interval_hours` | `recorder.sqlite.rotation_interval` | `1` is `1h`; whole hours |
+| `ui.recorder.max_flush_retries` | `recorder.sqlite.max_flush_retries` | |
+| `ui.recorder.store_state` | `recorder.sqlite.state_snapshots` | |
+| `ui.recorder.state_sync_interval_seconds` | `recorder.sqlite.state_interval` | `10` is `10s`; whole seconds |
+| `history.archive.enabled` | `recorder.archive.enabled` | |
+| `history.archive.window_hours` | `recorder.archive.window` | `24` is `24h`; whole hours |
+| `history.archive.due_after_hours` | `recorder.archive.due_after` | `48` is `48h`; whole hours |
+| `history.archive.retention_days` | `recorder.archive.retention` | `30` is `30d`; whole days |
+| `history.merged_retention_days` | `recorder.archive.merged_retention` | `32` is `32d`; whole days |
+| `history.archive.interval` | `recorder.archive.interval` | `3600` is `1h`; whole seconds |
+| `history.archive.cron` | `recorder.archive.cron` | |
+| `history.archive.lease_seconds` | `recorder.archive.lease` | `60` is `1m`; whole seconds |
+| `history.archive.sweep_after_seconds` | `recorder.archive.sweep_after` | `7200` is `2h`; whole seconds |
+| `ui.recorder.postgres.connection` | `recorder.postgres.connection` | |
+| `ui.recorder.postgres.table_prefix` | `recorder.postgres.table_prefix` | |
+| `ui.recorder.postgres.retention_hours` | `recorder.postgres.initial_retention` | `6` is `6h`; whole hours |
+| `ui.recorder.postgres.store_output` | `recorder.postgres.store_completed_output` | |
+| `ui.recorder.postgres.batch_rows` | `recorder.postgres.batch_rows` | |
+| `ui.recorder.postgres.queue_max_mib` | `recorder.postgres.max_queue` | `128` is `128MiB` |
+
+5. **Check the Postgres default.** `initial_retention` defaults to `24h`; the old key
+   defaulted to 6 hours. It only matters when a worker creates the table: an existing
+   table keeps the value in its comment. `drakkar-schema` keeps its own default of 6
+   hours when you give no `--retention-hours`.
+6. **Rename the keys of every resilience block**, in `recorder.postgres.resilience`,
+   `fleet.registry.resilience` and `periodic.election.resilience`. The `breaker` block
+   is gone.
+
+| The old key | The new key | The new value of an old one |
+|---|---|---|
+| `timeout_seconds` | `timeout` | `5.0` is `5s` |
+| `retries` | `max_retries` | |
+| `backoff_seconds` | `backoff` | `0.2` is `200ms` |
+| `backoff_max_seconds` | `max_backoff` | `5.0` is `5s` |
+| `breaker.failure_threshold` | `breaker_failures` | |
+| `breaker.cooldown_seconds` | `breaker_cooldown` | `30.0` is `30s` |
+
+7. **Update log queries.** `recorder_started` has no `ignored_keys` field. It has no
+   memory fields on a worker with no memory store.
+8. **Check a process that reads the Postgres table's comment or the archive messages.**
+   The load errors of the archive now start with `recorder.archive: `.
+
+The new layout of a worker with no UI that records into its folder:
+
+```yaml
+storage:
+  dir: /var/lib/drakkar
+  shared_dir: /mnt/fleet
+ui:
+  enabled: false
+recorder:
+  sqlite:
+    rotation_interval: 1h
+  archive:
+    retention: 30d
+```
+
+In code, `EventRecorder` takes a `RecorderConfig` as its first argument, and the
+constructor keywords `archive` and `merged_retention_days` are gone: both come from
+`config.archive`. `UIConfig.recorder`, `UIRecorderConfig`, `UITraceConfig`,
+`SharedConfig`, `HistoryConfig` and `BreakerConfig` are gone; `HistoryArchiveConfig` is
+`RecorderArchiveConfig`.

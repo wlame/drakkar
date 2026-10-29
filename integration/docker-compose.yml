@@ -302,14 +302,14 @@ services:
       # worker-1's cluster task definitions differ from worker-2's and
       # worker-3's, and the cluster-tasks scenario checks that worker-2
       # shows worker-1 with cluster_tasks_match false.
-      DK_HISTORY__ARCHIVE__ENABLED: "false"
+      DK_RECORDER__ARCHIVE__ENABLED: "false"
       # worker-1 keeps its recorder events in memory only and writes no
-      # recorder file; worker-2 and worker-3 keep the file (persistence
-      # sqlite, derived from storage.dir), so sealing and the archive still
+      # recorder file; worker-2 and worker-3 keep the file (the default
+      # provider sqlite), so sealing and the archive still
       # run. The short window lets the recorder-memory scenario see the
       # window eviction within a few minutes of the start.
-      DK_UI__RECORDER__PERSISTENCE: "none"
-      DK_UI__RECORDER__MEMORY__WINDOW_SECONDS: "60"
+      DK_RECORDER__ENABLED: "false"
+      DK_RECORDER__MEMORY__WINDOW: "1m"
     ports:
       - "9090:9090"
       - "8081:8081"
@@ -453,10 +453,10 @@ services:
       # drakkar.fast_recorder_events on postgres-fleet, with hourly partitions
       # kept for 2 hours (scenario-recorder-postgres.sh checks it). The main
       # cluster keeps its own modes.
-      DK_UI__RECORDER__PERSISTENCE: "postgres"
+      DK_RECORDER__PROVIDER: "postgres"
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
-      DK_UI__RECORDER__POSTGRES__TABLE_PREFIX: "fast"
-      DK_UI__RECORDER__POSTGRES__RETENTION_HOURS: "2"
+      DK_RECORDER__POSTGRES__TABLE_PREFIX: "fast"
+      DK_RECORDER__POSTGRES__INITIAL_RETENTION: "2h"
     ports:
       - "9094:9094"
       - "8084:8084"
@@ -483,10 +483,10 @@ services:
       DK_UI__PORT: "8085"
       DK_UI__PUBLIC_URL: "http://localhost:8085/"
       # Postgres recorder history, as fast-worker-1 (see there).
-      DK_UI__RECORDER__PERSISTENCE: "postgres"
+      DK_RECORDER__PROVIDER: "postgres"
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
-      DK_UI__RECORDER__POSTGRES__TABLE_PREFIX: "fast"
-      DK_UI__RECORDER__POSTGRES__RETENTION_HOURS: "2"
+      DK_RECORDER__POSTGRES__TABLE_PREFIX: "fast"
+      DK_RECORDER__POSTGRES__INITIAL_RETENTION: "2h"
     ports:
       - "9095:9095"
       - "8085:8085"

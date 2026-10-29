@@ -293,13 +293,13 @@ async def test_flush_ignores_events_appended_while_it_runs(tmp_path, monkeypatch
 
 async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
     """The chunk is the unit of loss. Before chunking, a database that stayed
-    unavailable for ``max_flush_retries`` ticks cost the entire buffer at
+    unavailable for ``sqlite.max_flush_retries`` ticks cost the entire buffer at
     once — on a busy worker that is every event held.
     """
     from drakkar.metrics import recorder_flush_batches_dropped
 
     monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 10)
-    config = make_debug_config(tmp_path, max_flush_retries=2)
+    config = make_debug_config(tmp_path, sqlite={'max_flush_retries': 2})
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     try:
@@ -332,19 +332,19 @@ async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
 
 async def test_flush_wait_returns_early_when_the_buffer_is_half_full(tmp_path):
     """A burst must not sit in the buffer until the next interval — at a high
-    event rate the buffer would reach ``max_buffer`` and start evicting.
+    event rate the buffer would reach ``max_buffer_rows`` and start evicting.
 
     Asserts the wait itself rather than watching the buffer drain through the
     flush loop: the loop resets its deadline after each flush, so a test that
     polls for an empty buffer depends on every event landing before the first
     early wake-up. That is true today but it is a race, not an invariant.
     """
-    config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
+    config = make_debug_config(tmp_path, flush_interval='600s', max_buffer_rows=1000)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     # Deliberately not started: the real memory loop calls this same method
     # and would drain the buffer out from under the assertion.
     rec._running = True
-    for offset in range(600):  # high water is max_buffer // 2
+    for offset in range(600):  # high water is max_buffer_rows // 2
         rec.record_committed(partition=0, offset=offset)
 
     # Returns on the buffer depth, not on the ten-minute interval.
@@ -355,7 +355,7 @@ async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_p
     """The early wake-up must not turn the flush loop into a busy writer:
     below the mark the interval is still what decides.
     """
-    config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
+    config = make_debug_config(tmp_path, flush_interval='600s', max_buffer_rows=1000)
     rec = EventRecorder(config, worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(tmp_path))
     rec._running = True
     for offset in range(100):

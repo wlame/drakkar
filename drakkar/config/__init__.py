@@ -4,7 +4,7 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
 The models are split per domain across this package — ``sinks``,
-``sources``, ``runtime``, ``ui``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
+``sources``, ``runtime``, ``ui``, ``recorder``, ``cache``, ``storage``, ``periodic``, ``fleet``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
@@ -28,7 +28,18 @@ from drakkar.config.fleet import (
     FleetRegistryConfig,
 )
 from drakkar.config.periodic import ElectionConfig, PeriodicConfig
-from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
+from drakkar.config.recorder import (
+    DEFAULT_ARCHIVE_RETENTION_DAYS,
+    RecorderAnnotationsConfig,
+    RecorderArchiveConfig,
+    RecorderCaptureConfig,
+    RecorderConfig,
+    RecorderMemoryConfig,
+    RecorderPostgresConfig,
+    RecorderSearchConfig,
+    RecorderSqliteConfig,
+)
+from drakkar.config.resilience import ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _parse_env_overrides, load_config, load_yaml_document
 from drakkar.config.runtime import (
     ExecutorConfig,
@@ -53,13 +64,7 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.sources import KafkaSourceConfig, SourcesConfig, StartupAlignConfig
-from drakkar.config.storage import (
-    DEFAULT_ARCHIVE_RETENTION_DAYS,
-    HistoryArchiveConfig,
-    HistoryConfig,
-    SharedConfig,
-    StorageConfig,
-)
+from drakkar.config.storage import StorageConfig
 from drakkar.config.strict import UnknownKey, deep_merge, find_unknown_keys, unknown_keys_message
 from drakkar.config.ui import (
     BUILTIN_LINK_BASES,
@@ -77,12 +82,8 @@ from drakkar.config.ui import (
     UIConsumePauseConfig,
     UIDocsConfig,
     UIProbeDetailsConfig,
-    UIRecorderConfig,
-    UIRecorderMemoryConfig,
-    UIRecorderPostgresConfig,
     UIReleaseConfig,
     UITimelineConfig,
-    UITraceConfig,
 )
 from drakkar.config.units import (
     ByteSize,
@@ -105,7 +106,6 @@ __all__ = [
     'TIMELINE_NUMERIC_FIELDS',
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
-    'BreakerConfig',
     'ByteSize',
     'CacheConfig',
     'CacheExchangeConfig',
@@ -122,8 +122,6 @@ __all__ = [
     'FileSinkConfig',
     'FleetConfig',
     'FleetRegistryConfig',
-    'HistoryArchiveConfig',
-    'HistoryConfig',
     'HttpSinkConfig',
     'IOConfig',
     'KafkaConnectionConfig',
@@ -138,11 +136,18 @@ __all__ = [
     'PeriodicConfig',
     'PostgresConnectionConfig',
     'PostgresSinkConfig',
+    'RecorderAnnotationsConfig',
+    'RecorderArchiveConfig',
+    'RecorderCaptureConfig',
+    'RecorderConfig',
+    'RecorderMemoryConfig',
+    'RecorderPostgresConfig',
+    'RecorderSearchConfig',
+    'RecorderSqliteConfig',
     'RedisConnectionConfig',
     'RedisSinkConfig',
     'ResilienceConfig',
     'RuntimeHealthConfig',
-    'SharedConfig',
     'SinkDefaults',
     'SinkInstanceConfig',
     'SinkPolicy',
@@ -158,12 +163,8 @@ __all__ = [
     'UIConsumePauseConfig',
     'UIDocsConfig',
     'UIProbeDetailsConfig',
-    'UIRecorderConfig',
-    'UIRecorderMemoryConfig',
-    'UIRecorderPostgresConfig',
     'UIReleaseConfig',
     'UITimelineConfig',
-    'UITraceConfig',
     'UnknownKey',
     'WebAppConfig',
     'WebClientConfig',

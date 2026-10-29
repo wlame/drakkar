@@ -25,7 +25,7 @@ from typing import Any
 
 import structlog
 
-from drakkar.config.resilience import BreakerConfig, ResilienceConfig
+from drakkar.config.resilience import ResilienceConfig
 from drakkar.metrics import provider_breaker_open, provider_call_duration, provider_calls
 from drakkar.utils import redact_url
 
@@ -119,8 +119,9 @@ class _Admission(enum.Enum):
 class _Breaker:
     """Closed until ``failure_threshold`` failed operations in a row; then open until a probe succeeds."""
 
-    def __init__(self, config: BreakerConfig) -> None:
-        self._config = config
+    def __init__(self, *, failure_threshold: int, cooldown_seconds: float) -> None:
+        self._failure_threshold = failure_threshold
+        self._cooldown_seconds = cooldown_seconds
         self._consecutive_failures = 0
         self._opened_at: float | None = None
         self._probe_in_flight = False
@@ -134,7 +135,7 @@ class _Breaker:
         """Decide whether an operation may run; after the cooldown the first one becomes the probe."""
         if self._opened_at is None:
             return _Admission.CALL
-        if self._probe_in_flight or now - self._opened_at < self._config.cooldown_seconds:
+        if self._probe_in_flight or now - self._opened_at < self._cooldown_seconds:
             return _Admission.REFUSED
         self._probe_in_flight = True
         return _Admission.PROBE
@@ -167,7 +168,7 @@ class _Breaker:
                 self._opened_at = now
             return False
         self._consecutive_failures += 1
-        if self._consecutive_failures < self._config.failure_threshold:
+        if self._consecutive_failures < self._failure_threshold:
             return False
         self._opened_at = now
         return True
@@ -197,7 +198,7 @@ class ResilientCaller:
         self._logger = logger if logger is not None else structlog.get_logger()
         self._now_monotonic = now_monotonic
         self._sleep = sleep
-        self._breaker = _Breaker(config.breaker)
+        self._breaker = _Breaker(failure_threshold=config.breaker_failures, cooldown_seconds=config.breaker_cooldown)
         self._failure_log = RateLimitedLog(now_monotonic)
         self._breaker_gauge = provider_breaker_open.labels(feature=feature, provider=provider)
         self._breaker_gauge.set(0)
@@ -210,9 +211,9 @@ class ResilientCaller:
     @property
     def operation_bound_seconds(self) -> float:
         """The longest one operation with the configured attempts takes: every attempt's limit plus every backoff."""
-        retries = self._config.retries
+        retries = self._config.max_retries
         backoffs = sum(self._backoff_delay(retry_index=index) for index in range(retries))
-        return (1 + retries) * self._config.timeout_seconds + backoffs
+        return (1 + retries) * self._config.timeout + backoffs
 
     async def call(
         self,
@@ -241,7 +242,7 @@ class ResilientCaller:
         the caller. A cancelled operation is neither counted nor held against
         the breaker.
         """
-        max_attempts = self._config.retries + 1 if attempts is None else attempts
+        max_attempts = self._config.max_retries + 1 if attempts is None else attempts
         if max_attempts < 1:
             raise ValueError(f'attempts must be >= 1, got {max_attempts}')
         started = self._now_monotonic()
@@ -282,7 +283,7 @@ class ResilientCaller:
         attempt = 0
         while True:
             attempt += 1
-            timeout = min(self._config.timeout_seconds, self._time_left(deadline_at))
+            timeout = min(self._config.timeout, self._time_left(deadline_at))
             try:
                 value = await asyncio.wait_for(make_call(), timeout=timeout)
             except TRANSIENT_ERRORS as exc:
@@ -303,8 +304,8 @@ class ResilientCaller:
 
     def _backoff_delay(self, *, retry_index: int) -> float:
         """The wait before retry ``retry_index`` (0-based): doubling from the base, capped."""
-        doubled = self._config.backoff_seconds * 2 ** min(retry_index, MAX_BACKOFF_EXPONENT)
-        return min(doubled, self._config.backoff_max_seconds)
+        doubled = self._config.backoff * 2 ** min(retry_index, MAX_BACKOFF_EXPONENT)
+        return min(doubled, self._config.max_backoff)
 
     def _time_left(self, deadline_at: float | None) -> float:
         if deadline_at is None:
@@ -351,8 +352,8 @@ class ResilientCaller:
             category=self._category,
             feature=self._feature,
             provider=self._provider,
-            failure_threshold=self._config.breaker.failure_threshold,
-            cooldown_seconds=self._config.breaker.cooldown_seconds,
+            failure_threshold=self._config.breaker_failures,
+            cooldown_seconds=self._config.breaker_cooldown,
         )
 
     async def _log_failure(self, op: str, result: CallResult, error: Exception) -> None:

@@ -10,6 +10,7 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.cronexpr import CRON_FIELDS_MESSAGE
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.periodic import (
@@ -27,7 +28,7 @@ from drakkar.periodic import (
     run_periodic_task,
     run_task_once,
 )
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import wait_for
 
 # --- Decorator tests ---
 
@@ -869,7 +870,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
     """Periodic run records events to the flight recorder."""
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -905,7 +906,7 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -943,7 +944,7 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -985,7 +986,7 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
 
@@ -1022,7 +1023,7 @@ def test_recorder_record_periodic_run_system_true_stores_in_metadata(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='cache.flush', duration=0.01, status='ok', system=True)
 
@@ -1042,7 +1043,7 @@ def test_recorder_record_periodic_run_system_false_omits_key(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(name='user.task', duration=0.01, status='ok')
 
@@ -1059,7 +1060,7 @@ def test_recorder_record_periodic_run_system_true_with_error(tmp_path):
 
     from drakkar.recorder import EventRecorder
 
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name='test', persistence='sqlite', storage_dir=str(tmp_path))
     rec.record_periodic_run(
         name='cache.sync',

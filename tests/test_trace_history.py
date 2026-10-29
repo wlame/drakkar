@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 import pytest
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.models import SourceMessage
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.queries import trace_history
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
-from tests.conftest import make_ui_config
 
 CLUSTER = 'search'
 PARTITION = 3
@@ -130,7 +130,7 @@ def _message(offset: int) -> SourceMessage:
 @pytest.fixture
 async def recorder(tmp_path):
     (tmp_path / 'storage').mkdir()
-    config = make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s', capture={'output': False})
     rec = EventRecorder(
         config,
         worker_name='w-1',

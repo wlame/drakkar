@@ -17,13 +17,14 @@ import pytest
 from structlog.testing import capture_logs
 
 import drakkar.recorder.core as recorder_core
+from drakkar.config import RecorderConfig
 from drakkar.metrics import recorder_seal_failures, recorder_unsealed_files
 from drakkar.models import SourceMessage
 from drakkar.recorder import EventRecorder, sealing
 from drakkar.recorder.helpers import make_db_path
 from drakkar.recorder.history import read_meta
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import wait_for
 
 WORKER = 'w-1'
 INSTANCE = '1111111111111111'
@@ -54,7 +55,7 @@ async def make_recorder(tmp_path):
     def build(*, worker: str = WORKER, cluster: str = 'search', storage: bool = True) -> EventRecorder:
         storage_dir = tmp_path / 'storage'
         storage_dir.mkdir(exist_ok=True)
-        config = make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60)
+        config = RecorderConfig(flush_interval='60s', capture={'output': False})
         recorder = EventRecorder(
             config,
             worker_name=worker,
@@ -461,7 +462,7 @@ async def test_the_live_file_is_never_a_leftover_however_the_folder_is_spelled(t
     monkeypatch.setattr(recorder_core, 'make_db_path', make_db_path)
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'storage').mkdir()
-    config = make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s', capture={'output': False})
     rec = EventRecorder(
         config,
         worker_name=WORKER,

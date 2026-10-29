@@ -43,15 +43,16 @@ RULE_CLUSTER_INTERVAL = "a cluster task's interval must be a whole number of sec
 RULE_LEASE_SCOPE = 'lease_seconds is only for cluster tasks'
 RULE_LEASE_BOUNDS = 'lease_seconds must be a whole number from 40 to 86400'
 
-# The texts of the ``history.archive`` config checks.
-PREFIX_ARCHIVE = 'history.archive: '
+# The texts of the ``recorder.archive`` config checks.
+PREFIX_ARCHIVE = 'recorder.archive: '
 RULE_AT_MOST_ONE = 'give at most one of interval and cron'
 RULE_ARCHIVE_INTERVAL = 'interval must be a whole number of seconds and at least 30'
-RULE_SWEEP_AFTER = 'sweep_after_seconds must be at least 60'
+RULE_ARCHIVE_LEASE = 'lease must be a whole number of seconds from 40 to 86400'
+RULE_SWEEP_AFTER = 'sweep_after must be at least 60 seconds'
 # The startup check of a cluster task with the filesystem election and no shared folder.
 STARTUP_NO_SHARED_FOLDER = (
     "periodic task '{name}' has scope cluster, but the filesystem election needs a shared folder "
-    '(shared.dir or storage.dir)'
+    '(storage.shared_dir or storage.dir)'
 )
 
 _TASK_NAME = re.compile(TASK_NAME_PATTERN)

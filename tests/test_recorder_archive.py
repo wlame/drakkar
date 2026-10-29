@@ -33,7 +33,7 @@ from drakkar.cluster_tasks import (
     SlotLease,
     run_cluster_task,
 )
-from drakkar.config import HistoryArchiveConfig, ResilienceConfig
+from drakkar.config import RecorderArchiveConfig, RecorderConfig, ResilienceConfig
 from drakkar.metrics import recorder_archive_failures
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import EventRecorder
@@ -62,7 +62,7 @@ from tests.archive_helpers import (
     run_won_slot,
     sealed_db_name,
 )
-from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, make_ui_config, wait_for
+from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
 
 OTHER_CLUSTER = 'index-fleet'
@@ -123,10 +123,10 @@ def _make_archive(folder: Path, cluster: str, end: float, *, window: float = DAY
     return path
 
 
-def _make_config(**overrides) -> HistoryArchiveConfig:
-    values = {'enabled': True, 'window_hours': 24}
+def _make_config(**overrides) -> RecorderArchiveConfig:
+    values = {'enabled': True, 'window': '24h', 'merged_retention': 0}
     values.update(overrides)
-    return HistoryArchiveConfig(**values)
+    return RecorderArchiveConfig(**values)
 
 
 def _age(path: Path, seconds: float) -> None:
@@ -268,7 +268,7 @@ def test_assign_windows_groups_separate_days_into_separate_windows(tmp_path):
 # --- archive pass -------------------------------------------------------
 
 
-async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, worker='worker-1', stop=None) -> str:
+async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, worker='worker-1', stop=None) -> str:
     """Run one archive slot as the slot loop does; the slot's outcome.
 
     The slot takes the lease on the filesystem election; when it wins, the
@@ -278,7 +278,7 @@ async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, 
     archive = cfg or _make_config()
     election = _filesystem_election(tmp_path, cluster, worker=worker)
     assert (await election.ensure_started(ACQUIRE_WINDOW_SECONDS)).ok
-    lease = SlotLease(election, scope=task_scope(cluster, ARCHIVE_TASK_NAME), lease_seconds=archive.lease_seconds)
+    lease = SlotLease(election, scope=task_scope(cluster, ARCHIVE_TASK_NAME), lease_seconds=archive.lease)
     outcome, _ = await lease.acquire(ACQUIRE_WINDOW_SECONDS)
     try:
         if outcome == SLOT_WON:
@@ -290,7 +290,6 @@ async def _run(tmp_path, cfg=None, *, cluster=CLUSTER, merged_retention_days=0, 
                     cluster=cluster,
                     instance=INSTANCE,
                     archive=archive,
-                    merged_retention_days=merged_retention_days,
                     fence=fence,
                     stop=stop,
                 )
@@ -308,7 +307,6 @@ def _run_fenced(tmp_path, fence: _ScriptedFence, cfg=None) -> None:
         cluster=CLUSTER,
         instance=INSTANCE,
         archive=cfg or _make_config(),
-        merged_retention_days=0,
         fence=fence,  # type: ignore[arg-type]
     )
 
@@ -541,7 +539,7 @@ async def test_run_archive_pass_takes_over_a_lock_left_by_a_dead_worker(tmp_path
     lock = _lock_path(tmp_path)
     lock.parent.mkdir(parents=True)
     lock.write_text(json.dumps({'acquired_at': '', 'instance': 'dead', 'token': 'dead', 'worker': 'worker-2'}))
-    _age(lock, HistoryArchiveConfig().lease_seconds + 60)
+    _age(lock, RecorderArchiveConfig().lease + 60)
 
     await _run(tmp_path)
 
@@ -695,7 +693,7 @@ async def test_run_archive_pass_fenced_logs_recorder_archive_fenced_and_counts_a
     assert _dotfiles(folder) == []
 
 
-async def test_run_archive_pass_sweeps_with_sweep_after_seconds(tmp_path):
+async def test_run_archive_pass_sweeps_with_sweep_after(tmp_path):
     folder = history_folder(tmp_path)
     old_work_file = folder / WORK_FILES[0]
     young_work_file = folder / WORK_FILES[3]
@@ -704,7 +702,7 @@ async def test_run_archive_pass_sweeps_with_sweep_after_seconds(tmp_path):
     _age(old_work_file, 700)
     _age(young_work_file, 500)
 
-    _run_fenced(tmp_path, _ScriptedFence(held=True), _make_config(sweep_after_seconds=600))
+    _run_fenced(tmp_path, _ScriptedFence(held=True), _make_config(sweep_after='600s'))
 
     assert not old_work_file.exists()
     assert young_work_file.exists()
@@ -830,7 +828,7 @@ async def test_the_sweep_removes_a_work_file_older_than_the_sweep_age(tmp_path, 
     _age(work_file, 101)
 
     with capture_logs() as cap:
-        await _run(tmp_path, _make_config(sweep_after_seconds=100))
+        await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert not work_file.exists()
     assert [e['name'] for e in cap if e['event'] == 'recorder_archive_temp_swept'] == [name]
@@ -848,7 +846,7 @@ async def test_history_sweep_still_removes_old_archive_lock_stale_copies(tmp_pat
         _age(path, 101)
 
     with capture_logs() as cap:
-        await _run(tmp_path, _make_config(sweep_after_seconds=100))
+        await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert not stale_copy.exists()
     assert old_lock.exists()
@@ -862,7 +860,7 @@ async def test_the_sweep_keeps_a_work_file_younger_than_the_sweep_age(tmp_path, 
     work_file.write_bytes(b'still being written')
     _age(work_file, 50)
 
-    await _run(tmp_path, _make_config(sweep_after_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert work_file.exists()
 
@@ -873,7 +871,7 @@ async def test_the_sweep_removes_an_old_meta_file_whose_database_is_missing(tmp_
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 101)
 
-    await _run(tmp_path, _make_config(sweep_after_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert not orphan.exists()
 
@@ -885,7 +883,7 @@ async def test_the_sweep_keeps_a_fresh_meta_file_whose_database_is_still_on_its_
     orphan.write_bytes(b'{"schema":1}')
     _age(orphan, 50)
 
-    await _run(tmp_path, _make_config(sweep_after_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert orphan.exists()
 
@@ -895,7 +893,7 @@ async def test_the_sweep_keeps_an_old_meta_file_next_to_its_database(tmp_path):
     source = make_sealed_db(folder, 'worker-1', time.time() - HOUR)
     _age(Path(meta_path(source)), 101)
 
-    await _run(tmp_path, _make_config(sweep_after_seconds=100))
+    await _run(tmp_path, _make_config(sweep_after='100s'))
 
     assert Path(meta_path(source)).exists()
 
@@ -912,7 +910,7 @@ async def test_run_archive_pass_expires_only_this_clusters_old_archives(tmp_path
     old_theirs = _make_archive(folder, OTHER_CLUSTER, now - 10 * DAY)
 
     with capture_logs() as cap:
-        await _run(tmp_path, _make_config(retention_days=3))
+        await _run(tmp_path, _make_config(retention='3d'))
 
     assert not old_mine.exists()
     assert recent_mine.exists()
@@ -925,7 +923,7 @@ async def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_p
     folder = history_folder(tmp_path)
     old_mine = _make_archive(folder, CLUSTER, time.time() - 100 * DAY)
 
-    await _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention=0))
 
     assert old_mine.exists()
 
@@ -949,7 +947,7 @@ async def test_run_archive_pass_prunes_merge_results_past_their_retention(tmp_pa
     in_progress = _merged_file(tmp_path, '.merged-2026-09-01__10_00_00-0123456789abcdef.tmp', 40)
 
     with capture_logs() as cap:
-        await _run(tmp_path, merged_retention_days=32)
+        await _run(tmp_path, _make_config(merged_retention='32d'))
 
     assert not old.exists()
     assert young.exists()
@@ -961,7 +959,7 @@ async def test_run_archive_pass_keeps_merge_results_when_their_retention_is_zero
     history_folder(tmp_path)
     old = _merged_file(tmp_path, 'merged-2026-01-01__10_00_00-0123456789abcdef.db', 300)
 
-    await _run(tmp_path, merged_retention_days=0)
+    await _run(tmp_path, _make_config(merged_retention=0))
 
     assert old.exists()
 
@@ -977,7 +975,7 @@ async def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
     extended = _make_archive(folder, f'{CLUSTER}-hot', now - 2 * DAY)
     extended.write_bytes(b'x' * 4096)
 
-    await _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 2
     assert archive_mod.recorder_archive_bytes._value.get() == mine_a.stat().st_size + mine_b.stat().st_size
@@ -987,7 +985,7 @@ async def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
     archive_mod.recorder_archive_bytes.set(999)
     archive_mod.recorder_archive_files.set(9)
 
-    await _run(tmp_path, _make_config(retention_days=0))
+    await _run(tmp_path, _make_config(retention=0))
 
     assert archive_mod.recorder_archive_files._value.get() == 0
     assert archive_mod.recorder_archive_bytes._value.get() == 0
@@ -998,18 +996,18 @@ async def test_archive_pass_reports_a_zero_footprint_without_a_folder(tmp_path):
 
 def test_warn_if_archives_unbounded_warns_when_retention_is_zero():
     with capture_logs() as cap:
-        warn_if_archives_unbounded(_make_config(retention_days=0), '/shared/history/search')
+        warn_if_archives_unbounded(_make_config(retention=0), '/shared/history/search')
 
     (warning,) = [e for e in cap if e['event'] == 'recorder_archives_unbounded']
     assert warning['log_level'] == 'warning'
     assert warning['folder'] == '/shared/history/search'
-    assert 'history.archive.retention_days' in warning['message']
+    assert 'recorder.archive.retention' in warning['message']
     assert 'drakkar_recorder_archive_bytes' in warning['message']
 
 
 @pytest.mark.parametrize(
     'cfg',
-    [_make_config(retention_days=30), _make_config(enabled=False, retention_days=0), HistoryArchiveConfig()],
+    [_make_config(retention='30d'), _make_config(enabled=False, retention=0), RecorderArchiveConfig()],
     ids=['retention-set', 'archiving-disabled', 'defaults'],
 )
 def test_warn_if_archives_unbounded_is_silent_otherwise(cfg):
@@ -1022,10 +1020,10 @@ def test_warn_if_archives_unbounded_is_silent_otherwise(cfg):
 # --- the recorder's archive task ----------------------------------------
 
 
-def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> EventRecorder:
+def _make_recorder(tmp_path, *, archive: RecorderArchiveConfig | None = None) -> EventRecorder:
     """A recorder of ``worker-1`` in ``CLUSTER``."""
     (tmp_path / 'storage').mkdir(exist_ok=True)
-    config = make_ui_config(enabled=True, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s', archive=archive or RecorderArchiveConfig())
     return EventRecorder(
         config,
         worker_name='worker-1',
@@ -1034,8 +1032,6 @@ def _make_recorder(tmp_path, *, archive: HistoryArchiveConfig | None = None) -> 
         storage_dir=str(tmp_path / 'storage'),
         shared_dir=str(tmp_path / 'shared'),
         instance=INSTANCE,
-        archive=archive,
-        merged_retention_days=7,
     )
 
 
@@ -1060,7 +1056,7 @@ async def _start_won_archive_slot(rec: EventRecorder, election: ClusterElection)
 
 
 def test_the_archive_task_is_the_system_cluster_task_history_archive(tmp_path):
-    archive = HistoryArchiveConfig(cron='0 * * * *', lease_seconds=900)
+    archive = RecorderArchiveConfig(cron='0 * * * *', lease='900s')
     archive_task = _make_recorder(tmp_path, archive=archive).archive_cluster_task()
 
     assert archive_task is not None
@@ -1070,7 +1066,7 @@ def test_the_archive_task_is_the_system_cluster_task_history_archive(tmp_path):
 
 
 async def test_archive_slot_won_runs_the_pass_with_a_fence_and_records_history_archive_row(tmp_path, monkeypatch):
-    archive = HistoryArchiveConfig(lease_seconds=900)
+    archive = RecorderArchiveConfig(lease='900s')
     rec = _make_recorder(tmp_path, archive=archive)
     election, _provider = _memory_election('memory-won')
     seen: dict = {}
@@ -1102,7 +1098,6 @@ async def test_archive_slot_won_runs_the_pass_with_a_fence_and_records_history_a
     assert seen['shared_dir'] == str(tmp_path / 'shared')
     assert (seen['cluster'], seen['instance']) == (CLUSTER, INSTANCE)
     assert seen['archive'] is rec._archive
-    assert seen['merged_retention_days'] == 7
     assert seen['stop'] is rec._archive_stop
     assert seen['thread'] != threading.current_thread().ident
     fence = seen['fence']
@@ -1297,7 +1292,7 @@ class _FakeClock:
 
 async def test_rotation_starts_no_archive_pass(tmp_path, monkeypatch):
     clock = _FakeClock()
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=True))
+    rec = _make_recorder(tmp_path, archive=RecorderArchiveConfig(enabled=True))
     rec._sleep = clock.sleep
     counts = {'rotations': 0, 'sealing': 0, 'passes': 0}
 
@@ -1311,7 +1306,7 @@ async def test_rotation_starts_no_archive_pass(tmp_path, monkeypatch):
     )
     await rec.start()
     try:
-        await clock.tick(rec._store.rotation_interval_hours * 3600)
+        await clock.tick(rec._config.sqlite.rotation_interval * 3600)
 
         assert counts == {'rotations': 1, 'sealing': 1, 'passes': 0}
         assert rec._archive_executor is None
@@ -1477,7 +1472,7 @@ async def test_a_stop_without_a_deadline_waits_until_the_pass_in_progress_ends(t
 
 
 async def test_start_notifies_once_when_archiving_is_disabled(tmp_path):
-    rec = _make_recorder(tmp_path, archive=HistoryArchiveConfig(enabled=False))
+    rec = _make_recorder(tmp_path, archive=RecorderArchiveConfig(enabled=False))
 
     with capture_logs() as cap:
         await rec.start()

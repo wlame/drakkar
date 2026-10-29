@@ -871,7 +871,7 @@ recorder_flush_batches_dropped = Counter(
 # otherwise stay silent.
 #
 # When a recorder write fails it re-queues the failed batch at the FRONT of
-# its bounded ``deque(maxlen=max_buffer)`` (the intake or the file queue)
+# its bounded ``deque(maxlen=max_buffer_rows)`` (the intake or the file queue)
 # via ``extendleft``. If appends filled the queue while the write was in
 # flight, ``extendleft`` would silently evict rows from the TAIL of the
 # deque (newest events) to honour ``maxlen``. Those drops are NOT counted
@@ -895,7 +895,7 @@ recorder_requeue_overflow = Counter(
 #
 # Rotation is bounded (raw files are merged away), the buffer is bounded
 # (maxlen), and the live database is bounded by the archive window. Archives
-# are the exception: they accumulate until ``history.archive.retention_days`` expires
+# are the exception: they accumulate until ``recorder.archive.retention`` expires
 # them, and with that set to 0 nothing ever does. Both gauges are refreshed on
 # every archive pass — including the ticks that archive nothing, which is
 # exactly when someone is asking why a volume is full.

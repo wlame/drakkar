@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The recorder is a feature of its own.** A root section `recorder:` holds it, and
+  `ui.enabled` no longer decides it. A worker with `ui.enabled: false` now records into
+  `storage.dir` or Postgres, seals and archives, with no memory store. Set
+  `recorder.enabled: false` to record nothing durable; with the UI on, the UI then shows
+  the memory window and a trace with `history=1` reads no folder and no table.
+  `recorder.provider` is `sqlite` or `postgres`. `ui.recorder.persistence` and its derive
+  rule are gone: with `sqlite`, an empty `storage.dir` now fails the load.
+- **Keys moved into `recorder`.** `ui.recorder.*` is split into `recorder.memory`,
+  `capture`, `annotations`, `sqlite` and `postgres`; `history.archive.*` and
+  `history.merged_retention_days` are in `recorder.archive`; `ui.trace` is
+  `recorder.search`; `ui.expose_env_vars` is `recorder.capture.env_vars`. Durations and
+  sizes carry a unit. `recorder.postgres.initial_retention` defaults to `24h`.
+  `shared.dir` is `storage.shared_dir`. See the path table in `docs/upgrading.md`.
+- **Resilience keys renamed.** `timeout`, `max_retries`, `backoff`, `max_backoff`,
+  `breaker_failures`, `breaker_cooldown`, with units; the `breaker` block is gone.
+- **`recorder_started` has no `ignored_keys` field.**
 - **A service is declared once under `connections`.** The root `kafka:` section
   is gone: brokers, security, `client_config` and the Kafka-UI links live in
   `connections.kafka.<name>`. `connections.mongo.<name>` holds the Mongo `uri`.

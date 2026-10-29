@@ -142,7 +142,7 @@ class Annotator:
         Args:
             recorder: Sink for accepted rows.
             enabled: When False every call returns immediately, recording
-                nothing and counting nothing. Mirrors ``annotations_enabled``.
+                nothing and counting nothing. Mirrors ``recorder.annotations.enabled``.
             max_bytes: Largest single encoded annotation accepted. ``0``
                 disables the limit.
             max_bytes_per_call: Total encoded bytes accepted per hook
@@ -339,7 +339,7 @@ class NoOpAnnotator:
 
     Shared as a class-level default on ``BaseDrakkarHandler`` exactly as
     ``NoOpCache`` is, so ``self.annotate(...)`` is always callable — in unit
-    tests, with ``ui.recorder.store_events=false``, and before the framework
+    tests, with ``recorder.capture.events=false``, and before the framework
     has finished starting up.
     """
 

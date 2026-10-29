@@ -51,14 +51,14 @@ class RecorderPostgresSettings:
 
     ``connection_name`` is the entry under ``connections.postgres`` and
     ``connection`` its settings; ``queue_max_bytes`` is
-    ``ui.recorder.postgres.queue_max_mib`` in bytes.
+    ``recorder.postgres.max_queue``.
     """
 
     connection_name: str
     connection: PostgresConnectionConfig
     table_prefix: str
     retention_hours: int
-    store_output: bool
+    store_completed_output: bool
     batch_rows: int
     queue_max_bytes: int
     resilience: ResilienceConfig
@@ -127,17 +127,17 @@ def _plain_text(value: str) -> str:
     return str.replace(value, NUL_CHARACTER, REPLACEMENT_CHARACTER)
 
 
-def build_record(row: tuple, *, cluster: str, worker: str, instance: str, store_output: bool) -> tuple:
+def build_record(row: tuple, *, cluster: str, worker: str, instance: str, store_completed_output: bool) -> tuple:
     """Return the 24 values of one row in ``COPY_COLUMNS`` order.
 
     The writer identity comes first, then the 20 event columns as they are
     (every text value as plain text with its NULs replaced), then the trace
-    offsets. Without ``store_output`` the ``stdout`` and ``stderr`` values
+    offsets. Without ``store_completed_output`` the ``stdout`` and ``stderr`` values
     are ``None``; ``stdout_size`` and ``metadata`` keep their values.
     """
     columns = [
         None
-        if (not store_output and index in _OUTPUT_INDEXES)
+        if (not store_completed_output and index in _OUTPUT_INDEXES)
         else (_plain_text(value) if isinstance(value, str) else value)
         for index, value in enumerate(row)
     ]

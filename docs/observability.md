@@ -895,18 +895,16 @@ byte-level spec. The short version:
 ```yaml
 storage:
   dir: /var/lib/drakkar
-shared:
-  dir: /mnt/fleet                    # history folders live here; '' = storage.dir
-ui:
-  recorder:
-    rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
-history:
+  shared_dir: /mnt/fleet             # history folders live here; '' = storage.dir
+recorder:
+  sqlite:
+    rotation_interval: 1h            # a whole number of hours
   archive:
     enabled: true                    # merge sealed files into windowed .db.gz archives
-    window_hours: 24                 # one archive per cluster per UTC day; must be >= rotation_interval_hours
-    due_after_hours: 48              # archive a window this long after it ends
-    retention_days: 30               # delete archives older than this; 0 = keep forever
-  merged_retention_days: 32          # delete UI merge results older than this; 0 = keep them
+    window: 24h                      # one archive per cluster per UTC day; must be >= rotation_interval
+    due_after: 48h                   # archive a window this long after it ends
+    retention: 30d                   # delete archives older than this; 0 = keep for ever
+    merged_retention: 32d            # delete UI merge results older than this; 0 = keep them
 ```
 
 Archives are downloaded from the same place as the other history files —

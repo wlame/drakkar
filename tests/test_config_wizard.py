@@ -825,6 +825,13 @@ def test_there_are_golden_examples_for_the_main_cases():
     } <= names
 
 
+def _fleet_part(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` without what the calculator prints: three sections and ``recorder.capture``."""
+    fleet = {key: value for key, value in document.items() if key not in {'sources', 'executor', 'ui'}}
+    recorder = {key: value for key, value in fleet.pop('recorder', {}).items() if key != 'capture'}
+    return {**fleet, 'recorder': recorder} if recorder else fleet
+
+
 @pytest.mark.parametrize('example', TABLE['examples'], ids=[example['name'] for example in TABLE['examples']])
 def test_golden_example_matches_the_computed_fleet_part(example, tmp_path, clean_environment):
     answers, invalid = parse_query(TABLE, example['query'])
@@ -838,11 +845,7 @@ def test_golden_example_matches_the_computed_fleet_part(example, tmp_path, clean
         for segment in path.split('.'):
             node = node[segment]
         assert node == value, path
-    calculator_sections = {'sources', 'executor', 'ui'}
-    fleet_keys = {key: value for key, value in loaded.items() if key not in calculator_sections}
-    assert fleet_keys == {
-        key: value for key, value in document_for(TABLE, resolution).items() if key not in calculator_sections
-    }
+    assert _fleet_part(loaded) == _fleet_part(document_for(TABLE, resolution))
     assert loaded['sources']['kafka']['enabled'] is True
     assert serialize_yaml(loaded) == example['yaml']
     assert example['env'] == resolution.env
@@ -886,7 +889,7 @@ def test_wizard_disk_no_with_a_shared_folder_keeps_the_filesystem_registry():
     resolution = resolve(TABLE, parse_query(TABLE, 'v=1&disk=no&workers=3&hosts=many&svc=folder')[0])
 
     assert resolution.registry == 'filesystem'
-    assert resolution.fleet['shared'] == {'dir': '/mnt/drakkar-shared'}
+    assert resolution.fleet['storage'] == {'dir': '', 'shared_dir': '/mnt/drakkar-shared'}
 
 
 def test_wizard_disk_no_shows_the_recorder_memory_only_note():
@@ -896,7 +899,7 @@ def test_wizard_disk_no_shows_the_recorder_memory_only_note():
     assert 'recorder_memory_only' not in [note['id'] for note in with_disk.notes]
     note = next(note for note in without_disk.notes if note['id'] == 'recorder_memory_only')
     assert note['docs'].partition('#')[0] == 'recent-events.md'
-    assert note.get('fragment', {}) == {}
+    assert note['fragment'] == {'recorder': {'enabled': False}}
 
 
 def test_wizard_section_order_puts_storage_after_ui():
@@ -910,7 +913,7 @@ def test_wizard_golden_disk_no():
     loaded = yaml.safe_load(example['yaml'])
 
     assert example['query'] == 'v=1&disk=no'
-    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'connections', 'fleet', 'periodic']
+    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'recorder', 'connections', 'fleet', 'periodic']
     assert loaded['storage'] == {'dir': ''}
     assert loaded['fleet'] == {'registry': {'provider': 'filesystem'}}
 
@@ -927,7 +930,7 @@ def test_history_choice_defaults_to_files_with_no_fragment():
     assert files.get('fragment', {}) == {}
     assert invalid == []
     assert answers.history == 'files'
-    assert 'ui' not in resolution.fleet
+    assert 'recorder' not in resolution.fleet
     assert 'connections' not in resolution.fleet
 
 
@@ -935,7 +938,7 @@ def test_history_postgres_prints_the_mode_the_connection_entry_and_the_dsn_env()
     resolution = resolve(TABLE, parse_query(TABLE, 'v=1&history=postgres')[0])
     printed = serialize_yaml(document_for(TABLE, resolution))
 
-    assert resolution.fleet['ui'] == {'recorder': {'persistence': 'postgres'}}
+    assert resolution.fleet['recorder'] == {'provider': 'postgres'}
     assert resolution.fleet['connections'] == {'postgres': {'main': {'schema': 'drakkar'}}}
     assert resolution.env == ['DK_CONNECTIONS__POSTGRES__MAIN__DSN']
     assert 'dsn' not in printed
@@ -966,7 +969,7 @@ def test_every_answer_with_history_postgres_prints_a_config_that_loads(answers, 
     config = write_and_load(tmp_path / 'drakkar.yaml', document_for(TABLE, resolution))
 
     assert config.resolved_persistence == 'postgres'
-    assert config.ui.recorder.postgres.connection == 'main'
+    assert config.recorder.postgres.connection == 'main'
     assert 'recorder=postgres' in config.config_summary()
 
 

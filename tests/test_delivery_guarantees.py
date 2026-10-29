@@ -26,6 +26,7 @@ from drakkar.config import (
     KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
+    RecorderConfig,
     SinksConfig,
 )
 from drakkar.executor import ExecutorPool
@@ -43,7 +44,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.dlq_record import DLQRecord, render_headers
-from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
 from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 from tests.test_app import SimpleHandler
@@ -544,9 +545,7 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
 
 
 async def test_recorder_db_file_owner_only_permissions(tmp_path):
-    recorder = EventRecorder(
-        make_ui_config(enabled=False), worker_name='permtest', persistence='sqlite', storage_dir=str(tmp_path)
-    )
+    recorder = EventRecorder(RecorderConfig(), worker_name='permtest', persistence='sqlite', storage_dir=str(tmp_path))
     await recorder.start()
     try:
         db_files = [f for f in os.listdir(tmp_path) if f.endswith('.db') and not os.path.islink(tmp_path / f)]

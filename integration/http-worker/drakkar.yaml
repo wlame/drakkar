@@ -63,16 +63,19 @@ ui:
   enabled: true
   host: "0.0.0.0"
   port: 8080
-  expose_env_vars: ["WORKER_ID", "DK_CONFIG", "WORKER_HANDLER"]
   prometheus_url: "http://localhost:9099"
   prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
   prometheus_cluster_label: 'cluster="http-cluster"'
-  recorder:
-    store_events: true
-    store_config: true
-    store_state: true
-    store_output: true
-    event_min_duration_ms: 0
+
+recorder:
+  capture:
+    events: true
+    config: true
+    output: true
+    min_event_duration: 0
+    env_vars: ["WORKER_ID", "DK_CONFIG", "WORKER_HANDLER"]
+  sqlite:
+    state_snapshots: true
 
 # No top-level cache: block here — the framework's in-process cache stays
 # disabled on this worker (every handler.cache call becomes a no-op). Its
@@ -86,7 +89,7 @@ ui:
 # This worker's own files (recorder, cache, crash marker). Same folder as
 # the main cluster's workers, so the Debug UI's workers page lists this one
 # alongside them: the harness mounts one host folder at /shared in every
-# container, so it doubles as the fleet's shared folder (shared.dir empty
-# = storage.dir).
+# container, so it doubles as the cluster's shared folder
+# (storage.shared_dir empty = storage.dir).
 storage:
   dir: "/shared"

@@ -151,7 +151,7 @@ def test_every_process_gets_a_new_instance(tmp_path):
 
 
 async def test_a_shared_dir_holds_the_card_folder(tmp_path):
-    app = _app(tmp_path, shared={'dir': str(tmp_path / 'shared')})
+    app = _app(tmp_path, storage={'shared_dir': str(tmp_path / 'shared')})
 
     await app._lifecycle._start_fleet()
     await wait_for((tmp_path / 'shared' / 'fleet' / 'workers' / 'w-1.json').exists)
@@ -259,9 +259,9 @@ def test_the_cluster_election_gives_the_filesystem_factory_no_options(tmp_path):
 def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(tmp_path):
     app = _app(
         tmp_path,
-        shared={'dir': str(tmp_path / 'shared')},
+        storage={'shared_dir': str(tmp_path / 'shared')},
         cluster_name=CLUSTER,
-        periodic={'election': {'resilience': {'timeout_seconds': 1.5, 'retries': 0}}},
+        periodic={'election': {'resilience': {'timeout': '1500ms', 'max_retries': 0}}},
     )
     app._lifecycle._create_connections()
 
@@ -291,18 +291,18 @@ def test_the_filesystem_election_without_a_shared_folder_fails_startup_naming_th
 
     assert str(raised.value) == (
         "periodic task 'refresh_rates' has scope cluster, but the filesystem election needs a shared folder "
-        '(shared.dir or storage.dir)'
+        '(storage.shared_dir or storage.dir)'
     )
 
 
 @pytest.mark.parametrize(
     'overrides',
     [
-        {'ui': {'enabled': False, 'release': {'enabled': False}}},
-        {'storage': {'dir': ''}},
-        {'history': {'archive': {'enabled': False}}},
+        {'recorder': {'enabled': False}},
+        {'storage': {'dir': ''}, 'recorder': {'enabled': False}},
+        {'recorder': {'archive': {'enabled': False}}},
     ],
-    ids=['ui-off', 'memory-only', 'archiving-off'],
+    ids=['recorder-off', 'memory-only', 'archiving-off'],
 )
 def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, overrides):
     app = _app(tmp_path, periodic={'election': {'provider': 'no-such-election'}}, **overrides)
@@ -349,7 +349,7 @@ async def test_the_ui_off_turns_the_registry_off_with_one_warning(tmp_path):
 
 
 async def test_no_folder_turns_the_filesystem_registry_off_with_one_warning(tmp_path):
-    app = _app(tmp_path, storage={'dir': ''})
+    app = _app(tmp_path, storage={'dir': ''}, recorder={'enabled': False})
 
     with capture_logs() as logs:
         await app._lifecycle._start_fleet()
@@ -365,7 +365,7 @@ async def test_a_derived_folder_that_cannot_be_created_only_fails_publishes(tmp_
     """The derived folder is best effort: the worker runs, the registry counts errors and retries."""
     blocker = tmp_path / 'blocker'
     blocker.write_text('a file where the folder should be')
-    app = _app(tmp_path, shared={'dir': str(blocker)})
+    app = _app(tmp_path, storage={'shared_dir': str(blocker)})
 
     await app._lifecycle._start_fleet()
     await app._fleet.stop()
@@ -456,7 +456,7 @@ async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_r
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
     # The registry needs the UI server, so a worker with the UI off runs none.
     app._config.ui.enabled = ui_enabled
-    app._config.fleet.registry.resilience.timeout_seconds = 0.7
+    app._config.fleet.registry.resilience.timeout = 0.7
 
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
@@ -599,7 +599,7 @@ class _BlockedRegistry:
 async def test_a_blocked_registry_never_holds_up_the_pipeline(tmp_path, monkeypatch):
     """Core isolation: the sources start and run, and shutdown ends, while every registry call hangs."""
     app, source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _BlockedRegistry())
-    app._config.fleet.registry.resilience.timeout_seconds = 0.05
+    app._config.fleet.registry.resilience.timeout = 0.05
 
     run = asyncio.create_task(app._lifecycle._async_run())
     # Readiness comes before the lifecycle calls ``run``; wait for both, or
@@ -684,7 +684,7 @@ class _FakeConsumer:
 def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[_FakeConsumer]]:
     """A worker with its real recorder and Kafka source, on a fake consumer; no UI server, sinks or subprocesses."""
     values = {
-        'shared': {'dir': str(tmp_path / 'shared')},
+        'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
         'cluster_name': CLUSTER,
     }
     values.update(overrides)
@@ -725,7 +725,7 @@ async def test_a_blocked_election_never_holds_up_the_pipeline(tmp_path, monkeypa
     """Core isolation: messages are processed and committed, and shutdown ends, while every election call hangs."""
     election = _BlockedElection()
     _install_election_factory(monkeypatch, lambda _options: election)
-    resilience = {'timeout_seconds': ELECTION_START_LIMIT_SECONDS, 'retries': 0}
+    resilience = {'timeout': f'{ELECTION_START_LIMIT_SECONDS}s', 'max_retries': 0}
     app, consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
@@ -763,7 +763,7 @@ async def test_a_pass_still_running_at_stop_leaves_the_registry_its_withdraw(tmp
     _install_registry_factory(monkeypatch, lambda _options: provider)
     # The reserve (0.5 s) is shorter than the drain budget (1 s), which is
     # shorter than the stuck window.
-    registry = {'provider': 'filesystem', 'resilience': {'timeout_seconds': 0.5}}
+    registry = {'provider': 'filesystem', 'resilience': {'timeout': '500ms'}}
     app, _consumers = _pipeline_app(tmp_path, monkeypatch, fleet={'registry': registry})
     in_window = threading.Event()
     window_may_end = threading.Event()
@@ -840,7 +840,7 @@ async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_regi
         tmp_path,
         monkeypatch,
         executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': WAIT_FOR_TIMEOUT_SECONDS},
-        fleet={'registry': {'resilience': {'timeout_seconds': 0.5}}},
+        fleet={'registry': {'resilience': {'timeout': '500ms'}}},
     )
     in_window = threading.Event()
 
@@ -990,8 +990,12 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
 async def test_check_off_logged_once_when_the_registry_is_off_and_cluster_tasks_exist(
     tmp_path, handler, ui_enabled, logged
 ):
-    overrides = {} if handler is _ClusterTaskHandler else {'history': {'archive': {'enabled': False}}}
-    app = _app(tmp_path, handler=handler(), ui={'enabled': ui_enabled, 'release': {'enabled': False}}, **overrides)
+    app = _app(
+        tmp_path,
+        handler=handler(),
+        ui={'enabled': ui_enabled, 'release': {'enabled': False}},
+        recorder={'archive': {'enabled': False}},
+    )
     app._lifecycle._build_periodic_roster()
 
     with capture_logs() as logs:
@@ -1034,7 +1038,7 @@ async def test_startup_with_failing_election_start_still_runs_the_pipeline(tmp_p
         tmp_path, monkeypatch, lambda _options: registry, handler=_PipelineGuardHandler()
     )
     _install_election_factory(monkeypatch, lambda _options: _DownElection(ElectionStore()))
-    app._config.periodic.election.resilience.retries = 0
+    app._config.periodic.election.resilience.max_retries = 0
     clock = VirtualClock(NOW)
     # Two slots of the task, SLOT and SLOT + 30, both within one minute.
     clock.limit = SLOT + 45

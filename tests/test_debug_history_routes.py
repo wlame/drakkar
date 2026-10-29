@@ -1,7 +1,7 @@
 """The debug routes over sealed history (contract v1.23 part 2).
 
 ``/debug/databases`` answers ``{own, history}``; downloads and merges take
-paths relative to ``shared.dir`` (``history/<cluster>/<name>``,
+paths relative to the shared folder (``history/<cluster>/<name>``,
 ``merged/<name>``); archives list every cluster folder; the trace reads the
 sealed history only with ``history=1``.
 """
@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, RecorderConfig
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import archive_file_name
 from drakkar.recorder.history import meta_path, serialize_json
@@ -96,7 +96,7 @@ def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merg
     """``memory_only``: no folder at all. ``shared_only``: no recorder file, a shared folder."""
     config = make_ui_config(enabled=True, port=8080, merge_enabled=merge_enabled)
     recorder = EventRecorder(
-        config,
+        RecorderConfig(),
         worker_name='w-1',
         cluster_name=CLUSTER,
         persistence='none' if memory_only or shared_only else 'sqlite',
@@ -380,7 +380,7 @@ async def test_trace_with_history_on_a_memory_only_worker_finds_nothing(tmp_path
 
 
 async def test_shared_paths_are_resolved_off_the_ui_loop(tmp_path, storage, shared, monkeypatch):
-    """``shared.dir`` is a network mount by design: resolving a path there
+    """the shared folder is a network mount by design: resolving a path there
     (realpath, an lstat per component) must never run on the loop that also
     answers /healthz and /readyz."""
     import threading
@@ -408,7 +408,7 @@ async def test_shared_paths_are_resolved_off_the_ui_loop(tmp_path, storage, shar
     assert on_loop == []
 
 
-async def test_trace_history_merge_download_and_archives_work_for_a_none_worker(tmp_path, shared):
+async def test_merge_download_and_archives_work_for_a_worker_with_the_recorder_off(tmp_path, shared):
     first = _sealed(shared, CLUSTER, 'w-1-2026-10-13__08_00_00.db')
     second = _sealed(shared, CLUSTER, 'w-2-2026-10-13__08_00_00.db', worker='w-2')
     archive = _archive(shared, CLUSTER, datetime(2026, 10, 12, tzinfo=UTC).timestamp())
@@ -422,7 +422,7 @@ async def test_trace_history_merge_download_and_archives_work_for_a_none_worker(
         archives = await c.get('/api/v1/debug/archives')
         live = await c.get('/api/v1/debug/download-live')
 
-    assert sorted(row['worker_name'] for row in trace.json()) == ['w-1', 'w-2']
+    assert trace.json() == []
     assert download.status_code == 200
     assert merge.status_code == 200
     assert [a['name'] for a in archives.json()['archives']] == [os.path.basename(archive)]

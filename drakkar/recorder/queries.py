@@ -33,8 +33,8 @@ from typing import Any, Literal
 import aiosqlite
 import structlog
 
-from drakkar.config import UIConfig, UIRecorderConfig
-from drakkar.config.ui import PERSISTENCE_SQLITE, Persistence
+from drakkar.config import RecorderConfig
+from drakkar.config.recorder import PERSISTENCE_SQLITE, Persistence
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import memstore
 from drakkar.recorder.archive import parse_db_start_ts
@@ -92,7 +92,7 @@ class _ScanBudget:
             op=op,
             max_files=self._max_files,
             budget_seconds=self._max_seconds,
-            hint='result may be incomplete; raise ui.trace.history_max_files / history_max_seconds',
+            hint='result may be incomplete; raise recorder.search.max_files / recorder.search.timeout',
         )
 
 
@@ -145,7 +145,7 @@ def trace_history(folder: str, partition: int, msg_offset: int, *, max_files: in
     """Trace a message through the sealed files of a cluster history folder.
 
     Newest files first, at most ``max_files`` files and ``max_seconds``
-    (``ui.trace.history_max_*``); every match is kept, because a message's
+    (``recorder.search.*``); every match is kept, because a message's
     lifecycle can span files of several workers. Files are opened with
     ``immutable=1``: they are sealed and never change. Blocking — run it in
     a thread; it needs nothing from the worker's event loop.
@@ -311,7 +311,7 @@ class QueryContext:
     same for a memory read.
     """
 
-    config: UIConfig
+    config: RecorderConfig
     worker_name: str
     cluster_name: str
     persistence: Persistence
@@ -323,11 +323,6 @@ class QueryContext:
     flush_memory: Callable[[], Awaitable[None]]
     # The worker's own folder (``storage.dir``); ``''`` without a recorder file.
     storage_dir: str = ''
-
-    @property
-    def store(self) -> UIRecorderConfig:
-        """The persistence tier (``ui.recorder.*``)."""
-        return self.config.recorder
 
 
 async def _rows_as_dicts(cursor: aiosqlite.Cursor) -> list[dict]:
@@ -354,7 +349,7 @@ class EventQueries:
         every poll. Answers ``[]`` when events are not stored or the source
         gives no answer.
         """
-        if not self._ctx.store.store_events:
+        if not self._ctx.config.capture.events:
             return []
         source = pick_source(self._ctx.persistence, read_class, ReadBound(), self._ctx.coverage())
         if source == SOURCE_MEMORY:

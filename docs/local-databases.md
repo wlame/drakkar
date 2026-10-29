@@ -1111,12 +1111,10 @@ an external job against them).
 ```yaml
 storage:
   dir: /var/lib/drakkar              # this worker's own files (local disk)
-shared:
-  dir: /mnt/fleet                    # history, archives and merge results; '' = storage.dir
-ui:
-  recorder:
-    rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
-history:
+  shared_dir: /mnt/fleet             # history, archives and merge results; '' = storage.dir
+recorder:
+  sqlite:
+    rotation_interval: 1h            # a whole number of hours
   archive:
     enabled: true                    # merge sealed files into windowed .db.gz archives
     window_hours: 24                 # one archive per cluster per UTC day; must be >= rotation_interval_hours

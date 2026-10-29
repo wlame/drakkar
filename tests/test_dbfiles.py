@@ -27,10 +27,9 @@ import pytest
 
 import drakkar.recorder.core as recorder_core
 from drakkar.cache import CacheEngine
-from drakkar.config import CacheConfig, CacheExchangeConfig, UIConfig
+from drakkar.config import CacheConfig, CacheExchangeConfig, RecorderConfig
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE, secure_db_file
 from drakkar.recorder import EventRecorder
-from tests.conftest import make_ui_config
 
 WORKER_NAME = 'test-worker'
 
@@ -59,15 +58,10 @@ def assert_db_files_owner_only(db_path: str) -> None:
         assert actual == DB_FILE_MODE, f'{sidecar} is {oct(actual)}, expected {oct(DB_FILE_MODE)}'
 
 
-def make_recorder_config(tmp_path: Path, **overrides) -> UIConfig:
-    defaults: dict = {
-        'enabled': True,
-        'store_events': True,
-        'store_config': False,
-        'store_state': False,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
+def make_recorder_config(tmp_path: Path, **overrides) -> RecorderConfig:
+    capture = {'events': True, 'config': False, **overrides.pop('capture', {})}
+    sqlite = {'state_snapshots': False, **overrides.pop('sqlite', {})}
+    return RecorderConfig(capture=capture, sqlite=sqlite, **overrides)
 
 
 # --- secure_db_file unit behaviour ---

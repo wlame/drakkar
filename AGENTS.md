@@ -38,7 +38,7 @@ breaking change, never a refactor:
   order they were given
 - the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads the
   sealed recorder files that other workers of its cluster publish into the
-  shared history folder (`<shared.dir>/history/<cluster>/`)
+  shared history folder (`<storage.shared_dir>/history/<cluster>/`)
 - the cache exchange: peers pull each other's own `cluster`/`global` rows
   over `GET /api/v1/peer/cache/changes` (parameters, check order and 400
   messages, row shape, paging rule: `tests/fixtures/cache_changes.json`),
@@ -46,7 +46,7 @@ breaking change, never a refactor:
   private to its worker
 - the history meta file `<name>.db.meta.json` (schema 1: fields, sorted
   compact JSON, no trailing newline) and the task lock body of
-  `<shared.dir>/tasks/<cluster>/<task>.lock`
+  `<storage.shared_dir>/tasks/<cluster>/<task>.lock`
   (`tests/fixtures/history_meta.json`) — workers of other releases read the
   meta files and take over each other's locks
 - the worker registry card (schema 1, `tests/fixtures/fleet_card.json`,

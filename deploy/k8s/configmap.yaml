@@ -90,11 +90,14 @@ data:
       # Deployment. Leaving this empty keeps the UI unauthenticated —
       # acceptable only on a private network.
       auth_token: ""
-      recorder:
-        store_events: true
-        store_config: true
-        store_state: true
-        rotation_interval_hours: 1
+
+    recorder:
+      capture:
+        events: true
+        config: true
+      sqlite:
+        state_snapshots: true
+        rotation_interval: 1h
 
     cache:
       # Off by default — flip to true if your handler uses

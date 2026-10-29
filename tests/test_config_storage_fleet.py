@@ -1,4 +1,4 @@
-"""The storage, shared, history and fleet config sections."""
+"""The storage, recorder archive and fleet config sections."""
 
 import re
 
@@ -11,12 +11,10 @@ from drakkar.config import (
     ConnectionsConfig,
     DrakkarConfig,
     FleetRegistryConfig,
-    HistoryArchiveConfig,
-    HistoryConfig,
     PeriodicConfig,
-    SharedConfig,
+    RecorderArchiveConfig,
+    RecorderConfig,
     StorageConfig,
-    UITraceConfig,
     load_config,
 )
 from tests.conftest import kafka_connections
@@ -34,23 +32,23 @@ def _config(**sections) -> DrakkarConfig:
 # --- defaults ------------------------------------------------------------
 
 
-def test_storage_and_shared_defaults():
+def test_storage_defaults():
     assert StorageConfig().dir == '/tmp/drakkar'
-    assert SharedConfig().dir == ''
+    assert StorageConfig().shared_dir == ''
 
 
-def test_history_defaults():
-    history = HistoryConfig()
+def test_archive_defaults():
+    archive = RecorderArchiveConfig()
 
-    assert history.archive.enabled is True
-    assert history.archive.window_hours == 24
-    assert history.archive.due_after_hours == 48
-    assert history.archive.retention_days == 30
-    assert history.archive.interval is None
-    assert history.archive.cron is None
-    assert history.archive.lease_seconds == 60
-    assert history.archive.sweep_after_seconds == 7200
-    assert history.merged_retention_days == 32
+    assert archive.enabled is True
+    assert archive.window == 24
+    assert archive.due_after == 48
+    assert archive.retention == 30
+    assert archive.merged_retention == 32
+    assert archive.interval is None
+    assert archive.cron is None
+    assert archive.lease == 60
+    assert archive.sweep_after == 7200
 
 
 def test_fleet_registry_defaults():
@@ -62,7 +60,7 @@ def test_fleet_registry_defaults():
     assert registry.connection == 'main'
     assert registry.offline_after_seconds == 60
     assert registry.prune_after_seconds == 86400
-    assert registry.resilience.timeout_seconds == 5.0
+    assert registry.resilience.timeout == 5.0
 
 
 def test_fleet_registry_fields_are_the_provider_choice_the_timings_and_the_resilience_block():
@@ -83,7 +81,7 @@ def test_offline_after_seconds_of_30_loads_with_the_default_heartbeat():
 
 def test_the_registry_time_limit_lives_in_its_resilience_block():
     assert 'timeout_seconds' not in FleetRegistryConfig.model_fields
-    assert 'timeout_seconds' in FleetRegistryConfig.model_fields['resilience'].annotation.model_fields
+    assert 'timeout' in FleetRegistryConfig.model_fields['resilience'].annotation.model_fields
 
 
 def test_offline_after_seconds_of_zero_fails_at_the_field():
@@ -94,7 +92,7 @@ def test_offline_after_seconds_of_zero_fails_at_the_field():
 def test_election_defaults():
     election = PeriodicConfig().election
 
-    assert (election.provider, election.connection, election.resilience.retries) == ('filesystem', 'main', 2)
+    assert (election.provider, election.connection, election.resilience.max_retries) == ('filesystem', 'main', 2)
 
 
 def test_cache_exchange_defaults():
@@ -108,11 +106,11 @@ def test_cache_exchange_defaults():
     assert exchange.max_concurrent_peers == 4
 
 
-def test_ui_trace_defaults():
-    trace = UITraceConfig()
+def test_recorder_search_defaults():
+    search = RecorderConfig().search
 
-    assert trace.history_max_files == 256
-    assert trace.history_max_seconds == 10.0
+    assert search.max_files == 256
+    assert search.timeout == 10.0
 
 
 # --- derived values ------------------------------------------------------
@@ -128,7 +126,7 @@ def test_ui_trace_defaults():
     ],
 )
 def test_resolved_shared_dir_falls_back_to_storage_dir(storage_dir, shared_dir, expected):
-    config = _config(storage={'dir': storage_dir}, shared={'dir': shared_dir})
+    config = _config(storage={'dir': storage_dir, 'shared_dir': shared_dir}, recorder={'enabled': False})
 
     assert config.resolved_shared_dir == expected
 
@@ -144,7 +142,7 @@ def test_resolved_shared_dir_falls_back_to_storage_dir(storage_dir, shared_dir, 
     ],
 )
 def test_resolved_registry_dir(storage_dir, expected):
-    config = _config(storage={'dir': storage_dir})
+    config = _config(storage={'dir': storage_dir}, recorder={'enabled': bool(storage_dir)})
 
     assert config.resolved_registry_dir == expected
 
@@ -154,7 +152,7 @@ def test_resolved_registry_dir(storage_dir, expected):
     [
         ({}, 'filesystem'),
         ({'ui': {'enabled': False}}, 'off'),
-        ({'storage': {'dir': ''}}, 'off'),
+        ({'storage': {'dir': ''}, 'recorder': {'enabled': False}}, 'off'),
         ({'fleet': {'registry': {'provider': 'consul'}}, 'connections': {'consul': {'main': {}}}}, 'consul'),
         (
             {
@@ -268,7 +266,7 @@ def test_consul_registry_checks_the_prune_limit_before_the_offline_cap():
 @pytest.mark.parametrize('provider', ['filesystem', 'consul', 'redis', 'postgres'])
 def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider):
     config = _config(
-        history={'archive': {'lease_seconds': 86_400}},
+        recorder={'archive': {'lease': '24h'}},
         periodic={'election': {'provider': provider}},
         connections={
             'consul': {'main': {}},
@@ -277,21 +275,21 @@ def test_the_archive_lease_at_its_upper_bound_loads_for_every_provider(provider)
         },
     )
 
-    assert config.history.archive.lease_seconds == 86_400
+    assert config.recorder.archive.lease == 86_400
 
 
 def test_resilience_blocks_load_from_env_names(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
-    monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS', '2.5')
-    monkeypatch.setenv('DK_PERIODIC__ELECTION__RESILIENCE__RETRIES', '0')
+    monkeypatch.setenv('DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT', '2500ms')
+    monkeypatch.setenv('DK_PERIODIC__ELECTION__RESILIENCE__MAX_RETRIES', '0')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
     config = load_config(None)
 
-    assert config.fleet.registry.resilience.timeout_seconds == 2.5
-    assert config.periodic.election.resilience.retries == 0
+    assert config.fleet.registry.resilience.timeout == 2.5
+    assert config.periodic.election.resilience.max_retries == 0
 
 
 # --- env names -----------------------------------------------------------
@@ -302,23 +300,23 @@ def test_env_names_load_into_the_new_sections(monkeypatch):
     monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
     monkeypatch.setenv('DK_STORAGE__DIR', '/var/lib/drakkar')
-    monkeypatch.setenv('DK_SHARED__DIR', '/mnt/fleet')
-    monkeypatch.setenv('DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS', '72')
-    monkeypatch.setenv('DK_HISTORY__MERGED_RETENTION_DAYS', '0')
+    monkeypatch.setenv('DK_STORAGE__SHARED_DIR', '/mnt/fleet')
+    monkeypatch.setenv('DK_RECORDER__ARCHIVE__DUE_AFTER', '72h')
+    monkeypatch.setenv('DK_RECORDER__ARCHIVE__MERGED_RETENTION', '0')
     monkeypatch.setenv('DK_FLEET__REGISTRY__PROVIDER', 'filesystem')
     monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '12.5')
-    monkeypatch.setenv('DK_UI__TRACE__HISTORY_MAX_FILES', '64')
+    monkeypatch.setenv('DK_RECORDER__SEARCH__MAX_FILES', '64')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
     config = load_config(None)
 
     assert config.storage.dir == '/var/lib/drakkar'
-    assert config.shared.dir == '/mnt/fleet'
-    assert config.history.archive.due_after_hours == 72
-    assert config.history.merged_retention_days == 0
+    assert config.storage.shared_dir == '/mnt/fleet'
+    assert config.recorder.archive.due_after == 72
+    assert config.recorder.archive.merged_retention == 0
     assert config.fleet.registry.provider == 'filesystem'
     assert config.fleet.cache_exchange.interval_seconds == 12.5
-    assert config.ui.trace.history_max_files == 64
+    assert config.recorder.search.max_files == 64
 
 
 # --- archive retention against the due delay -------------------------------
@@ -333,25 +331,25 @@ def test_archive_retention_default_bounds_disk_growth():
     horizon, and 0 is an explicit opt-out.
     """
     assert DEFAULT_ARCHIVE_RETENTION_DAYS > 0
-    assert HistoryArchiveConfig().retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
+    assert RecorderArchiveConfig().retention == DEFAULT_ARCHIVE_RETENTION_DAYS
 
 
 def test_archive_retention_default_covers_the_default_due_delay_and_window():
     """The shipped defaults must validate against each other."""
-    archive = HistoryArchiveConfig()
-    assert archive.due_after_hours + archive.window_hours <= DEFAULT_ARCHIVE_RETENTION_DAYS * 24
+    archive = RecorderArchiveConfig()
+    assert archive.due_after + archive.window <= DEFAULT_ARCHIVE_RETENTION_DAYS * 24
 
 
 def test_archive_retention_covering_exactly_due_plus_window_is_accepted():
-    archive = HistoryArchiveConfig(retention_days=3, due_after_hours=48, window_hours=24)
-    assert archive.retention_days == 3
+    archive = RecorderArchiveConfig(retention='3d', due_after='48h', window='24h')
+    assert archive.retention == 3
 
 
 def test_archive_retention_zero_is_accepted_for_any_window():
-    assert HistoryArchiveConfig(retention_days=0, window_hours=168, due_after_hours=500).retention_days == 0
+    assert RecorderArchiveConfig(retention=0, window='168h', due_after='500h').retention == 0
 
 
 def test_archive_retention_explicit_value_message_has_no_default_note():
     with pytest.raises(ValueError) as excinfo:
-        HistoryArchiveConfig(retention_days=2)
+        RecorderArchiveConfig(retention='2d')
     assert 'default' not in str(excinfo.value)

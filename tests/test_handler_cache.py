@@ -155,12 +155,12 @@ def _make_config_with_cache(
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
-        ui=make_ui_config(
-            enabled=debug_enabled,
-            store_events=False,
-            store_config=False,
-            store_state=False,
-        ),
+        ui=make_ui_config(enabled=debug_enabled),
+        recorder={
+            'enabled': False,
+            'capture': {'events': False, 'config': False},
+            'sqlite': {'state_snapshots': False},
+        },
         cache=CacheConfig(
             enabled=cache_enabled,
             flush_interval_seconds=60.0,  # slow — tests manually flush

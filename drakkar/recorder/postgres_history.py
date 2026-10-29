@@ -4,7 +4,7 @@
 history in Postgres reads the rows of the worker's own cluster from the
 events table, never the sealed files. The search runs on the UI server's
 loop with a connection of its own (no pool), makes one attempt, and is
-bounded as a whole by ``ui.trace.history_max_seconds``: the client side by
+bounded as a whole by ``recorder.search.timeout``: the client side by
 ``asyncio.timeout``, the server side by ``statement_timeout``.
 """
 
@@ -32,7 +32,7 @@ MILLISECONDS_PER_SECOND = 1000
 # The smallest statement_timeout sent: 0 would mean no limit on the server.
 MIN_STATEMENT_TIMEOUT_MS = 1
 # The longest a search may take; a larger or non-finite
-# ``ui.trace.history_max_seconds`` uses this limit.
+# ``recorder.search.timeout`` uses this limit.
 MAX_SEARCH_SECONDS = 3600.0
 # Searches that may hold a connection at once in one worker process. The debug
 # UI has no authentication, so this keeps a burst of requests from using up the

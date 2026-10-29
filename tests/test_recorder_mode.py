@@ -7,16 +7,16 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from drakkar.config import RecorderConfig
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
-from tests.conftest import make_ui_config
 
 CLUSTER = 'search'
 
 
-def _recorder(persistence: str, *, storage_dir: str = '', shared_dir: str = '', **ui) -> EventRecorder:
+def _recorder(persistence: str, *, storage_dir: str = '', shared_dir: str = '', **recorder) -> EventRecorder:
     return EventRecorder(
-        make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60, **ui),
+        RecorderConfig(flush_interval='60s', capture={'output': False}, **recorder),
         worker_name='w-1',
         cluster_name=CLUSTER,
         persistence=persistence,
@@ -91,7 +91,7 @@ async def test_none_recorder_skips_folder_warnings_rotation_state_and_leftover_s
     leftover = storage / 'w-1-2026-10-13__08_00_00.db'
     leftover.write_bytes(b'')
     os.utime(leftover, (1, 1))
-    recorder = _recorder('none', storage_dir=str(storage), store_state=True)
+    recorder = _recorder('none', storage_dir=str(storage), sqlite={'state_snapshots': True})
 
     with capture_logs() as logs:
         await recorder.start()

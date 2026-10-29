@@ -5,8 +5,8 @@ that runs for seconds, right now, instead of after the next hourly rotation.
 This writes ``--files`` sealed recorder files of one cluster into
 ``<shared>/history/<sanitized cluster>/``, each with ``--events-per-file``
 events and a real meta file, all in one hour window that ended at least an
-hour ago. With the harness settings (``window_hours: 1``,
-``due_after_hours: 1``) that window is due at once, so the next timer tick
+hour ago. With the harness settings (``window: 1h``,
+``due_after: 1h``) that window is due at once, so the next timer tick
 of an archive pass merges, compresses and publishes it.
 
 The files go through the recorder's own sealing path: the schema of
@@ -49,7 +49,7 @@ from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_
 from drakkar.recorder.sealing import publish_sealed, seal_closed_file
 
 # The archive window and due delay of integration/worker/drakkar.yaml
-# (history.archive.window_hours and due_after_hours), in seconds.
+# (recorder.archive.window and due_after), in seconds.
 WINDOW_SECONDS = 3600
 DUE_AFTER_SECONDS = 3600
 # A window that starts this many hours ago or more is due at once:

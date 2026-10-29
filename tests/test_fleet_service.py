@@ -17,7 +17,6 @@ from structlog.testing import capture_logs
 
 from drakkar.config import FleetRegistryConfig, ResilienceConfig
 from drakkar.config.connections import ConnectionsConfig
-from drakkar.config.resilience import BreakerConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.service import FleetRegistry
@@ -44,7 +43,7 @@ def _config(timeout_seconds: float = 1.0, retries: int = 0, **overrides) -> Flee
         'refresh_seconds': 3600,
         'offline_after_seconds': 30,
         'prune_after_seconds': 86_400,
-        'resilience': ResilienceConfig(timeout_seconds=timeout_seconds, retries=retries),
+        'resilience': ResilienceConfig(timeout=f'{timeout_seconds}s', max_retries=retries),
     }
     values.update(overrides)
     return FleetRegistryConfig.model_construct(**values)
@@ -59,7 +58,7 @@ def _never_opening_breaker() -> ResilienceConfig:
 
     An open breaker skips ``start`` too, and the fake clock never ends its cooldown.
     """
-    return ResilienceConfig(timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=1000))
+    return ResilienceConfig(timeout='1s', max_retries=0, breaker_failures=1000)
 
 
 def _peer(worker: str, instance: str = '2222222222222222', cluster: str = 'search', **extra) -> dict:
@@ -590,9 +589,7 @@ async def test_start_failures_log_once_a_minute():
 async def test_an_open_breaker_holds_start_back_until_the_cooldown_then_the_probe_starts_and_publishes():
     provider = _StartsWhenAllowed(MemoryStore())
     clock = _Clock()
-    resilience = ResilienceConfig(
-        timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=1, cooldown_seconds=30.0)
-    )
+    resilience = ResilienceConfig(timeout='1s', max_retries=0, breaker_failures=1, breaker_cooldown='30s')
     service = _service(provider, clock, resilience=resilience)
     skipped_before = _calls('start', 'skipped_open')
 
@@ -744,9 +741,7 @@ async def test_a_publish_iteration_that_keeps_raising_does_not_stop_the_refresh_
 
 async def test_stop_skips_withdraw_at_once_while_the_breaker_is_open():
     provider = _Failing()
-    resilience = ResilienceConfig(
-        timeout_seconds=1.0, retries=0, breaker=BreakerConfig(failure_threshold=2, cooldown_seconds=30.0)
-    )
+    resilience = ResilienceConfig(timeout='1s', max_retries=0, breaker_failures=2, breaker_cooldown='30s')
     service = _service(provider, resilience=resilience)
     await service.start()
     await wait_for(lambda: service._caller.breaker_open)

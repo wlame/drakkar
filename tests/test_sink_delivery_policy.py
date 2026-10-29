@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 import drakkar.sinks.manager as manager_module
-from drakkar.config import DrakkarConfig, SinkPolicy, UIConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, SinkPolicy
 from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -102,7 +102,7 @@ class CollectingRecorder(EventWriter):
     """An EventWriter whose rows land in a list."""
 
     def __init__(self) -> None:
-        super().__init__(UIConfig(recorder={'store_events': True}, release={'enabled': False}))
+        super().__init__(RecorderConfig(), ws_min_duration_ms=500, log_min_duration_ms=500)
         self.rows: list[dict] = []
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:

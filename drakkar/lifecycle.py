@@ -59,7 +59,7 @@ from drakkar.cluster_tasks import (
     archive_task_runs,
     run_cluster_task,
 )
-from drakkar.config.ui import PERSISTENCE_POSTGRES
+from drakkar.config.recorder import PERSISTENCE_POSTGRES
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -88,7 +88,6 @@ from drakkar.recorder.election import (
     ElectionContext,
 )
 from drakkar.recorder.history import history_dir
-from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER
 from drakkar.sinks.manager import SinkNotConfiguredError
@@ -183,20 +182,20 @@ def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSetting
     """The table settings of the ``postgres`` recorder mode, or ``None`` when the effective mode is another.
 
     The DSN and the schema come from the connection entry that
-    ``ui.recorder.postgres.connection`` names; the config load already
+    ``recorder.postgres.connection`` names; the config load already
     checked that it is declared.
     """
     if config.resolved_persistence != PERSISTENCE_POSTGRES:
         return None
-    section = config.ui.recorder.postgres
+    section = config.recorder.postgres
     return RecorderPostgresSettings(
         connection_name=section.connection,
         connection=config.connections.postgres[section.connection],
         table_prefix=section.table_prefix,
-        retention_hours=section.retention_hours,
-        store_output=section.store_output,
+        retention_hours=section.initial_retention,
+        store_completed_output=section.store_completed_output,
         batch_rows=section.batch_rows,
-        queue_max_bytes=section.queue_max_mib * MIB,
+        queue_max_bytes=section.max_queue,
         resilience=section.resilience,
     )
 
@@ -596,10 +595,11 @@ class AppLifecycle:
             )
 
     async def _start_ui_and_recorder(self) -> None:
-        """Start the recorder and UI server, or warn when the UI is disabled.
+        """Start the recorder and the UI server, each when its config asks for it.
 
-        Extracted from ``_async_run`` so the boot sequence is testable step by
-        step; the body is unchanged.
+        The recorder runs with the UI or with durable recording; a memory store
+        exists only to serve the UI. With the UI off, the worker warns about its
+        missing probes.
         """
         app = self._app
         log = logger.bind(worker_id=app._worker_id)
@@ -611,45 +611,8 @@ class AppLifecycle:
             # also names any side-effecting endpoint (probe, merge) left
             # enabled. See docs/faq.md §"Security and trust model".
             warn_if_ui_unauthenticated(app._config)
-            # Archives are the one recorder artifact nothing else reclaims,
-            # so "keep forever" is stated at startup rather than discovered
-            # when a volume fills. Only a worker that runs the archive task
-            # produces them.
-            if archive_task_runs(app._config):
-                warn_if_archives_unbounded(
-                    app._config.history.archive,
-                    history_dir(app._config.resolved_shared_dir, app._cluster_name),
-                )
-
-            memory = app._config.ui.recorder.memory
-            app._recorder = EventRecorder(
-                app._config.ui,
-                worker_name=app._worker_id,
-                cluster_name=app._cluster_name,
-                persistence=app._config.resolved_persistence,
-                storage_dir=app._config.storage.dir,
-                shared_dir=app._config.resolved_shared_dir,
-                instance=app._instance,
-                archive=app._config.history.archive,
-                merged_retention_days=app._config.history.merged_retention_days,
-                memory_window_seconds=memory.window_seconds,
-                memory_max_rows=memory.rows_per_executor * app._config.executor.max_executors,
-                memory_max_bytes=memory.max_mib * MIB,
-                postgres=recorder_postgres_settings(app._config),
-            )
-            app._recorder.set_state_provider(app._get_worker_state)
-            await app._recorder.start()
-            await app._recorder.write_config(app._config)
-
-            from drakkar.uiserver.server import UIServer
-
-            app._ui_server = UIServer(
-                config=app._config.ui,
-                recorder=app._recorder,
-                app=app,
-            )
-            await app._ui_server.start()
-        else:
+        await self._start_recorder()
+        if not app._config.ui.enabled:
             # The UI server is this worker's ONLY probe surface — without
             # it nothing serves /healthz or /readyz and Kubernetes probes
             # simply fail. Warn loudly, because that consequence is easy
@@ -659,6 +622,56 @@ class AppLifecycle:
                 category='lifecycle',
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
+            return
+        # A worker with the UI on always has a recorder: its memory store serves the UI.
+        assert app._recorder is not None
+
+        from drakkar.uiserver.server import UIServer
+
+        app._ui_server = UIServer(
+            config=app._config.ui,
+            recorder=app._recorder,
+            app=app,
+        )
+        await app._ui_server.start()
+
+    async def _start_recorder(self) -> None:
+        """Build and start the recorder, unless the worker has neither a UI nor durable recording."""
+        app = self._app
+        config = app._config
+        if not config.ui.enabled and not config.recorder.enabled:
+            return
+        # Archives are the one recorder artifact nothing else reclaims,
+        # so "keep forever" is stated at startup rather than discovered
+        # when a volume fills. Only a worker that runs the archive task
+        # produces them.
+        if archive_task_runs(config):
+            warn_if_archives_unbounded(
+                config.recorder.archive,
+                history_dir(config.resolved_shared_dir, app._cluster_name),
+            )
+        memory = config.recorder.memory
+        app._recorder = EventRecorder(
+            config.recorder,
+            worker_name=app._worker_id,
+            cluster_name=app._cluster_name,
+            persistence=config.resolved_persistence,
+            memory_enabled=config.ui.enabled,
+            api_port=config.ui.port,
+            api_public_url=config.ui.public_url,
+            ws_min_duration_ms=config.ui.ws_min_duration_ms,
+            log_min_duration_ms=config.ui.log_min_duration_ms,
+            storage_dir=config.storage.dir,
+            shared_dir=config.resolved_shared_dir,
+            instance=app._instance,
+            memory_window_seconds=memory.window,
+            memory_max_rows=memory.rows_per_executor * config.executor.max_executors,
+            memory_max_bytes=memory.max_size,
+            postgres=recorder_postgres_settings(config),
+        )
+        app._recorder.set_state_provider(app._get_worker_state)
+        await app._recorder.start()
+        await app._recorder.write_config(config)
 
     def _build_periodic_roster(self) -> None:
         """Resolve the handler's periodic tasks and make the election of its cluster tasks.
@@ -767,7 +780,7 @@ class AppLifecycle:
             await log.awarning(
                 'fleet_registry_disabled_no_dir',
                 category='fleet',
-                hint='set storage.dir or shared.dir for the card folder',
+                hint='set storage.dir or storage.shared_dir for the card folder',
             )
             return
         factory = _builtin_factory(BUILTIN_PROVIDERS, registry.provider, config_path='fleet.registry.provider')
@@ -805,8 +818,8 @@ class AppLifecycle:
         """Start the event-loop health monitor when enabled.
 
         Runs after the recorder so transitions/stalls persist as events;
-        the recorder handle may still be ``None`` (ui.enabled=false), in
-        which case the monitor feeds only Prometheus and the in-memory
+        the recorder handle may still be ``None`` (no UI and no durable
+        recording), in which case the monitor feeds only Prometheus and the in-memory
         history — deliberately still worth running.
         """
         app = self._app
@@ -830,7 +843,7 @@ class AppLifecycle:
         and ``self.annotate(...)`` remains a cheap call the handler can make
         unconditionally.
 
-        ``store_events`` is part of the condition on purpose: with it false
+        ``capture.events`` is part of the condition on purpose: with it false
         the recorder never starts a flush loop, so annotations would fill the
         bounded buffer and be evicted, spending memory and inflating
         ``drakkar_recorder_dropped_events_total`` to no benefit.
@@ -843,14 +856,15 @@ class AppLifecycle:
         ``NoOpTimelineEventEmitter`` stub stays in place instead.
         """
         app = self._app
-        recorder_config = app._config.ui.recorder
-        if app._recorder is None or not recorder_config.annotations_enabled or not recorder_config.store_events:
+        recorder_config = app._config.recorder
+        annotations = recorder_config.annotations
+        if app._recorder is None or not annotations.enabled or not recorder_config.capture.events:
             return
         annotator = Annotator(
             app._recorder,
-            max_bytes=recorder_config.annotation_max_bytes,
-            max_bytes_per_call=recorder_config.annotation_max_bytes_per_call,
-            log_max_bytes=recorder_config.annotation_log_max_bytes,
+            max_bytes=annotations.max_size,
+            max_bytes_per_call=annotations.max_size_per_call,
+            log_max_bytes=annotations.max_log_size,
         )
         app._handler._annotator = annotator
 
@@ -1467,7 +1481,7 @@ class AppLifecycle:
         app = self._app
         if app._fleet is None:
             return 0.0
-        return app._config.fleet.registry.resilience.timeout_seconds
+        return app._config.fleet.registry.resilience.timeout
 
     async def _drain_sources(self, sources: list[Source], deadline: float) -> None:
         """Wait for every source's in-flight work, all against one ``deadline``.

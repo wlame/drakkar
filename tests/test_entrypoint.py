@@ -7,21 +7,14 @@ name; a clean stop seals the live file into the history folder.
 import os
 from pathlib import Path
 
-from drakkar.config import UIConfig
+from drakkar.config import RecorderConfig
 from drakkar.recorder import EventRecorder, make_db_path
-from tests.conftest import make_ui_config
 
 WORKER = 'worker-1'
 
 
-def _make_config(tmp_path, **overrides) -> UIConfig:
-    defaults = {
-        'enabled': True,
-        'rotation_interval_hours': 1,
-        'flush_interval_seconds': 60,
-    }
-    defaults.update(overrides)
-    return make_ui_config(**defaults)
+def _make_config(tmp_path, **overrides) -> RecorderConfig:
+    return RecorderConfig(**{'flush_interval': '60s', **overrides})
 
 
 # --- Filename generation ---
@@ -105,7 +98,7 @@ async def test_stop_flushes_before_sealing(tmp_path):
 
 
 async def test_no_db_file_when_storage_dir_empty():
-    config = make_ui_config(enabled=True)
+    config = RecorderConfig()
     rec = EventRecorder(config, worker_name=WORKER, persistence='none', storage_dir='')
     await rec.start()
     assert rec.db_path == ''

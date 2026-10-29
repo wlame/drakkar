@@ -89,6 +89,7 @@ def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
         # An empty ``storage.dir`` keeps the watchdog (and every other on-disk
         # artifact) out of the test; ``test_watchdog.py`` covers that path.
         storage={'dir': ''},
+        recorder={'enabled': False},
         ui={'enabled': False, 'release': {'enabled': False}},
         metrics={'enabled': False},
         runtime_health={'enabled': False},

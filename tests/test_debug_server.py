@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from drakkar.annotations import Annotator
-from drakkar.config import DrakkarConfig, TimelineEventType, UITimelineConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, TimelineEventType, UITimelineConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -654,7 +654,7 @@ def ws_recv_frame(ws) -> dict:
 
 async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
     """WebSocket endpoint streams recorder events to connected clients."""
-    real_recorder = EventRecorder(debug_config, persistence='none')
+    real_recorder = EventRecorder(RecorderConfig(), persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -678,7 +678,7 @@ async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
 
 async def test_websocket_multiple_events(debug_config, mock_recorder, mock_app):
     """WebSocket receives multiple events in order."""
-    real_recorder = EventRecorder(debug_config, persistence='none')
+    real_recorder = EventRecorder(RecorderConfig(), persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -706,7 +706,7 @@ async def test_websocket_event_filter_limits_the_stream(debug_config, mock_recor
     ``task_complete`` event a handler emits once per task — on a fan-out
     workload that is the largest event class by count.
     """
-    real_recorder = EventRecorder(debug_config, persistence='none')
+    real_recorder = EventRecorder(RecorderConfig(), persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -731,7 +731,7 @@ async def test_websocket_reports_dropped_events(debug_config, mock_recorder, moc
     """
     import queue as queue_mod
 
-    real_recorder = EventRecorder(debug_config, persistence='none')
+    real_recorder = EventRecorder(RecorderConfig(), persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -753,7 +753,7 @@ async def test_websocket_reports_dropped_events(debug_config, mock_recorder, moc
 
 async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock_app):
     """Subscriber queue is removed when WebSocket disconnects."""
-    real_recorder = EventRecorder(debug_config, persistence='none')
+    real_recorder = EventRecorder(RecorderConfig(), persistence='none')
     real_recorder._running = True
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
@@ -785,7 +785,7 @@ async def _start_live_recorder(tmp_path):
     """
     from drakkar.recorder import EventRecorder
 
-    cfg = make_ui_config(enabled=True, flush_interval_seconds=60)
+    cfg = RecorderConfig(flush_interval='60s')
     rec = EventRecorder(cfg, worker_name='test-arrange-tasks', persistence='sqlite', storage_dir=str(tmp_path))
     await rec.start()
     return rec
@@ -1757,7 +1757,7 @@ class TestApiEvents:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -1880,9 +1880,9 @@ class TestApiRecentTasks:
         # recorder.config (public property) — both expose formerly-private
         # attributes. Stub the public names directly so the specced mock
         # returns the real config instead of a MagicMock (which breaks when
-        # the endpoint reads recorder.config.ws_min_duration_ms).
+        # the endpoint reads recorder.config.capture.events).
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2058,7 +2058,7 @@ class TestApiTimelineEvents:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2151,7 +2151,7 @@ class TestApiRecentTasksDepthAndWindow:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         if not pool_present:
             mock_app._executor_pool = None
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2557,7 +2557,7 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2591,7 +2591,7 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2665,7 +2665,7 @@ class TestAuthToken:
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2676,7 +2676,7 @@ class TestAuthToken:
 
     async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2687,7 +2687,7 @@ class TestAuthToken:
 
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2697,7 +2697,7 @@ class TestAuthToken:
 
     async def test_archives_list_accepts_bearer_header(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2707,7 +2707,7 @@ class TestAuthToken:
 
     async def test_archives_list_accepts_query_param(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2717,7 +2717,7 @@ class TestAuthToken:
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2727,7 +2727,7 @@ class TestAuthToken:
 
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2744,7 +2744,7 @@ class TestAuthToken:
         bundle exists.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2759,7 +2759,7 @@ class TestAuthToken:
         """/healthz and /readyz must remain unauthenticated — Kubernetes
         probes cannot send bearer tokens."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2771,7 +2771,7 @@ class TestAuthToken:
 
     async def test_ui_routes_open_when_no_token_configured(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2782,7 +2782,7 @@ class TestAuthToken:
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2808,7 +2808,7 @@ class TestAuthToken:
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2827,7 +2827,7 @@ class TestAuthToken:
     async def test_merge_disabled_returns_403_naming_the_config_key(self, tmp_path, mock_recorder, mock_app):
         """``ui.merge_enabled=false`` closes the one UI endpoint that writes files."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='', merge_enabled=False)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2844,7 +2844,7 @@ class TestAuthToken:
         endpoint the operator has switched off.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='', merge_enabled=False)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2860,7 +2860,7 @@ class TestAuthToken:
         """``ui.probe_enabled=false`` closes the endpoint that runs caller bytes."""
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
         cfg = make_ui_config(enabled=True, port=8080, auth_token='', probe_enabled=False)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2878,7 +2878,7 @@ class TestAuthToken:
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123', probe_enabled=False)
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2896,7 +2896,7 @@ class TestAuthToken:
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
         assert cfg.probe_enabled is True
         assert cfg.merge_enabled is True
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2923,7 +2923,7 @@ class TestAuthToken:
         same way a real request would.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2946,7 +2946,7 @@ class TestAuthToken:
         not explode into 500s that fill logs and trip 5xx alerting.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='non-ascïi')
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -3036,7 +3036,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3057,7 +3057,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=['https://ops.internal'],
         )
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3079,7 +3079,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3098,7 +3098,7 @@ class TestWebSocketAuth:
         still be accepted on an untokened worker reached over the network.
         """
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3116,7 +3116,7 @@ class TestWebSocketAuth:
     def test_ws_without_a_token_accepts_a_same_origin_page(self, mock_recorder, mock_app):
         """The served SPA — the normal case — must keep working."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3139,7 +3139,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=['https://ops.internal'],
         )
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3157,7 +3157,7 @@ class TestWebSocketAuth:
     def test_ws_no_auth_configured_still_works(self, mock_recorder, mock_app):
         """Default dev workflow: ``auth_token=''`` → connection accepted without token."""
         cfg = make_ui_config(enabled=True, port=8080, auth_token='')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3177,7 +3177,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3204,7 +3204,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3229,7 +3229,7 @@ class TestWebSocketAuth:
         from starlette.websockets import WebSocketDisconnect
 
         cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3255,7 +3255,7 @@ class TestWebSocketAuth:
             auth_token='secret-123',
             allowed_ws_origins=[],
         )
-        real_recorder = EventRecorder(cfg, persistence='sqlite', storage_dir='/tmp')
+        real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
@@ -3446,7 +3446,7 @@ class TestApiPeriodicTasks:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
 
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -3488,7 +3488,7 @@ class TestApiPeriodicTasks:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
 
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -3559,7 +3559,7 @@ class TestApiLabelTrace:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
         mock_recorder._worker_name = 'test-worker'
         mock_recorder._cluster_name = ''
         mock_recorder._db_path = db_path
@@ -3621,7 +3621,7 @@ class TestApiLabelTrace:
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
-        mock_recorder.config = cfg
+        mock_recorder.config = RecorderConfig()
 
         mock_recorder.storage_dir = '/tmp'
         mock_recorder.memory_store = await self._memory_store_like(db)

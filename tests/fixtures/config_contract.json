@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (fleet, history, periodic, election, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (fleet, recorder, periodic, election, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -207,6 +207,9 @@
       "yaml": {
         "storage": {
           "dir": ""
+        },
+        "recorder": {
+          "enabled": false
         }
       },
       "worker": "w-1",
@@ -217,10 +220,8 @@
       "name": "shared_differs",
       "yaml": {
         "storage": {
-          "dir": "/var/lib/drakkar"
-        },
-        "shared": {
-          "dir": "/mnt/fleet"
+          "dir": "/var/lib/drakkar",
+          "shared_dir": "/mnt/fleet"
         }
       },
       "worker": "w-1",
@@ -231,10 +232,8 @@
       "name": "shared_equal_to_storage",
       "yaml": {
         "storage": {
-          "dir": "/var/lib/drakkar"
-        },
-        "shared": {
-          "dir": "/var/lib/drakkar"
+          "dir": "/var/lib/drakkar",
+          "shared_dir": "/var/lib/drakkar"
         }
       },
       "worker": "w-1",
@@ -245,10 +244,11 @@
       "name": "shared_set_with_memory_only_storage",
       "yaml": {
         "storage": {
-          "dir": ""
+          "dir": "",
+          "shared_dir": "/mnt/fleet"
         },
-        "shared": {
-          "dir": "/mnt/fleet"
+        "recorder": {
+          "enabled": false
         }
       },
       "worker": "w-1",
@@ -437,12 +437,10 @@
       "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "persistence_none_with_storage_dir",
+      "name": "recorder_off_with_storage_dir",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "none"
-          }
+        "recorder": {
+          "enabled": false
         },
         "storage": {
           "dir": "/var/lib/drakkar"
@@ -453,12 +451,10 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=none fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "persistence_none_memory_only",
+      "name": "recorder_off_memory_only",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "none"
-          }
+        "recorder": {
+          "enabled": false
         },
         "storage": {
           "dir": ""
@@ -469,12 +465,10 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "persistence_sqlite_explicit",
+      "name": "provider_sqlite_explicit",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "sqlite"
-          }
+        "recorder": {
+          "provider": "sqlite"
         },
         "storage": {
           "dir": "/var/lib/drakkar"
@@ -485,12 +479,10 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "persistence_postgres_memory_only",
+      "name": "provider_postgres_memory_only",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres"
-          }
+        "recorder": {
+          "provider": "postgres"
         },
         "connections": {
           "postgres": {
@@ -508,12 +500,10 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem recorder=postgres fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "persistence_postgres_with_storage_dir",
+      "name": "provider_postgres_with_storage_dir",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres"
-          }
+        "recorder": {
+          "provider": "postgres"
         },
         "connections": {
           "postgres": {
@@ -546,56 +536,52 @@
     {
       "name": "window_shorter_than_rotation",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "window_hours": 1
-          }
-        },
-        "ui": {
-          "recorder": {
-            "rotation_interval_hours": 2
+            "window": "1h"
+          },
+          "sqlite": {
+            "rotation_interval": "2h"
           }
         }
       },
-      "message": "history.archive.window_hours (1) must be >= ui.recorder.rotation_interval_hours (2)"
+      "message": "recorder.archive.window (1h) must be >= recorder.sqlite.rotation_interval (2h)"
     },
     {
       "name": "due_shorter_than_rotation",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "due_after_hours": 1
-          }
-        },
-        "ui": {
-          "recorder": {
-            "rotation_interval_hours": 2
+            "due_after": "1h"
+          },
+          "sqlite": {
+            "rotation_interval": "2h"
           }
         }
       },
-      "message": "history.archive.due_after_hours (1) must be >= ui.recorder.rotation_interval_hours (2)"
+      "message": "recorder.archive.due_after (1h) must be >= recorder.sqlite.rotation_interval (2h)"
     },
     {
       "name": "retention_too_short",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "retention_days": 2
+            "retention": "2d"
           }
         }
       },
-      "message": "history.archive.retention_days (2) must be 0 (keep archives forever) or cover the due delay plus one window: retention_days * 24 must be >= history.archive.due_after_hours (48) + history.archive.window_hours (24)."
+      "message": "recorder.archive.retention (2d) must be 0 (keep archives for ever) or cover the due delay plus one window: it must be >= recorder.archive.due_after (2d) + recorder.archive.window (1d)."
     },
     {
       "name": "retention_default_note",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "window_hours": 720
+            "window": "720h"
           }
         }
       },
-      "message": "history.archive.retention_days (30) must be 0 (keep archives forever) or cover the due delay plus one window: retention_days * 24 must be >= history.archive.due_after_hours (48) + history.archive.window_hours (720). The value is the 30-day default, so raise it (or set 0 to keep archives forever) to go with a window this wide."
+      "message": "recorder.archive.retention (30d) must be 0 (keep archives for ever) or cover the due delay plus one window: it must be >= recorder.archive.due_after (2d) + recorder.archive.window (30d). The value is the 30-day default, so raise it (or set 0 to keep archives for ever) to go with a window this wide."
     },
     {
       "name": "offline_below_two_heartbeats",
@@ -712,68 +698,70 @@
       "path": "fleet.cache_exchange.max_concurrent_peers"
     },
     {
-      "name": "history_max_files_zero",
+      "name": "search_max_files_zero",
       "yaml": {
-        "ui": {
-          "trace": {
-            "history_max_files": 0
+        "recorder": {
+          "search": {
+            "max_files": 0
           }
         }
       },
-      "path": "ui.trace.history_max_files"
+      "path": "recorder.search.max_files"
     },
     {
-      "name": "history_max_seconds_zero",
+      "name": "search_timeout_zero",
       "yaml": {
-        "ui": {
-          "trace": {
-            "history_max_seconds": 0
+        "recorder": {
+          "search": {
+            "timeout": 0
           }
         }
       },
-      "path": "ui.trace.history_max_seconds"
+      "path": "recorder.search.timeout"
     },
     {
       "name": "merged_retention_negative",
       "yaml": {
-        "history": {
-          "merged_retention_days": -1
+        "recorder": {
+          "archive": {
+            "merged_retention": "-1d"
+          }
         }
       },
-      "path": "history.merged_retention_days"
+      "path": "recorder.archive.merged_retention"
     },
     {
       "name": "window_zero",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "window_hours": 0
+            "window": 0
           }
         }
       },
-      "path": "history.archive.window_hours"
+      "path": "recorder.archive.window"
     },
     {
       "name": "due_after_zero",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "due_after_hours": 0
+            "due_after": 0
           }
         }
       },
-      "path": "history.archive.due_after_hours"
+      "path": "recorder.archive.due_after"
     },
     {
       "name": "retention_negative",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "retention_days": -1
+            "retention": "-1d"
           }
         }
       },
-      "path": "history.archive.retention_days"
+      "path": "recorder.archive.retention"
     },
     {
       "name": "heartbeat_zero",
@@ -798,17 +786,17 @@
       "path": "fleet.registry.refresh_seconds"
     },
     {
-      "name": "registry_timeout_zero",
+      "name": "registry_resilience_timeout_zero",
       "yaml": {
         "fleet": {
           "registry": {
             "resilience": {
-              "timeout_seconds": 0
+              "timeout": 0
             }
           }
         }
       },
-      "path": "fleet.registry.resilience.timeout_seconds"
+      "path": "fleet.registry.resilience.timeout"
     },
     {
       "name": "empty_provider",
@@ -874,32 +862,32 @@
       "message": "fleet.registry.offline_after_seconds (86401) must be <= 86400 when fleet.registry.provider is consul"
     },
     {
-      "name": "registry_resilience_backoff_max_below_base",
+      "name": "registry_resilience_max_backoff_below_backoff",
       "yaml": {
         "fleet": {
           "registry": {
             "resilience": {
-              "backoff_seconds": 2,
-              "backoff_max_seconds": 1
+              "backoff": "2s",
+              "max_backoff": "1s"
             }
           }
         }
       },
-      "message": "fleet.registry.resilience.backoff_max_seconds (1) must be >= fleet.registry.resilience.backoff_seconds (2)"
+      "message": "fleet.registry.resilience.max_backoff (1s) must be >= fleet.registry.resilience.backoff (2s)"
     },
     {
-      "name": "election_resilience_backoff_max_below_base",
+      "name": "election_resilience_max_backoff_below_backoff",
       "yaml": {
         "periodic": {
           "election": {
             "resilience": {
-              "backoff_seconds": 2,
-              "backoff_max_seconds": 1
+              "backoff": "2s",
+              "max_backoff": "1s"
             }
           }
         }
       },
-      "message": "periodic.election.resilience.backoff_max_seconds (1) must be >= periodic.election.resilience.backoff_seconds (2)"
+      "message": "periodic.election.resilience.max_backoff (1s) must be >= periodic.election.resilience.backoff (2s)"
     },
     {
       "name": "postgres_pool_max_below_min",
@@ -985,276 +973,250 @@
     {
       "name": "archive_interval_and_cron",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "interval": 600,
+            "interval": "600s",
             "cron": "0 * * * *"
           }
         }
       },
-      "message": "history.archive: give at most one of interval and cron"
+      "message": "recorder.archive: give at most one of interval and cron"
     },
     {
       "name": "archive_interval_too_short",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "interval": 29
+            "interval": "29s"
           }
         }
       },
-      "message": "history.archive: interval must be a whole number of seconds and at least 30"
+      "message": "recorder.archive: interval must be a whole number of seconds and at least 30"
     },
     {
       "name": "archive_interval_zero",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
             "interval": 0
           }
         }
       },
-      "message": "history.archive: interval must be a whole number of seconds and at least 30"
+      "message": "recorder.archive: interval must be a whole number of seconds and at least 30"
     },
     {
       "name": "archive_cron_bad_syntax",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
             "cron": "61 * * * *"
           }
         }
       },
-      "message": "history.archive: cron '61 * * * *': minute value '61' is not one of 0-59"
+      "message": "recorder.archive: cron '61 * * * *': minute value '61' is not one of 0-59"
     },
     {
       "name": "archive_cron_never_fires",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
             "cron": "0 0 30 2 *"
           }
         }
       },
-      "message": "history.archive: cron '0 0 30 2 *' never fires"
+      "message": "recorder.archive: cron '0 0 30 2 *' never fires"
     },
     {
       "name": "archive_lease_too_short",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "lease_seconds": 39
+            "lease": "39s"
           }
         }
       },
-      "message": "history.archive: lease_seconds must be a whole number from 40 to 86400"
+      "message": "recorder.archive: lease must be a whole number of seconds from 40 to 86400"
     },
     {
       "name": "archive_lease_too_long",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "lease_seconds": 86401
+            "lease": "86401s"
           }
         }
       },
-      "message": "history.archive: lease_seconds must be a whole number from 40 to 86400"
+      "message": "recorder.archive: lease must be a whole number of seconds from 40 to 86400"
     },
     {
       "name": "archive_sweep_too_short",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "sweep_after_seconds": 59
+            "sweep_after": "59s"
           }
         }
       },
-      "message": "history.archive: sweep_after_seconds must be at least 60"
+      "message": "recorder.archive: sweep_after must be at least 60 seconds"
     },
     {
-      "name": "persistence_sqlite_without_storage_dir",
+      "name": "provider_sqlite_without_storage_dir",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "sqlite"
+        "recorder": {
+          "provider": "sqlite"
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "message": "recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, or set recorder.enabled to false"
+    },
+    {
+      "name": "provider_checked_before_rotation",
+      "yaml": {
+        "recorder": {
+          "provider": "sqlite",
+          "sqlite": {
+            "rotation_interval": "2h"
+          },
+          "archive": {
+            "window": "1h"
           }
         },
         "storage": {
           "dir": ""
         }
       },
-      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
+      "message": "recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, or set recorder.enabled to false"
     },
     {
-      "name": "persistence_checked_before_rotation",
-      "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "sqlite",
-            "rotation_interval_hours": 2
-          }
-        },
-        "storage": {
-          "dir": ""
-        },
-        "history": {
-          "archive": {
-            "window_hours": 1
-          }
-        }
-      },
-      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
-    },
-    {
-      "name": "persistence_sqlite_by_env_without_storage_dir",
+      "name": "provider_sqlite_by_env_without_storage_dir",
       "yaml": {},
       "env": {
-        "DK_UI__RECORDER__PERSISTENCE": "sqlite",
+        "DK_RECORDER__PROVIDER": "sqlite",
         "DK_STORAGE__DIR": ""
       },
-      "message": "ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only"
+      "message": "recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, or set recorder.enabled to false"
     },
     {
-      "name": "persistence_unknown",
+      "name": "provider_unknown",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "files"
-          }
+        "recorder": {
+          "provider": "files"
         }
       },
-      "path": "ui.recorder.persistence"
+      "path": "recorder.provider"
     },
     {
-      "name": "persistence_empty",
+      "name": "provider_empty",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": ""
-          }
+        "recorder": {
+          "provider": ""
         }
       },
-      "path": "ui.recorder.persistence"
+      "path": "recorder.provider"
     },
     {
-      "name": "persistence_empty_by_env",
+      "name": "provider_empty_by_env",
       "yaml": {},
       "env": {
-        "DK_UI__RECORDER__PERSISTENCE": ""
+        "DK_RECORDER__PROVIDER": ""
       },
-      "path": "ui.recorder.persistence"
+      "path": "recorder.provider"
     },
     {
       "name": "memory_window_too_short",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "window_seconds": 9
-            }
+        "recorder": {
+          "memory": {
+            "window": "9s"
           }
         }
       },
-      "path": "ui.recorder.memory.window_seconds"
+      "path": "recorder.memory.window"
     },
     {
       "name": "memory_window_too_long",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "window_seconds": 86401
-            }
+        "recorder": {
+          "memory": {
+            "window": "86401s"
           }
         }
       },
-      "path": "ui.recorder.memory.window_seconds"
+      "path": "recorder.memory.window"
     },
     {
       "name": "memory_rows_too_small",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "rows_per_executor": 99
-            }
+        "recorder": {
+          "memory": {
+            "rows_per_executor": 99
           }
         }
       },
-      "path": "ui.recorder.memory.rows_per_executor"
+      "path": "recorder.memory.rows_per_executor"
     },
     {
       "name": "memory_rows_too_large",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "rows_per_executor": 1000001
-            }
+        "recorder": {
+          "memory": {
+            "rows_per_executor": 1000001
           }
         }
       },
-      "path": "ui.recorder.memory.rows_per_executor"
+      "path": "recorder.memory.rows_per_executor"
     },
     {
-      "name": "memory_max_mib_too_small",
+      "name": "memory_max_size_too_small",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "max_mib": 15
-            }
+        "recorder": {
+          "memory": {
+            "max_size": "15MiB"
           }
         }
       },
-      "path": "ui.recorder.memory.max_mib"
+      "path": "recorder.memory.max_size"
     },
     {
-      "name": "memory_max_mib_too_large",
+      "name": "memory_max_size_too_large",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "max_mib": 513
-            }
+        "recorder": {
+          "memory": {
+            "max_size": "513MiB"
           }
         }
       },
-      "path": "ui.recorder.memory.max_mib"
+      "path": "recorder.memory.max_size"
     },
     {
       "name": "memory_window_fraction",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "window_seconds": 30.5
-            }
+        "recorder": {
+          "memory": {
+            "window": "30.5s"
           }
         }
       },
-      "path": "ui.recorder.memory.window_seconds"
+      "path": "recorder.memory.window"
     },
     {
-      "name": "persistence_postgres_without_connection",
+      "name": "provider_postgres_without_connection",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres"
-          }
+        "recorder": {
+          "provider": "postgres"
         }
       },
-      "message": "ui.recorder.postgres.connection 'main' is not defined under connections.postgres"
+      "message": "recorder.postgres.connection 'main' is not defined under connections.postgres"
     },
     {
       "name": "postgres_table_prefix_invalid",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres",
-            "postgres": {
-              "table_prefix": "Heavy"
-            }
+        "recorder": {
+          "provider": "postgres",
+          "postgres": {
+            "table_prefix": "Heavy"
           }
         },
         "connections": {
@@ -1265,17 +1227,15 @@
           }
         }
       },
-      "message": "ui.recorder.postgres.table_prefix 'Heavy' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
+      "message": "recorder.postgres.table_prefix 'Heavy' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
     },
     {
       "name": "postgres_table_prefix_trailing_newline",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres",
-            "postgres": {
-              "table_prefix": "a\n"
-            }
+        "recorder": {
+          "provider": "postgres",
+          "postgres": {
+            "table_prefix": "a\n"
           }
         },
         "connections": {
@@ -1286,115 +1246,99 @@
           }
         }
       },
-      "message": "ui.recorder.postgres.table_prefix 'a\n' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
+      "message": "recorder.postgres.table_prefix 'a\n' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores"
     },
     {
-      "name": "persistence_postgres_checked_before_rotation",
+      "name": "provider_postgres_checked_before_rotation",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "persistence": "postgres",
-            "rotation_interval_hours": 2
-          }
-        },
-        "history": {
+        "recorder": {
+          "provider": "postgres",
+          "sqlite": {
+            "rotation_interval": "2h"
+          },
           "archive": {
-            "window_hours": 1
+            "window": "1h"
           }
         }
       },
-      "message": "ui.recorder.postgres.connection 'main' is not defined under connections.postgres"
+      "message": "recorder.postgres.connection 'main' is not defined under connections.postgres"
     },
     {
-      "name": "postgres_retention_too_small",
+      "name": "postgres_initial_retention_too_small",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "retention_hours": 0
-            }
+        "recorder": {
+          "postgres": {
+            "initial_retention": 0
           }
         }
       },
-      "path": "ui.recorder.postgres.retention_hours"
+      "path": "recorder.postgres.initial_retention"
     },
     {
-      "name": "postgres_retention_too_large",
+      "name": "postgres_initial_retention_too_large",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "retention_hours": 169
-            }
+        "recorder": {
+          "postgres": {
+            "initial_retention": "169h"
           }
         }
       },
-      "path": "ui.recorder.postgres.retention_hours"
+      "path": "recorder.postgres.initial_retention"
     },
     {
       "name": "postgres_batch_rows_too_small",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "batch_rows": 99
-            }
+        "recorder": {
+          "postgres": {
+            "batch_rows": 99
           }
         }
       },
-      "path": "ui.recorder.postgres.batch_rows"
+      "path": "recorder.postgres.batch_rows"
     },
     {
       "name": "postgres_batch_rows_too_large",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "batch_rows": 50001
-            }
+        "recorder": {
+          "postgres": {
+            "batch_rows": 50001
           }
         }
       },
-      "path": "ui.recorder.postgres.batch_rows"
+      "path": "recorder.postgres.batch_rows"
     },
     {
       "name": "postgres_queue_too_small",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "queue_max_mib": 15
-            }
+        "recorder": {
+          "postgres": {
+            "max_queue": "15MiB"
           }
         }
       },
-      "path": "ui.recorder.postgres.queue_max_mib"
+      "path": "recorder.postgres.max_queue"
     },
     {
       "name": "postgres_queue_too_large",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "queue_max_mib": 1025
-            }
+        "recorder": {
+          "postgres": {
+            "max_queue": "1025MiB"
           }
         }
       },
-      "path": "ui.recorder.postgres.queue_max_mib"
+      "path": "recorder.postgres.max_queue"
     },
     {
-      "name": "postgres_retention_fraction",
+      "name": "postgres_initial_retention_fraction",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "retention_hours": 30.5
-            }
+        "recorder": {
+          "postgres": {
+            "initial_retention": "30.5h"
           }
         }
       },
-      "path": "ui.recorder.postgres.retention_hours"
+      "path": "recorder.postgres.initial_retention"
     },
     {
       "name": "sink_on_failure_unknown",
@@ -1754,55 +1698,192 @@
         }
       },
       "path": "connections.mongo.main.uri"
+    },
+    {
+      "name": "recorder_flush_interval_fraction",
+      "yaml": {
+        "recorder": {
+          "flush_interval": "500ms"
+        }
+      },
+      "path": "recorder.flush_interval"
+    },
+    {
+      "name": "recorder_flush_interval_needs_a_unit",
+      "yaml": {
+        "recorder": {
+          "flush_interval": 5
+        }
+      },
+      "message": "needs a unit, for example 30s; got '5'"
+    },
+    {
+      "name": "recorder_max_buffer_rows_too_small",
+      "yaml": {
+        "recorder": {
+          "max_buffer_rows": 999
+        }
+      },
+      "path": "recorder.max_buffer_rows"
+    },
+    {
+      "name": "sqlite_rotation_interval_fraction",
+      "yaml": {
+        "recorder": {
+          "sqlite": {
+            "rotation_interval": "90m"
+          }
+        }
+      },
+      "path": "recorder.sqlite.rotation_interval"
+    },
+    {
+      "name": "sqlite_state_interval_fraction",
+      "yaml": {
+        "recorder": {
+          "sqlite": {
+            "state_interval": "1500ms"
+          }
+        }
+      },
+      "path": "recorder.sqlite.state_interval"
+    },
+    {
+      "name": "archive_window_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "window": "90m"
+          }
+        }
+      },
+      "path": "recorder.archive.window"
+    },
+    {
+      "name": "archive_due_after_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "due_after": "90m"
+          }
+        }
+      },
+      "path": "recorder.archive.due_after"
+    },
+    {
+      "name": "archive_retention_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "retention": "36h"
+          }
+        }
+      },
+      "path": "recorder.archive.retention"
+    },
+    {
+      "name": "archive_merged_retention_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "merged_retention": "36h"
+          }
+        }
+      },
+      "path": "recorder.archive.merged_retention"
+    },
+    {
+      "name": "archive_interval_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "interval": "30.5s"
+          }
+        }
+      },
+      "path": "recorder.archive.interval"
+    },
+    {
+      "name": "archive_lease_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "lease": "40.5s"
+          }
+        }
+      },
+      "path": "recorder.archive.lease"
+    },
+    {
+      "name": "archive_sweep_after_fraction",
+      "yaml": {
+        "recorder": {
+          "archive": {
+            "sweep_after": "60.5s"
+          }
+        }
+      },
+      "path": "recorder.archive.sweep_after"
+    },
+    {
+      "name": "capture_max_stdin_needs_a_unit",
+      "yaml": {
+        "recorder": {
+          "capture": {
+            "max_stdin": 1024
+          }
+        }
+      },
+      "message": "needs a unit, for example 64KiB; got '1024'"
     }
   ],
   "load_values": [
     {
       "name": "archive_interval_default_null",
       "yaml": {},
-      "path": "history.archive.interval",
+      "path": "recorder.archive.interval",
       "value": null
     },
     {
       "name": "archive_cron_default_null",
       "yaml": {},
-      "path": "history.archive.cron",
+      "path": "recorder.archive.cron",
       "value": null
     },
     {
-      "name": "archive_lease_default_60",
+      "name": "archive_lease_default_1m",
       "yaml": {},
-      "path": "history.archive.lease_seconds",
+      "path": "recorder.archive.lease",
       "value": 60
     },
     {
-      "name": "archive_sweep_default_7200",
+      "name": "archive_sweep_after_default_2h",
       "yaml": {},
-      "path": "history.archive.sweep_after_seconds",
+      "path": "recorder.archive.sweep_after",
       "value": 7200
     },
     {
       "name": "archive_interval_600_loads",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
-            "interval": 600
+            "interval": "10m"
           }
         }
       },
-      "path": "history.archive.interval",
+      "path": "recorder.archive.interval",
       "value": 600
     },
     {
       "name": "archive_cron_loads",
       "yaml": {
-        "history": {
+        "recorder": {
           "archive": {
             "cron": "0 * * * *"
           }
         }
       },
-      "path": "history.archive.cron",
+      "path": "recorder.archive.cron",
       "value": "0 * * * *"
     },
     {
@@ -1827,110 +1908,106 @@
       "value": "redis"
     },
     {
-      "name": "persistence_default_null",
+      "name": "recorder_defaults",
       "yaml": {},
-      "path": "ui.recorder.persistence",
-      "value": null
+      "path": "recorder.enabled",
+      "value": true
     },
     {
       "name": "memory_window_default",
       "yaml": {},
-      "path": "ui.recorder.memory.window_seconds",
+      "path": "recorder.memory.window",
       "value": 120
     },
     {
       "name": "memory_rows_default",
       "yaml": {},
-      "path": "ui.recorder.memory.rows_per_executor",
+      "path": "recorder.memory.rows_per_executor",
       "value": 3000
     },
     {
-      "name": "memory_max_mib_default",
+      "name": "memory_max_size_default",
       "yaml": {},
-      "path": "ui.recorder.memory.max_mib",
-      "value": 256
+      "path": "recorder.memory.max_size",
+      "value": 268435456
     },
     {
       "name": "memory_window_whole_float",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "memory": {
-              "window_seconds": 120.0
-            }
+        "recorder": {
+          "memory": {
+            "window": "120.0s"
           }
         }
       },
-      "path": "ui.recorder.memory.window_seconds",
+      "path": "recorder.memory.window",
       "value": 120
     },
     {
-      "name": "persistence_none_by_env",
+      "name": "recorder_off_by_env",
       "yaml": {},
       "env": {
-        "DK_UI__RECORDER__PERSISTENCE": "none"
+        "DK_RECORDER__ENABLED": "false"
       },
-      "path": "ui.recorder.persistence",
-      "value": "none"
+      "path": "recorder.enabled",
+      "value": false
     },
     {
       "name": "postgres_connection_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.connection",
+      "path": "recorder.postgres.connection",
       "value": "main"
     },
     {
       "name": "postgres_table_prefix_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.table_prefix",
+      "path": "recorder.postgres.table_prefix",
       "value": ""
     },
     {
-      "name": "postgres_retention_default",
+      "name": "postgres_initial_retention_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.retention_hours",
-      "value": 6
+      "path": "recorder.postgres.initial_retention",
+      "value": 24
     },
     {
-      "name": "postgres_store_output_default",
+      "name": "postgres_store_completed_output_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.store_output",
+      "path": "recorder.postgres.store_completed_output",
       "value": false
     },
     {
       "name": "postgres_batch_rows_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.batch_rows",
+      "path": "recorder.postgres.batch_rows",
       "value": 5000
     },
     {
       "name": "postgres_queue_default",
       "yaml": {},
-      "path": "ui.recorder.postgres.queue_max_mib",
-      "value": 128
+      "path": "recorder.postgres.max_queue",
+      "value": 134217728
     },
     {
-      "name": "postgres_retention_whole_float",
+      "name": "postgres_initial_retention_whole_float",
       "yaml": {
-        "ui": {
-          "recorder": {
-            "postgres": {
-              "retention_hours": 24.0
-            }
+        "recorder": {
+          "postgres": {
+            "initial_retention": "24.0h"
           }
         }
       },
-      "path": "ui.recorder.postgres.retention_hours",
+      "path": "recorder.postgres.initial_retention",
       "value": 24
     },
     {
-      "name": "persistence_postgres_by_env",
+      "name": "provider_postgres_by_env",
       "yaml": {},
       "env": {
-        "DK_UI__RECORDER__PERSISTENCE": "postgres",
+        "DK_RECORDER__PROVIDER": "postgres",
         "DK_CONNECTIONS__POSTGRES__MAIN__DSN": "postgresql://drakkar:secret@db:5432/drakkar"
       },
-      "path": "ui.recorder.persistence",
+      "path": "recorder.provider",
       "value": "postgres"
     },
     {
@@ -2126,9 +2203,9 @@
       "name": "env_json_list",
       "yaml": {},
       "env": {
-        "DK_UI__EXPOSE_ENV_VARS": "[\"A\",\"B\"]"
+        "DK_RECORDER__CAPTURE__ENV_VARS": "[\"A\",\"B\"]"
       },
-      "path": "ui.expose_env_vars",
+      "path": "recorder.capture.env_vars",
       "value": [
         "A",
         "B"
@@ -2148,18 +2225,20 @@
     {
       "name": "env_json_list_replaces_the_yaml_list",
       "yaml": {
-        "ui": {
-          "expose_env_vars": [
-            "X",
-            "Y",
-            "Z"
-          ]
+        "recorder": {
+          "capture": {
+            "env_vars": [
+              "X",
+              "Y",
+              "Z"
+            ]
+          }
         }
       },
       "env": {
-        "DK_UI__EXPOSE_ENV_VARS": "[\"A\"]"
+        "DK_RECORDER__CAPTURE__ENV_VARS": "[\"A\"]"
       },
-      "path": "ui.expose_env_vars",
+      "path": "recorder.capture.env_vars",
       "value": [
         "A"
       ]
@@ -2394,6 +2473,209 @@
       },
       "path": "connections.consul.main.state_prefix",
       "value": "drakkar"
+    },
+    {
+      "name": "memory_window_by_env_with_a_unit",
+      "yaml": {},
+      "env": {
+        "DK_RECORDER__MEMORY__WINDOW": "2m"
+      },
+      "path": "recorder.memory.window",
+      "value": 120
+    },
+    {
+      "name": "recorder_off_with_empty_storage_dir",
+      "yaml": {
+        "recorder": {
+          "enabled": false
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "path": "recorder.enabled",
+      "value": false
+    },
+    {
+      "name": "provider_postgres_with_empty_storage_dir",
+      "yaml": {
+        "recorder": {
+          "provider": "postgres"
+        },
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://drakkar:secret@db:5432/drakkar"
+            }
+          }
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "path": "storage.dir",
+      "value": ""
+    },
+    {
+      "name": "recorder_off_ignores_an_undeclared_postgres_connection",
+      "yaml": {
+        "recorder": {
+          "enabled": false,
+          "provider": "postgres"
+        }
+      },
+      "path": "recorder.provider",
+      "value": "postgres"
+    },
+    {
+      "name": "storage_shared_dir_default",
+      "yaml": {},
+      "path": "storage.shared_dir",
+      "value": ""
+    },
+    {
+      "name": "flush_interval_default",
+      "yaml": {},
+      "path": "recorder.flush_interval",
+      "value": 5
+    },
+    {
+      "name": "max_buffer_rows_default",
+      "yaml": {},
+      "path": "recorder.max_buffer_rows",
+      "value": 50000
+    },
+    {
+      "name": "capture_max_stdin_default",
+      "yaml": {},
+      "path": "recorder.capture.max_stdin",
+      "value": 65536
+    },
+    {
+      "name": "capture_min_output_duration_default",
+      "yaml": {},
+      "path": "recorder.capture.min_output_duration",
+      "value": 0.5
+    },
+    {
+      "name": "annotations_max_size_default",
+      "yaml": {},
+      "path": "recorder.annotations.max_size",
+      "value": 16384
+    },
+    {
+      "name": "annotations_max_size_per_call_default",
+      "yaml": {},
+      "path": "recorder.annotations.max_size_per_call",
+      "value": 262144
+    },
+    {
+      "name": "annotations_max_log_size_default",
+      "yaml": {},
+      "path": "recorder.annotations.max_log_size",
+      "value": 2048
+    },
+    {
+      "name": "sqlite_rotation_interval_default",
+      "yaml": {},
+      "path": "recorder.sqlite.rotation_interval",
+      "value": 1
+    },
+    {
+      "name": "sqlite_state_snapshots_default",
+      "yaml": {},
+      "path": "recorder.sqlite.state_snapshots",
+      "value": true
+    },
+    {
+      "name": "sqlite_state_interval_default",
+      "yaml": {},
+      "path": "recorder.sqlite.state_interval",
+      "value": 10
+    },
+    {
+      "name": "archive_window_default",
+      "yaml": {},
+      "path": "recorder.archive.window",
+      "value": 24
+    },
+    {
+      "name": "archive_due_after_default",
+      "yaml": {},
+      "path": "recorder.archive.due_after",
+      "value": 48
+    },
+    {
+      "name": "archive_retention_default",
+      "yaml": {},
+      "path": "recorder.archive.retention",
+      "value": 30
+    },
+    {
+      "name": "archive_merged_retention_default",
+      "yaml": {},
+      "path": "recorder.archive.merged_retention",
+      "value": 32
+    },
+    {
+      "name": "postgres_max_output_default",
+      "yaml": {},
+      "path": "recorder.postgres.max_output",
+      "value": 65536
+    },
+    {
+      "name": "postgres_max_size_default",
+      "yaml": {},
+      "path": "recorder.postgres.max_size",
+      "value": 0
+    },
+    {
+      "name": "search_max_files_default",
+      "yaml": {},
+      "path": "recorder.search.max_files",
+      "value": 256
+    },
+    {
+      "name": "search_timeout_default",
+      "yaml": {},
+      "path": "recorder.search.timeout",
+      "value": 10.0
+    },
+    {
+      "name": "resilience_defaults_timeout",
+      "yaml": {},
+      "path": "recorder.postgres.resilience.timeout",
+      "value": 5.0
+    },
+    {
+      "name": "resilience_defaults_max_retries",
+      "yaml": {},
+      "path": "recorder.postgres.resilience.max_retries",
+      "value": 2
+    },
+    {
+      "name": "resilience_defaults_backoff",
+      "yaml": {},
+      "path": "fleet.registry.resilience.backoff",
+      "value": 0.2
+    },
+    {
+      "name": "resilience_defaults_max_backoff",
+      "yaml": {},
+      "path": "fleet.registry.resilience.max_backoff",
+      "value": 5.0
+    },
+    {
+      "name": "resilience_defaults_breaker_failures",
+      "yaml": {},
+      "path": "periodic.election.resilience.breaker_failures",
+      "value": 5
+    },
+    {
+      "name": "resilience_defaults_breaker_cooldown",
+      "yaml": {},
+      "path": "periodic.election.resilience.breaker_cooldown",
+      "value": 30.0
     }
   ],
   "sink_policies": [

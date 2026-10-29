@@ -18,7 +18,7 @@ class ElectionConfig(ConfigModel):
         default='filesystem',
         min_length=1,
         description=(
-            'Election provider: filesystem (a lock file in shared.dir), postgres (a row in a table '
+            'Election provider: filesystem (a lock file in storage.shared_dir), postgres (a row in a table '
             'of the database named by periodic.election.connection), redis (a key on the Redis '
             'server named by periodic.election.connection), consul (a key of the Consul agent named '
             'by periodic.election.connection, held by a session). '

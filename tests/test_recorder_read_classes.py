@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, RecorderConfig
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
@@ -87,7 +87,7 @@ def test_still_covered_table(read_class, bound, coverage, rows_returned, expecte
 
 
 def _recorder(tmp_path, persistence: str, **memory) -> EventRecorder:
-    config = make_ui_config(enabled=True, store_output=False, flush_interval_seconds=60)
+    config = RecorderConfig(flush_interval='60s', capture={'output': False})
     return EventRecorder(
         config,
         worker_name=WORKER,
@@ -128,12 +128,12 @@ def _drakkar_app() -> MagicMock:
 
 
 def _client(rec: EventRecorder) -> AsyncClient:
-    app = create_ui_app(rec.config, rec, _drakkar_app())
+    app = create_ui_app(make_ui_config(), rec, _drakkar_app())
     return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
 
 
 def _deps(rec: EventRecorder) -> UIDeps:
-    return UIDeps(rec.config, rec, _drakkar_app())
+    return UIDeps(make_ui_config(), rec, _drakkar_app())
 
 
 def _consumed(offset: int, ts: float | None = None) -> dict:

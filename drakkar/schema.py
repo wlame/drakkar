@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from typing import IO, NoReturn
 
 from drakkar.config.connections import SCHEMA_RE
-from drakkar.config.ui import TABLE_PREFIX_RE
+from drakkar.config.recorder import TABLE_PREFIX_RE
 from drakkar.providers.postgres import (
     POSTGRES_PROVIDER,
     RETENTION_HOURS_MAX,

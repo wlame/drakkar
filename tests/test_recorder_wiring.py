@@ -23,8 +23,7 @@ DRAIN_TIMEOUT_SECONDS = 4
 
 def _app(tmp_path, **overrides) -> DrakkarApp:
     values = {
-        'storage': {'dir': str(tmp_path / 'storage')},
-        'shared': {'dir': str(tmp_path / 'shared')},
+        'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
         'cluster_name': 'search',
         'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
@@ -66,7 +65,7 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
     monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: received.update(kwargs))
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
-    election_config = {'resilience': {'timeout_seconds': 1.5, 'retries': 0}}
+    election_config = {'resilience': {'timeout': '1500ms', 'max_retries': 0}}
     app = _app(tmp_path, periodic={'election': election_config})
     (tmp_path / 'storage').mkdir()
     started_ok = provider_calls.labels(feature='election', provider='filesystem', op='start', outcome='ok')
@@ -181,9 +180,7 @@ async def test_the_recorder_stops_with_the_shutdown_time_that_is_left(tmp_path, 
 
 
 async def test_lifecycle_creates_storage_dir_and_starts_no_leftover_sealing_with_none(tmp_path, monkeypatch):
-    app = _app(
-        tmp_path, ui={'enabled': True, 'port': 8123, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}}
-    )
+    app = _app(tmp_path, recorder={'enabled': False})
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._prepare_storage()
@@ -204,10 +201,7 @@ async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_r
     warned = MagicMock()
     monkeypatch.setattr('drakkar.lifecycle.warn_if_archives_unbounded', warned)
     monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
-    none_app = _app(
-        tmp_path,
-        ui={'enabled': True, 'port': 8123, 'release': {'enabled': False}, 'recorder': {'persistence': 'none'}},
-    )
+    none_app = _app(tmp_path, recorder={'enabled': False})
     await none_app._lifecycle._start_ui_and_recorder()
     await none_app._recorder.stop()
     warned.assert_not_called()
@@ -222,12 +216,7 @@ async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_r
 async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkeypatch):
     app = _app(
         tmp_path,
-        ui={
-            'enabled': True,
-            'port': 8123,
-            'release': {'enabled': False},
-            'recorder': {'memory': {'window_seconds': 60, 'rows_per_executor': 200, 'max_mib': 16}},
-        },
+        recorder={'memory': {'window': '1m', 'rows_per_executor': 200, 'max_size': '16MiB'}},
         executor={'binary_path': '/usr/bin/echo', 'max_executors': 4},
     )
     (tmp_path / 'storage').mkdir()
@@ -249,22 +238,17 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
     app = _app(
         tmp_path,
         storage={'dir': ''},
-        ui={
-            'enabled': True,
-            'port': 8123,
-            'release': {'enabled': False},
-            'recorder': {
-                'persistence': 'postgres',
-                'flush_interval_seconds': 1,
-                'postgres': {
-                    'connection': 'history',
-                    'table_prefix': 'fast',
-                    'retention_hours': 12,
-                    'store_output': True,
-                    'batch_rows': 200,
-                    'queue_max_mib': 32,
-                    'resilience': {'retries': 1},
-                },
+        recorder={
+            'provider': 'postgres',
+            'flush_interval': '1s',
+            'postgres': {
+                'connection': 'history',
+                'table_prefix': 'fast',
+                'initial_retention': '12h',
+                'store_completed_output': True,
+                'batch_rows': 200,
+                'max_queue': '32MiB',
+                'resilience': {'max_retries': 1},
             },
         },
         connections={'postgres': {'history': {'dsn': 'postgresql://drakkar:secret@db:5432/drakkar', 'schema': 'rec'}}},
@@ -280,9 +264,9 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
             'postgresql://drakkar:secret@db:5432/drakkar',
             'rec.fast_recorder_events',
         )
-        assert (settings.retention_hours, settings.store_output, settings.batch_rows) == (12, True, 200)
+        assert (settings.retention_hours, settings.store_completed_output, settings.batch_rows) == (12, True, 200)
         assert settings.queue_max_bytes == 32 * 1024 * 1024
-        assert settings.resilience.retries == 1
+        assert settings.resilience.max_retries == 1
         await wait_for(lambda: len(fake.opened) == 1)
         assert (fake.opened[0].pool_min, fake.opened[0].pool_max) == (1, 1)
     finally:

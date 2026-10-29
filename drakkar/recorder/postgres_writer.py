@@ -426,7 +426,7 @@ class PostgresWriter:
                 cluster=self._cluster,
                 worker=self._worker,
                 instance=self._instance,
-                store_output=self._settings.store_output,
+                store_completed_output=self._settings.store_completed_output,
             )
             for _, row in pairs
         ]

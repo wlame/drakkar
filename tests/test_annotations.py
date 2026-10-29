@@ -15,13 +15,14 @@ from drakkar.annotations import (
     Annotator,
     NoOpAnnotator,
 )
+from drakkar.config import RecorderConfig
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context, current_hook_context
 from drakkar.models import ExecutorTask, SourceMessage
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
-from tests.conftest import make_ui_config, wait_for
+from tests.conftest import wait_for
 
 
 class FakeRecorder:
@@ -381,7 +382,7 @@ async def test_annotations_reach_the_recorder_db_through_the_real_pipeline(tmp_p
     and the real annotator applying the real budgets.
     """
     recorder = EventRecorder(
-        make_ui_config(), worker_name='e2e', cluster_name='main', persistence='sqlite', storage_dir=str(tmp_path)
+        RecorderConfig(), worker_name='e2e', cluster_name='main', persistence='sqlite', storage_dir=str(tmp_path)
     )
     await recorder.start()
     try:

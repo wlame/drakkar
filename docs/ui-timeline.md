@@ -279,6 +279,6 @@ And the five label roles:
 - [Handler — Task labels](handler.md#task-labels) for how to set labels a timeline rule or
   role can read.
 - [Configuration](configuration.md#ui-flight-recorder-ui) and
-  [Config Reference](config-reference.md#ui-flight-recorder-ui) for the full `ui.*` field
+  [Config Reference](config-reference.md#ui-ui) for the full `ui.*` field
   list.
 - [Integration Tests](integration.md) for the worked example's full handler.

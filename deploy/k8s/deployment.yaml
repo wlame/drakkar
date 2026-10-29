@@ -91,7 +91,7 @@ spec:
           # a starting point — measure with your real handler binary
           # and tune. Memory limit should leave headroom above the
           # cache and recorder buffers (cache.max_memory_entries,
-          # ui.recorder.max_buffer) plus subprocess RSS.
+          # recorder.max_buffer_rows) plus subprocess RSS.
           resources:
             requests:
               cpu: 500m

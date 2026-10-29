@@ -74,7 +74,7 @@ REFRESHES_PER_LEASE = 3
 class ElectionContext:
     """What a provider learns about the worker that runs it, at ``start``.
 
-    ``shared_dir`` is the worker's shared folder (``shared.dir``); the
+    ``shared_dir`` is the worker's shared folder (``storage.shared_dir``); the
     ``filesystem`` provider keeps its locks in its ``tasks`` folder, others
     ignore it. ``options`` is the provider's own settings mapping. ``connections``
     resolves the worker's named shared connections; it is ``None`` when the

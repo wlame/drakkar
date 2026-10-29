@@ -1,7 +1,7 @@
 """Tests for configuration mode combinations.
 
 Validates that the framework handles all reasonable combinations of config
-flags consistently — debug on/off, metrics on/off, store_events/config/state
+flags consistently — debug on/off, metrics on/off, capture.events, capture.config, state_snapshots
 toggles, db_dir empty, max_retries=0, window_size=1, single vs multiple
 sinks, and various edge cases.
 """
@@ -22,6 +22,7 @@ from drakkar.config import (
     KafkaSourceConfig,
     LoggingConfig,
     MetricsConfig,
+    RecorderConfig,
     SinksConfig,
 )
 from drakkar.executor import ExecutorPool
@@ -109,6 +110,7 @@ def make_config(**overrides) -> DrakkarConfig:
         # Memory-only: a test that reaches startup must not create the
         # default own-files folder on the host.
         'storage': {'dir': ''},
+        'recorder': {'enabled': False},
     }
     defaults.update(overrides)
     return DrakkarConfig(**defaults)
@@ -254,7 +256,7 @@ class TestPartitionProcessorRecorderModes:
         async def on_commit(pid, offset):
             committed.append((pid, offset))
 
-        debug_cfg = make_ui_config(enabled=True, flush_interval_seconds=60)
+        debug_cfg = RecorderConfig(flush_interval='60s')
         recorder = EventRecorder(
             debug_cfg, worker_name='test-w', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path)
         )
@@ -283,10 +285,10 @@ class TestPartitionProcessorRecorderModes:
 
 
 class TestRecorderStoreFlags:
-    """Verify recorder handles all store_events/config/state flag combos."""
+    """Verify recorder handles all capture.events, capture.config and state_snapshots combos."""
 
     @pytest.mark.parametrize(
-        'store_events,store_config,store_state',
+        'capture_events,capture_config,state_snapshots',
         [
             (True, True, True),
             (True, True, False),
@@ -298,14 +300,14 @@ class TestRecorderStoreFlags:
             (False, False, False),
         ],
     )
-    async def test_recorder_start_stop_with_flag_combos(self, tmp_path, store_events, store_config, store_state):
+    async def test_recorder_start_stop_with_flag_combos(
+        self, tmp_path, capture_events, capture_config, state_snapshots
+    ):
         """Recorder starts and stops cleanly with any combination of store flags."""
-        cfg = make_ui_config(
-            enabled=True,
-            store_events=store_events,
-            store_config=store_config,
-            store_state=store_state,
-            flush_interval_seconds=60,
+        cfg = RecorderConfig(
+            flush_interval='60s',
+            capture={'events': capture_events, 'config': capture_config},
+            sqlite={'state_snapshots': state_snapshots},
         )
         rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path))
         await rec.start()
@@ -324,21 +326,17 @@ class TestRecorderStoreFlags:
         )
         await rec.write_config(dummy_config)
 
-        # get_events should return empty if store_events is False
+        # get_events should return empty if capture_events is False
         events = await rec.get_events()
-        if not store_events:
+        if not capture_events:
             assert events == []
 
         await rec.stop()
 
     async def test_recorder_empty_storage_dir_is_memory_only(self, tmp_path):
         """With storage_dir empty, recorder keeps events and the config row in its memory store."""
-        cfg = make_ui_config(
-            enabled=True,
-            store_events=True,
-            store_config=True,
-            store_state=True,
-            flush_interval_seconds=60,
+        cfg = RecorderConfig(
+            flush_interval='60s', capture={'events': True, 'config': True}, sqlite={'state_snapshots': True}
         )
         rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='none', storage_dir='')
         await rec.start()
@@ -364,16 +362,13 @@ class TestRecorderStoreFlags:
         await rec.stop()
         assert rec.db_path == ''
 
-    @pytest.mark.parametrize('store_state', [True, False])
-    async def test_recorder_state_sync_respects_flag(self, tmp_path, store_state):
-        """State sync only writes when store_state=True and db exists."""
-        cfg = make_ui_config(
-            enabled=True,
-            store_events=False,
-            store_config=False,
-            store_state=store_state,
-            flush_interval_seconds=60,
-            state_sync_interval_seconds=1,
+    @pytest.mark.parametrize('state_snapshots', [True, False])
+    async def test_recorder_state_sync_respects_flag(self, tmp_path, state_snapshots):
+        """State sync only writes when state_snapshots=True and db exists."""
+        cfg = RecorderConfig(
+            flush_interval='60s',
+            capture={'events': False, 'config': False},
+            sqlite={'state_snapshots': state_snapshots, 'state_interval': '1s'},
         )
         rec = EventRecorder(cfg, worker_name='test', cluster_name='', persistence='sqlite', storage_dir=str(tmp_path))
         rec.set_state_provider(
@@ -392,7 +387,7 @@ class TestRecorderStoreFlags:
         # manually trigger state sync
         await rec._sync_state()
 
-        if store_state and rec._db:
+        if state_snapshots and rec._db:
             async with rec._db.execute('SELECT COUNT(*) FROM worker_state') as cur:
                 row = await cur.fetchone()
             assert row[0] >= 1

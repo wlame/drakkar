@@ -371,7 +371,7 @@ async def test_a_filesystem_election_start_after_stop_fails_and_starts_no_thread
 
 async def test_a_lock_read_error_on_refresh_reads_as_unconfirmed(tmp_path, monkeypatch):
     provider = await _started_filesystem(tmp_path)
-    caller = _caller('filesystem-io-error', retries=0)
+    caller = _caller('filesystem-io-error', max_retries=0)
     token = '0123456789abcdef'
     assert await provider.acquire(SCOPE, token, LEASE_SECONDS)
     real_open = os.open

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import UIConfig
+from drakkar.config import RecorderConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -93,19 +93,20 @@ class EventWriter:
     """Builds recorder event rows and hands them to a sink.
 
     Subclasses supply the sink by implementing :meth:`_record`. This class
-    owns only what row building needs: the UI config, the live fan-out, and
-    the in-memory counters the ``worker_state`` snapshot reports.
+    owns only what row building needs: the recorder config, the live fan-out,
+    and the in-memory counters the ``worker_state`` snapshot reports.
     """
 
-    def __init__(self, config: UIConfig) -> None:
+    def __init__(self, config: RecorderConfig, *, ws_min_duration_ms: int, log_min_duration_ms: int) -> None:
         self._config = config
-        # The persistence tier (ui.recorder.*) is read on hot paths — bind
-        # it once so those reads don't repeat the attribute hop.
-        self._store = config.recorder
+        # Read on hot paths — bind it once so those reads don't repeat the attribute hop.
+        self._capture = config.capture
+        self._ws_min_duration_ms = ws_min_duration_ms
+        self._log_min_duration_ms = log_min_duration_ms
         # Live-stream fan-out (subscribers, per-client queues, deferred
         # start events) — see :mod:`drakkar.recorder.fanout`.
-        self._fanout = WSFanout(config.ws_min_duration_ms)
-        # In-memory counters (used for worker_state regardless of store_events)
+        self._fanout = WSFanout(ws_min_duration_ms)
+        # In-memory counters (used for worker_state regardless of capture.events)
         self._counters = {
             'consumed': 0,
             'completed': 0,
@@ -268,11 +269,11 @@ class EventWriter:
             # the live UI shows it in the timeline hover so wall time splits
             # into waiting vs running.
             metadata['queue_wait_ms'] = queue_wait_ms
-        if task.stdin and self._store.store_stdin:
-            # Opt-in stdin capture (ui.recorder.store_stdin): the exact input
-            # the task consumed, capped at stdin_max_bytes. Rides the existing
+        if task.stdin and self._capture.stdin:
+            # Opt-in stdin capture (recorder.capture.stdin): the exact input
+            # the task consumed, capped at max_stdin. Rides the existing
             # metadata JSON, so no events-table schema change is involved.
-            stored_stdin, stdin_truncated = _capped_stdin(task.stdin, self._store.stdin_max_bytes)
+            stored_stdin, stdin_truncated = _capped_stdin(task.stdin, self._capture.max_stdin)
             metadata['stdin'] = stored_stdin
             if stdin_truncated:
                 metadata['stdin_truncated'] = True
@@ -320,7 +321,7 @@ class EventWriter:
             'client_name': resolved_client_name,
             'request_id': resolved_request_id,
         }
-        ws_threshold_ms = self._config.ws_min_duration_ms
+        ws_threshold_ms = self._ws_min_duration_ms
         if ws_threshold_ms > 0:
             # Defer WS broadcast: only send task_started to live UI if
             # the task is still running after ws_min_duration_ms.
@@ -342,6 +343,7 @@ class EventWriter:
     ) -> None:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
+        duration = result.duration_seconds
 
         # If the task_started was deferred and the task finished before
         # the threshold, neither start nor completion goes to WS.
@@ -351,8 +353,8 @@ class EventWriter:
         # is no per-task timer to cancel.
         skip_ws = self._fanout.take_deferred(result.task.task_id) is not None
 
-        skip_db = self._store.event_min_duration_ms > 0 and duration_ms < self._store.event_min_duration_ms
-        include_output = duration_ms >= self._store.output_min_duration_ms
+        skip_db = self._capture.min_event_duration > 0 and duration < self._capture.min_event_duration
+        include_output = duration >= self._capture.min_output_duration
 
         # See ``record_task_started`` for the resolution rules: explicit
         # kwargs take precedence, otherwise we read from the task that
@@ -399,12 +401,12 @@ class EventWriter:
             entry['metadata'] = encode_json_str(completed_meta)
         if include_output:
             entry['args'] = encode_json_str(result.task.args)
-        if include_output and self._store.store_output:
+        if include_output and self._capture.output:
             entry['stdout'] = result.stdout
             entry['stderr'] = result.stderr
         self._record(entry, skip_ws=skip_ws, skip_db=skip_db)
 
-        if duration_ms >= self._config.log_min_duration_ms:
+        if duration_ms >= self._log_min_duration_ms:
             logger.info(
                 'slow_task_completed',
                 category='recorder',
@@ -436,9 +438,9 @@ class EventWriter:
 
         if duration_seconds is not None:
             duration_ms = duration_seconds * 1000
-            skip_db = self._store.event_min_duration_ms > 0 and duration_ms < self._store.event_min_duration_ms
-            include_output = duration_ms >= self._store.output_min_duration_ms
-            should_log = duration_ms >= self._config.log_min_duration_ms
+            skip_db = self._capture.min_event_duration > 0 and duration_seconds < self._capture.min_event_duration
+            include_output = duration_seconds >= self._capture.min_output_duration
+            should_log = duration_ms >= self._log_min_duration_ms
         else:
             skip_db = False
             include_output = True
@@ -457,7 +459,7 @@ class EventWriter:
             'pid': error.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
-            'metadata': encode_json_str(_failed_metadata(task, error, self._store.stdin_max_bytes)),
+            'metadata': encode_json_str(_failed_metadata(task, error, self._capture.max_stdin)),
             'labels': encode_json_str(task.labels) if task.labels else None,
             'origin': resolved_origin,
             'client_name': resolved_client_name,
@@ -467,7 +469,7 @@ class EventWriter:
             entry['duration'] = duration_seconds
         if include_output:
             entry['args'] = encode_json_str(task.args)
-        if include_output and self._store.store_output:
+        if include_output and self._capture.output:
             entry['stderr'] = error.stderr
         self._record(entry, skip_ws=False, skip_db=skip_db)
 

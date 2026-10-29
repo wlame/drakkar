@@ -58,7 +58,7 @@ def test_artifact_is_valid_json_matching_the_schema():
     raw = json.loads(ARTIFACT_PATH.read_text())
     # Round-trips through the pydantic model without error.
     parsed = ConfigMetadata.model_validate(raw)
-    assert len(parsed.groups) == 18
+    assert len(parsed.groups) == 17
 
 
 # --- 2. Anchor parity: every doc_anchor must exist on the real docs page ---
@@ -339,7 +339,7 @@ def test_type_field_uses_simple_json_type_names():
     assert by_path['sinks.defaults.breaker_cooldown'].type == 'duration'
     assert by_path['sinks.defaults.breaker_failures'].type == 'integer'
     assert by_path['metrics.enabled'].type == 'boolean'
-    assert by_path['ui.expose_env_vars'].type == 'array'
+    assert by_path['recorder.capture.env_vars'].type == 'array'
     assert by_path['executor.env'].type == 'object'
     assert by_path['sinks.mongo.*.statements.*.op'].type == 'string'
 
