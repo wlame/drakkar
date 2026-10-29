@@ -768,6 +768,8 @@ run and the minimum hold. The archive pass also checks it right before each
 publish and each delete.
 
 ```yaml
+storage:
+  shared_dir: /mnt/drakkar-shared   # provider filesystem needs it
 autodiscover:
   enabled: true
   provider: filesystem     # the task lock above; or postgres, redis, consul

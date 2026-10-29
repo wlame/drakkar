@@ -236,6 +236,8 @@ the [worker registry](fleet.md). It is configured once, under `autodiscover`,
 and it is off by default:
 
 ```yaml
+storage:
+  shared_dir: /mnt/drakkar-shared   # provider filesystem needs it
 autodiscover:
   enabled: true
   provider: filesystem   # filesystem | postgres | redis | consul
@@ -250,8 +252,8 @@ keeps the lock of task `<task>` of cluster `<cluster>`:
 |---|---|
 | `filesystem` | The file `<storage.shared_dir>/tasks/<cluster>/<task>.lock` |
 | `postgres` | A row of the table `task_locks` (key column `scope`) in the schema of the connection |
-| `redis` | The key `<key_prefix>task-locks:<cluster>/<task>` |
-| `consul` | The key `<key_prefix>/task-locks/<cluster>/<task>`, held by a session named `drakkar/task-lock/<cluster>/<task>/<token>` |
+| `redis` | The key `<state_prefix>task-locks:<cluster>/<task>` |
+| `consul` | The key `<state_prefix>/task-locks/<cluster>/<task>`, held by a session named `drakkar/task-lock/<cluster>/<task>/<token>` |
 
 The details of each provider are on
 [Local databases](local-databases.md#the-election-provider).
@@ -377,12 +379,3 @@ The `periodic_run` row of the [flight recorder](observability.md#events-processi
 of a cluster run has the metadata keys `"scope": "cluster"` and
 `"slot": <epoch second>`. The full list of log events is on
 [Observability](observability.md#periodic-log-events).
-
-## Upgrading
-
-`seconds=` is gone: write `@periodic(30)` or `@periodic(interval=30)`. The
-archive keys and its lock changed, and old and new workers take different
-archive locks, so they must not archive at the same time. Stop the whole
-fleet for the upgrade, or set `recorder.archive.enabled: false` on every
-worker during a rolling restart. See
-[Upgrading](upgrading.md#periodic-tasks-and-the-archive).

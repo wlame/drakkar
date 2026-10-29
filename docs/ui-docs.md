@@ -266,11 +266,10 @@ a worker:
 
 ---
 
-## Swagger moved to `/api-docs`
+## Swagger at `/api-docs`
 
-`/docs` used to serve the built-in Swagger UI over the worker's OpenAPI
-document. That path now belongs to the operator docs site, and **Swagger
-moved to `GET /api-docs`** (its assets to `/api-docs/swagger-ui-bundle.js`
+`/docs` belongs to the operator docs site. The built-in Swagger UI over the worker's OpenAPI
+document is **served at `GET /api-docs`** (its assets to `/api-docs/swagger-ui-bundle.js`
 and `/api-docs/swagger-ui.css`). The document itself is unchanged and still
 served at `GET /api/v1/openapi.json`.
 

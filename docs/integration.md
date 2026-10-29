@@ -481,7 +481,7 @@ use.
 With `redis`, both use the connection `connections.redis.main`: its URL
 in `drakkar.yaml` has no password, and `docker-compose.yml` supplies the
 full URL through `DK_CONNECTIONS__REDIS__MAIN__URL`. The keys start with
-`drakkar:` (the `key_prefix`) and are in database 3 (the path of the URL).
+`drakkar:` (the `state_prefix`) and are in database 3 (the path of the URL).
 `redis-fleet` starts with the `default` user off and one user, `drakkar`,
 that has exactly the rights that
 [Security](security.md#provider-credentials) gives the providers:
@@ -489,7 +489,7 @@ that has exactly the rights that
 `redis` therefore also shows that these rights are enough.
 
 With `consul`, both use the connection `connections.consul.main`: its
-entry in `drakkar.yaml` has the `address` and the `key_prefix` (`drakkar`)
+entry in `drakkar.yaml` has the `address` and the `state_prefix` (`drakkar`)
 and no token, and `docker-compose.yml` supplies the ACL token through
 `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`. `consul-fleet` runs with ACLs on and
 the default policy `deny`. Before the workers start, `consul-fleet-init`

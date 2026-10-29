@@ -211,8 +211,8 @@ shared services that providers use: the Consul ACL `token`, the Redis `url`
 `postgres` registry and election providers read `connections.postgres.<name>`:
 they open one pool with the `dsn` and use the `schema`. The `redis` providers
 read `connections.redis.<name>`: they open one client with the `url` and use
-the `key_prefix`. The `consul` providers read `connections.consul.<name>`: they
-open one client with the `address` and the `token`, and use the `key_prefix`.
+the `state_prefix`. The `consul` providers read `connections.consul.<name>`: they
+open one client with the `address` and the `token`, and use the `state_prefix`.
 The advice below applies to the entries you declare and to any provider that
 uses them.
 
@@ -222,8 +222,8 @@ uses them.
   or sits in version control, and neither is a place for a password.
 - **Give a provider only its own access.** A provider needs the key prefix
   or the schema of its connection and nothing else: a Consul token limited
-  to `key_prefix` and to sessions (see below for what its rules allow), a
-  Redis user whose key pattern is its `key_prefix` (see below for what the
+  to `state_prefix` and to sessions (see below for what its rules allow), a
+  Redis user whose key pattern is its `state_prefix` (see below for what the
   pattern limits), a Postgres role
   limited to its `schema` (with `manage_schema: false`, a role that only
   uses tables that already exist). Do not reuse the credentials of a sink,
@@ -272,7 +272,7 @@ uses them.
   `destroy` and `info`) and the key requests (a read of one key, a recursive
   read of the card prefix, and a write with `?acquire=`) of the agent's HTTP
   API. The leader request needs no right. The rest needs two rules, in which
-  `drakkar/` is the `key_prefix` of the connection and a `/`:
+  `drakkar/` is the `state_prefix` of the connection and a `/`:
 
   ```hcl
   key_prefix "drakkar/" { policy = "write" }
@@ -282,7 +282,7 @@ uses them.
   Put them into a policy, make a token of the policy, and set the token from
   the environment (`DK_CONNECTIONS__CONSUL__MAIN__TOKEN`). The `/` after the
   prefix keeps the rule from matching a sibling such as `drakkar-other/`. A
-  `key_prefix` with more than one segment, such as `team/drakkar`, gives the
+  `state_prefix` with more than one segment, such as `team/drakkar`, gives the
   rule `key_prefix "team/drakkar/"`. A token without `session:write` cannot
   create a session; its first publish fails with a `403`.
 
@@ -291,7 +291,7 @@ uses them.
   - `write` on the key prefix lets the token read, write and delete **any**
     key under the prefix, not only the cards and the locks. Whoever holds the
     token can publish and delete worker cards and take the lease of any cluster task. Give
-    the fleet a `key_prefix` of its own, so that no other tool keeps keys
+    the fleet a `state_prefix` of its own, so that no other tool keeps keys
     under it.
   - `session_prefix ""` matches every node, so the token can create, renew,
     read and destroy **any session** of the datacenter, also the sessions of
@@ -327,7 +327,7 @@ uses them.
   `ZADD`, `ZRANGE`, `ZREM`, `PEXPIRE` and `TIME`. The client also sends its
   connection commands when it connects. The rights
   `~<prefix>* +@read +@write +@scripting +@connection +time` cover all of
-  them, where `<prefix>` is the `key_prefix` of the connection. With the
+  them, where `<prefix>` is the `state_prefix` of the connection. With the
   default prefix:
 
   ```text
@@ -364,7 +364,7 @@ uses them.
     and `FLUSHALL`, and `+@read` allows `KEYS`.
   - The key pattern `~drakkar:*` limits only which keys a command may name.
     It does not limit `FLUSHDB`, `FLUSHALL` or `KEYS`. With an empty
-    `key_prefix` the pattern is `~*`, and the user may name every key.
+    `state_prefix` the pattern is `~*`, and the user may name every key.
   - A Redis ACL does not limit databases. `+@connection` includes `SELECT`, so
     the user can select any database and reach the keys that its pattern
     matches there.

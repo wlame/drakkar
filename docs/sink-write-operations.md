@@ -478,8 +478,7 @@ order, execution stops at the first failure, and the index in
 submitted operations. So the offending payload is named exactly, **without
 re-sending anything**.
 
-That retires the `_id`-stripping fallback this sink used to need. The fallback
-existed only because the per-document replay re-sent documents the failed batch
+The sink needs no `_id`-stripping fallback. Such a fallback would only be needed if a per-document replay re-sent documents the failed batch
 had already written, and PyMongo writes a generated `_id` back into every
 document it is handed — so a resent document raised a duplicate-key error on
 the *first* document rather than the guilty one. With no replay the whole

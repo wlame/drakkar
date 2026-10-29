@@ -44,9 +44,8 @@ Full semantics, metrics side effects, and sharp edges: see the
 
 ## What it solves
 
-Before this feature, handlers that wanted to memoize subprocess results
-had to hand-roll their own dict + TTL + eviction policy (see the pre-cache
-integration demo). Each ad-hoc cache reinvented:
+Without the cache, a handler that wants to memoize subprocess results
+has to hand-roll its own dict + TTL + eviction policy. Each ad-hoc cache reinvents:
 
 - Eviction when the dict grew unbounded
 - Hit/miss counters and metrics

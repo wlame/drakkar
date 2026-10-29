@@ -439,6 +439,3 @@ lease) leaves workers of one cluster with different definitions for a
 while: they log `periodic_cluster_mismatch` and
 `drakkar_periodic_cluster_mismatch_peers` is above zero until the last
 worker restarted. See [Definition hash](periodic-tasks.md#definition-hash).
-A rolling upgrade from 2.4.0 needs `recorder.archive.enabled: false` on every
-worker until the restart ends, or a stop of the whole fleet; see
-[Upgrading](upgrading.md#periodic-tasks-and-the-archive).

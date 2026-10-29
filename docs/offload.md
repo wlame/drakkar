@@ -26,8 +26,8 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
         return [ExecutorTask(...) for item in plan]
 
     def _build_task_plan(self, messages):
-        # Plain sync function — the nested loops that used to stall the
-        # loop live here now. Runs on the offload thread pool.
+        # Plain sync function — the nested loops live here, off the
+        # event loop. Runs on the offload thread pool.
         plan = []
         for msg in messages:
             for candidate in msg.payload.candidates:
@@ -186,8 +186,8 @@ moves its entire window-planning pass (`_build_scan_plan`) onto the pool —
 the nested `patterns × file_paths` bucketing, per-file stat/read
 syscalls, and the memory-tier `cache.peek` probes all run in one offload
 call, while the SQLite-tier `await cache.get()` fallback stays on the
-loop. It also shows the batching win: one offload call replaces what was
-previously a per-pair `asyncio.to_thread` hop.
+loop. It also shows the batching win: one offload call replaces a per-pair
+`asyncio.to_thread` hop.
 
 ## See also
 

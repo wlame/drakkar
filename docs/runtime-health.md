@@ -68,8 +68,8 @@ transition, not dozens. Every transition is logged, recorded as a
 ## Lag episodes and verdicts
 
 A single hard block produces a clean `runtime_stall` event with the
-guilty stack. But the second failure shape — the one that used to render
-as a `stalled` badge over "No stalls recorded" — is *diffuse*: thousands
+guilty stack. But the second failure shape — the one that would show
+a `stalled` badge over "No stalls recorded" without episodes — is *diffuse*: thousands
 of small delays, no single blocking call, usually because the **host**
 is the problem (CPU starvation, cgroup throttling, a struggling NFS
 server slowing every syscall).
