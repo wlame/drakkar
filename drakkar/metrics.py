@@ -906,8 +906,8 @@ recorder_archive_bytes = Gauge(
     'drakkar_recorder_archive_bytes',
     (
         'Total size on disk of the compressed recorder archives of this cluster, and of this '
-        'worker when it archives its own files, in its history folder. Bounded by '
-        'recorder.archive.retention; grows without limit while that is 0.'
+        'worker when it archives its own files, in its history folder. recorder.archive.retention '
+        'bounds the archives of the current scope and worker name, and nothing while it is 0.'
     ),
 )
 

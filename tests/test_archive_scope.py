@@ -289,6 +289,46 @@ def test_own_scope_prunes_merge_results(tmp_path):
     assert young.exists()
 
 
+def _old_merge_result(tmp_path) -> Path:
+    merged = tmp_path / 'shared' / 'merged'
+    merged.mkdir(parents=True)
+    old = merged / 'merged-2026-09-01__10_00_00-0123456789abcdef.db'
+    old.write_bytes(b'merged')
+    _age(old, 40 * DAY)
+    return old
+
+
+def test_pass_without_a_history_folder_prunes_merge_results(tmp_path):
+    old = _old_merge_result(tmp_path)
+
+    _own_pass(tmp_path, cfg=_archive_config(merged_retention='32d'))
+
+    assert not old.exists()
+    assert not (tmp_path / 'shared' / 'history').exists()
+    assert _names(old.parent, '.*') == []
+
+
+def test_stopped_pass_without_a_history_folder_prunes_nothing(tmp_path):
+    old = _old_merge_result(tmp_path)
+    stop = threading.Event()
+    stop.set()
+
+    _own_pass(tmp_path, cfg=_archive_config(merged_retention='32d'), stop=stop)
+
+    assert old.exists()
+
+
+def test_pass_with_neither_a_fence_nor_a_worker_fails_before_it_touches_a_file(tmp_path):
+    folder = history_folder(tmp_path)
+    source = make_sealed_db(folder, WORKER, due_start(time.time()))
+
+    with pytest.raises(ValueError, match='needs a fence or only_worker'):
+        run_archive_pass(str(tmp_path / 'shared'), cluster=CLUSTER, instance=INSTANCE, archive=_archive_config())
+
+    assert Path(source).exists()
+    assert _names(folder, '*.db.gz') == []
+
+
 def test_own_scope_pass_runs_without_a_merged_folder(tmp_path):
     history_folder(tmp_path)
 
@@ -305,10 +345,20 @@ def test_own_scope_pass_runs_without_a_merged_folder(tmp_path):
         f'.{CLUSTER}-{WORKER}-2026-07-14_00-00__2026-07-15_00-00.db.gz.0123456789abcdef.tmp',
         f'.{WORKER}-2026-07-14__00_00_00.db.0123456789abcdef.incoming',
         f'{WORKER}-2026-07-14__00_00_00.db.meta.json',
+        f'.{WORKER}-2026-07-14__00_00_00.db.meta.json.0123456789abcdef.tmp',
         '.clock.2222222222222222',
         '.archive.lock.stale.0123456789abcdef',
     ],
-    ids=['merge', 'merge-sidecar', 'compress', 'sealing-copy', 'orphan-meta', 'clock-marker', 'old-lock-copy'],
+    ids=[
+        'merge',
+        'merge-sidecar',
+        'compress',
+        'sealing-copy',
+        'orphan-meta',
+        'meta-temp',
+        'clock-marker',
+        'lock-copy',
+    ],
 )
 def test_own_scope_sweeps_this_workers_old_work_files_and_the_shared_markers(tmp_path, name):
     folder = history_folder(tmp_path)
@@ -329,8 +379,9 @@ def test_own_scope_sweeps_this_workers_old_work_files_and_the_shared_markers(tmp
         f'.{CLUSTER}-2026-07-14_00-00__2026-07-15_00-00.db.gz.0123456789abcdef.tmp',
         f'.{NEIGHBOUR}-2026-07-14__00_00_00.db.0123456789abcdef.incoming',
         f'{NEIGHBOUR}-2026-07-14__00_00_00.db.meta.json',
+        f'.{NEIGHBOUR}-2026-07-14__00_00_00.db.meta.json.0123456789abcdef.tmp',
     ],
-    ids=['merge', 'compress', 'cluster-compress', 'sealing-copy', 'orphan-meta'],
+    ids=['merge', 'compress', 'cluster-compress', 'sealing-copy', 'orphan-meta', 'meta-temp'],
 )
 def test_own_scope_sweeps_nothing_of_another_worker(tmp_path, name):
     folder = history_folder(tmp_path)
@@ -351,6 +402,27 @@ def test_own_scope_archive_name_matches_the_fixture(case):
     name = archive_file_name(case['cluster'], case['from'], case['to'], worker=case['worker'])
 
     assert name == case['name']
+    match = archive_mod.ARCHIVE_NAME_RE.fullmatch(name)
+    assert match is not None
+    assert match['owner'] == name.removesuffix(f'-{match["from_ts"]}__{match["to_ts"]}.db.gz')
+
+
+def test_own_scope_of_a_worker_name_holding_the_time_format_takes_and_prunes_only_its_own(tmp_path):
+    folder = history_folder(tmp_path)
+    now = time.time()
+    start = due_start(now)
+    worker = 'w-2026-07-14__00_00_00'
+    mine = make_sealed_db(folder, worker, start)
+    other = make_sealed_db(folder, WORKER, start)
+    old_mine = _make_archive(folder, now - 10 * DAY, worker=worker)
+    old_other = _make_archive(folder, now - 10 * DAY, worker=WORKER)
+
+    _own_pass(tmp_path, worker=worker, cfg=_archive_config(retention='3d'))
+
+    assert not Path(mine).exists()
+    assert Path(other).exists()
+    assert not old_mine.exists()
+    assert old_other.exists()
 
 
 @pytest.mark.parametrize('case', FIXTURE['own_sealed_files'], ids=lambda case: f'{case["worker"]}:{case["file"]}')
@@ -665,6 +737,57 @@ async def test_own_scope_worker_warns_about_archives_kept_for_ever(tmp_path):
         assert [entry for entry in logs if entry['event'] == 'recorder_archives_unbounded']
     finally:
         await app._recorder.stop()
+
+
+def _app_with_generated_name(monkeypatch, **values) -> DrakkarApp:
+    monkeypatch.delenv('WORKER_ID', raising=False)
+    return DrakkarApp(handler=KafkaOnlyHandler(), config=_config(**values))
+
+
+async def _events_of_start_recorder(app: DrakkarApp) -> list[dict]:
+    with capture_logs() as logs:
+        await app._lifecycle._start_recorder()
+    await app._recorder.stop()
+    return [entry for entry in logs if entry['event'] == 'archive_own_scope_unstable_worker_name']
+
+
+async def test_own_scope_warns_about_a_generated_worker_name(tmp_path, monkeypatch):
+    app = _app_with_generated_name(monkeypatch, autodiscover={'enabled': False}, storage={'dir': str(tmp_path)})
+
+    (warning,) = await _events_of_start_recorder(app)
+
+    assert warning['log_level'] == 'warning'
+    assert warning['category'] == 'recorder'
+    assert warning['worker'] == app._worker_id
+
+
+async def test_own_scope_is_silent_about_a_worker_name_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv('WORKER_ID', 'worker-7')
+    app = DrakkarApp(
+        handler=KafkaOnlyHandler(),
+        config=_config(autodiscover={'enabled': False}, storage={'dir': str(tmp_path)}),
+    )
+
+    assert await _events_of_start_recorder(app) == []
+
+
+async def test_own_scope_is_silent_about_a_worker_name_from_the_caller(tmp_path):
+    app = DrakkarApp(
+        handler=KafkaOnlyHandler(),
+        config=_config(autodiscover={'enabled': False}, storage={'dir': str(tmp_path)}),
+        worker_id=WORKER,
+    )
+
+    assert await _events_of_start_recorder(app) == []
+
+
+async def test_cluster_scope_is_silent_about_a_generated_worker_name(tmp_path, monkeypatch):
+    (tmp_path / 'storage').mkdir()
+    app = _app_with_generated_name(
+        monkeypatch, storage={'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')}
+    )
+
+    assert await _events_of_start_recorder(app) == []
 
 
 # --- a real own-scope pass end to end -------------------------------------

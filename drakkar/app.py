@@ -297,7 +297,10 @@ class DrakkarApp:
         # every hook, on_startup included.
         self._wire_app_config()
         self._wire_executor_on_failure()
-        self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
+        configured_worker_id = worker_id or os.environ.get(self._config.worker_name_env, '')
+        self._worker_id = configured_worker_id or f'drakkar-{id(self):x}'
+        # The generated name changes at each start; the own archive scope warns about it.
+        self._worker_id_is_generated = not configured_worker_id
         self._cluster_name = ''
         if self._config.cluster_name_env:
             self._cluster_name = os.environ.get(self._config.cluster_name_env, '')

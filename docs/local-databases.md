@@ -566,9 +566,21 @@ also leave each other's archives alone. Both scopes prune the merge results in
 `<dir>/merged/` by age, when that folder exists.
 
 The own scope suits a worker with its own disk, a worker with a folder that
-other workers do not see, and any worker with `autodiscover` off. A folder that
-workers share is safe in either scope, but the own scope gives one archive per
-worker for each window.
+other workers do not see, and any worker with `autodiscover` off. Workers can
+share a folder in one scope, and the own scope gives one archive per worker for
+each window. Use one scope per folder: a cluster-scope pass takes every sealed
+file of the folder, those of an own-scope worker beside it too.
+
+**The own scope needs a stable worker name.** It finds its files by the name, so
+a pass never takes or expires the files of an earlier name. Sealed files and
+archives of a retired name stay until an operator deletes them, and they fall
+out of the gauges. A worker with no `worker_name_env` value gets a generated name
+that changes at each start, and logs `archive_own_scope_unstable_worker_name`
+(warning, category `recorder`, field `worker`) at startup in this scope.
+
+Archives left by a change of scope stay in the folder, because a pass deletes
+only those of its own scope, and they fall outside the gauges of the other scope
+when they belong to a worker.
 
 The gauges `drakkar_recorder_archive_bytes` and
 `drakkar_recorder_archive_files` count the archives of the cluster. In the own

@@ -614,11 +614,16 @@ class AppLifecycle:
         # so "keep forever" is stated at startup rather than discovered
         # when a volume fills. Only a worker that runs archive passes
         # produces them.
-        if archive_scope(config) is not None:
+        scope = archive_scope(config)
+        if scope is not None:
             warn_if_archives_unbounded(
                 config.recorder.archive,
                 history_dir(config.resolved_shared_dir, app._cluster_name),
             )
+        # The own scope finds its files by the worker name, so the files of an
+        # earlier name are never archived or expired.
+        if scope == ARCHIVE_SCOPE_WORKER and app._worker_id_is_generated:
+            logger.warning('archive_own_scope_unstable_worker_name', category='recorder', worker=app._worker_id)
         memory = config.recorder.memory
         app._recorder = EventRecorder(
             config.recorder,

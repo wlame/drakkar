@@ -879,6 +879,13 @@ The archive pass now has two scopes. See
 3. Delete a line such as `recorder: {archive: {enabled: false}}` that you added only because
    the workers have no shared folder. Each worker can now archive its own files.
 
+**The own scope needs a stable worker name.** A pass finds its files by the worker name.
+Sealed files and archives of a retired name stay until an operator deletes them. Set the
+variable that `worker_name_env` names (default `WORKER_ID`) to a name that does not change
+across restarts. A worker with no name gets a generated one that changes at each start, and
+it logs `archive_own_scope_unstable_worker_name` at startup in this scope. Its sealed files
+of earlier starts are never archived.
+
 **Archives that stay in the folder after a change of scope:** a pass deletes only the
 archives of its own scope. If a worker changes scope, delete its old archives by hand once
 you no longer need them. Their sealed files are already gone.
@@ -890,4 +897,5 @@ the own scope, `the pass ends after the window in progress`. The help texts of
 
 **In code:** `archive_task_runs` is `archive_scope`, which answers `cluster`, `worker` or
 `None`. `PeriodicRoster.runs_archive` is `PeriodicRoster.archive_scope`. `run_archive_pass`
-takes `only_worker`, and `fence` is optional. `archive_file_name` takes `worker`.
+takes `only_worker`, and needs `fence` or `only_worker`: with neither it raises `ValueError`.
+`archive_file_name` takes `worker`.

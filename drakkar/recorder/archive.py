@@ -100,17 +100,17 @@ _MERGE_TEMP_SUFFIX = '.merge.db'
 _COMPRESS_TEMP_SUFFIX = '.tmp'
 _PREVIOUS_TEMP_SUFFIX = '.previous.db'
 
-# A lock set aside by a takeover in the history folder, left by workers that
-# kept the archive lock there; the task locks live in their own folder now.
-# The old lock file itself stays until an operator deletes it.
-OLD_ARCHIVE_LOCK_STALE_PREFIX = '.archive.lock.stale.'
+# A copy of a ``.archive.lock`` file in a history folder, set aside by a takeover.
+# It holds no data, so the sweep removes it. The pass takes no lock in this
+# folder, and a ``.archive.lock`` file itself stays until an operator deletes it.
+ARCHIVE_LOCK_COPY_PREFIX = '.archive.lock.stale.'
 
 # What the sweep removes once it is older than ``sweep_after_seconds``: dot
 # files ending in one of these (a pass's work files, a sealing copy in
-# progress) or starting with one of these (an age-check marker, an old lock
+# progress) or starting with one of these (an age-check marker, a lock copy
 # set aside by a takeover), together with their SQLite sidecars.
 _SWEPT_SUFFIXES = (_MERGE_TEMP_SUFFIX, _COMPRESS_TEMP_SUFFIX, _PREVIOUS_TEMP_SUFFIX, INCOMING_SUFFIX)
-_SWEPT_PREFIXES = (CLOCK_PREFIX, OLD_ARCHIVE_LOCK_STALE_PREFIX)
+_SWEPT_PREFIXES = (CLOCK_PREFIX, ARCHIVE_LOCK_COPY_PREFIX)
 
 # Minute precision in archive names: window bounds always land on a
 # multiple of the window width, so seconds carry no information.
@@ -178,21 +178,18 @@ class _PassTarget:
     """What one pass works on.
 
     ``cluster`` is sanitized. ``worker`` is the sanitized name of the worker
-    whose own files the pass takes, ``None`` for the whole cluster. ``fence``
-    is the slot's lease check, ``None`` for a pass with no election. ``token``
-    names the pass's work files.
+    whose own files the pass takes, ``None`` for the whole cluster. ``owner``
+    is what the archive names of this pass start with. ``fence`` is the slot's
+    lease check, ``None`` for a pass with no election. ``token`` names the
+    pass's work files.
     """
 
     folder: str
     cluster: str
     worker: str | None
+    owner: str
     fence: ThreadFence | None
     token: str
-
-    @property
-    def owner(self) -> str:
-        """What the archive names of this pass start with."""
-        return _archive_owner(self.cluster, self.worker)
 
 
 def parse_db_start_ts(path: str) -> float:
@@ -376,7 +373,8 @@ def run_archive_pass(
     the slot loop took the lease and releases it, and ``fence`` checks it
     before each publish. The fence runs its checks on the loop and waits for
     them. With ``only_worker`` the pass takes only that worker's sealed files
-    and archives, and needs no ``fence``.
+    and archives, and needs no ``fence``. A pass with neither would delete the
+    files of the whole cluster with no lease, so it fails at once.
 
     Blocking by nature (stat, SQLite merge, gzip) — run it in a thread, never
     on the event loop. A pass that did not finish cleanly (a window failed, the
@@ -386,20 +384,27 @@ def run_archive_pass(
     ``stop`` ends the pass after the window in progress: a worker that
     shuts down does not wait for a long backlog of windows. Expiry and
     pruning are skipped too; the next pass does them.
+
+    Raises:
+        ValueError: neither ``fence`` nor ``only_worker`` is given.
     """
+    if fence is None and only_worker is None:
+        raise ValueError('an archive pass needs a fence or only_worker')
     target = _PassTarget(
         folder=history_dir(shared_dir, cluster),
         cluster=sanitize_cluster(cluster),
         worker=None if only_worker is None else sanitize_worker_name(only_worker),
+        owner=_archive_owner(cluster, only_worker),
         fence=fence,
         token=fence.token if fence is not None else secrets.token_hex(_OWN_TOKEN_BYTES),
     )
     _observe_footprint_in(target.folder, target.cluster, target.worker)
-    if not os.path.isdir(target.folder):
-        return
+    stop_event = stop or threading.Event()
     completed = False
     try:
-        completed = _archive_locked(target, instance, archive, merged_dir(shared_dir), stop or threading.Event())
+        completed = _archive_folder(target, instance, archive, stop_event)
+        if archive.merged_retention > 0 and not stop_event.is_set():
+            _prune_merged(merged_dir(shared_dir), instance, archive.merged_retention)
     except ArchiveFencedError as exc:
         logger.warning(
             'recorder_archive_fenced',
@@ -424,14 +429,20 @@ def _sealed_of(target: _PassTarget) -> list[str]:
     return [path for path in paths if is_own_sealed_name(os.path.basename(path), target.worker)]
 
 
-def _archive_locked(
+def _archive_folder(
     target: _PassTarget,
     instance: str,
     archive: RecorderArchiveConfig,
-    merged_folder: str,
     stop: threading.Event,
 ) -> bool:
-    """The pass body, run while nothing else archives the same files; False when a window failed."""
+    """Sweep the history folder, archive its due windows and expire old archives; False when a window failed.
+
+    A missing folder has nothing to do, which is no failure. Nothing else
+    archives the same files at the same time: the slot's lease or the scope of
+    the pass keeps other workers away.
+    """
+    if not os.path.isdir(target.folder):
+        return True
     now = time.time()
     # Ages of files in the shared folder are measured on the file server's
     # clock, whichever provider holds the lease.
@@ -454,8 +465,6 @@ def _archive_locked(
         return completed
     if archive.retention > 0:
         _expire_archives(target, now, archive.retention)
-    if archive.merged_retention > 0:
-        _prune_merged(merged_folder, server_now, archive.merged_retention)
     return completed
 
 
@@ -497,7 +506,8 @@ def _may_sweep(name: str, target: _PassTarget) -> bool:
     worker = target.worker
     if worker is None or name.startswith(_SWEPT_PREFIXES):
         return True
-    subject = _work_file_subject(name) if is_work_file else name.removesuffix(META_SUFFIX)
+    # A work file may be made for a meta file: ``.<sealed>.meta.json.<token>.tmp``.
+    subject = (_work_file_subject(name) if is_work_file else name).removesuffix(META_SUFFIX)
     archive = ARCHIVE_NAME_RE.fullmatch(subject)
     if archive is not None:
         return archive['owner'] == target.owner
@@ -874,18 +884,18 @@ def _expire_archives(target: _PassTarget, now: float, retention_days: int) -> No
         )
 
 
-def _prune_merged(merged_folder: str, now: float, retention_days: int) -> None:
-    """Delete UI merge results (``merged/*.db``) older than ``retention_days``.
+def _prune_merged(merged_folder: str, instance: str, retention_days: int) -> None:
+    """Delete UI merge results (``merged/*.db``) older than ``retention_days``, when the folder exists.
 
     Every archive pass runs this on the same folder, so a file another
     one deleted first is simply skipped. Dot-prefixed names are
-    merges still being written.
+    merges still being written. Ages are measured on the file server's clock.
     """
-    cutoff = now - retention_days * 86400
     try:
         names = os.listdir(merged_folder)
     except FileNotFoundError:
         return
+    cutoff = folder_server_now(merged_folder, instance) - retention_days * 86400
     for name in sorted(names):
         if name.startswith('.') or not name.endswith('.db'):
             continue
