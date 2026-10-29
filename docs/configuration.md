@@ -69,7 +69,7 @@ export DK_EXECUTOR__MAX_EXECUTORS=16
 export DK_UI__PORT=9000
 ```
 
-Env vars are parsed into a nested dict structure and deep-merged on top of the YAML values. Leaf values from env vars always win over YAML values; nested dicts are merged recursively.
+Env vars are parsed into a nested dict structure and deep-merged on top of the YAML values. Leaf values from env vars always win over YAML values; nested dicts are merged recursively. A JSON list or object in a variable for a list or map field is that field's whole value: it replaces the YAML value and is not merged with it.
 
 ### Loading Order Summary
 

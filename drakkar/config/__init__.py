@@ -28,7 +28,7 @@ from drakkar.config.fleet import (
 from drakkar.config.kafka import KafkaConfig
 from drakkar.config.periodic import ElectionConfig, PeriodicConfig
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
-from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
+from drakkar.config.root import DrakkarConfig, _parse_env_overrides, load_config, load_yaml_document
 from drakkar.config.runtime import (
     ExecutorConfig,
     IOConfig,
@@ -59,7 +59,7 @@ from drakkar.config.storage import (
     SharedConfig,
     StorageConfig,
 )
-from drakkar.config.strict import UnknownKey, find_unknown_keys, unknown_keys_message
+from drakkar.config.strict import UnknownKey, deep_merge, find_unknown_keys, unknown_keys_message
 from drakkar.config.ui import (
     BUILTIN_LINK_BASES,
     TIMELINE_COLOR_NAMES,
@@ -167,12 +167,13 @@ __all__ = [
     'WholeDays',
     'WholeHours',
     'WholeSeconds',
-    '_deep_merge',
     '_parse_env_overrides',
+    'deep_merge',
     'find_unknown_keys',
     'format_duration',
     'format_size',
     'load_config',
+    'load_yaml_document',
     'parse_duration',
     'parse_size',
     'unknown_keys_message',

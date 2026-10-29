@@ -18,14 +18,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel, ValidationError
 
 # Deliberately reuses the framework loader's own env-parsing and merge
 # machinery so the app section cannot drift from the framework's override
 # semantics (same ``__`` nesting, same deep-merge rules, same numeric-
 # segment list handling).
-from drakkar.config import _deep_merge, _parse_env_overrides
+from drakkar.config import _parse_env_overrides, deep_merge, load_yaml_document
 
 
 def load_app_config[ModelT: BaseModel](
@@ -82,7 +81,7 @@ def load_app_config[ModelT: BaseModel](
             if not path.exists():
                 raise FileNotFoundError(f'Config file not found: {path}')
             with open(path) as f:
-                yaml_data = yaml.safe_load(f) or {}
+                yaml_data = load_yaml_document(f) or {}
         else:
             yaml_data = {}
 
@@ -97,7 +96,7 @@ def load_app_config[ModelT: BaseModel](
         )
 
     env_overrides = _parse_env_overrides(env_prefix, '__', skip_config_key=False)
-    merged = _deep_merge(section_data, env_overrides)
+    merged = deep_merge(section_data, env_overrides)
 
     try:
         return model.model_validate(merged)

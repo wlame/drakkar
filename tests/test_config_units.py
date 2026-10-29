@@ -1,6 +1,7 @@
 """Durations and sizes with units: the fixture cases, the annotated types, the metadata."""
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
+from drakkar.config import load_config, load_yaml_document
 from drakkar.config.units import (
     ByteSize,
     Duration,
@@ -25,15 +27,19 @@ FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'config_units.json').
 MESSAGES: dict[str, str] = FIXTURE['messages']
 
 
-def _value_text(value: Any) -> str:
-    """The input as the messages quote it."""
-    if isinstance(value, bool):
-        return str(value).lower()
-    return str(value)
+def _input_text(value: Any) -> str:
+    """The input as a message quotes it when the case gives no text of its own."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
-def _expected(message_key: str, value_text: str) -> str:
-    return MESSAGES[message_key].replace('{v}', value_text)
+def _expected(case: list[Any], *, input_text: str | None = None) -> str:
+    """The message of a refused case: ``[input, key of messages]`` or ``[input, key of messages, {v}]``."""
+    quoted = case[2] if len(case) > 2 else input_text if input_text is not None else _input_text(case[0])
+    return MESSAGES[case[1]].replace('{v}', quoted)
+
+
+def _case_id(case: list[Any]) -> str:
+    return str(case[0])[:30]
 
 
 @pytest.mark.parametrize('text, milliseconds', FIXTURE['durations'])
@@ -41,20 +47,25 @@ def test_parse_duration_accepts_the_fixture_case(text, milliseconds):
     assert parse_duration(text) == milliseconds
 
 
-@pytest.mark.parametrize('value, message_key', FIXTURE['durations_refused'])
-def test_parse_duration_refuses_the_fixture_case(value, message_key):
+@pytest.mark.parametrize('case', FIXTURE['durations_refused'], ids=_case_id)
+def test_parse_duration_refuses_the_fixture_case(case):
     with pytest.raises(ValueError) as excinfo:
-        parse_duration(value)
+        parse_duration(case[0])
 
-    assert str(excinfo.value) == _expected(message_key, _value_text(value))
+    assert str(excinfo.value) == _expected(case)
 
 
-@pytest.mark.parametrize('scalar, message_key', FIXTURE['durations_refused_yaml'])
-def test_parse_duration_refuses_the_yaml_scalar(scalar, message_key):
+@pytest.mark.parametrize('case', FIXTURE['durations_refused_yaml'], ids=_case_id)
+def test_parse_duration_refuses_the_yaml_scalar(case):
     with pytest.raises(ValueError) as excinfo:
-        parse_duration(yaml.safe_load(scalar))
+        parse_duration(yaml.safe_load(case[0]))
 
-    assert str(excinfo.value) == _expected(message_key, scalar)
+    assert str(excinfo.value) == _expected(case, input_text=case[0])
+
+
+@pytest.mark.parametrize('scalar, milliseconds', FIXTURE['durations_yaml'])
+def test_parse_duration_reads_the_yaml_spelling_of_zero(scalar, milliseconds):
+    assert parse_duration(yaml.safe_load(scalar)) == milliseconds
 
 
 @pytest.mark.parametrize('text, size', FIXTURE['sizes'])
@@ -62,20 +73,20 @@ def test_parse_size_accepts_the_fixture_case(text, size):
     assert parse_size(text) == size
 
 
-@pytest.mark.parametrize('value, message_key', FIXTURE['sizes_refused'])
-def test_parse_size_refuses_the_fixture_case(value, message_key):
+@pytest.mark.parametrize('case', FIXTURE['sizes_refused'], ids=_case_id)
+def test_parse_size_refuses_the_fixture_case(case):
     with pytest.raises(ValueError) as excinfo:
-        parse_size(value)
+        parse_size(case[0])
 
-    assert str(excinfo.value) == _expected(message_key, _value_text(value))
+    assert str(excinfo.value) == _expected(case)
 
 
-@pytest.mark.parametrize('scalar, message_key', FIXTURE['sizes_refused_yaml'])
-def test_parse_size_refuses_the_yaml_scalar(scalar, message_key):
+@pytest.mark.parametrize('case', FIXTURE['sizes_refused_yaml'], ids=_case_id)
+def test_parse_size_refuses_the_yaml_scalar(case):
     with pytest.raises(ValueError) as excinfo:
-        parse_size(yaml.safe_load(scalar))
+        parse_size(yaml.safe_load(case[0]))
 
-    assert str(excinfo.value) == _expected(message_key, scalar)
+    assert str(excinfo.value) == _expected(case, input_text=case[0])
 
 
 @pytest.mark.parametrize('milliseconds, text', FIXTURE['canonical_durations'])
@@ -97,19 +108,56 @@ def test_format_refuses_a_negative_value(formatter):
 
 
 @pytest.mark.parametrize('parser', [parse_duration, parse_size])
-def test_a_value_that_is_no_text_or_number_is_refused(parser):
+def test_null_is_refused(parser):
     with pytest.raises(ValueError, match="got 'null'"):
         parser(None)
-    with pytest.raises(ValueError, match=r"got '\['1s'\]'"):
-        parser(['1s'])
 
 
+@pytest.mark.parametrize(
+    'parser, noun',
+    [(parse_duration, 'duration'), (parse_size, 'size')],
+)
+@pytest.mark.parametrize(
+    'value, kind',
+    [(['1s'], 'list'), (('1s',), 'list'), ({'a': 1}, 'mapping'), ({}, 'mapping')],
+)
+def test_a_list_or_mapping_is_named_by_its_kind(parser, noun, value, kind):
+    with pytest.raises(ValueError) as excinfo:
+        parser(value)
+
+    assert str(excinfo.value) == f'is not a {noun}, got a {kind}'
+
+
+def test_a_value_of_another_type_is_refused_with_its_text():
+    with pytest.raises(ValueError, match="got '2026-11-07'"):
+        parse_duration(date(2026, 11, 7))
+
+
+@pytest.mark.parametrize('value', [10**5000, -(10**5000)], ids=['positive', 'negative'])
 @pytest.mark.parametrize('parser', [parse_duration, parse_size])
-def test_a_very_long_number_is_refused_with_the_contract_message(parser):
-    text = '1' * 5000 + 's'
+def test_an_integer_too_long_for_str_is_refused_with_the_message(parser, value):
+    with pytest.raises(ValueError, match=r'^is not a .*\.\.\.') as excinfo:
+        parser(value)
 
-    with pytest.raises(ValueError, match=r'^is not a'):
-        parser(text)
+    sign = '-' if value < 0 else ''
+    assert f"got '{sign}1{'0' * (63 - len(sign))}...'" in str(excinfo.value)
+
+
+def test_a_yaml_integer_too_long_for_python_reaches_the_parser_as_text():
+    digits = '1' * 5000
+
+    assert load_yaml_document(f'value: {digits}') == {'value': digits}
+    assert load_yaml_document('value: 12') == {'value': 12}
+    with pytest.raises(ValueError, match=r'^is not a duration, got .1{64}\.\.\.'):
+        parse_duration(load_yaml_document(digits))
+
+
+def test_a_field_that_gets_a_yaml_integer_too_long_for_python_reports_the_field(tmp_path):
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(f'sources: {{kafka: {{enabled: true}}}}\nmetrics: {{port: {"1" * 5000}}}\n', encoding='utf-8')
+
+    with pytest.raises(ValidationError, match=r'metrics\.port'):
+        load_config(path)
 
 
 class _Units(BaseModel):
@@ -154,7 +202,7 @@ def test_a_whole_number_type_refuses_with_the_message_under_the_field_path(field
         _Units(**{field: value})
 
     assert field in str(excinfo.value)
-    assert _expected(message_key, _value_text(value)) in str(excinfo.value)
+    assert _expected([value, message_key]) in str(excinfo.value)
 
 
 def test_a_duration_holds_float_seconds():
@@ -179,7 +227,7 @@ def test_an_optional_duration_refuses_with_one_clean_message():
         _Units(optional_timeout=30)
 
     assert excinfo.value.error_count() == 1
-    assert _expected('duration_needs_unit', '30') in str(excinfo.value)
+    assert _expected([30, 'duration_needs_unit']) in str(excinfo.value)
 
 
 @pytest.mark.parametrize('mode', ['python', 'json'])

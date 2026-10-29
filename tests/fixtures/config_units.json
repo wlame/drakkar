@@ -1,5 +1,5 @@
 {
-  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_refused and sizes_refused: [input, key of messages]; {v} in a message is the input as text. durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar and {v} is that text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the unit that divides it and gives the smallest whole number; on a tie the binary unit wins.",
+  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. A text longer than 64 characters is refused as not a duration or not a size, whatever it holds, and is quoted as its first 64 characters plus three dots. The rules are on decoded values. A YAML integer with the value 0 is 0, whatever its spelling. As text, only exactly 0 is zero. A YAML float 0.0 needs a unit. Integer values in this file may exceed 2^53 and must be decoded as integers, not floats. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_yaml: [text of one YAML scalar, value]. durations_refused and sizes_refused: [input, key of messages], or [input, key of messages, {v}]; {v} in a message is the decoded value, as text, and with no third element it is the input as written (true for a boolean). durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar. Other unusual YAML numeric spellings are not part of the contract for the quoted text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the unit that divides it and gives the smallest whole number; on a tie the binary unit wins.",
   "durations": [
     ["2h45m", 9900000],
     ["1.5h", 5400000],
@@ -14,7 +14,11 @@
     ["0.001s", 1],
     ["0.00001m0.4ms", 1],
     ["007s", 7000],
-    ["106579d", 9208425600000]
+    ["106579d", 9208425600000],
+    ["1.00000000000000000000000000000s", 1000],
+    ["106579d23h59m59s999ms", 9208511999999],
+    ["1.50s", 1500],
+    ["000000000000000000000000000000000000000000000000000000000000001s", 1000]
   ],
   "durations_refused": [
     [30, "duration_needs_unit"],
@@ -43,7 +47,28 @@
     ["1s ", "duration_invalid"],
     ["١s", "duration_invalid"],
     ["1ms1s", "duration_invalid"],
-    ["h", "duration_invalid"]
+    ["h", "duration_invalid"],
+    ["18446744073709551617ms", "duration_invalid"],
+    ["99999999999999999999d", "duration_invalid"],
+    ["1.00000000000000000000000000001s", "duration_invalid"],
+    ["106579d24h", "duration_invalid"],
+    ["+5", "duration_needs_unit"],
+    ["-0", "duration_needs_unit"],
+    [".5", "duration_invalid"],
+    ["5.", "duration_invalid"],
+    ["1e3", "duration_invalid"],
+    ["0000000000000000000000000000000000000000000000000000000000000001s", "duration_invalid", "0000000000000000000000000000000000000000000000000000000000000001..."],
+    [["1s"], "duration_list"],
+    [{"a": 1}, "duration_mapping"]
+  ],
+  "durations_yaml": [
+    ["0", 0],
+    ["-0", 0],
+    ["+0", 0],
+    ["00", 0],
+    ["0x0", 0],
+    ["0b0", 0],
+    ["0_0", 0]
   ],
   "durations_refused_yaml": [
     ["30", "duration_needs_unit"],
@@ -51,7 +76,9 @@
     ["0.0", "duration_needs_unit"],
     ["-5", "duration_needs_unit"],
     ["true", "duration_invalid"],
-    ["false", "duration_invalid"]
+    ["false", "duration_invalid"],
+    ["1.50", "duration_needs_unit", "1.5"],
+    ["11111111111111111111111111111111111111111111111111111111111111111", "duration_invalid", "1111111111111111111111111111111111111111111111111111111111111111..."]
   ],
   "sizes": [
     ["64KiB", 65536],
@@ -64,7 +91,11 @@
     ["1B", 1],
     ["1.5GiB", 1610612736],
     ["2TB", 2000000000000],
-    ["8388607TiB", 9223370937343148032]
+    ["8388607TiB", 9223370937343148032],
+    ["9223372036854775807B", 9223372036854775807],
+    ["1.0B", 1],
+    ["1.000KiB", 1024],
+    ["000000000000000000000000000000000000000000000000000000000000001B", 1]
   ],
   "sizes_refused": [
     [64, "size_needs_unit"],
@@ -82,12 +113,19 @@
     [".5KB", "size_invalid"],
     ["1.KB", "size_invalid"],
     ["1KiB1B", "size_invalid"],
-    ["8388608TiB", "size_invalid"]
+    ["8388608TiB", "size_invalid"],
+    ["99999999999999999999TiB", "size_invalid"],
+    ["9223372036854775808B", "size_invalid"],
+    ["0000000000000000000000000000000000000000000000000000000000000001B", "size_invalid", "0000000000000000000000000000000000000000000000000000000000000001..."],
+    [["1B"], "size_list"],
+    [{"a": 1}, "size_mapping"]
   ],
   "sizes_refused_yaml": [
     ["64", "size_needs_unit"],
     ["0.0", "size_needs_unit"],
-    ["true", "size_invalid"]
+    ["true", "size_invalid"],
+    ["1.50", "size_needs_unit", "1.5"],
+    ["11111111111111111111111111111111111111111111111111111111111111111", "size_invalid", "1111111111111111111111111111111111111111111111111111111111111111..."]
   ],
   "whole_seconds": {
     "accepted": [
@@ -161,6 +199,10 @@
     "duration_invalid": "is not a duration, got '{v}'; write for example 30s or 2h45m",
     "size_needs_unit": "needs a unit, for example 64KiB; got '{v}'",
     "size_invalid": "is not a size, got '{v}'; write for example 64KiB or 256MB",
+    "duration_list": "is not a duration, got a list",
+    "duration_mapping": "is not a duration, got a mapping",
+    "size_list": "is not a size, got a list",
+    "size_mapping": "is not a size, got a mapping",
     "whole_seconds": "must be a whole number of seconds, got '{v}'",
     "whole_hours": "must be a whole number of hours, got '{v}'",
     "whole_days": "must be a whole number of days, got '{v}'"

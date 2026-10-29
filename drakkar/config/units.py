@@ -8,20 +8,22 @@ pinned by ``tests/fixtures/config_units.json``.
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator, PlainSerializer
 
+from drakkar.config.base import yaml_text
+
 ZERO_TEXT = '0'
 
 _NUMBER = r'[0-9]+(?:\.[0-9]+)?'
 _PLAIN_NUMBER_RE = re.compile(rf'[+-]?{_NUMBER}')
-# Keeps the digits below the length limit of Python's text-to-int conversion;
-# any number this long is out of range or not whole anyway.
-_MAX_TEXT_LENGTH = 4000
+# A longer text is refused without being parsed, and a message quotes only this much of it.
+_MAX_TEXT_LENGTH = 64
+_CUT_MARK = '...'
 
 _MS_PER_SECOND = 1000
 _MS_PER_HOUR = 3_600_000
@@ -46,45 +48,53 @@ _SIZE_LIMIT = 2**63 - 1
 
 @dataclass(frozen=True)
 class _Refusals:
-    """The two refusal texts of one kind of value; ``{v}`` is the value as written."""
+    """The refusal texts of one kind of value; ``{v}`` is the decoded value."""
 
     needs_unit: str
     invalid: str
+    list_value: str
+    mapping_value: str
 
 
 _DURATION_REFUSALS = _Refusals(
     needs_unit="needs a unit, for example 30s; got '{v}'",
     invalid="is not a duration, got '{v}'; write for example 30s or 2h45m",
+    list_value='is not a duration, got a list',
+    mapping_value='is not a duration, got a mapping',
 )
 _SIZE_REFUSALS = _Refusals(
     needs_unit="needs a unit, for example 64KiB; got '{v}'",
     invalid="is not a size, got '{v}'; write for example 64KiB or 256MB",
+    list_value='is not a size, got a list',
+    mapping_value='is not a size, got a mapping',
 )
 
 
-def _value_text(value: object) -> str:
-    """A raw value as a message quotes it, with YAML's spelling of the words."""
-    if isinstance(value, bool):
-        return str(value).lower()
-    return 'null' if value is None else str(value)
-
-
-def _refused(template: str, value: object) -> ValueError:
-    return ValueError(template.replace('{v}', _value_text(value)))
+def _refused(template: str, value_text: str) -> ValueError:
+    return ValueError(template.replace('{v}', value_text))
 
 
 def _checked_text(value: object, refusals: _Refusals) -> str:
-    """The text to parse: a whole ``0`` of either type is ``'0'``, anything else must be text with a unit."""
-    if isinstance(value, bool) or value is None:
-        raise _refused(refusals.invalid, value)
+    """The text to parse: ``'0'`` for a YAML integer of value 0, anything else must be text with a unit.
+
+    The rule is on decoded values: a YAML float ``0.0`` needs a unit, and as text
+    only exactly ``0`` is zero.
+    """
+    if isinstance(value, Mapping):
+        raise ValueError(refusals.mapping_value)
+    if isinstance(value, list | tuple):
+        raise ValueError(refusals.list_value)
+    text = yaml_text(value)
+    if len(text) > _MAX_TEXT_LENGTH:
+        raise _refused(refusals.invalid, text[:_MAX_TEXT_LENGTH] + _CUT_MARK)
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise _refused(refusals.invalid, text)
     if isinstance(value, int | float):
         if isinstance(value, int) and value == 0:
             return ZERO_TEXT
-        raise _refused(refusals.needs_unit, value)
-    if not isinstance(value, str) or len(value) > _MAX_TEXT_LENGTH:
-        raise _refused(refusals.invalid, value)
+        raise _refused(refusals.needs_unit, text)
     if value != ZERO_TEXT and _PLAIN_NUMBER_RE.fullmatch(value):
-        raise _refused(refusals.needs_unit, value)
+        raise _refused(refusals.needs_unit, text)
     return value
 
 
@@ -105,14 +115,14 @@ def parse_duration(text: str | int | float) -> int:
         return 0
     match = _DURATION_RE.fullmatch(checked)
     if match is None or not checked:
-        raise _refused(_DURATION_REFUSALS.invalid, text)
+        raise _refused(_DURATION_REFUSALS.invalid, checked)
     # The whole-milliseconds rule applies to the total, not to each term.
     total = sum(
         (_scaled(number, factor) for unit, factor in _DURATION_UNITS if (number := match.group(unit)) is not None),
         start=Fraction(0),
     )
     if total.denominator != 1 or total >= _DURATION_LIMIT_MS:
-        raise _refused(_DURATION_REFUSALS.invalid, text)
+        raise _refused(_DURATION_REFUSALS.invalid, checked)
     return int(total)
 
 
@@ -127,10 +137,10 @@ def parse_size(text: str | int | float) -> int:
         return 0
     match = _SIZE_RE.fullmatch(checked)
     if match is None:
-        raise _refused(_SIZE_REFUSALS.invalid, text)
+        raise _refused(_SIZE_REFUSALS.invalid, checked)
     size = _scaled(match['number'], _SIZE_UNITS[match['unit']])
     if size.denominator != 1 or size > _SIZE_LIMIT:
-        raise _refused(_SIZE_REFUSALS.invalid, text)
+        raise _refused(_SIZE_REFUSALS.invalid, checked)
     return int(size)
 
 
@@ -194,7 +204,7 @@ def _whole_duration_type(unit_name: str, unit_ms: int) -> Any:
     def from_text(value: Any) -> int:
         milliseconds = parse_duration(value)
         if milliseconds % unit_ms:
-            raise _refused(f"must be a whole number of {unit_name}, got '{{v}}'", value)
+            raise _refused(f"must be a whole number of {unit_name}, got '{{v}}'", yaml_text(value))
         return milliseconds // unit_ms
 
     def to_text(count: int) -> str:

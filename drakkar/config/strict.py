@@ -9,12 +9,16 @@ field check, so one message names every unknown key at once. The rules:
 - a list of models is checked element by element, written ``[i]``;
 - a free map (``dict[str, str]``, ``dict[str, Any]``) and a union with no model
   branch are open;
-- a value of another shape than its field is not walked: the field check reports it.
+- a mapping at the position of a list of models is walked as one element, with no
+  index in the path: a list field such as ``when`` also takes the single-element form;
+- any other value of another shape than its field is not walked: the field check
+  reports it.
 
 The message bytes are a contract (the ``unknown_keys`` section of
 ``tests/fixtures/config_contract.json``).
 """
 
+import json
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +26,8 @@ from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
+
+from drakkar.config.base import yaml_text
 
 UNKNOWN_KEYS_HEADER = (
     'config has unknown keys (YAML paths; as env vars they are DK_ plus the path with "__"; '
@@ -49,13 +55,6 @@ def yaml_key(name: str, info: FieldInfo) -> str:
     shadow a ``BaseModel`` attribute), so it takes an alias.
     """
     return info.alias or name
-
-
-def key_text(key: object) -> str:
-    """A mapping key as text. YAML allows keys that are not strings; they use YAML's spelling."""
-    if isinstance(key, bool):
-        return str(key).lower()
-    return 'null' if key is None else str(key)
 
 
 def _is_model(annotation: Any) -> bool:
@@ -118,7 +117,7 @@ def _walk_model(model: type[BaseModel], tree: Mapping[Any, Any], path: str, foun
     for key, value in tree.items():
         info = fields.get(key) if isinstance(key, str) else None
         if info is None:
-            text = key_text(key)
+            text = yaml_text(key)
             found.append(UnknownKey(path=_join(path, text), suggestion=_suggestion(text, list(fields))))
         else:
             _walk_value(info.annotation, value, _join(path, key), found)
@@ -134,7 +133,7 @@ def _walk_value(annotation: Any, value: Any, path: str, found: list[UnknownKey])
     args = get_args(shape)
     if origin is dict and isinstance(value, Mapping):
         for name, item in value.items():
-            _walk_value(args[1], item, f'{path}.{key_text(name)}', found)
+            _walk_value(args[1], item, f'{path}.{yaml_text(name)}', found)
     elif origin is list and isinstance(value, list):
         for index, item in enumerate(value):
             _walk_value(args[0], item, f'{path}[{index}]', found)
@@ -252,9 +251,12 @@ def _resolve_map_names(
 ) -> dict[str, Any]:
     yaml_map = yaml_value if isinstance(yaml_value, Mapping) else {}
     resolved: dict[str, Any] = {}
-    for segment, item in env_map.items():
+    # Two segments can reach one name (``main_db`` and a literal ``main-db``), and
+    # both must land. Sorted, so a key that both set has one result.
+    for segment, item in sorted(env_map.items()):
         name = _existing_name(segment, yaml_map, path)
-        resolved[name] = _resolve_value(value_annotation, item, yaml_map.get(name), f'{path}.{name}')
+        value = _resolve_value(value_annotation, item, yaml_map.get(name), f'{path}.{name}')
+        resolved[name] = deep_merge(resolved[name], value) if name in resolved else value
     return resolved
 
 
@@ -265,3 +267,91 @@ def _existing_name(segment: str, yaml_map: Mapping[Any, Any], path: str) -> str:
             f"the environment name '{segment}' under {path} matches more than one configured name: {', '.join(matches)}"
         )
     return matches[0] if matches else segment
+
+
+def decode_env_json(merged: Mapping[str, Any], env_tree: Mapping[str, Any], model: type[BaseModel]) -> dict[str, Any]:
+    """Decode each ``DK_`` value that is a JSON text for a list or map field.
+
+    ``DK_UI__EXPOSE_ENV_VARS='["A","B"]'`` gives the list. The decoded value replaces
+    the whole YAML value, so this runs on the tree after the merge, which would
+    otherwise overlay a list by index. ``env_tree`` holds the resolved env values.
+    A text that is not a JSON list or object stays text, and the field check reports it.
+    """
+    return _decode_model(model, merged, env_tree)
+
+
+def _decode_model(model: type[BaseModel], merged: Mapping[str, Any], env_tree: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {yaml_key(name, info): info for name, info in model.model_fields.items()}
+    decoded = dict(merged)
+    for key, env_value in env_tree.items():
+        info = fields.get(key)
+        if info is not None:
+            decoded[key] = _decode_value(info.annotation, merged[key], env_value)
+    return decoded
+
+
+def _decode_value(annotation: Any, merged: Any, env_value: Any) -> Any:
+    shape = _shape(annotation)
+    if isinstance(env_value, str):
+        return _decoded_json(env_value) if _takes_json(shape) else merged
+    if _is_model(shape):
+        return _decode_model(shape, merged, env_value) if isinstance(env_value, Mapping) else merged
+    origin = get_origin(shape)
+    args = get_args(shape)
+    if origin is dict and isinstance(env_value, Mapping):
+        return {**merged, **{name: _decode_value(args[1], merged[name], item) for name, item in env_value.items()}}
+    if origin is list and isinstance(env_value, list):
+        items = list(merged)
+        for index, item in enumerate(env_value):
+            items[index] = _decode_value(args[0], items[index], item)
+        return items
+    return merged
+
+
+def _takes_json(shape: Any) -> bool:
+    """Whether a field holds a list or a map, in any branch of a union."""
+    origin = get_origin(shape)
+    if origin is Union or origin is types.UnionType:
+        return any(_takes_json(_shape(branch)) for branch in get_args(shape))
+    return (origin or shape) in (dict, list, set, frozenset, tuple)
+
+
+def _decoded_json(text: str) -> Any:
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        return text
+    return decoded if isinstance(decoded, dict | list) else text
+
+
+def deep_merge(base: Any, override: Any) -> Any:
+    """Deep-merge override on top of base. Override wins for leaf values.
+
+    When both sides are lists, merge element-by-element by index: the
+    override's i-th element overrides base's i-th element (recursively
+    if both are dicts), and any extra base elements past the override's
+    length are preserved. This supports the env-var override pattern
+    where ``DK_SOURCES__HTTP__CLIENTS__0__RPM=10`` should change only the
+    first client's rpm without dropping the rest of the clients defined
+    in YAML.
+    """
+    if isinstance(base, dict) and isinstance(override, dict):
+        result_dict: dict[Any, Any] = dict(base)
+        for key, val in override.items():
+            if key in result_dict:
+                result_dict[key] = deep_merge(result_dict[key], val)
+            else:
+                result_dict[key] = val
+        return result_dict
+    if isinstance(base, list) and isinstance(override, list):
+        merged_list: list[Any] = []
+        for i in range(max(len(base), len(override))):
+            if i < len(base) and i < len(override):
+                merged_list.append(deep_merge(base[i], override[i]))
+            elif i < len(override):
+                merged_list.append(override[i])
+            else:
+                merged_list.append(base[i])
+        return merged_list
+    # Leaf or type mismatch: override wins.
+    return override

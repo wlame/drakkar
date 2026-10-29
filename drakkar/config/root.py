@@ -29,7 +29,13 @@ from drakkar.config.runtime import (
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
 from drakkar.config.storage import HistoryConfig, SharedConfig, StorageConfig
-from drakkar.config.strict import find_unknown_keys, key_text, resolve_env_map_names, unknown_keys_message
+from drakkar.config.strict import (
+    decode_env_json,
+    deep_merge,
+    find_unknown_keys,
+    resolve_env_map_names,
+    unknown_keys_message,
+)
 from drakkar.config.ui import PERSISTENCE_NONE, PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE, Persistence, UIConfig
 from drakkar.config.webapp import WebAppConfig
 
@@ -89,7 +95,7 @@ class DrakkarConfig(BaseSettings):
         would create a second, framework-flavored override path for the
         same values. Sorted var order keeps the message deterministic.
         """
-        app_env = sorted(name for name in os.environ if name.startswith('DK_APP__'))
+        app_env = sorted(name for name in os.environ if name == 'DK_APP' or name.startswith('DK_APP__'))
         if app_env:
             raise ValueError(
                 'DK_APP__* environment overrides are not supported: the app.* section is '
@@ -397,6 +403,28 @@ def _require_declared_connection(path: str, provider: str, name: str, connection
         raise ValueError(f"{path} '{name}' is not defined under connections.{provider}")
 
 
+class _ConfigYamlLoader(yaml.SafeLoader):
+    """The safe loader, except that an integer too long for ``int()`` stays text.
+
+    Python refuses to convert a very long decimal text, and the error would name no
+    config key. As text, the value reaches its field check.
+    """
+
+    def construct_yaml_int(self, node: yaml.ScalarNode) -> int | str:
+        try:
+            return super().construct_yaml_int(node)
+        except ValueError:
+            return node.value
+
+
+_ConfigYamlLoader.add_constructor('tag:yaml.org,2002:int', _ConfigYamlLoader.construct_yaml_int)
+
+
+def load_yaml_document(stream: Any) -> Any:
+    """Parse one config document from an open file or a text."""
+    return yaml.load(stream, Loader=_ConfigYamlLoader)
+
+
 def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     """Load configuration from YAML file and environment variables.
 
@@ -418,17 +446,21 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
             raise FileNotFoundError(f'Config file not found: {path}')
 
         with open(path) as f:
-            yaml_data = yaml.safe_load(f) or {}
+            yaml_data = load_yaml_document(f) or {}
 
     env_overrides = resolve_env_map_names(_parse_env_overrides('DK_', '__'), yaml_data, DrakkarConfig)
-    merged = _deep_merge(yaml_data, env_overrides)
+    merged = deep_merge(yaml_data, env_overrides)
     # Top-level result is always a dict (the env-var prefix is fixed
     # and never numeric); the assert satisfies static typing without a
     # runtime branch.
     assert isinstance(merged, dict)
-    merged = _apply_list_field_defaults(merged)
-    # A top-level key that is no string cannot be a keyword; as text, the strict check reports it.
-    return DrakkarConfig(_env_prefix=_NO_ENV_VARIABLE_PREFIX, **{key_text(key): value for key, value in merged.items()})
+    merged = _apply_list_field_defaults(decode_env_json(merged, env_overrides, DrakkarConfig))
+    # The before-validator cannot do this for the loader: the settings constructor
+    # takes keys such as ``_env_file`` as its own arguments, so they never reach it.
+    found = find_unknown_keys(merged, DrakkarConfig)
+    if found:
+        raise ValueError(unknown_keys_message(found))
+    return DrakkarConfig(_env_prefix=_NO_ENV_VARIABLE_PREFIX, **merged)
 
 
 def _apply_list_field_defaults(merged: dict) -> dict:
@@ -463,7 +495,7 @@ def _apply_list_field_defaults(merged: dict) -> dict:
     # future changes to the default list.
     default_clients = [c.model_dump() for c in WebAppConfig().clients]
     new_http = dict(http)
-    new_http['clients'] = _deep_merge(default_clients, clients_override)
+    new_http['clients'] = deep_merge(default_clients, clients_override)
     new_sources = dict(sources)
     new_sources['http'] = new_http
     new_merged = dict(merged)
@@ -528,36 +560,3 @@ def _numeric_dicts_to_lists(node: Any) -> Any:
             return result_list
         return converted
     return node
-
-
-def _deep_merge(base: Any, override: Any) -> Any:
-    """Deep-merge override on top of base. Override wins for leaf values.
-
-    When both sides are lists, merge element-by-element by index: the
-    override's i-th element overrides base's i-th element (recursively
-    if both are dicts), and any extra base elements past the override's
-    length are preserved. This supports the env-var override pattern
-    where ``DK_SOURCES__HTTP__CLIENTS__0__RPM=10`` should change only the
-    first client's rpm without dropping the rest of the clients defined
-    in YAML.
-    """
-    if isinstance(base, dict) and isinstance(override, dict):
-        result_dict: dict[Any, Any] = dict(base)
-        for key, val in override.items():
-            if key in result_dict:
-                result_dict[key] = _deep_merge(result_dict[key], val)
-            else:
-                result_dict[key] = val
-        return result_dict
-    if isinstance(base, list) and isinstance(override, list):
-        merged_list: list[Any] = []
-        for i in range(max(len(base), len(override))):
-            if i < len(base) and i < len(override):
-                merged_list.append(_deep_merge(base[i], override[i]))
-            elif i < len(override):
-                merged_list.append(override[i])
-            else:
-                merged_list.append(base[i])
-        return merged_list
-    # Leaf or type mismatch: override wins.
-    return override

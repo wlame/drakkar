@@ -152,6 +152,41 @@
         }
       },
       "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executor.bogus_two\n  ui.bogus_one"
+    },
+    {
+      "name": "settings_argument_keys",
+      "yaml_text": "_case_sensitive: x\n_env_file: x\n_env_prefix: x\n_secrets_dir: x\n",
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  _case_sensitive\n  _env_file\n  _env_prefix\n  _secrets_dir"
+    },
+    {
+      "name": "single_mapping_inside_a_list_element",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "color_rules": [
+              {
+                "when": {
+                  "bogus": 1
+                }
+              }
+            ]
+          }
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  ui.timeline.color_rules[0].when.bogus"
+    },
+    {
+      "name": "mapping_at_a_list_of_models",
+      "yaml": {
+        "sources": {
+          "http": {
+            "clients": {
+              "bogus": 1
+            }
+          }
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  sources.http.clients.bogus"
     }
   ],
   "summary": [
@@ -1829,6 +1864,65 @@
       },
       "path": "connections.postgres.main-pg.pool_max",
       "value": 9
+    },
+    {
+      "name": "env_json_list",
+      "yaml": {},
+      "env": {
+        "DK_UI__EXPOSE_ENV_VARS": "[\"A\",\"B\"]"
+      },
+      "path": "ui.expose_env_vars",
+      "value": [
+        "A",
+        "B"
+      ]
+    },
+    {
+      "name": "env_json_map",
+      "yaml": {},
+      "env": {
+        "DK_EXECUTOR__ENV": "{\"FOO\":\"bar\"}"
+      },
+      "path": "executor.env",
+      "value": {
+        "FOO": "bar"
+      }
+    },
+    {
+      "name": "env_json_list_replaces_the_yaml_list",
+      "yaml": {
+        "ui": {
+          "expose_env_vars": [
+            "X",
+            "Y",
+            "Z"
+          ]
+        }
+      },
+      "env": {
+        "DK_UI__EXPOSE_ENV_VARS": "[\"A\"]"
+      },
+      "path": "ui.expose_env_vars",
+      "value": [
+        "A"
+      ]
+    },
+    {
+      "name": "env_json_map_replaces_the_yaml_map",
+      "yaml": {
+        "executor": {
+          "env": {
+            "KEEP": "no"
+          }
+        }
+      },
+      "env": {
+        "DK_EXECUTOR__ENV": "{\"FOO\":\"bar\"}"
+      },
+      "path": "executor.env",
+      "value": {
+        "FOO": "bar"
+      }
     }
   ]
 }

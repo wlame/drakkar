@@ -16,7 +16,7 @@ from drakkar.config import (
     DrakkarConfig,
     PostgresConnectionConfig,
     RedisConnectionConfig,
-    _deep_merge,
+    deep_merge,
     load_config,
 )
 from drakkar.configmeta import walk_model_fields
@@ -62,7 +62,7 @@ def load(tmp_path: Path, clean_environment: pytest.MonkeyPatch) -> Callable[...,
             clean_environment.setenv(name, value)
         path = tmp_path / 'drakkar.yaml'
         # Keys keep their order: where a secret sits in the file decides how much of it an error can echo.
-        path.write_text(yaml.safe_dump(_deep_merge(BASE_YAML, yaml_data or {}), sort_keys=False), encoding='utf-8')
+        path.write_text(yaml.safe_dump(deep_merge(BASE_YAML, yaml_data or {}), sort_keys=False), encoding='utf-8')
         return load_config(path)
 
     return _load

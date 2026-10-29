@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from drakkar.config import DrakkarConfig, _deep_merge, load_config
+from drakkar.config import DrakkarConfig, deep_merge, load_config
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'config_contract.json').read_text(encoding='utf-8'))
 
@@ -35,7 +35,7 @@ def _load(case: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Drakka
     if case.get('env_only'):
         return load_config(None)
     path = tmp_path / 'drakkar.yaml'
-    path.write_text(yaml.safe_dump(_deep_merge(FIXTURE['base'], case['yaml'])), encoding='utf-8')
+    path.write_text(yaml.safe_dump(deep_merge(FIXTURE['base'], case['yaml'])), encoding='utf-8')
     return load_config(path)
 
 

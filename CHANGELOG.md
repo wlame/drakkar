@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_` equals it, so `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` changes
   `sinks.postgres.main-db` and does not make a second instance. Two matches fail
   the load. `load_config` reads upper-case `DK_` names only.
+- **A JSON text in a `DK_` value now loads through `load_config`.** For a list or
+  map field, `DK_UI__EXPOSE_ENV_VARS='["A","B"]'` is the whole value and replaces
+  the YAML value. A text that is not valid JSON fails at the field. `DK_APP` is
+  refused like `DK_APP__*`.
 - **Plugins are removed.** There are no custom sinks and no custom registry or
   election providers. `sinks.custom`, `CustomPayload` and
   `CollectResult.custom` are gone, and so are `SinkRegistry`, the entry-point

@@ -90,8 +90,8 @@ MYAPP_SCORING__TIMEOUT_SECONDS=15      # nested: app.scoring.timeout_seconds
 Values are strings in the environment; your model's types coerce them
 (`"20"` → `int`, `"true"` → `bool`), like the framework config.
 
-**`DK_APP__*` is rejected.** The `DK_` namespace belongs to the framework,
-and the `app:` section does not: setting any `DK_APP__*` variable fails
+**`DK_APP` and `DK_APP__*` are rejected.** The `DK_` namespace belongs to the framework,
+and the `app:` section does not: setting any such variable fails
 startup with a message naming the offending variables and pointing at your
 handler's own prefix. Likewise, `app_env_prefix` itself must not start
 with `DK_` — the loader refuses it.

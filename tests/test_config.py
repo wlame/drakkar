@@ -533,13 +533,13 @@ def test_load_config_rejects_dk_app_env_overrides_with_yaml(tmp_path: Path, monk
         load_config(config_path)
 
 
-def test_deep_merge_recursive():
-    """_deep_merge recursively merges nested dicts."""
-    from drakkar.config import _deep_merge
+def testdeep_merge_recursive():
+    """deep_merge recursively merges nested dicts."""
+    from drakkar.config import deep_merge
 
     base = {'a': {'b': 1, 'c': 2}, 'd': 3}
     override = {'a': {'c': 99, 'e': 5}}
-    result = _deep_merge(base, override)
+    result = deep_merge(base, override)
     assert result == {'a': {'b': 1, 'c': 99, 'e': 5}, 'd': 3}
 
 

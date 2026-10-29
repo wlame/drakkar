@@ -9,10 +9,11 @@ import pytest
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
-from drakkar.config import ConfigModel, DrakkarConfig, MetricsConfig, _deep_merge, load_config
+from drakkar.config import ConfigModel, DrakkarConfig, MetricsConfig, SinksConfig, deep_merge, load_config
 from drakkar.config.strict import (
     UNKNOWN_KEYS_HEADER,
     UnknownKey,
+    decode_env_json,
     find_unknown_keys,
     known_leaf_paths,
     resolve_env_map_names,
@@ -38,27 +39,44 @@ def _metadata_paths() -> set[str]:
 
 def _write_config(tmp_path: Path, tree: Mapping[str, Any]) -> Path:
     path = tmp_path / 'drakkar.yaml'
-    path.write_text(yaml.safe_dump(_deep_merge(CONTRACT['base'], dict(tree))), encoding='utf-8')
+    path.write_text(yaml.safe_dump(deep_merge(CONTRACT['base'], dict(tree))), encoding='utf-8')
     return path
+
+
+def _case_tree(case: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The tree of one ``unknown_keys`` case, written as an object or as YAML text."""
+    return yaml.safe_load(case['yaml_text']) if 'yaml_text' in case else case['yaml']
 
 
 @pytest.mark.parametrize('case', CONTRACT['unknown_keys'], ids=[case['name'] for case in CONTRACT['unknown_keys']])
 def test_unknown_keys_message_matches_the_fixture(case):
-    found = find_unknown_keys(_deep_merge(CONTRACT['base'], case['yaml']), DrakkarConfig)
+    found = find_unknown_keys(deep_merge(CONTRACT['base'], _case_tree(case)), DrakkarConfig)
 
     assert unknown_keys_message(found) == case['message']
 
 
 @pytest.mark.parametrize('case', CONTRACT['unknown_keys'], ids=[case['name'] for case in CONTRACT['unknown_keys']])
-def test_unknown_keys_fail_the_load_before_any_field_check(case, tmp_path, monkeypatch):
+def test_unknown_keys_fail_the_load_before_any_field_check(case, tmp_path):
     # An invalid value next to the unknown key must not hide the message.
-    tree = _deep_merge(case['yaml'], {'metrics': {'port': 'not-a-port'}})
+    tree = deep_merge(_case_tree(case), {'metrics': {'port': 'not-a-port'}})
 
-    with pytest.raises(ValidationError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_config(_write_config(tmp_path, tree))
 
-    assert case['message'] in str(excinfo.value)
-    assert excinfo.value.error_count() == 1
+    assert str(excinfo.value) == case['message']
+
+
+@pytest.mark.parametrize(
+    'variable, key',
+    [('DK__ENV_FILE', '_env_file'), ('DK__SECRETS_DIR', '_secrets_dir'), ('DK__ENV_PREFIX', '_env_prefix')],
+)
+def test_a_variable_that_names_a_settings_argument_is_an_unknown_key(variable, key, tmp_path, monkeypatch):
+    monkeypatch.setenv(variable, 'x')
+
+    with pytest.raises(ValueError) as excinfo:
+        load_config(_write_config(tmp_path, {}))
+
+    assert str(excinfo.value) == f'{UNKNOWN_KEYS_HEADER}\n  {key}'
 
 
 def test_walker_accepts_exactly_the_metadata_paths():
@@ -131,10 +149,10 @@ def test_a_top_level_key_that_is_no_string_fails_the_load_naming_it(tmp_path):
     path = tmp_path / 'drakkar.yaml'
     path.write_text('1: x\nsources: {kafka: {enabled: true}}\n', encoding='utf-8')
 
-    with pytest.raises(ValidationError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_config(path)
 
-    assert '\n  1' in str(excinfo.value)
+    assert str(excinfo.value) == f'{UNKNOWN_KEYS_HEADER}\n  1'
 
 
 def test_a_single_mapping_at_a_list_position_is_walked():
@@ -236,7 +254,7 @@ def _models_in(annotation: Any) -> list[type[BaseModel]]:
 def test_env_typo_is_reported(tmp_path, monkeypatch):
     monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTER', '8')
 
-    with pytest.raises(ValidationError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_config(_write_config(tmp_path, {}))
 
     assert "executor.max_executer (did you mean 'max_executors'?)" in str(excinfo.value)
@@ -246,7 +264,7 @@ def test_env_typo_is_reported_with_no_config_file(monkeypatch):
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTER', '8')
 
-    with pytest.raises(ValidationError, match=r'executor\.max_executer'):
+    with pytest.raises(ValueError, match=r'executor\.max_executer'):
         load_config(None)
 
 
@@ -260,7 +278,7 @@ def test_env_typo_is_reported_for_a_config_built_in_code(monkeypatch):
 def test_an_unknown_top_level_env_key_is_reported(tmp_path, monkeypatch):
     monkeypatch.setenv('DK_BOGUS', '1')
 
-    with pytest.raises(ValidationError, match='has unknown keys') as excinfo:
+    with pytest.raises(ValueError, match='has unknown keys') as excinfo:
         load_config(_write_config(tmp_path, {}))
 
     assert '\n  bogus' in str(excinfo.value)
@@ -301,6 +319,27 @@ def test_env_segment_matching_two_names_fails_the_load(tmp_path, monkeypatch):
     assert str(excinfo.value) == (
         "the environment name 'main_db' under sinks.postgres matches more than one configured name: main-db, main_db"
     )
+
+
+def test_two_segments_that_reach_one_name_both_land(tmp_path, monkeypatch):
+    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'postgresql://h/db'}}}}
+    monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX', '7')
+    monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN-DB__POOL_MIN', '3')
+
+    config = load_config(_write_config(tmp_path, tree))
+
+    assert list(config.sinks.postgres) == ['main-db']
+    assert config.sinks.postgres['main-db'].pool_max == 7
+    assert config.sinks.postgres['main-db'].pool_min == 3
+
+
+def test_two_segments_that_set_one_key_have_one_result():
+    env_tree = {'postgres': {'main_db': {'pool_max': 'underscore'}, 'main-db': {'pool_max': 'hyphen'}}}
+    yaml_tree = {'postgres': {'main-db': {}}}
+
+    resolved = resolve_env_map_names(env_tree, yaml_tree, SinksConfig)
+
+    assert resolved == {'postgres': {'main-db': {'pool_max': 'underscore'}}}
 
 
 def test_env_segment_reaches_a_nested_map_name():
@@ -356,3 +395,111 @@ def test_the_loader_applies_each_env_value_once_with_no_second_source(tmp_path, 
     config = load_config(_write_config(tmp_path, tree))
 
     assert {name: sink.topic for name, sink in config.sinks.kafka.items()} == {'main-db': 'from-env'}
+
+
+# --- JSON text in env values ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    'variable, value, read, expected',
+    [
+        ('DK_UI__EXPOSE_ENV_VARS', '["A","B"]', lambda c: c.ui.expose_env_vars, ['A', 'B']),
+        ('DK_EXECUTOR__ENV', '{"FOO":"bar"}', lambda c: c.executor.env, {'FOO': 'bar'}),
+        ('DK_SINKS__POSTGRES__MAIN_DB__DEPENDS_ON', '[]', lambda c: c.sinks.postgres['main-db'].depends_on, []),
+        ('DK_UI__CUSTOM_LINKS', '[{"name":"a","url":"b"}]', lambda c: c.ui.custom_links, [{'name': 'a', 'url': 'b'}]),
+    ],
+)
+def test_a_json_text_for_a_list_or_map_field_loads(variable, value, read, expected, tmp_path, monkeypatch):
+    tree = {'sinks': {'postgres': {'main-db': {'dsn': 'postgresql://h/db'}}}}
+    monkeypatch.setenv(variable, value)
+
+    assert read(load_config(_write_config(tmp_path, tree))) == expected
+
+
+def test_a_json_text_replaces_the_whole_yaml_value(tmp_path, monkeypatch):
+    tree = {'ui': {'expose_env_vars': ['X', 'Y', 'Z']}, 'executor': {'env': {'KEEP': 'no'}}}
+    monkeypatch.setenv('DK_UI__EXPOSE_ENV_VARS', '["A"]')
+    monkeypatch.setenv('DK_EXECUTOR__ENV', '{"FOO":"bar"}')
+
+    config = load_config(_write_config(tmp_path, tree))
+
+    assert config.ui.expose_env_vars == ['A']
+    assert config.executor.env == {'FOO': 'bar'}
+
+
+def test_a_json_text_for_a_map_of_models_loads(tmp_path, monkeypatch):
+    monkeypatch.setenv('DK_CONNECTIONS__POSTGRES', '{"pg":{"dsn":"postgresql://h/db"}}')
+
+    config = load_config(_write_config(tmp_path, {}))
+
+    assert config.connections.postgres['pg'].dsn == 'postgresql://h/db'
+
+
+@pytest.mark.parametrize(
+    'value',
+    ['[not json', '{"FOO":', 'plain', '5', '"text"', 'null'],
+)
+def test_a_text_that_is_no_json_list_or_object_stays_text_for_the_field_check(value, tmp_path, monkeypatch):
+    monkeypatch.setenv('DK_EXECUTOR__ENV', value)
+
+    with pytest.raises(ValidationError, match=r'executor\.env'):
+        load_config(_write_config(tmp_path, {}))
+
+
+def test_a_json_text_for_a_section_is_not_decoded(tmp_path, monkeypatch):
+    monkeypatch.setenv('DK_METRICS', '{"port":9191}')
+
+    with pytest.raises(ValidationError, match='metrics'):
+        load_config(_write_config(tmp_path, {}))
+
+
+def test_a_scalar_field_keeps_a_text_that_looks_like_json():
+    assert decode_env_json({'worker_name_env': '[1]'}, {'worker_name_env': '[1]'}, DrakkarConfig) == {
+        'worker_name_env': '[1]'
+    }
+
+
+def test_the_keys_inside_a_json_text_are_checked(tmp_path, monkeypatch):
+    monkeypatch.setenv('DK_SOURCES__HTTP__CLIENTS', '[{"bogus":1}]')
+
+    with pytest.raises(ValueError, match=r'sources\.http\.clients\[0\]\.bogus'):
+        load_config(_write_config(tmp_path, {}))
+
+
+def test_json_decoding_goes_through_lists_and_maps_and_leaves_other_values():
+    class Element(ConfigModel):
+        names: list[str] = Field(default_factory=list)
+        count: int = 0
+
+    class Root(ConfigModel):
+        items: list[Element] = Field(default_factory=list)
+        named: dict[str, Element] = Field(default_factory=dict)
+        optional_names: list[str] | None = None
+        section: Element = Field(default_factory=Element)
+        bogus_shape: dict[str, str] = Field(default_factory=dict)
+
+    env_tree = {
+        'items': [{'names': '["a"]', 'count': '1'}],
+        'named': {'n': {'names': '["b"]'}},
+        'optional_names': '["c"]',
+        'section': 'text',
+        'bogus_shape': ['x'],
+        'unknown': '["d"]',
+    }
+    merged = {**env_tree, 'items': [env_tree['items'][0], {'count': 9}], 'named': {'n': {'names': '["b"]'}, 'm': {}}}
+
+    assert decode_env_json(merged, env_tree, Root) == {
+        'items': [{'names': ['a'], 'count': '1'}, {'count': 9}],
+        'named': {'n': {'names': ['b']}, 'm': {}},
+        'optional_names': ['c'],
+        'section': 'text',
+        'bogus_shape': ['x'],
+        'unknown': '["d"]',
+    }
+
+
+def test_a_json_text_in_dk_app_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv('DK_APP', '{"a":1}')
+
+    with pytest.raises(ValidationError, match=r'rename: DK_APP'):
+        load_config(_write_config(tmp_path, {}))

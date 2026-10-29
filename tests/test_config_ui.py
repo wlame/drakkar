@@ -84,7 +84,7 @@ def test_annotation_env_override(monkeypatch):
     assert cfg.ui.recorder.annotation_max_bytes == 4096
 
 
-def test_release_defaults_match_old_flat_ui_defaults():
+def test_release_defaults():
     rel = UIReleaseConfig()
     assert rel.enabled is True
     assert rel.repo == 'wlame/drakkar-ui'
