@@ -144,7 +144,7 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its UI server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval_seconds` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
+Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval_seconds` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
 
 What happens with `autodiscover` off (the default): nothing is pulled and the cache operates single-worker. No error — it just behaves like a local cache, and the worker logs `cache_exchange_off_no_autodiscover` once at startup. If you *want* a cluster-wide cache, turn on `autodiscover` with a provider every worker can reach (for example `filesystem` with one `storage.shared_dir`) and make sure every worker can reach the UI port of the others at the URL on their cards.
 
@@ -227,7 +227,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's UI port must be reachable from the others at the URL on its registry card (set `ui.host: 0.0.0.0`, or `ui.public_url`).
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's UI port must be reachable from the others at the URL on its registry card (set `api.host: 0.0.0.0`, or `api.public_url`).
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
@@ -240,7 +240,7 @@ Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N r
 The UI runs on a separate thread with its own asyncio event loop, so most read-only endpoints don't interfere. Real effects to be aware of:
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
-- **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
+- **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe.enabled: false`.
 - **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<shared.dir>/merged/`. The archive pass deletes it after `history.merged_retention_days` (default 32); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
@@ -253,12 +253,12 @@ To a team of operators on a trusted network, yes -- that is what it is for. To a
 
 Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
-Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file into the shared folder. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
+Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file into the shared folder. Set `ui.probe.enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
 1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/api/v1/debug/download/{path}`, `/api/v1/debug/download-live`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
-2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The `Origin` header is validated on every handshake, token or not, against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). An untokened worker still accepts the cross-origin handshakes the cluster view is built on, but not a page that is off loopback reaching a worker over loopback — see [Security](security.md#the-loopback-bind-and-the-operators-browser). The same rule decides the cross-origin reads that the UI sends to every worker of the cluster (trace, label trace, databases list): with a token set, list every worker origin in `allowed_ws_origins` — see [Cross-origin reads](security.md#cross-origin-reads).
+2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The `Origin` header is validated on every handshake, token or not, against `allowed_origins` (explicit allowlist) or the `Host` header (same-origin fallback). An untokened worker still accepts the cross-origin handshakes the cluster view is built on, but not a page that is off loopback reaching a worker over loopback — see [Security](security.md#the-loopback-bind-and-the-operators-browser). The same rule decides the cross-origin reads that the UI sends to every worker of the cluster (trace, label trace, databases list): with a token set, list every worker origin in `allowed_origins` — see [Cross-origin reads](security.md#cross-origin-reads).
 3. **Read-only views remain accessible** — both before and after enabling auth. `/`, `/live`, `/history` and the per-task views are SPA routes backed by read-only flight-recorder endpoints; the extra gating listed above is on the mutating / data-exposing ones.
 4. **The peer route stays public.** `GET /api/v1/peer/cache/changes` needs no token, because other workers call it without one. It serves the `cluster` and `global` cache rows this worker originated — see [The public peer route](security.md#the-public-peer-route).
 
@@ -271,7 +271,7 @@ You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an
 To silence it (i.e. require auth), pick one of:
 
 - **Set `ui.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
-- **Set `ui.enabled=false`** — if the worker doesn't need the flight recorder at all (no observability cost reduction without removing the UI).
+- **Set `ui.enabled=false`** — if the worker doesn't need the UI at all. `/healthz`, `/readyz` and the peer route stay on, and every other route answers 404.
 
 See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app_security.py::warn_if_ui_unauthenticated`.
 
@@ -369,7 +369,7 @@ Drakkar does not run a built-in replay worker — replays are operator-driven. U
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
-Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the UI server exposes `/api/v1/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
+Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the API server exposes `/api/v1/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
 
 Rescue procedure when a task is truly wedged past the timeout:
 
@@ -400,7 +400,7 @@ Zero-operational-cost embedded store with WAL-mode concurrency, good enough for 
 
 ### How many event loops does a worker run?
 
-Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **UI server loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — in particular, the recorder's `aiosqlite` connection and the cache reader connection are bound to the main loop. The UI server uses a dispatch-to-loop helper to marshal roughly 20 read-side endpoints (message trace, probe, task listings, cache inspection, etc.) back onto the main loop via `asyncio.run_coroutine_threadsafe`; pure-Python work (template rendering, counters, constants) stays on the UI loop.
+Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **API server loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — in particular, the recorder's `aiosqlite` connection and the cache reader connection are bound to the main loop. The API server uses a dispatch-to-loop helper to marshal roughly 20 read-side endpoints (message trace, probe, task listings, cache inspection, etc.) back onto the main loop via `asyncio.run_coroutine_threadsafe`; pure-Python work (template rendering, counters, constants) stays on the UI loop.
 
 ### What happens during a Kafka rebalance?
 
@@ -438,7 +438,7 @@ Treat `shared.dir` (and the card folder, when it lives elsewhere) as a shared-tr
 
 Auth is opt-in (see [Is the UI safe](#is-the-ui-safe-to-expose-to-a-team-of-operators) above):
 
-1. **Default loopback bind** (`ui.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
+1. **Default loopback bind** (`api.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
 2. **Startup warning when unauthenticated.** With `ui.enabled=true` and an empty `auth_token`, the worker emits a `ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
 3. **Bearer token when `auth_token` is set, Origin check always.** With a token, every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes, and the routes under `/api/v1/peer/` for the cache exchange between workers. The WebSocket stream authenticates inside its handshake, and validates the `Origin` header on every handshake whether or not a token is set. See `drakkar/uiserver/server_helpers.py::origin_allowed` and `drakkar/uiserver/server.py::token_matches`.
 

@@ -57,7 +57,7 @@ closed with a pointer here:
   Authentication is opt-in (`ui.auth_token`); a startup warning names
   the unauthenticated posture. Most endpoints are read-only, but two are
   not, and each can be closed independently of `auth_token`: the
-  **Message Probe** (`ui.probe_enabled`) executes the live handler
+  **Message Probe** (`ui.probe.enabled`) executes the live handler
   against pasted input and competes with production traffic for
   executor slots, and **Merge** (`ui.merge_enabled`) writes a
   `merged-<ts>-<token>.db` into `storage.dir` that nothing reclaims. It is intended

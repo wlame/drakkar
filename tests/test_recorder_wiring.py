@@ -26,7 +26,8 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
         'autodiscover': {'enabled': True, 'provider': 'filesystem'},
         'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
         'cluster_name': 'search',
-        'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
+        'api': {'port': 8123},
+        'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': DRAIN_TIMEOUT_SECONDS},
@@ -41,9 +42,9 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
 async def test_the_recorder_seals_into_the_shared_history_folder_with_the_process_instance(tmp_path, monkeypatch):
     app = _app(tmp_path)
     (tmp_path / 'storage').mkdir()
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder is not None
         assert app._recorder.history_dir == str(tmp_path / 'shared' / 'history' / 'search')
@@ -65,7 +66,7 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
 
     monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
     monkeypatch.setattr(core_mod, 'run_archive_pass', lambda shared_dir, **kwargs: received.update(kwargs))
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
     resilience = {'timeout': '1500ms', 'max_retries': 0}
     app = _app(tmp_path, autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': resilience})
     (tmp_path / 'storage').mkdir()
@@ -74,7 +75,7 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
 
     app._lifecycle._create_connections()
     app._lifecycle._build_periodic_roster()
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     cluster_election = app._cluster_election
     assert app._recorder is not None
     assert cluster_election is not None
@@ -127,11 +128,11 @@ def _runnable_app(tmp_path, monkeypatch) -> tuple[DrakkarApp, MagicMock, list[st
         await real_start_sources()
         order.append('sources_started')
 
-    async def start_ui_and_recorder() -> None:
+    async def start_recorder_and_api() -> None:
         app._recorder = recorder
 
     monkeypatch.setattr(app._lifecycle, '_start_sources', start_sources)
-    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', start_ui_and_recorder)
+    monkeypatch.setattr(app._lifecycle, '_start_recorder_and_api', start_recorder_and_api)
     return app, recorder, order
 
 
@@ -148,14 +149,14 @@ async def test_leftover_sealing_starts_once_the_sources_run(tmp_path, monkeypatc
 
 async def test_the_shared_connections_exist_before_the_recorder_starts(tmp_path, monkeypatch):
     app, _recorder, _order = _runnable_app(tmp_path, monkeypatch)
-    start_stand_in = app._lifecycle._start_ui_and_recorder
+    start_stand_in = app._lifecycle._start_recorder_and_api
     seen: dict = {}
 
-    async def start_ui_and_recorder() -> None:
+    async def start_recorder_and_api() -> None:
         seen['connections'] = app._connections
         await start_stand_in()
 
-    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', start_ui_and_recorder)
+    monkeypatch.setattr(app._lifecycle, '_start_recorder_and_api', start_recorder_and_api)
     run = asyncio.create_task(app._lifecycle._async_run())
     await wait_for(lambda: app.is_ready)
     app._lifecycle._handle_signal()
@@ -182,10 +183,10 @@ async def test_the_recorder_stops_with_the_shutdown_time_that_is_left(tmp_path, 
 
 async def test_lifecycle_creates_storage_dir_and_starts_no_leftover_sealing_with_none(tmp_path, monkeypatch):
     app = _app(tmp_path, recorder={'enabled': False})
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._prepare_storage()
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder is not None
         assert app._recorder.persistence == 'none'
@@ -201,15 +202,15 @@ async def test_lifecycle_creates_storage_dir_and_starts_no_leftover_sealing_with
 async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_run(tmp_path, monkeypatch):
     warned = MagicMock()
     monkeypatch.setattr('drakkar.lifecycle.warn_if_archives_unbounded', warned)
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
     none_app = _app(tmp_path, recorder={'enabled': False})
-    await none_app._lifecycle._start_ui_and_recorder()
+    await none_app._lifecycle._start_recorder_and_api()
     await none_app._recorder.stop()
     warned.assert_not_called()
 
     file_app = _app(tmp_path)
     (tmp_path / 'storage').mkdir(exist_ok=True)
-    await file_app._lifecycle._start_ui_and_recorder()
+    await file_app._lifecycle._start_recorder_and_api()
     await file_app._recorder.stop()
     warned.assert_called_once()
 
@@ -221,9 +222,9 @@ async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkey
         executor={'binary_path': '/usr/bin/echo', 'max_executors': 4},
     )
     (tmp_path / 'storage').mkdir()
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder is not None
         assert app._recorder._memory_window_seconds == 60
@@ -254,9 +255,9 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
         },
         connections={'postgres': {'history': {'dsn': 'postgresql://drakkar:secret@db:5432/drakkar', 'schema': 'rec'}}},
     )
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         settings = app._recorder.postgres_settings
         assert settings is not None
@@ -277,9 +278,9 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
 async def test_lifecycle_passes_no_postgres_settings_in_the_other_modes(tmp_path, monkeypatch):
     app = _app(tmp_path)
     (tmp_path / 'storage').mkdir()
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder.postgres_settings is None
     finally:

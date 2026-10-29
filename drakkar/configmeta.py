@@ -27,6 +27,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from drakkar.config import (
+    APIConfig,
     AutodiscoverConfig,
     CacheConfig,
     ConnectionsConfig,
@@ -143,6 +144,7 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('io', 'Blocking I/O pool (io:)', 'blocking-i-o-pool-io', IOConfig),
     ('offload', 'Offload pool (offload:)', 'offload-pool-offload', OffloadConfig),
     ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),
+    ('api', 'API (api:)', 'api-api', APIConfig),
     ('ui', 'UI (ui:)', 'ui-ui', UIConfig),
     ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
     ('storage', 'Own storage (storage:)', 'own-storage-storage', StorageConfig),
@@ -504,7 +506,7 @@ def build_config_metadata() -> ConfigMetadata:
         if _is_basemodel(annotation):
             # Every nested-model field on DrakkarConfig shares its name with
             # its group key (kafka/sources/executor/sinks/dlq/metrics/
-            # logging/ui/cache) — see _GROUP_DEFS.
+            # logging/api/ui/cache) — see _GROUP_DEFS.
             _walk(annotation, [field_name], field_name, entries_by_group[field_name])
         else:
             entries_by_group['root'].append(_build_leaf(field_info, [field_name], 'root'))

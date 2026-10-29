@@ -268,8 +268,8 @@ services:
       CLUSTER_ID: analytics-prod
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9090"
-      DK_UI__PORT: "8081"
-      DK_UI__PUBLIC_URL: "http://localhost:8081/"
+      DK_API__PORT: "8081"
+      DK_API__PUBLIC_URL: "http://localhost:8081/"
       # Autodiscover provider of the main cluster:
       # filesystem (the default), postgres, redis or consul, chosen with
       # `just integration-up provider=<name>`. The DSN and the Redis URL
@@ -361,8 +361,8 @@ services:
       CLUSTER_ID: analytics-prod
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9091"
-      DK_UI__PORT: "8082"
-      DK_UI__PUBLIC_URL: "http://localhost:8082/"
+      DK_API__PORT: "8082"
+      DK_API__PUBLIC_URL: "http://localhost:8082/"
       # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
       DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
@@ -410,8 +410,8 @@ services:
       WORKER_ID: worker-3
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9093"
-      DK_UI__PORT: "8083"
-      DK_UI__PUBLIC_URL: "http://localhost:8083/"
+      DK_API__PORT: "8083"
+      DK_API__PUBLIC_URL: "http://localhost:8083/"
       # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
       DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
@@ -444,8 +444,8 @@ services:
       WORKER_ID: fast-worker-1
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9094"
-      DK_UI__PORT: "8084"
-      DK_UI__PUBLIC_URL: "http://localhost:8084/"
+      DK_API__PORT: "8084"
+      DK_API__PUBLIC_URL: "http://localhost:8084/"
       # The fast cluster keeps its recorder history in Postgres: the table
       # drakkar.fast_recorder_events on postgres-fleet, with hourly partitions
       # kept for 2 hours (scenario-recorder-postgres.sh checks it). The main
@@ -477,8 +477,8 @@ services:
       WORKER_ID: fast-worker-2
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9095"
-      DK_UI__PORT: "8085"
-      DK_UI__PUBLIC_URL: "http://localhost:8085/"
+      DK_API__PORT: "8085"
+      DK_API__PUBLIC_URL: "http://localhost:8085/"
       # Postgres recorder history, as fast-worker-1 (see there).
       DK_RECORDER__PROVIDER: "postgres"
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
@@ -512,8 +512,8 @@ services:
       WORKER_HANDLER: http-search
       DK_CONFIG: /app/http-worker.yaml
       DK_METRICS__PORT: "9096"
-      DK_UI__PORT: "8086"
-      DK_UI__PUBLIC_URL: "http://localhost:8086/"
+      DK_API__PORT: "8086"
+      DK_API__PUBLIC_URL: "http://localhost:8086/"
     ports:
       - "9096:9096"
       - "8086:8086"

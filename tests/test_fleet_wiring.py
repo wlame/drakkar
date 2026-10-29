@@ -47,7 +47,8 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
     values = {
         'autodiscover': {'enabled': True, 'provider': 'filesystem'},
         'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
-        'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
+        'api': {'port': 8123},
+        'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
@@ -121,7 +122,7 @@ async def test_the_card_carries_the_worker_identity(tmp_path):
     app = _app(
         tmp_path,
         cluster_name='search',
-        ui={'enabled': True, 'port': 8123, 'release': {'enabled': False}, 'public_url': 'http://w-1.internal:8123/'},
+        api={'port': 8123, 'public_url': 'http://w-1.internal:8123/'},
     )
 
     await app._lifecycle._start_fleet()
@@ -138,13 +139,13 @@ async def test_the_card_carries_the_worker_identity(tmp_path):
     assert re.fullmatch(r'[0-9a-f]{16}', card['instance'])
 
 
-def test_the_ui_url_without_public_url_is_the_outbound_address(tmp_path, monkeypatch):
+def test_the_api_url_without_public_url_is_the_outbound_address(tmp_path, monkeypatch):
     import drakkar.app as app_module
 
     monkeypatch.setattr(app_module, 'detect_worker_ip', lambda: '10.1.2.3')
     app = _app(tmp_path)
 
-    assert app.ui_url == 'http://10.1.2.3:8123/'
+    assert app.api_url == 'http://10.1.2.3:8123/'
 
 
 def test_every_process_gets_a_new_instance(tmp_path):
@@ -300,14 +301,14 @@ def test_election_is_built_only_when_the_archive_has_cluster_scope(tmp_path, ove
 # --- the registry switched off ---
 
 
-async def test_the_ui_off_turns_the_registry_off_with_one_warning(tmp_path):
+async def test_the_registry_runs_with_the_ui_off(tmp_path):
     app = _app(tmp_path, ui={'enabled': False, 'release': {'enabled': False}})
 
-    with capture_logs() as logs:
-        await app._lifecycle._start_fleet()
-
-    assert app.fleet is None
-    assert [entry['event'] for entry in logs] == ['fleet_registry_disabled_no_ui']
+    await app._lifecycle._start_fleet()
+    try:
+        assert app.fleet is not None
+    finally:
+        await app.fleet.stop(deadline_seconds=1.0)
 
 
 # --- the card folder ---
@@ -366,16 +367,16 @@ def _runnable_app(
     # and a won slot would do nothing, so no archive work runs here.
     recorder.archive_cluster_task = MagicMock(return_value=idle_archive_task())
 
-    async def start_ui_and_recorder() -> None:
+    async def start_recorder_and_api() -> None:
         order.append('ui_and_recorder')
-        app._ui_server = ui_server
+        app._api_server = ui_server
         app._recorder = recorder
 
-    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', start_ui_and_recorder)
+    monkeypatch.setattr(app._lifecycle, '_start_recorder_and_api', start_recorder_and_api)
     return app, source, order
 
 
-async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_server(tmp_path, monkeypatch):
+async def test_states_follow_the_worker_life_and_the_card_goes_before_the_api_server(tmp_path, monkeypatch):
     provider = _RecordingRegistry()
     app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: provider)
 
@@ -403,14 +404,14 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
 
 @pytest.mark.parametrize(
     ('switch', 'reserve'),
-    [('none', 0.7), ('ui', 0.0), ('autodiscover', 0.0)],
+    [('none', 0.7), ('ui', 0.7), ('autodiscover', 0.0)],
     ids=['registry', 'ui-off', 'autodiscover-off'],
 )
 async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_runs(
     tmp_path, monkeypatch, switch, reserve
 ):
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
-    # The registry needs the UI server, so a worker with the UI off runs none.
+    # The registry needs the API server and not the UI, so a worker with the UI off runs one.
     app._config.ui.enabled = switch != 'ui'
     app._config.autodiscover.enabled = switch != 'autodiscover'
     app._config.autodiscover.resilience.timeout = 0.7
@@ -654,7 +655,7 @@ def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[
         return consumer
 
     monkeypatch.setattr(kafka_source_module, 'KafkaConsumer', make_consumer)
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr(app._sink_manager, 'connect_all', AsyncMock())
     monkeypatch.setattr(app._sink_manager, 'close_all', AsyncMock())
     monkeypatch.setattr(app, '_build_dlq', lambda: setattr(app, '_dlq_sink', None))
@@ -896,7 +897,7 @@ async def test_first_published_card_carries_the_cluster_hash(tmp_path, monkeypat
     )
     assert app.cluster_tasks_hash == expected
     assert provider.cards[0]['state'] == 'starting'
-    assert provider.cards[0]['features'] == {'periodic': {'cluster_hash': expected}}
+    assert provider.cards[0]['features'] == {'periodic': {'cluster_hash': expected}, 'ui': True}
     checker = getattr(app._fleet._on_refresh, '__self__', None)
     assert isinstance(checker, ClusterHashChecker)
 
@@ -909,7 +910,7 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
     lifecycle = app._lifecycle
     run_on_startup, check_autodiscover, build_roster, create_connections, start_fleet = (
         lifecycle._run_on_startup,
-        lifecycle._check_autodiscover_after_startup,
+        lifecycle._check_config_after_startup,
         lifecycle._build_periodic_roster,
         lifecycle._create_connections,
         lifecycle._start_fleet,
@@ -936,7 +937,7 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
         await start_fleet()
 
     monkeypatch.setattr(lifecycle, '_run_on_startup', recorded_on_startup)
-    monkeypatch.setattr(lifecycle, '_check_autodiscover_after_startup', recorded_check)
+    monkeypatch.setattr(lifecycle, '_check_config_after_startup', recorded_check)
     monkeypatch.setattr(lifecycle, '_build_periodic_roster', recorded_roster)
     monkeypatch.setattr(lifecycle, '_create_connections', recorded_connections)
     monkeypatch.setattr(lifecycle, '_start_fleet', recorded_fleet)

@@ -144,7 +144,7 @@ _CONSUL_ON = {'enabled': True, 'provider': 'consul'}
         ({}, 'off'),
         ({'autodiscover': {'provider': 'consul'}}, 'off'),
         ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}}, 'consul'),
-        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}, 'ui': {'enabled': False}}, 'off'),
+        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}, 'ui': {'enabled': False}}, 'consul'),
     ],
     ids=['default', 'off-with-provider', 'on', 'ui-off'],
 )

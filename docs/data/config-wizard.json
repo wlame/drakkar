@@ -163,9 +163,9 @@
       "docs": "periodic-tasks.md#the-election"
     },
     {
-      "id": "ui_needed",
+      "id": "api_needed",
       "when": {"autodiscover": ["filesystem", "postgres", "redis", "consul"]},
-      "text": "Autodiscover needs the UI server. Keep ui.enabled: true, the default.",
+      "text": "Autodiscover needs the API server. Keep api.enabled: true, the default.",
       "docs": "fleet.md#what-you-get-with-the-defaults"
     }
   ],

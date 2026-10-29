@@ -151,9 +151,12 @@ parametrize).
    registry and any sink start, so the registry card carries the definition
    hash from its first publish.
 
-## UI server footguns
+## API server footguns
 
-- The UI server (`drakkar/uiserver/`) runs on its own thread and event loop.
+- The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
+  one listener: `/healthz`, `/readyz` and the peer route need only `api.enabled`
+  (`create_api_app`; they read no recorder), and every other route needs
+  `ui.enabled` too (`create_ui_app` adds them to that app).
   Every read of live worker state goes through `dispatch_to_loop(...)` to the
   main loop, plus a dedicated SQLite reader connection. Follow that pattern
   for any new endpoint.
@@ -166,9 +169,9 @@ parametrize).
   `cluster`/`global` cache rows this worker originated. The fan-out paths
   (`cors.py`) answer CORS with the `/ws` origin rule; their preflight runs
   before auth.
-- Three separate HTTP servers: UI server `:8080`, opt-in HTTP source `:8090`
+- Three separate HTTP servers: API server `:8080`, opt-in HTTP source `:8090`
   (synchronous ingress, no health routes — readiness is per-request),
-  Prometheus exporter `:9090` (not FastAPI). Kubernetes probes live on the UI
+  Prometheus exporter `:9090` (not FastAPI). Kubernetes probes live on the API
   server only.
 
 ## Decoupled UI hosting (`drakkar/uihost/`)
@@ -201,7 +204,7 @@ drakkar/
   cluster_tasks.py         cluster slot loop, slot lease, the worker's one election service, hash checker
   schedule.py, cronexpr.py slot math, scopes, definition hash; the cron subset check (a library computes fire times)
   recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock
-  uiserver/                UI server: routes + message probe runner
+  uiserver/                API server: routes + message probe runner
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),

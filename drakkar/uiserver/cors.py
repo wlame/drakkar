@@ -3,7 +3,7 @@
 The page served by one worker reads the trace, the label trace and the
 databases list from every worker of its cluster. Those reads are
 cross-origin, so these three paths answer CORS: with the origin rule of the
-WebSocket (``origin_allowed`` and ``ui.allowed_ws_origins``, one decision
+WebSocket (``origin_allowed`` and ``ui.allowed_origins``, one decision
 table for both), and with a preflight that needs no token, because a
 browser sends none with it. No other path sends CORS headers.
 """

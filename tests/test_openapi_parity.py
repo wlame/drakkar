@@ -416,7 +416,7 @@ async def test_archives_payload_matches_schema(tmp_path):
     with gzip.open(folder / name, 'wb') as f:
         f.write(b'archived-bytes')
 
-    cfg = UIConfig(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     recorder.storage_dir = str(tmp_path / 'storage')
@@ -480,7 +480,7 @@ async def test_workers_payload_matches_schema():
                 peer('w-unknown', 'search', {'cache': {}}),
             ]
 
-    cfg = UIConfig(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -560,7 +560,7 @@ async def test_databases_payload_matches_schema(tmp_path):
     schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
     storage = tmp_path / 'storage'
     storage.mkdir()
-    cfg = UIConfig(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True)
     recorder = EventRecorder(
         RecorderConfig(flush_interval='60s'),
         worker_name='schema-worker',

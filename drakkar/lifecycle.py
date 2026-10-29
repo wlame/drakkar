@@ -315,13 +315,13 @@ class AppLifecycle:
             # A source that delivers results to sinks needs at least one.
             if app._config.sinks.is_empty and app._config.sources.delivers_to_sinks:
                 raise SinkNotConfiguredError(NO_SINKS_ERROR)
-            self._check_autodiscover_after_startup()
+            self._check_config_after_startup()
 
             await self._build_executor_pool()
             await self._start_observability()
             self._create_connections()
             self._build_periodic_roster()
-            await self._start_ui_and_recorder()
+            await self._start_recorder_and_api()
             await self._start_fleet()
             self._start_runtime_health()
             self._wire_annotator()
@@ -563,46 +563,46 @@ class AppLifecycle:
                 metrics=[f'{m._name} ({m._type})' for m in user_metrics.values()],
             )
 
-    async def _start_ui_and_recorder(self) -> None:
-        """Start the recorder and the UI server, each when its config asks for it.
+    async def _start_recorder_and_api(self) -> None:
+        """Start the recorder and the API server, each when its config asks for it.
 
         The recorder runs with the UI or with durable recording; a memory store
-        exists only to serve the UI. With the UI off, the worker warns about its
+        exists only to serve the UI. With the API off, the worker warns about its
         missing probes.
         """
         app = self._app
+        config = app._config
         log = logger.bind(worker_id=app._worker_id)
-        if app._config.ui.enabled:
+        if config.ui.enabled:
             # Auth is opt-in. Emit a startup warning naming how to set a
             # token when none is configured — no endpoint touches the
             # pipeline and the UI is meant for private-network deployment,
             # so this is informational rather than fail-fast. The warning
             # also names any side-effecting endpoint (probe, merge) left
             # enabled. See docs/faq.md §"Security and trust model".
-            warn_if_ui_unauthenticated(app._config)
+            warn_if_ui_unauthenticated(config)
         await self._start_recorder()
-        if not app._config.ui.enabled:
-            # The UI server is this worker's ONLY probe surface — without
+        if not config.api.enabled:
+            # The API server is this worker's ONLY probe surface — without
             # it nothing serves /healthz or /readyz and Kubernetes probes
             # simply fail. Warn loudly, because that consequence is easy
             # to miss.
             await log.awarning(
                 'ui_disabled_no_probes',
                 category='lifecycle',
-                reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
+                reason='api.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the API server',
             )
             return
-        # A worker with the UI on always has a recorder: its memory store serves the UI.
-        assert app._recorder is not None
 
-        from drakkar.uiserver.server import UIServer
+        from drakkar.uiserver.server import APIServer
 
-        app._ui_server = UIServer(
-            config=app._config.ui,
-            recorder=app._recorder,
+        app._api_server = APIServer(
+            config=config.api,
             app=app,
+            ui=config.ui if config.ui.enabled else None,
+            recorder=app._recorder,
         )
-        await app._ui_server.start()
+        await app._api_server.start()
 
     async def _start_recorder(self) -> None:
         """Build and start the recorder, unless the worker has neither a UI nor durable recording."""
@@ -631,15 +631,17 @@ class AppLifecycle:
             cluster_name=app._cluster_name,
             persistence=config.resolved_persistence,
             memory_enabled=config.ui.enabled,
-            api_port=config.ui.port,
-            api_public_url=config.ui.public_url,
-            ws_min_duration_ms=config.ui.ws_min_duration_ms,
+            api_port=config.api.port,
+            api_public_url=config.api.public_url,
+            # With the UI off no /ws route exists, so nothing can subscribe: a
+            # zero threshold defers no ``task_started`` for a stream nobody reads.
+            ws_min_duration_ms=config.ui.ws_min_duration_ms if config.ui.enabled else 0,
             log_min_duration_ms=config.ui.log_min_duration_ms,
             storage_dir=config.storage.dir,
             shared_dir=config.resolved_shared_dir,
             instance=app._instance,
             memory_window_seconds=memory.window,
-            memory_max_rows=memory.rows_per_executor * config.executor.max_executors,
+            memory_max_rows=config.memory_max_rows,
             memory_max_bytes=memory.max_size,
             postgres=recorder_postgres_settings(config),
         )
@@ -647,16 +649,17 @@ class AppLifecycle:
         await app._recorder.start()
         await app._recorder.write_config(config)
 
-    def _check_autodiscover_after_startup(self) -> None:
-        """Check the ``autodiscover`` keys again, and say once when the cluster name is empty.
+    def _check_config_after_startup(self) -> None:
+        """Check the ``api`` and ``autodiscover`` rules again, and say once when the cluster name is empty.
 
         ``on_startup`` may have changed the keys, so this gives the messages of
         the config load.
 
         Raises:
-            ValueError: ``autodiscover`` cannot run as configured.
+            ValueError: the UI or ``autodiscover`` cannot run as configured.
         """
         app = self._app
+        app._config.check_what_needs_the_api()
         app._config.check_autodiscover()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(
@@ -733,7 +736,7 @@ class AppLifecycle:
     async def _start_fleet(self) -> None:
         """Start the worker registry when ``autodiscover`` is on, or leave ``app._fleet`` unset.
 
-        Runs right after the UI server listens: peers reach this worker
+        Runs right after the API server listens: peers reach this worker
         through the URL its card publishes. The service starts its loops in
         the background and returns at once; nothing later in startup, and
         nothing in the pipeline, waits on a registry call.
@@ -742,14 +745,6 @@ class AppLifecycle:
         config = app._config
         autodiscover = config.autodiscover
         if not autodiscover.enabled:
-            return
-        if not config.ui.enabled:
-            await logger.bind(worker_id=app._worker_id).awarning(
-                'fleet_registry_disabled_no_ui',
-                category='fleet',
-                provider=autodiscover.provider,
-                hint='the registry needs ui.enabled: peers reach a worker through its UI server',
-            )
             return
         options = registry_provider_options(config)
         app._fleet = FleetRegistry(
@@ -765,13 +760,13 @@ class AppLifecycle:
         await app._fleet.start()
 
     def _card_features(self) -> dict[str, Any]:
-        """The card's ``features``: the cluster task hash, and the cache marks while the cache serves.
+        """The card's ``features``: the cluster task hash, the UI switch, and the cache marks while the cache serves.
 
         Read at each publish: the cache engine starts after the registry.
         """
         app = self._app
         cache = app._cache_engine.features() if app._cache_engine is not None else {}
-        return {'periodic': {'cluster_hash': app.cluster_tasks_hash}, **cache}
+        return {'periodic': {'cluster_hash': app.cluster_tasks_hash}, 'ui': app._config.ui.enabled, **cache}
 
     def _set_lifecycle_state(self, state: str) -> None:
         """Record the worker's state and publish it in the registry card at once."""
@@ -843,7 +838,7 @@ class AppLifecycle:
 
         Every ``asyncio.to_thread`` call on the main loop — handler blocking
         I/O plus the framework's own short file work — shares this one pool,
-        which Python caps at ``min(32, cpu_count + 4)``. The UI server's and
+        which Python caps at ``min(32, cpu_count + 4)``. The API server's and
         the webapp's loops keep pools of their own. Installing a
         replacement via ``loop.set_default_executor`` lifts that cap;
         ``asyncio.run``'s cleanup (``shutdown_default_executor``) then owns
@@ -1387,7 +1382,7 @@ class AppLifecycle:
                     )
 
             # Withdraw the registry card after the recorder's last write and
-            # before the UI server goes: until the card is gone, peers may
+            # before the API server goes: until the card is gone, peers may
             # still reach this worker through it.
             if app._fleet is not None:
                 try:
@@ -1424,9 +1419,9 @@ class AppLifecycle:
                         exc_info=True,
                     )
 
-            if app._ui_server:
+            if app._api_server:
                 try:
-                    await app._ui_server.stop()
+                    await app._api_server.stop()
                 except Exception as exc:
                     await log.awarning(
                         'debug_server_stop_failed',

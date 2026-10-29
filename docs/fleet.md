@@ -22,9 +22,10 @@ election and pulls no cache rows. The workers list shows only this worker, and
 a declared `scope='cluster'` periodic task fails startup.
 
 To turn it on, set `autodiscover.enabled: true` and choose one provider. The
-registry needs the UI server (`ui.enabled: true`), because peers and browsers
-reach a worker through the URL on its card. With the UI off, the registry is
-off and the worker logs `fleet_registry_disabled_no_ui` once.
+registry needs the API server (`api.enabled: true`), because peers and browsers
+reach a worker through the URL on its card. With the API off, the config does
+not load. The UI may be off: the card then says so in `features.ui`, and the UI
+of a peer leaves that worker out.
 
 ## Providers
 
@@ -135,7 +136,7 @@ Set the connection string in the environment, not in the YAML file:
 export DK_CONNECTIONS__POSTGRES__MAIN__DSN='postgresql://drakkar:...@db.internal/drakkar'
 ```
 
-The registry needs the UI server (`ui.enabled: true`), as with every
+The registry needs the API server (`api.enabled: true`), as with every
 provider. Every worker of the fleet uses the same provider and the same
 database, schema and `connection`; workers on different stores do not see
 each other.
@@ -278,7 +279,7 @@ export DK_CONNECTIONS__REDIS__MAIN__URL='redis://drakkar-fleet:...@redis.interna
 ```
 
 Without it the entry uses `redis://localhost:6379/0`. The registry needs the
-UI server (`ui.enabled: true`), as with every provider. Every worker of the
+API server (`api.enabled: true`), as with every provider. Every worker of the
 fleet uses the same provider and the same server, database number and
 `key_prefix`; workers on different stores do not see each other.
 
@@ -452,7 +453,7 @@ export DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
 ```
 
 Without a token the requests go out without one, and Consul treats them as
-the anonymous token. The registry needs the UI server (`ui.enabled: true`), as
+the anonymous token. The registry needs the API server (`api.enabled: true`), as
 with every provider. Every worker of the fleet uses the same provider and the
 same Consul cluster, datacenter and `key_prefix`; workers on different stores
 do not see each other.
@@ -646,7 +647,7 @@ A card is a JSON object, at most 4096 bytes:
 | `schema` | yes | Card format version, `1`. A card with another value is skipped and the worker logs `fleet_card_schema_unsupported` once for that worker. |
 | `worker` | yes | Worker name. Not empty. |
 | `cluster` | yes | The worker's cluster name, as configured (may be `""`). |
-| `url` | yes | Where the worker's UI server answers: `ui.public_url` when set, else `http://<outbound ip>:<ui.port>/`. Not empty. |
+| `url` | yes | Where the worker's API server answers: `api.public_url` when set, else `http://<outbound ip>:<api.port>/`. Not empty. |
 | `instance` | no | 16 random hex characters, new at every process start. Tells two processes with one worker name apart. |
 | `backend` | no | The implementation that runs the worker. |
 | `version` | no | The worker's release, as `/api/v1/identity` reports it. |
@@ -667,13 +668,13 @@ same bytes whichever worker wrote it.
 
 A worker publishes its card:
 
-- with `starting` right after its UI server listens;
+- with `starting` right after its API server listens;
 - with `running` once its sources have started;
 - with `draining` as soon as shutdown begins;
 - again every `heartbeat` (default 10) with the current state.
 
 A state change is published at once, not at the next heartbeat. At the end
-of a clean stop, after the recorder's last write and before the UI server
+of a clean stop, after the recorder's last write and before the API server
 stops, the worker withdraws its card (see [Shutdown](#resilience) for when it
 does not).
 
@@ -963,7 +964,6 @@ also counted by the three provider metrics:
 | Event | Level | When |
 |---|---|---|
 | `fleet_registry_started` | info | The registry service started; names the provider, instance and URL. |
-| `fleet_registry_disabled_no_ui` | warning | The UI is off, so the registry is off. |
 | `provider_started` | info | A provider started (fields `feature`, `provider`). After failed starts it is logged once, when a start succeeds. |
 | `provider_call_failed` | warning | A provider operation failed after its retries (fields `feature`, `provider`, `op`, `error`, `attempts`, `suppressed`); at most once a minute per operation. `suppressed` counts the failures the line stands for. |
 | `provider_breaker_opened` | warning | A closed breaker opened (fields `feature`, `provider`, `failure_threshold`, `cooldown_seconds`). A failed probe does not log it again. |

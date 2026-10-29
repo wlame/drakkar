@@ -65,8 +65,8 @@ export DK_KAFKA__BROKERS=kafka-prod:9092
 # Override executor.max_executors
 export DK_EXECUTOR__MAX_EXECUTORS=16
 
-# Override ui.port
-export DK_UI__PORT=9000
+# Override api.port
+export DK_API__PORT=9000
 ```
 
 Env vars are parsed into a nested dict structure and deep-merged on top of the YAML values. Leaf values from env vars always win over YAML values; nested dicts are merged recursively. A JSON list or object in a variable for a list or map field is that field's whole value: it replaces the YAML value and is not merged with it.
@@ -842,7 +842,7 @@ The UI's auth is **opt-in by default**. With `ui.enabled=true` and `ui.auth_toke
 
 | Endpoint | Effect | Switch |
 |----------|--------|--------|
-| `POST /api/v1/debug/probe` | Runs caller-supplied bytes through the live handler and the real executor subprocess pool, competing with production traffic for executor slots. (It writes no sinks, recorder rows, cache entries, or offsets — see [Message Probe](observability.md#operator-ui).) | `ui.probe_enabled: false` |
+| `POST /api/v1/debug/probe` | Runs caller-supplied bytes through the live handler and the real executor subprocess pool, competing with production traffic for executor slots. (It writes no sinks, recorder rows, cache entries, or offsets — see [Message Probe](observability.md#operator-ui).) | `ui.probe.enabled: false` |
 | `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `<shared.dir>/merged/`. The archive pass deletes it after `history.merged_retention_days` (default 32); with archiving off, or with that set to `0`, nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
 
 Both default to `true`, and both return `403` with `{"error": "..."}` naming the config key when switched off. The switches are deliberately independent of `auth_token` in both directions: a deployment that cannot set a token can still close the endpoints, and a deployment that has one can still close them as defence in depth — a valid token is not the same as consent to burn executor slots on demand. The startup warning names whichever of the two is still enabled, so an operator who has already closed them is not warned about exposure they do not have.
@@ -853,25 +853,26 @@ To require auth on the protected endpoints (database download, merge, message pr
 - **Configure via YAML:** set `ui.auth_token: <value>` in your config.
 - **Or via environment:** export `DK_UI__AUTH_TOKEN=<value>` (overrides YAML when both are set).
 
-When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header), and so do the three cross-origin reads of the UI fan-out. The routes under `/api/v1/peer/` are never protected: other workers call them without a token for the [cache exchange](cache.md#cache-exchange). See [Security posture](security.md#the-public-peer-route). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
+When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_origins` (or the request's `Host` header), and so do the three cross-origin reads of the UI fan-out. The routes under `/api/v1/peer/` are never protected: other workers call them without a token for the [cache exchange](cache.md#cache-exchange). See [Security posture](security.md#the-public-peer-route). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
 
-The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and UI server are constructed. See `drakkar/app_security.py::warn_if_ui_unauthenticated` for the implementation.
+The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and API server are constructed. See `drakkar/app_security.py::warn_if_ui_unauthenticated` for the implementation.
 
 ### Server Settings
 
-Top-level `ui.*` fields configure the UI server itself and the presentation settings its pages consume.
+The `api` section is the HTTP server itself. Top-level `ui.*` fields configure the UI routes on that server and the presentation settings its pages consume.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `true` | | Enable or disable the entire UI feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
-| `host` | `str` | `'127.0.0.1'` | | Bind address for the UI server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host — when binding to a non-loopback address inside anything other than a fully-trusted private network, set `auth_token` (see below). |
-| `port` | `int` | `8080` | 1--65535 | Port for the web UI (FastAPI server). |
-| `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. `/healthz`, `/readyz` and the routes under `/api/v1/peer/` (the [cache exchange](cache.md#cache-exchange)) never need the token. With a token set, list every worker origin in `allowed_ws_origins` so the UI can read the other workers of the cluster. |
-| `probe_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
+| `api.enabled` | `bool` | `true` | | Run the HTTP server: `/healthz`, `/readyz` and the peer route. Off means no listener, so nothing answers the Kubernetes probes, and `ui.enabled` and `autodiscover.enabled` must both be false. |
+| `api.port` | `int` | `8080` | 1--65535 | Port for the HTTP server (FastAPI). |
+| `enabled` | `bool` | `true` | | Serve the UI: the pages, the bundle fetch, the debug and data routes, `/ws` and the docs. It needs `api.enabled`. Off: those routes answer 404, no bundle is fetched, and the recorder keeps no memory store. |
+| `api.host` | `str` | `'127.0.0.1'` | | Bind address for the HTTP server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host — when binding to a non-loopback address inside anything other than a fully-trusted private network, set `auth_token` (see below). |
+| `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. `/healthz`, `/readyz` and the routes under `/api/v1/peer/` (the [cache exchange](cache.md#cache-exchange)) never need the token. With a token set, list every worker origin in `allowed_origins` so the UI can read the other workers of the cluster. |
+| `probe.enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
 | `merge_enabled` | `bool` | `true` | | Serve `POST /api/v1/debug/merge`. Each call writes a new `merged-<ts>-<token>.db` into `<shared.dir>/merged/`. The archive pass deletes merge results after `history.merged_retention_days`; with archiving off, or with that set to `0`, nothing reclaims them. `false` serves `403` instead — independently of `auth_token`. |
 | `kafka_read_enabled` | `bool` | `true` | | Serve `GET /api/v1/debug/kafka/*` — ad-hoc reads of the configured topics (source, DLQ, and each Kafka sink by instance name; never an arbitrary topic). Reads use `assign()`-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. `false` serves `403` instead — independently of `auth_token`. When the resolved Kafka security of any readable topic is not PLAINTEXT while `auth_token` is empty, startup logs a warning naming the exposed aliases. See [Kafka Read API](kafka-read.md). |
-| `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. The same rule decides the cross-origin reads (CORS) of `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI sends to every worker of the cluster; with `auth_token` set, list the origin of every worker here, or those reads fail and the UI shows the other workers as unreachable (see [Cross-origin reads](security.md#cross-origin-reads)). Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
-| `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
+| `allowed_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values, consulted on every handshake whether or not `auth_token` is set. The same rule decides the cross-origin reads (CORS) of `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI sends to every worker of the cluster; with `auth_token` set, list the origin of every worker here, or those reads fail and the UI shows the other workers as unreachable (see [Cross-origin reads](security.md#cross-origin-reads)). Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Empty list + empty `auth_token` = the cross-origin handshakes the cluster view needs are accepted, except a page that is not itself on loopback reaching a worker over loopback -- no peer worker is ever at the browser's own loopback address. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- a browser cannot omit it. |
+| `api.public_url` | `str` | `''` | | External URL for this worker's HTTP server. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
 | `expose_env_vars` | `list[str]` | `[]` | | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
 | `max_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the web UI in list views. |
 
@@ -892,10 +893,10 @@ These settings add clickable Prometheus graph links to the dashboard.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `prometheus_url` | `str` | `''` | Base URL of your Prometheus server (e.g., `http://prometheus:9090`). If empty, no Prometheus links are shown in the UI. |
-| `prometheus_rate_interval` | `str` | `'5m'` | Rate interval used in PromQL `rate()` expressions for dashboard links (e.g., `1m`, `5m`, `15m`). |
-| `prometheus_worker_label` | `str` | `''` | PromQL label filter for worker-scoped queries. Supports template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. If empty, defaults to `instance="{hostname}:{metrics_port}"`. Example: `worker_id="{worker_id}"`. |
-| `prometheus_cluster_label` | `str` | `''` | PromQL label filter for cluster-wide queries. Supports the same template variables. Example: `cluster="{cluster_name}"`. If empty, cluster-wide links are not shown. |
+| `prometheus.url` | `str` | `''` | Base URL of your Prometheus server (e.g., `http://prometheus:9090`). If empty, no Prometheus links are shown in the UI. |
+| `prometheus.rate_interval` | `str` | `'5m'` | Rate interval used in PromQL `rate()` expressions for dashboard links (e.g., `1m`, `5m`, `15m`). |
+| `prometheus.worker_label` | `str` | `''` | PromQL label filter for worker-scoped queries. Supports template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. If empty, defaults to `instance="{hostname}:{metrics_port}"`. Example: `worker_id="{worker_id}"`. |
+| `prometheus.cluster_label` | `str` | `''` | PromQL label filter for cluster-wide queries. Supports the same template variables. Example: `cluster="{cluster_name}"`. If empty, cluster-wide links are not shown. |
 
 ### Custom Links
 
@@ -937,10 +938,10 @@ Timed debug pause of message intake, driven from the Live page — see the dedic
 | `enabled` | `bool` | `false` | Serve the consume-pause API (`/api/v1/debug/consume-pause`) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments. |
 | `durations_seconds` | `list[int]` | `[15, 60, 300, 900]` | Preset pause durations (seconds) offered as one-click buttons on the Live page. Each preset must sit in the same 1--3600 range the API enforces; the API itself accepts any duration in that range regardless of the presets. |
 
-### Probe Details Caps (`ui.probe_details:`)
+### Message Probe (`ui.probe:`)
 
-Write caps for the Message Probe's user-defined details tab (`max_writes`, default
-`10000`; `max_total_bytes`, default `5000000`) — see
+The switch of the Message Probe (`enabled`, default `true`) and the write caps for its
+user-defined details tab (`max_writes`, default `10000`; `max_total_size`, default `5MB`) — see
 [Probe User Details](probe-user-details.md) for the feature and when to raise them.
 
 ### Timeline Tuning (`ui.timeline:`)
@@ -1039,10 +1040,12 @@ Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (
 | `check_update` | `bool` | `true` | Resolve the latest release tag on startup instead of only the pinned version. Already-cached versions are never re-downloaded — release tags are immutable. |
 
 ```yaml
-ui:
-  enabled: true
+api:
   port: 8080
   public_url: https://drakkar-ui.example.com/worker-1
+
+ui:
+  enabled: true
   expose_env_vars:
     - GIT_SHA
     - DEPLOY_ENV
@@ -1050,10 +1053,11 @@ ui:
   max_rows: 5000
   log_min_duration_ms: 1000
   ws_min_duration_ms: 500
-  prometheus_url: http://prometheus:9090
-  prometheus_rate_interval: 5m
-  prometheus_worker_label: 'worker_id="{worker_id}"'
-  prometheus_cluster_label: 'cluster="{cluster_name}"'
+  prometheus:
+    url: http://prometheus:9090
+    rate_interval: 5m
+    worker_label: 'worker_id="{worker_id}"'
+    cluster_label: 'cluster="{cluster_name}"'
   custom_links:
     - name: Grafana Dashboard
       url: http://grafana:3000/d/drakkar?var-worker={worker_id}

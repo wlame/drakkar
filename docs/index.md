@@ -239,7 +239,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |
 | [Webapp](webapp.md) | Synchronous HTTP pipeline, auth, rate limits, status codes |
 | [Observability](observability.md) | Operator UI pages, Prometheus metrics, structured logging setup |
-| [Kafka Read API](kafka-read.md) | Debug endpoints for reading Kafka topics from the UI server — fetch one message by coordinates or stream a time window, invisible to the pipeline |
+| [Kafka Read API](kafka-read.md) | Debug endpoints for reading Kafka topics from the API server — fetch one message by coordinates or stream a time window, invisible to the pipeline |
 | [Consume Pause](consume-pause.md) | Timed Live-page pause of message intake for inspecting a live worker; auto-resumes at its deadline |
 | [Debugging Bottlenecks](debugging-bottlenecks.md) | Runbook for a worker that periodically looks stuck: the recorded signals and what each combination means |
 | [Runtime Health](runtime-health.md) | Event-loop lag monitor: heartbeat, stall sampler, state badge, Prometheus metrics |

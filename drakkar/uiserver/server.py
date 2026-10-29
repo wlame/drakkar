@@ -1,10 +1,15 @@
-"""Debug web UI for Drakkar workers — a FastAPI JSON API plus the SPA.
+"""The worker's one HTTP server: the always-on routes, plus the UI when it is on.
 
-The route handlers are split across sibling modules to keep this factory
+:func:`create_api_app` builds what every worker with an API serves.
+:func:`create_ui_app` adds the UI to it: a FastAPI JSON API plus the SPA.
+
+The route handlers are split across sibling modules to keep these factories
 thin. Every JSON endpoint lives under ``/api/v1``; the pages are served by
 the drakkar-ui bundle through ``routes_spa``, not rendered here.
 
-  * ``routes_pages``  — health probes, WebSocket, and the top-level JSON
+  * ``routes_health`` — ``/healthz`` and ``/readyz``.
+  * ``routes_peer``   — ``/api/v1/peer/*``, the routes workers call on each other.
+  * ``routes_pages``  — WebSocket, and the top-level JSON
     APIs (dashboard, partitions, task, identity, sinks, workers,
     processors).
   * ``routes_live``   — ``/api/v1/live/*``, ``/api/v1/recent-tasks``,
@@ -21,7 +26,7 @@ the drakkar-ui bundle through ``routes_spa``, not rendered here.
   * ``routes_spa``           — the drakkar-ui bundle, with an
     ``index.html`` fallback for client-side routes.
 
-Each routes module defines a ``create_*_router(deps)`` factory that
+Each UI routes module defines a ``create_*_router(deps)`` factory that
 returns an ``APIRouter`` and is mounted into the app via
 ``include_router``. The shared helpers (auth/origin checks, cross-thread
 dispatch, prometheus-link builder, etc.) hang off ``UIDeps`` so the
@@ -51,7 +56,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.config import UIConfig
+from drakkar.config import APIConfig, UIConfig
 from drakkar.loopserver import LoopLoggingServer
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
@@ -119,7 +124,7 @@ WS_PROTOCOL = 'websockets-sansio'
 WS_PING_INTERVAL_SECONDS = 20.0
 WS_PING_TIMEOUT_SECONDS = 20.0
 
-# Caps a request body before it is buffered. The UI server takes a body on
+# Caps a request body before it is buffered. The server takes a body on
 # exactly two routes (the message probe and the merge request), and the
 # probe's own 10 MB limit is a pydantic field constraint — it fires only
 # AFTER the whole body has been read into memory, which is the wrong end of
@@ -146,6 +151,43 @@ class RecorderRows:
     columns: list[str]
     rows: list
     source: Source
+
+
+async def dispatch_bounded(coro: Coroutine[Any, Any, Any], main_loop: Any, default: Any = None) -> Any:
+    """Run ``coro`` on the main loop, giving up after a bounded wait.
+
+    Bare ``dispatch_to_loop`` waits forever. When the main loop is wedged
+    (a stuck sink flush, an executor deadlock) every request that
+    touches live worker state hangs with it — including the pages an
+    operator opens *because* something is wrong. Bounding the wait turns
+    that into a fast degraded response instead of a dead browser tab.
+
+    Returns ``default`` on timeout or error; the caller renders its own
+    empty shape. Errors are swallowed deliberately here — these are
+    best-effort display reads, and the underlying operations already log
+    and count their own failures.
+    """
+    try:
+        return await asyncio.wait_for(
+            dispatch_to_loop(coro, main_loop),
+            timeout=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            'ui_main_loop_dispatch_timeout',
+            category='debug',
+            timeout_seconds=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
+            hint='main loop did not answer in time — the pipeline may be stalled',
+        )
+        return default
+    except Exception as exc:
+        logger.warning(
+            'ui_main_loop_dispatch_failed',
+            category='debug',
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return default
 
 
 def _warn_degraded_read(event: str, hint: str) -> None:
@@ -378,40 +420,8 @@ class UIDeps:
         return result
 
     async def dispatch_bounded(self, coro: Coroutine[Any, Any, Any], default: Any = None) -> Any:
-        """Run ``coro`` on the main loop, giving up after a bounded wait.
-
-        Bare ``dispatch_to_loop`` waits forever. When the main loop is wedged
-        (a stuck sink flush, an executor deadlock) every UI request that
-        touches live worker state hangs with it — including the pages an
-        operator opens *because* something is wrong. Bounding the wait turns
-        that into a fast degraded response instead of a dead browser tab.
-
-        Returns ``default`` on timeout or error; the caller renders its own
-        empty shape. Errors are swallowed deliberately here — these are
-        best-effort display reads, and the underlying operations already log
-        and count their own failures.
-        """
-        try:
-            return await asyncio.wait_for(
-                dispatch_to_loop(coro, self.drakkar_app.main_loop),
-                timeout=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                'ui_main_loop_dispatch_timeout',
-                category='debug',
-                timeout_seconds=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
-                hint='main loop did not answer in time — the pipeline may be stalled',
-            )
-            return default
-        except Exception as exc:
-            logger.warning(
-                'ui_main_loop_dispatch_failed',
-                category='debug',
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            return default
+        """Run ``coro`` on this worker's main loop; see :func:`dispatch_bounded`."""
+        return await dispatch_bounded(coro, self.drakkar_app.main_loop, default=default)
 
     async def get_lag(self) -> dict[int, dict]:
         """Return per-partition lag info for currently assigned partitions.
@@ -444,21 +454,21 @@ class UIDeps:
     def build_prometheus_links(self) -> dict:
         """Build Prometheus graph URLs for dashboard cards and metrics panel.
 
-        Returns empty dicts/lists when ``prometheus_url`` is not configured.
+        Returns empty dicts/lists when ``prometheus.url`` is not configured.
         """
-        config = self.config
+        prometheus = self.config.prometheus
         drakkar_app = self.drakkar_app
-        prom_url = config.prometheus_url.rstrip('/')
+        prom_url = prometheus.url.rstrip('/')
         if not prom_url:
             return {'card_links': {}, 'worker_links': [], 'cluster_links': []}
 
-        rate = config.prometheus_rate_interval
+        rate = prometheus.rate_interval
         metrics_port = str(drakkar_app._config.metrics.port)
         tpl_vars = {
             'worker_id': drakkar_app._worker_id,
             'cluster_name': drakkar_app._cluster_name or '',
             'metrics_port': metrics_port,
-            'debug_port': str(config.port),
+            'debug_port': str(drakkar_app._config.api.port),
         }
 
         def _expand(template: str) -> str:
@@ -468,8 +478,8 @@ class UIDeps:
             return result
 
         # Worker-scoped label filter
-        if config.prometheus_worker_label:
-            wf = _expand(config.prometheus_worker_label)
+        if prometheus.worker_label:
+            wf = _expand(prometheus.worker_label)
         else:
             import socket
 
@@ -477,7 +487,7 @@ class UIDeps:
             wf = f'instance="{hostname}:{metrics_port}"'
 
         # Cluster-scoped label filter
-        cf = _expand(config.prometheus_cluster_label) if config.prometheus_cluster_label else ''
+        cf = _expand(prometheus.cluster_label) if prometheus.cluster_label else ''
 
         def _graph_url(expr: str, range_input: str = '1h') -> str:
             return f'{prom_url}/graph?g0.expr={quote(expr)}&g0.tab=0&g0.range_input={range_input}'
@@ -578,6 +588,55 @@ class UIDeps:
         return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
 
 
+def create_api_app(drakkar_app: DrakkarApp) -> FastAPI:
+    """Create the FastAPI application every worker with an API serves.
+
+    It holds ``/healthz``, ``/readyz`` and the peer routes, which read only
+    the worker itself: no recorder, no ``ui`` section, no bundle. Any other
+    path answers 404. :func:`create_ui_app` adds the UI to this app.
+    """
+    # Local imports for the same reason as in ``create_ui_app``.
+    from drakkar.uiserver.routes_health import create_health_router
+    from drakkar.uiserver.routes_peer import create_peer_router
+
+    # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
+    # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
+    # served, and that route is created by FastAPI itself so it carries none
+    # of our auth dependencies — it answered 200 with the full route table
+    # (including every /api/v1/debug/* path) even with ui.auth_token set. The
+    # contract surface is served instead by routes_openapi.py, which vendors
+    # the spec and is auth-gated like the rest of its route class.
+    app = FastAPI(title='Drakkar', docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware('http')
+    async def _reject_oversized_bodies(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Reject an over-long request body before anything buffers it.
+
+        Declared size only — a body arriving without ``Content-Length``
+        (chunked) is not counted here, because reading it to find out is
+        exactly the buffering this exists to avoid. The two routes that
+        take a body validate their own content afterwards; this is the
+        cheap outer bound, and ``MAX_BODY_BYTES`` explains why the probe's
+        pydantic-level limit was not enough on its own.
+        """
+        declared = request.headers.get('content-length')
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                return JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)
+            if length > MAX_BODY_BYTES:
+                return JSONResponse(
+                    {'error': 'Request body too large', 'max_bytes': MAX_BODY_BYTES},
+                    status_code=413,
+                )
+        return await call_next(request)
+
+    app.include_router(create_health_router(drakkar_app))
+    app.include_router(create_peer_router(drakkar_app))
+    return app
+
+
 def create_ui_app(
     config: UIConfig,
     recorder: EventRecorder,
@@ -586,9 +645,9 @@ def create_ui_app(
     ui_version: str | None = None,
     ui_source: str | None = None,
 ) -> FastAPI:
-    """Create the FastAPI UI application.
+    """Create the FastAPI application of a worker with the UI on.
 
-    Mounts the route modules onto the app; each receives a single
+    Mounts the route modules onto the API app; each receives a single
     ``UIDeps`` parameter exposing the shared state and helpers.
 
     ``ui_root`` is the resolved drakkar-ui bundle directory. A catch-all
@@ -617,44 +676,12 @@ def create_ui_app(
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
     from drakkar.uiserver.routes_pages import create_pages_router
-    from drakkar.uiserver.routes_peer import create_peer_router
     from drakkar.uiserver.routes_renderers import create_renderers_router
     from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
     from drakkar.uiserver.routes_uipages import create_uipages_router
 
-    # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
-    # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
-    # served, and that route is created by FastAPI itself so it carries none
-    # of our auth dependencies — it answered 200 with the full route table
-    # (including every /api/v1/debug/* path) even with ui.auth_token set. The
-    # contract surface is served instead by routes_openapi.py, which vendors
-    # the spec and is auth-gated like the rest of its route class.
-    app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None, openapi_url=None)
-
-    @app.middleware('http')
-    async def _reject_oversized_bodies(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        """Reject an over-long request body before anything buffers it.
-
-        Declared size only — a body arriving without ``Content-Length``
-        (chunked) is not counted here, because reading it to find out is
-        exactly the buffering this exists to avoid. The two routes that
-        take a body validate their own content afterwards; this is the
-        cheap outer bound, and ``MAX_BODY_BYTES`` explains why the probe's
-        pydantic-level limit was not enough on its own.
-        """
-        declared = request.headers.get('content-length')
-        if declared is not None:
-            try:
-                length = int(declared)
-            except ValueError:
-                return JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)
-            if length > MAX_BODY_BYTES:
-                return JSONResponse(
-                    {'error': 'Request body too large', 'max_bytes': MAX_BODY_BYTES},
-                    status_code=413,
-                )
-        return await call_next(request)
+    app = create_api_app(drakkar_app)
 
     # The browser fan-out reads three debug paths cross-origin; their
     # preflight must answer before auth (it carries no token).
@@ -680,9 +707,9 @@ def create_ui_app(
     # pages → live → debug → cache. Only leaf routers land here: newer
     # FastAPI includes routers lazily, so a nesting ``include_router``
     # would hide its routes from the app-level table.
-    pages_public, pages_gated = create_pages_router(deps)
+    pages_websocket, pages_gated = create_pages_router(deps)
     routers = (
-        pages_public,
+        pages_websocket,
         pages_gated,
         create_live_router(deps),
         create_debug_router(deps),
@@ -694,7 +721,6 @@ def create_ui_app(
         create_uipages_router(deps),
         create_renderers_router(deps),
         create_openapi_router(deps),
-        create_peer_router(deps),
     )
     for router in routers:
         app.include_router(router)
@@ -715,34 +741,44 @@ def create_ui_app(
     return app
 
 
-class UIServer:
-    """Manages the UI FastAPI server in a separate thread.
+class APIServer:
+    """Manages the worker's HTTP server in a separate thread.
 
     Runs Uvicorn in its own thread with a dedicated event loop so that
-    CPU-intensive executor tasks on the main loop don't block the UI.
+    CPU-intensive executor tasks on the main loop don't block it. ``ui`` is
+    the UI section when the worker serves the UI, which also needs ``recorder``;
+    with ``ui=None`` the server holds only the routes of :func:`create_api_app`.
     """
 
     def __init__(
         self,
-        config: UIConfig,
-        recorder: EventRecorder,
+        config: APIConfig,
         app: DrakkarApp,
+        ui: UIConfig | None = None,
+        recorder: EventRecorder | None = None,
     ) -> None:
         self._config = config
-        self._recorder = recorder
         self._drakkar_app = app
+        self._ui = ui
+        self._recorder = recorder
         self._server: LoopLoggingServer | None = None
         self._thread: threading.Thread | None = None
 
-    async def start(self) -> None:
-        bundle = await self._resolve_ui_bundle()
-        fastapi_app = create_ui_app(
-            self._config,
+    async def _build_app(self) -> FastAPI:
+        """The application to serve; only a worker with the UI on resolves a bundle."""
+        if self._ui is None or self._recorder is None:
+            return create_api_app(self._drakkar_app)
+        bundle = await self._resolve_ui_bundle(self._ui)
+        return create_ui_app(
+            self._ui,
             self._recorder,
             self._drakkar_app,
             ui_root=bundle.root if bundle else None,
             ui_version=bundle.version if bundle else None,
         )
+
+    async def start(self) -> None:
+        fastapi_app = await self._build_app()
         uvi_config = uvicorn.Config(
             app=fastapi_app,
             host=self._config.host,
@@ -796,13 +832,13 @@ class UIServer:
                 return
             if not self._thread.is_alive():
                 raise RuntimeError(
-                    f'UI server thread exited before serving — '
+                    f'API server thread exited before serving — '
                     f'is {self._config.host}:{self._config.port} already in use?'
                 )
             time.sleep(0.05)
-        raise TimeoutError(f'UI server did not start serving within {timeout}s')
+        raise TimeoutError(f'API server did not start serving within {timeout}s')
 
-    async def _resolve_ui_bundle(self) -> ResolvedBundle | None:
+    async def _resolve_ui_bundle(self, ui: UIConfig) -> ResolvedBundle | None:
         """Resolve the drakkar-ui bundle when ``ui.release.enabled``, else ``None``.
 
         Returns the full :class:`drakkar.uihost.ResolvedBundle` (directory +
@@ -818,16 +854,12 @@ class UIServer:
         whose cache is still empty. The worker then runs API-only; see
         :mod:`drakkar.uiserver.routes_spa`.
         """
-        from drakkar.config import UIConfig
         from drakkar.uihost import resolve
 
-        ui_cfg = getattr(self._drakkar_app._config, 'ui', None)
-        # The isinstance check keeps MagicMock-configured test apps (whose
-        # attribute chain is truthy) from triggering a real resolution.
-        if not isinstance(ui_cfg, UIConfig) or not ui_cfg.release.enabled:
+        if not ui.release.enabled:
             return None
         try:
-            bundle = await asyncio.to_thread(resolve, ui_cfg.release)
+            bundle = await asyncio.to_thread(resolve, ui.release)
         except Exception as exc:
             await logger.awarning('ui_resolve_failed', category='ui', error=str(exc))
             return None

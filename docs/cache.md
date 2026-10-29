@@ -320,11 +320,11 @@ rows are not strictly after the cursor and in `(updated_at_ms, key)` order
 `cache.exchange.timeout_seconds` covers the whole request, the body
 included.
 
-Peer requests go to the URL on the peer's card (`ui.public_url`, else
-`http://<outbound ip>:<ui.port>/`). They ignore the proxy environment
+Peer requests go to the URL on the peer's card (`api.public_url`, else
+`http://<outbound ip>:<api.port>/`). They ignore the proxy environment
 variables and do not follow redirects. So every worker must reach the
-UI port of its peers at that URL: across hosts, bind `ui.host` to an
-address peers can reach, or set `ui.public_url`.
+API port of its peers at that URL: across hosts, bind `api.host` to an
+address peers can reach, or set `api.public_url`.
 
 The serving route needs no token, even with `ui.auth_token` set; see
 [Security posture](security.md) for what that exposes.
@@ -624,7 +624,7 @@ The cache does **not** apply such redaction: cache values are written
 verbatim. The `/debug/cache` entries browser shows every persisted value
 (behind `ui.auth_token` when one is set). `cluster` and `global` values are
 also served by `GET /api/v1/peer/cache/changes`, which needs no token, to
-anyone who can reach the UI port of a worker that serves the exchange. Do
+anyone who can reach the API port of a worker that serves the exchange. Do
 not put secrets in the cache.
 
 ### Delete is local-only (the main sharp edge)

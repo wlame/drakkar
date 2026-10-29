@@ -12,7 +12,7 @@
 #     the Deployment — they win over the YAML at config load time and
 #     don't require re-applying the ConfigMap. Examples:
 #       DK_CONNECTIONS__KAFKA__MAIN__BROKERS=kafka:9092
-#       DK_UI__PORT=8080
+#       DK_API__PORT=8080
 #       DK_UI__AUTH_TOKEN=<token>
 #       DK_EXECUTOR__MAX_EXECUTORS=16
 #
@@ -79,13 +79,15 @@ data:
       format: "json"
       output: "stderr"
 
-    ui:
-      enabled: true
+    api:
       # 0.0.0.0 binds on all interfaces inside the pod so kube-probes
-      # and the Service can reach the port. Keep auth_token set in a
+      # and the Service can reach the port. Keep ui.auth_token set in a
       # Secret if the Service is ever exposed beyond ClusterIP.
       host: "0.0.0.0"
       port: 8080
+
+    ui:
+      enabled: true
       # Override via DK_UI__AUTH_TOKEN from a Secret in the
       # Deployment. Leaving this empty keeps the UI unauthenticated —
       # acceptable only on a private network.

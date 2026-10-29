@@ -50,7 +50,7 @@ from tests.conftest import kafka_connections
 
 @pytest.fixture
 def mock_recorder():
-    """Same shape as test_ui_server.py — minimal recorder spy."""
+    """Same shape as test_api_server.py — minimal recorder spy."""
     rec = AsyncMock(spec=EventRecorder)
     rec.get_stats.return_value = {
         'total_events': 0,
@@ -92,7 +92,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     app.processors = {}
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     # UI hosting defaults ON and resolves against the real user cache /
-    # GitHub at UIServer.start(); tests must stay hermetic.
+    # GitHub at APIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
 
     pool = MagicMock()
@@ -120,7 +120,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return UIConfig(enabled=True, port=8080)
+    return UIConfig(enabled=True)
 
 
 # ---------------------------------------------------------------------------

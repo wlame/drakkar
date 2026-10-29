@@ -290,25 +290,25 @@ unbounded diagnostics during a single probe run:
 
 | Limit | Default | Config key | What happens past it |
 |---|---|---|---|
-| Writes per probe | 10,000 | `ui.probe_details.max_writes` | Every further `set` / `append` / `update` call is dropped. |
-| Total serialized size per probe | 5 MB | `ui.probe_details.max_total_bytes` | Same — further writes are dropped. |
+| Writes per probe | 10,000 | `ui.probe.max_writes` | Every further `set` / `append` / `update` call is dropped. |
+| Total serialized size per probe | 5 MB | `ui.probe.max_total_size` | Same — further writes are dropped. |
 
 The first write past either cap records one `ProbeError` naming the
 tripped cap, its configured limit, and the config key to raise (e.g.
 "max_writes cap exceeded (10000 writes) — … raise
-`ui.probe_details.max_writes`"), so the report itself says which knob to
+`ui.probe.max_writes`"), so the report itself says which knob to
 turn; every write after that is silently dropped rather than raising a
 fresh error each time. A probe is a
 single replayed message — the defaults are generous headroom for real
-handler logic. Raise them in YAML (or via `DK_UI__PROBE_DETAILS__MAX_WRITES`
-and `DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES`) when a probe legitimately
+handler logic. Raise them in YAML (or via `DK_UI__PROBE__MAX_WRITES`
+and `DK_UI__PROBE__MAX_TOTAL_SIZE`) when a probe legitimately
 produces more — e.g. one `tables` row per record across many large inputs:
 
 ```yaml
 ui:
-  probe_details:
+  probe:
     max_writes: 50000
-    max_total_bytes: 20000000
+    max_total_size: 20MB
 ```
 
 ---

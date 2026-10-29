@@ -111,8 +111,8 @@ thread. The event loop handles:
 - [Prometheus metric](observability.md#prometheus-metrics) updates
 - [Offset tracking](handler.md#offset-commit-logic) and commits
 
-Note: the **[UI server](observability.md#operator-ui) runs in a separate thread** with its own
-Uvicorn event loop (`UIServer` uses `threading.Thread`). It does not
+Note: the **[API server](observability.md#operator-ui) runs in a separate thread** with its own
+Uvicorn event loop (`APIServer` uses `threading.Thread`). It does not
 compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
 
@@ -381,7 +381,7 @@ The default memory store (a 120 second window, 3000 rows per executor and a
 [Sizing the row cap](recent-events.md#sizing-the-row-cap) and
 [RAM to plan](recent-events.md#ram-to-plan).
 
-The WebSocket broadcast is handled in the UI server's **separate
+The WebSocket broadcast is handled in the API server's **separate
 thread**, so it doesn't block the main event loop. However, the
 `_record()` method on the main loop still JSON-encodes each event and
 pushes it to the thread-safe queue (~20us per event).

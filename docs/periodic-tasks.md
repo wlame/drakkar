@@ -266,7 +266,7 @@ with `ui.enabled: false` runs them too.
 ## Startup
 
 The worker finds the handler's periodic tasks once at startup: after
-`on_startup`, and before the recorder, the registry, the UI server, the sinks
+`on_startup`, and before the recorder, the registry, the API server, the sinks
 and the sources start. The loops start after `on_ready`, before the sources
 take input.
 

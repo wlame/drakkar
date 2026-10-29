@@ -94,7 +94,7 @@ def shared(tmp_path):
 
 def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merge_enabled: bool = True):
     """``memory_only``: no folder at all. ``shared_only``: no recorder file, a shared folder."""
-    config = UIConfig(enabled=True, port=8080, merge_enabled=merge_enabled)
+    config = UIConfig(enabled=True, merge_enabled=merge_enabled)
     recorder = EventRecorder(
         RecorderConfig(),
         worker_name='w-1',

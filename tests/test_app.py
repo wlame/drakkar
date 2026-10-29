@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 from drakkar.app import DrakkarApp, warn_if_ui_unauthenticated
 from drakkar.app_security import SIDE_EFFECTING_ENDPOINTS
 from drakkar.config import (
+    APIConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaSinkConfig,
@@ -514,7 +515,7 @@ async def test_an_http_only_worker_without_sinks_starts(test_config, monkeypatch
         raise RuntimeError('reached the sources')
 
     monkeypatch.setattr('drakkar.sources.http.WebApp', reached_the_sources)
-    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', AsyncMock())
+    monkeypatch.setattr(app._lifecycle, '_start_recorder_and_api', AsyncMock())
 
     with pytest.raises(RuntimeError, match='reached the sources'):
         await app._lifecycle._async_run()
@@ -556,7 +557,7 @@ async def test_async_run_startup_failure_tears_down_started_subsystems(test_conf
         '_report_kafka_security',
         '_build_executor_pool',
         '_start_observability',
-        '_start_ui_and_recorder',
+        '_start_recorder_and_api',
         '_start_cache',
         '_connect_sinks',
     ):
@@ -1007,7 +1008,7 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
 # --- Shutdown: recorder and debug server cleanup ---
 
 
-async def test_shutdown_stops_recorder_and_ui_server(test_config):
+async def test_shutdown_stops_recorder_and_api_server(test_config):
     """Shutdown stops the recorder and debug server if they exist."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     wire_kafka_source(app, AsyncMock())
@@ -1015,14 +1016,14 @@ async def test_shutdown_stops_recorder_and_ui_server(test_config):
     app._dlq_sink = AsyncMock()
 
     mock_recorder = AsyncMock()
-    mock_ui_server = AsyncMock()
+    mock_api_server = AsyncMock()
     app._recorder = mock_recorder
-    app._ui_server = mock_ui_server
+    app._api_server = mock_api_server
 
     await app._lifecycle._shutdown()
 
     mock_recorder.stop.assert_called_once()
-    mock_ui_server.stop.assert_called_once()
+    mock_api_server.stop.assert_called_once()
 
 
 # --- Poll loop tests ---
@@ -1185,15 +1186,15 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
 
 @pytest.fixture
 def config_with_ui(test_config_no_sinks):
-    """Factory fixture — returns a builder that swaps ``ui`` on the no-sinks baseline.
+    """Factory fixture — returns a builder that swaps ``ui`` and ``api`` on the no-sinks baseline.
 
-    The security gating tests only read ``config.ui``, so reusing the
-    existing minimal config and overriding the ``ui`` field keeps the test
-    setup a single line without duplicating the Kafka/executor/sinks scaffold.
+    The security gating tests only read ``config.ui`` and ``config.api``, so
+    reusing the existing minimal config and overriding those fields keeps the
+    test setup a single line without duplicating the Kafka/executor/sinks scaffold.
     """
 
-    def _build(ui_cfg: UIConfig) -> DrakkarConfig:
-        return test_config_no_sinks.model_copy(update={'ui': ui_cfg})
+    def _build(ui_cfg: UIConfig, api: dict[str, str] | None = None) -> DrakkarConfig:
+        return test_config_no_sinks.model_copy(update={'ui': ui_cfg, 'api': APIConfig(**(api or {}))})
 
     return _build
 
@@ -1221,7 +1222,7 @@ def _captured_unauth_events(records: list[dict]) -> list[dict]:
 
 def test_warn_if_ui_unauthenticated_emits_warning(config_with_ui):
     """debug.enabled + empty auth_token emits a structured warning naming host:port."""
-    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, auth_token=''), api={'host': '0.0.0.0'})
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1230,7 +1231,7 @@ def test_warn_if_ui_unauthenticated_emits_warning(config_with_ui):
     record = events[0]
     assert record['log_level'] == 'warning'
     assert record['host'] == '0.0.0.0'
-    assert record['port'] == config.ui.port
+    assert record['port'] == config.api.port
     # The remediation message must name BOTH opt-in paths (YAML key + env
     # var) so operators don't have to guess which knob to turn.
     assert 'ui.auth_token' in record['message']
@@ -1277,7 +1278,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
         UIConfig(
             enabled=True,
             auth_token='',
-            probe_enabled=probe_enabled,
+            probe={'enabled': probe_enabled},
             merge_enabled=merge_enabled,
         )
     )
@@ -1294,7 +1295,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
 
 def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui):
     """With both side-effecting endpoints closed, the read-only claim is true again."""
-    config = config_with_ui(UIConfig(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False))
+    config = config_with_ui(UIConfig(enabled=True, auth_token='', probe={'enabled': False}, merge_enabled=False))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1305,7 +1306,7 @@ def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui)
 
 def test_warn_if_ui_unauthenticated_silent_when_token_set(config_with_ui):
     """Setting auth_token (any non-empty value) silences the unauthenticated warning."""
-    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
+    config = config_with_ui(UIConfig(enabled=True, auth_token='secret-token'), api={'host': '0.0.0.0'})
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
@@ -1315,7 +1316,7 @@ def test_warn_if_ui_unauthenticated_warns_on_loopback_too(config_with_ui):
     """Warning fires regardless of host — even on 127.0.0.1 with empty token,
     so the unauthenticated posture is always visible in logs (no host-based
     silent path that masks the same default in dev vs prod)."""
-    config = config_with_ui(UIConfig(enabled=True, host='127.0.0.1', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, auth_token=''), api={'host': '127.0.0.1'})
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
@@ -1323,7 +1324,7 @@ def test_warn_if_ui_unauthenticated_warns_on_loopback_too(config_with_ui):
 
 def test_warn_if_ui_unauthenticated_silent_when_debug_disabled(config_with_ui):
     """debug.enabled=False means no debug server starts, so the warning is skipped."""
-    config = config_with_ui(UIConfig(enabled=False, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=False, auth_token=''), api={'host': '0.0.0.0'})
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
@@ -1333,7 +1334,7 @@ def test_warn_if_ui_unauthenticated_whitespace_token_treated_as_empty(config_wit
     """A token of only spaces is stripped to empty by the field validator, so
     the helper sees ``''`` and warns. This prevents a 'spaces token' from
     silently looking secured to a careless operator."""
-    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token='   '))
+    config = config_with_ui(UIConfig(enabled=True, auth_token='   '), api={'host': '0.0.0.0'})
     # Pre-condition: the field validator already stripped the whitespace.
     assert config.ui.auth_token == ''
     with capture_logs() as cap:
@@ -1344,7 +1345,7 @@ def test_warn_if_ui_unauthenticated_whitespace_token_treated_as_empty(config_wit
 @pytest.mark.parametrize('host', ['127.0.0.1', 'localhost', '::1', '0.0.0.0', 'worker.internal'])
 def test_warn_if_ui_unauthenticated_host_independent(config_with_ui, host: str):
     """Warning fires for every host — auth gating is no longer host-based."""
-    config = config_with_ui(UIConfig(enabled=True, host=host, auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, auth_token=''), api={'host': host})
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     events = _captured_unauth_events(cap)
@@ -1973,7 +1974,7 @@ async def test_boot_connects_sinks_before_starting_the_sources(test_config, monk
         '_setup_watchdog',
         '_build_executor_pool',
         '_start_observability',
-        '_start_ui_and_recorder',
+        '_start_recorder_and_api',
         '_start_cache',
     ):
         monkeypatch.setattr(app._lifecycle, step, recorder('other'))
@@ -2010,7 +2011,7 @@ async def test_http_bind_failure_aborts_startup(test_config, monkeypatch):
 
     monkeypatch.setattr('drakkar.sources.http.WebApp', explode)
     monkeypatch.setattr(app._lifecycle, '_connect_sinks', AsyncMock())
-    monkeypatch.setattr(app._lifecycle, '_start_ui_and_recorder', AsyncMock())
+    monkeypatch.setattr(app._lifecycle, '_start_recorder_and_api', AsyncMock())
 
     with pytest.raises(RuntimeError, match='port already bound'):
         await app._lifecycle._async_run()
@@ -2018,15 +2019,16 @@ async def test_http_bind_failure_aborts_startup(test_config, monkeypatch):
     assert app._webapp is None
 
 
-async def test_ui_disabled_warns_that_probes_are_unserved(test_config):
-    """The UI server is the ONLY probe surface — disabling it must be loud."""
+async def test_api_disabled_warns_that_probes_are_unserved(test_config):
+    """The API server is the ONLY probe surface — disabling it must be loud."""
     cfg = test_config.model_copy(deep=True)
+    cfg.api.enabled = False
     cfg.ui.enabled = False
     cfg.recorder.enabled = False
     app = DrakkarApp(handler=SimpleHandler(), config=cfg)
 
     with capture_logs() as cap:
-        await app._lifecycle._start_ui_and_recorder()
+        await app._lifecycle._start_recorder_and_api()
 
     assert app._recorder is None
     assert any(e['event'] == 'ui_disabled_no_probes' for e in cap)
@@ -2176,7 +2178,7 @@ async def test_async_run_swallows_cancelled_error_and_still_shuts_down(test_conf
         '_setup_watchdog',
         '_build_executor_pool',
         '_start_observability',
-        '_start_ui_and_recorder',
+        '_start_recorder_and_api',
         '_start_cache',
         '_connect_sinks',
         '_start_sources',

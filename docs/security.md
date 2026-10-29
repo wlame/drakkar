@@ -45,13 +45,13 @@ network access.
 
 | Control | What it does |
 |---|---|
-| **Loopback default** | `ui.host` defaults to `127.0.0.1`, so a worker is not reachable off-host until you change it. |
+| **Loopback default** | `api.host` defaults to `127.0.0.1`, so a worker is not reachable off-host until you change it. |
 | **WebSocket Origin check** | Runs on every `/ws` handshake, token or not. A page that is not itself on loopback cannot open a socket to a worker on the browser's loopback — the one route that would otherwise reach past the loopback bind. |
 | **UI bearer token** | `ui.auth_token` gates every page and API route (`Authorization: Bearer`, or `?token=` for browser navigation), compared with `secrets.compare_digest`. `/healthz` and `/readyz` stay public for Kubernetes, and the routes under `/api/v1/peer/` stay public for the cache exchange (see [below](#the-public-peer-route)). |
-| **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_ws_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
+| **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
 | **Cross-origin read rule** | Only three read paths answer cross-origin browser requests: `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI reads from every worker of the cluster. They use the same origin rule as `/ws`. The preflight needs no token; the read itself still needs one when a token is set. No other path sends CORS headers. See [below](#cross-origin-reads). |
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
-| **Independent kill switches** | `ui.probe_enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
+| **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
 | **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`) or of its recorder memory store (`source=memory`), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `store_output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
@@ -122,14 +122,14 @@ loopback addresses on different ports, are unaffected.
 
 The gap this leaves is a page served from another *loopback* port, such as a
 local dev server: a worker cannot tell it apart from a co-located sibling.
-Set `ui.allowed_ws_origins` to close it — a non-empty list is a strict
+Set `ui.allowed_origins` to close it — a non-empty list is a strict
 allowlist and nothing outside it connects.
 
 ### The public peer route
 
 Workers pull each other's cache rows from
 `GET /api/v1/peer/cache/changes` and send no token, so `ui.auth_token` does
-not protect the routes under `/api/v1/peer/`. **Anyone who can reach the UI
+not protect the routes under `/api/v1/peer/`. **Anyone who can reach the API
 port can read the `cluster` and `global` cache rows of a worker that serves
 the cache exchange** — keys, values and timestamps. The route serves only
 the rows that worker originated, never `local` rows, and nothing else of the
@@ -142,7 +142,7 @@ values private:
 - keep them in the `local` scope, which is never served;
 - set `cache.exchange.enabled: false` on workers that need no
   exchange;
-- let only the workers and the operators reach the UI port.
+- let only the workers and the operators reach the API port.
 
 ### Outbound requests to card URLs
 
@@ -167,14 +167,14 @@ The UI page served by one worker reads the trace, the label trace and the
 databases list from every worker of its cluster. Those reads are
 cross-origin, so three paths answer CORS: `/api/v1/debug/trace`,
 `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`. They use the
-origin rule of `/ws` and the same `ui.allowed_ws_origins` key:
+origin rule of `/ws` and the same `ui.allowed_origins` key:
 
-- A non-empty `ui.allowed_ws_origins` is a strict allowlist: only the
+- A non-empty `ui.allowed_origins` is a strict allowlist: only the
   listed origins pass.
 - With an empty list, a same-origin request passes.
 - **With an empty list and `ui.auth_token` set, every cross-origin read is
   refused.** So with a token, list the origin of every worker of the
-  cluster in `ui.allowed_ws_origins`. Otherwise the page of one worker
+  cluster in `ui.allowed_origins`. Otherwise the page of one worker
   cannot read the others, and the UI lists them as unreachable.
 - With an empty list and no token, cross-origin reads pass, except a page
   that is not on loopback reaching a worker over loopback.
@@ -407,7 +407,7 @@ in order of how much they buy you:
    [Front it with a proxy](webapp.md#front-it-with-a-proxy).
 3. **Set a strong `ui.auth_token`** — and treat it as a shared secret with
    no revocation story, because that is what it is.
-4. **Close what you do not need**: `ui.probe_enabled: false`,
+4. **Close what you do not need**: `ui.probe.enabled: false`,
    `ui.merge_enabled: false`, and `ui.enabled: false` entirely on workers
    nobody debugs.
 5. **Restrict `storage.dir` and `shared.dir` permissions** to the worker

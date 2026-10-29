@@ -44,8 +44,8 @@ After `on_startup`, the framework builds all components in this order:
    - Starts the recorder (creates/opens the SQLite database, starts flush/rotation/state-sync background tasks).
      Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
    - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
-   - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
-   - Starts the [fleet registry](fleet.md) service (when `autodiscover.enabled` and `ui.enabled`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
+   - Creates and starts an `APIServer` (FastAPI) on `api.port` (default: `8080`) when `api.enabled`. It always answers `/healthz`, `/readyz` and the peer route; with `ui.enabled` it also provides a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
+   - Starts the [fleet registry](fleet.md) service (when `autodiscover.enabled`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the API server stops.
 
 6. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
@@ -898,20 +898,27 @@ Each sink type is a dict mapping instance names to their config:
 | `level` | str | `'INFO'` |
 | `format` | str | `'json'` (also: `'console'`) |
 
+### `api` -- The HTTP Server
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `True` | Run the HTTP server: `/healthz`, `/readyz` and the peer route |
+| `host` | str | `'127.0.0.1'` | Bind address |
+| `port` | int | `8080` | Port |
+| `public_url` | str | `''` | External URL for this worker's HTTP server |
+
 ### `ui` -- Operator UI and Flight Recorder
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `True` | Enable/disable the entire UI feature |
-| `port` | int | `8080` | Web UI port |
-| `public_url` | str | `''` | External URL for this worker's UI |
 | `max_rows` | int | `5000` | Max rows returned to UI queries |
 | `log_min_duration_ms` | int | `500` | Min duration to log slow tasks |
 | `ws_min_duration_ms` | int | `500` | Min duration to broadcast via WebSocket |
-| `prometheus_url` | str | `''` | Prometheus server URL for dashboard links |
-| `prometheus_rate_interval` | str | `'5m'` | Rate interval for Prometheus queries |
-| `prometheus_worker_label` | str | `''` | Worker label name in Prometheus |
-| `prometheus_cluster_label` | str | `''` | Cluster label name in Prometheus |
+| `prometheus.url` | str | `''` | Prometheus server URL for dashboard links |
+| `prometheus.rate_interval` | str | `'5m'` | Rate interval for Prometheus queries |
+| `prometheus.worker_label` | str | `''` | Worker label name in Prometheus |
+| `prometheus.cluster_label` | str | `''` | Cluster label name in Prometheus |
 | `custom_links` | list[dict] | `[]` | Custom links for the UI dashboard |
 | `recorder.store_events` | bool | `True` | Write processing events to events table |
 | `recorder.store_config` | bool | `True` | Write worker config into each file |

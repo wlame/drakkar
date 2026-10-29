@@ -899,3 +899,57 @@ the own scope, `the pass ends after the window in progress`. The help texts of
 `None`. `PeriodicRoster.runs_archive` is `PeriodicRoster.archive_scope`. `run_archive_pass`
 takes `only_worker`, and needs `fence` or `only_worker`: with neither it raises `ValueError`.
 `archive_file_name` takes `worker`.
+
+## The API server and the UI {#api-and-ui}
+
+The HTTP server is now its own section, `api`. The `ui` section holds only what
+the UI needs on that server.
+
+| Old path | New path |
+|---|---|
+| `ui.host` | `api.host` |
+| `ui.port` | `api.port` |
+| `ui.public_url` | `api.public_url` |
+| `ui.allowed_ws_origins` | `ui.allowed_origins` |
+| `ui.probe_enabled` | `ui.probe.enabled` |
+| `ui.probe_details.max_writes` | `ui.probe.max_writes` |
+| `ui.probe_details.max_total_bytes` | `ui.probe.max_total_size`, with a unit: `5MB` |
+| `ui.prometheus_url` | `ui.prometheus.url` |
+| `ui.prometheus_rate_interval` | `ui.prometheus.rate_interval` |
+| `ui.prometheus_worker_label` | `ui.prometheus.worker_label` |
+| `ui.prometheus_cluster_label` | `ui.prometheus.cluster_label` |
+
+The environment variables follow the paths: `DK_UI__PORT` is `DK_API__PORT`,
+`DK_UI__PROBE_ENABLED` is `DK_UI__PROBE__ENABLED`, and so on.
+
+**What a worker serves:**
+
+| Route | Needs |
+|---|---|
+| `/healthz`, `/readyz`, `/api/v1/peer/cache/changes` | `api.enabled` |
+| everything else: `/ws`, `/api/v1/*`, `/api-docs`, `/docs`, the pages | `api.enabled` and `ui.enabled` |
+
+With `ui.enabled: false` the worker fetches no bundle and the routes of the second
+row answer 404. To run with no listener at all, set `api.enabled: false` and
+`ui.enabled: false`. The probes are then gone, and the worker logs
+`ui_disabled_no_probes`.
+
+**What can stop a config from loading:**
+
+- `api.enabled: false` with the UI on:
+  `ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true`.
+- `api.enabled: false` with autodiscover on:
+  `autodiscover.enabled needs api.enabled: peers reach a worker through its API`.
+
+**What changed for a worker with the UI off:**
+
+- A deployment that set `ui.enabled: false` so that no port opens must now also
+  set `api.enabled: false`.
+- The registry now runs on such a worker, so it publishes a card and appears in the
+  workers list of its peers. The card's `features.ui` is `false`, and the UI leaves
+  that worker out of its fan-out.
+- The log event `fleet_registry_disabled_no_ui` is gone.
+
+**In handler or test code:** `drakkar.uiserver.UIServer` is `APIServer`, and
+`DrakkarApp.ui_url` is `api_url`. `SideEffectingEndpoint.config_key` of the probe is
+`ui.probe.enabled`.

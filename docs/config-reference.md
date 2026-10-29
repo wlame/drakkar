@@ -400,31 +400,45 @@ logging:
 
 ---
 
+## API (`api:`)
+
+The worker's one HTTP server. It always answers `/healthz`, `/readyz` and `/api/v1/peer/cache/changes`; these three routes are public. The `ui` section adds every other route to the same listener.
+
+```yaml
+api:
+  enabled: true                    # the HTTP server. Off: no listener, nothing answers the Kubernetes probes,
+                                   # and ui.enabled and autodiscover.enabled must both be false. env: DK_API__ENABLED
+  host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_API__HOST
+  port: 8080                       # 1–65535. env: DK_API__PORT
+  public_url: ''                   # external URL advertised to peers (LB / ingress); it goes on the registry card.
+                                   # '' = http://<outbound ip>:<port>/. env: DK_API__PUBLIC_URL
+```
+
+Two load errors follow from it:
+
+- `ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true`
+- `autodiscover.enabled needs api.enabled: peers reach a worker through its API`
+
 ## UI (`ui:`)
 
 📚 [Deep details](configuration.md#ui-flight-recorder-ui) · [Authentication](configuration.md#authentication) · [Operator UI](observability.md#operator-ui)
 
-The largest section. Provides the operator web UI, drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming, worker autodiscovery, and Prometheus deep-links. The event log is the [flight recorder](#flight-recorder-recorder).
+The largest section. Provides the operator web UI, drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming and Prometheus deep-links, on the listener of the [`api` section](#api-api). With `ui.enabled: false` those routes answer 404 and the worker fetches no bundle. The event log is the [flight recorder](#flight-recorder-recorder).
 
 ```yaml
 ui:
-  # --- Server ---
-  enabled: true                    # master switch for the server and the bundle; the recorder does not depend on it. env: DK_UI__ENABLED
-  host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_UI__HOST
-  port: 8080                       # 1–65535. env: DK_UI__PORT
-  public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
+  enabled: true                    # the pages, the bundle fetch, the debug and data routes, /ws, the docs.
+                                   # Needs api.enabled. The recorder does not depend on it. env: DK_UI__ENABLED
 
   # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
                                    # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
                                    # Never covers /healthz, /readyz and /api/v1/peer/ (the cache exchange).
-  allowed_ws_origins: []           # Origin allowlist for /ws and for the cross-origin reads of the UI fan-out
+  allowed_origins: []              # Origin allowlist for /ws and for the cross-origin reads of the UI fan-out
                                    # (debug/trace, debug/trace-by-label, debug/databases). With auth_token set,
-                                   # list every worker origin. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
+                                   # list every worker origin. env: DK_UI__ALLOWED_ORIGINS (JSON list)
 
-  # --- Side-effecting endpoints (gated independently of auth_token) ---
-  probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
-                                   # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
+  # --- Side-effecting endpoints (gated independently of auth_token; ui.probe.enabled is the third switch) ---
   merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
                                    # <storage.shared_dir>/merged/, deleted after recorder.archive.merged_retention.
                                    # false = 403. env: DK_UI__MERGE_ENABLED
@@ -445,12 +459,13 @@ ui:
   ws_min_duration_ms: 500          # min ms to broadcast over WebSocket. env: DK_UI__WS_MIN_DURATION_MS
 
   # --- Prometheus deep-links in the UI ---
-  prometheus_url: ''               # e.g. http://prometheus:9090. env: DK_UI__PROMETHEUS_URL
-  prometheus_rate_interval: 5m     # rate() interval used in dashboard PromQL. env: DK_UI__PROMETHEUS_RATE_INTERVAL
-  prometheus_worker_label: ''      # PromQL label for worker-scoped queries. env: DK_UI__PROMETHEUS_WORKER_LABEL
+  prometheus:
+    url: ''                        # e.g. http://prometheus:9090. env: DK_UI__PROMETHEUS__URL
+    rate_interval: 5m              # rate() interval used in dashboard PromQL, a PromQL text. env: DK_UI__PROMETHEUS__RATE_INTERVAL
+    worker_label: ''               # PromQL label for worker-scoped queries. env: DK_UI__PROMETHEUS__WORKER_LABEL
                                    # Supports {worker_id}, {cluster_name}, {metrics_port}, {debug_port}
                                    # e.g. 'worker_id="{worker_id}"'
-  prometheus_cluster_label: ''     # PromQL label for cluster-wide queries. env: DK_UI__PROMETHEUS_CLUSTER_LABEL
+    cluster_label: ''              # PromQL label for cluster-wide queries. env: DK_UI__PROMETHEUS__CLUSTER_LABEL
                                    # e.g. 'cluster="{cluster_name}"'
 
   # --- Custom links shown in the dashboard nav ---
@@ -475,13 +490,16 @@ ui:
     cache_dir: ''                    # bundle cache root; '' = $XDG_CACHE_HOME/drakkar/ui. env: DK_UI__RELEASE__CACHE_DIR
     check_update: true               # resolve the latest release tag on startup. env: DK_UI__RELEASE__CHECK_UPDATE
 
-  # --- Message Probe user-details write caps (see probe-user-details.md) ---
-  probe_details:
+  # --- Message Probe: its switch and the user-details write caps (see probe-user-details.md) ---
+  probe:
+    enabled: true                    # POST /api/v1/debug/probe; runs caller bytes through the live handler
+                                     # and takes executor slots. false = 403, whatever auth_token says.
+                                     # env: DK_UI__PROBE__ENABLED
     max_writes: 10000                # max probe.set/append/update calls per probe run; the first write
                                      # past the cap records one ProbeError, further writes drop silently.
-                                     # env: DK_UI__PROBE_DETAILS__MAX_WRITES
-    max_total_bytes: 5000000         # total serialized bytes of probe-details writes per run; past it,
-                                     # writes drop like max_writes. env: DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES
+                                     # env: DK_UI__PROBE__MAX_WRITES
+    max_total_size: 5MB              # total serialized size of probe-details writes per run; past it,
+                                     # writes drop like max_writes. env: DK_UI__PROBE__MAX_TOTAL_SIZE
 
   # --- Live timeline tuning: history depth, bar color rules, label roles (see ui-timeline.md) ---
   timeline:

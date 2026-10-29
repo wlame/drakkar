@@ -11,7 +11,7 @@ Covers:
   new ``origin`` column.
 
 The tests follow the pytest-function-with-fixtures style used by the
-rest of the debug-UI suite (``test_ui_server.py``) and reuse the same
+rest of the debug-UI suite (``test_api_server.py``) and reuse the same
 ``UIConfig`` / ``DrakkarConfig`` shapes.
 """
 
@@ -100,7 +100,7 @@ def _make_mock_app(*, webapp_enabled: bool = False) -> MagicMock:
 
 @pytest.fixture
 def debug_config():
-    return UIConfig(enabled=True, port=8080)
+    return UIConfig(enabled=True)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
 
 async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
     """The /api/recent-tasks payload exposes origin/client_name/request_id."""
-    cfg = UIConfig(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True)
     rec = EventRecorder(
         RecorderConfig(flush_interval='60s'),
         worker_name='wlame-worker',
@@ -334,7 +334,7 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
 
 async def test_events_filter_by_origin(tmp_path):
     """``origin=kafka|http`` splits Kafka-origin tasks from webapp requests."""
-    cfg = UIConfig(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True)
     rec = EventRecorder(
         RecorderConfig(flush_interval='60s'),
         worker_name='wlame-worker',

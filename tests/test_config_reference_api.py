@@ -63,7 +63,7 @@ async def get_config_reference(config: DrakkarConfig, handler: object = None) ->
     Reuses ``config.ui`` as the debug-server's own ``UIConfig`` (rather than
     building an unrelated standalone one) so a test that sets
     ``config.ui.auth_token`` gets a server that is actually gated by that
-    same token — mirroring how ``UIServer.start()`` wires the real app.
+    same token — mirroring how ``APIServer.start()`` wires the real app.
     """
     ui_config = config.ui
     recorder = AsyncMock(spec=EventRecorder)
@@ -114,6 +114,7 @@ class TestShape:
             'io',
             'offload',
             'logging',
+            'api',
             'ui',
             'cache',
             'storage',
@@ -148,7 +149,7 @@ class TestShape:
         }
 
     async def test_requires_auth_when_token_configured(self):
-        ui_config = UIConfig(enabled=True, port=8080, auth_token='top-secret')
+        ui_config = UIConfig(enabled=True, auth_token='top-secret')
         recorder = AsyncMock(spec=EventRecorder)
         recorder._db = None
         recorder.file_reader_db = None

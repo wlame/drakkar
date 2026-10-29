@@ -1,6 +1,6 @@
 """Uvicorn server whose event loop reports unhandled errors through structlog.
 
-The UI server and the webapp each run uvicorn on a daemon thread with its
+The API server and the webapp each run uvicorn on a daemon thread with its
 own event loop. An exception that no coroutine retrieves on such a loop —
 a WebSocket library's close path failing after its client went silent, an
 un-awaited task that raised — reaches asyncio's default exception handler,

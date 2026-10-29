@@ -4,13 +4,14 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
 The models are split per domain across this package — ``sinks``,
-``sources``, ``runtime``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
+``sources``, ``runtime``, ``api``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
+from drakkar.config.api import APIConfig
 from drakkar.config.autodiscover import AUTODISCOVER_PROVIDERS, CONNECTION_PROVIDERS, AutodiscoverConfig
 from drakkar.config.base import ConfigModel
 from drakkar.config.cache import CacheConfig, CacheExchangeConfig
@@ -75,7 +76,8 @@ from drakkar.config.ui import (
     UIConfig,
     UIConsumePauseConfig,
     UIDocsConfig,
-    UIProbeDetailsConfig,
+    UIProbeConfig,
+    UIPrometheusConfig,
     UIReleaseConfig,
     UITimelineConfig,
 )
@@ -101,6 +103,7 @@ __all__ = [
     'TIMELINE_NUMERIC_FIELDS',
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
+    'APIConfig',
     'AutodiscoverConfig',
     'ByteSize',
     'CacheConfig',
@@ -154,7 +157,8 @@ __all__ = [
     'UIConfig',
     'UIConsumePauseConfig',
     'UIDocsConfig',
-    'UIProbeDetailsConfig',
+    'UIProbeConfig',
+    'UIPrometheusConfig',
     'UIReleaseConfig',
     'UITimelineConfig',
     'UnknownKey',

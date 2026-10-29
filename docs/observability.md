@@ -536,7 +536,7 @@ The landing page with a high-level overview of worker health:
 - **Event counters** -- consumed, completed, failed, produced, committed totals.
 - **Consumer lag** -- total lag across all assigned partitions.
 - **Custom links** -- configurable via `ui.custom_links` with template variables (`{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`).
-- **Prometheus graph links** -- when `ui.prometheus_url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus_cluster_label` is set.
+- **Prometheus graph links** -- when `ui.prometheus.url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus.cluster_label` is set.
 
 The two tables below the tiles hold the per-partition and per-sink detail. There are no separate `/partitions` or `/sinks` pages.
 
@@ -1170,8 +1170,8 @@ works identically.
 Workers find each other through the [fleet registry](fleet.md):
 
 1. Each worker publishes a small card -- worker name, cluster, the URL of
-   its UI server, state (`starting`, `running`, `draining`), release --
-   right after its UI server starts, at every state change, and every
+   its API server, state (`starting`, `running`, `draining`), release --
+   right after its API server starts, at every state change, and every
    `autodiscover.heartbeat` (default 10).
 2. With the `filesystem` provider the card is a file in
    `<storage.shared_dir>/fleet/workers/`, so workers that mount the same folder
@@ -1209,8 +1209,8 @@ it is just marked as gone.
 
 The UI navigation bar includes a worker dropdown that lists all
 discovered workers, grouped by cluster. Clicking a worker navigates to the
-URL on its card: `ui.public_url` if configured, otherwise
-`http://<outbound ip>:<ui.port>/`. A worker that is not `running` shows its
+URL on its card: `api.public_url` if configured, otherwise
+`http://<outbound ip>:<api.port>/`. A worker that is not `running` shows its
 state, and every worker shows its release when the card carries it. The
 dropdown refreshes every 10 seconds.
 
@@ -1296,7 +1296,7 @@ come from their sealed files, or from the workers themselves: the UI
 sends the trace, label-trace and databases requests to every worker of
 the cluster that is not offline, and lists the workers that did not
 answer as unreachable. Those reads are cross-origin. With `ui.auth_token`
-set, list the origin of every worker in `ui.allowed_ws_origins`, or only
+set, list the origin of every worker in `ui.allowed_origins`, or only
 the serving worker answers (see
 [Cross-origin reads](security.md#cross-origin-reads)).
 

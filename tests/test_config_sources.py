@@ -124,7 +124,8 @@ def test_root_config_has_no_webapp_field():
 
 def _summary_config(**overrides) -> DrakkarConfig:
     base = {
-        'ui': {'release': {'enabled': False}, 'port': 8081},
+        'api': {'port': 8081},
+        'ui': {'release': {'enabled': False}},
         'executor': {
             'binary_path': '/usr/bin/echo',
             'max_executors': 4,

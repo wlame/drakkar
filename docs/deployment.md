@@ -3,15 +3,15 @@
 ## Network exposure
 
 Before anything below: **a Drakkar worker belongs on a trusted, private
-network.** It serves up to three HTTP ports — the operator UI
-(`ui.port`, default 8080), the optional webapp ingress
+network.** It serves up to three HTTP ports — the API server and
+the operator UI (`api.port`, default 8080), the optional webapp ingress
 (`sources.http.port`, default 8090) and the optional Prometheus exporter
 (`metrics.port`, default 9090) — and none of them is designed to face an
 untrusted network. Bind them where only your own infrastructure can reach
 them, and put a reverse proxy in front of anything that must travel
 further.
 
-Only `/healthz` and `/readyz` on the UI port are meant to be reachable
+Only `/healthz` and `/readyz` on the API port are meant to be reachable
 without a token, because kubelet needs them.
 
 See [Security posture](security.md) for what Drakkar's own controls do and
@@ -19,7 +19,7 @@ do not cover.
 
 This page covers operational topics that apply when running Drakkar in a
 production environment: Kubernetes probes, rolling restarts, and the
-interaction between the UI server and cluster health checks.
+interaction between the API server and cluster health checks.
 
 ## A shared folder plus a shared Postgres
 
@@ -60,7 +60,7 @@ What to check:
 
 - Every worker of the fleet uses the same autodiscover provider and database.
   Workers on different providers do not see each other's cards or leases.
-- Autodiscover needs `ui.enabled: true`.
+- Autodiscover needs `api.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
   Only the cards and the leases of the cluster tasks move to Postgres.
 - `manage_schema: true` lets the first worker that starts create the schema
@@ -135,7 +135,7 @@ What to check:
 - Every worker of the fleet uses the same autodiscover provider, and the same
   server, database number and `key_prefix`. Workers on different providers or
   different databases do not see each other's cards or leases.
-- Autodiscover needs `ui.enabled: true`.
+- Autodiscover needs `api.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
   Only the cards and the leases of the cluster tasks move to Redis.
 - Use a **database number of its own** for the fleet, so that the keys of the
@@ -222,7 +222,7 @@ What to check:
 - Every worker of the fleet uses the same autodiscover provider, and the same
   Consul cluster, datacenter and `key_prefix`. Workers on different providers or
   stores do not see each other's cards or leases.
-- Autodiscover needs `ui.enabled: true`.
+- Autodiscover needs `api.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
   Only the cards and the leases of the cluster tasks move to Consul.
 - The Consul token needs two rules, in which `drakkar/` is the `key_prefix`:
@@ -342,7 +342,7 @@ Points to check:
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the
-UI-server port (``ui.port``, default ``8080``):
+API-server port (``api.port``, default ``8080``):
 
 | Endpoint   | Purpose    | Success  | Failure                         |
 |------------|------------|----------|---------------------------------|
@@ -350,7 +350,7 @@ UI-server port (``ui.port``, default ``8080``):
 | ``/readyz``  | Readiness  | ``200``  | Remove the pod from endpoints   |
 
 Both endpoints are **unauthenticated** — they are the only routes on the
-UI server that ignore ``ui.auth_token``. This is intentional: the
+API server that ignore ``ui.auth_token``. This is intentional: the
 kubelet has no facility to supply bearer tokens on probe requests, and
 both endpoints expose only liveness / readiness signals with no message
 content, partition state, or operator credentials. They must be mounted

@@ -1,7 +1,7 @@
 """Webapp HTTP server — FastAPI app factory + uvicorn-on-thread bootstrap.
 
 The webapp runs on a dedicated daemon thread with its own asyncio event
-loop. This mirrors the ``UIServer`` pattern (see
+loop. This mirrors the ``APIServer`` pattern (see
 :mod:`drakkar.uiserver.server`): keeping the FastAPI request handlers off
 the main pipeline loop means a slow client or contended HTTP socket
 never stalls Kafka polling, the executor pool, or sink flushes.
@@ -248,7 +248,7 @@ class WebApp:
     def start_in_thread(self) -> None:
         """Spawn the daemon thread that runs ``uvicorn.Server.run()``.
 
-        Mirrors :class:`drakkar.uiserver.server.UIServer.start` — uvicorn
+        Mirrors :class:`drakkar.uiserver.server.APIServer.start` — uvicorn
         constructs its own event loop inside the thread. We capture that
         loop via the FastAPI lifespan startup hook (see ``_build_app``),
         which fires inside the same loop and stores a reference on
@@ -257,7 +257,7 @@ class WebApp:
         # ``log_config=None`` defers to structlog (the project-wide
         # logging stack) rather than uvicorn's default formatter; we set
         # ``log_level='warning'`` so uvicorn only surfaces real errors,
-        # matching the UIServer pattern.
+        # matching the APIServer pattern.
         uvi_config = uvicorn.Config(
             app=self._fastapi_app,
             host=self._config.host,

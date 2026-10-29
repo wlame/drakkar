@@ -315,8 +315,8 @@ class DrakkarApp:
         # starting -> running (sources started) -> draining (shutdown began);
         # published in the registry card and shown in the workers list.
         self._lifecycle_state = 'starting'
-        # Registry service, started by the lifecycle after the UI server
-        # listens; None while the registry is off (autodiscover off, or the UI off).
+        # Registry service, started by the lifecycle after the API server
+        # listens; None while the registry is off (autodiscover off).
         self._fleet: FleetRegistry | None = None
         # Named shared connections, made by the lifecycle before the first
         # provider starts and closed after the last one stops.
@@ -328,7 +328,7 @@ class DrakkarApp:
         # The handler's periodic tasks after the config overrides, built by
         # the lifecycle before the registry starts; None until then.
         self._periodic_roster: PeriodicRoster | None = None
-        self._ui_url: str | None = None
+        self._api_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
         self._sink_manager: SinkManager = SinkManager()
@@ -338,7 +338,7 @@ class DrakkarApp:
         self._sink_policies: dict[str, SinkPolicy] = self._config.sinks.policies()
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
-        self._ui_server = None
+        self._api_server = None
         # Runtime health monitor (event-loop lag + stall introspection) —
         # constructed in lifecycle._async_run when runtime_health.enabled.
         # Forward-declared as ``Any`` to keep drakkar.runtimehealth out of
@@ -499,17 +499,17 @@ class DrakkarApp:
         return self._lifecycle_state
 
     @property
-    def ui_url(self) -> str:
-        """Where peers and browsers reach this worker's UI server.
+    def api_url(self) -> str:
+        """Where peers and browsers reach this worker's HTTP server.
 
-        ``ui.public_url`` when set, else ``http://<outbound ip>:<ui.port>/``.
+        ``api.public_url`` when set, else ``http://<outbound ip>:<api.port>/``.
         Detected once and kept: the outbound address does not change while
         the process runs.
         """
-        if self._ui_url is None:
-            ui = self._config.ui
-            self._ui_url = ui.public_url or f'http://{detect_worker_ip()}:{ui.port}/'
-        return self._ui_url
+        if self._api_url is None:
+            api = self._config.api
+            self._api_url = api.public_url or f'http://{detect_worker_ip()}:{api.port}/'
+        return self._api_url
 
     @property
     def worker_identity(self) -> WorkerIdentity:
@@ -520,7 +520,7 @@ class DrakkarApp:
             worker=self._worker_id,
             instance=self._instance,
             cluster=self._cluster_name,
-            url=self.ui_url,
+            url=self.api_url,
             backend=BACKEND_NAME,
             version=backend_version(),
             started_at=self._started_at,

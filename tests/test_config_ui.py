@@ -19,15 +19,12 @@ from tests.conftest import kafka_connections
 def test_ui_defaults():
     ui = UIConfig()
     assert ui.enabled is True
-    assert ui.host == '127.0.0.1'
-    assert ui.port == 8080
     assert ui.auth_token == ''
-    assert ui.allowed_ws_origins == []
-    assert ui.public_url == ''
+    assert ui.allowed_origins == []
     assert ui.max_rows == 5000
     assert ui.ws_min_duration_ms == 500
     assert ui.log_min_duration_ms == 500
-    assert ui.prometheus_rate_interval == '5m'
+    assert ui.prometheus.rate_interval == '5m'
     assert ui.custom_links == []
 
 
@@ -100,12 +97,12 @@ def test_auth_token_stripped_on_load():
 def test_env_nested_override(monkeypatch):
     monkeypatch.setenv('DK_RECORDER__FLUSH_INTERVAL', '7s')
     monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'false')
-    monkeypatch.setenv('DK_UI__PORT', '9001')
+    monkeypatch.setenv('DK_API__PORT', '9001')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.recorder.flush_interval == 7
     assert cfg.ui.release.check_update is False
-    assert cfg.ui.port == 9001
+    assert cfg.api.port == 9001
 
 
 def test_unknown_top_level_section_fails_with_the_unknown_keys_message():
@@ -134,15 +131,15 @@ def test_config_summary_storage_and_fleet_tokens_follow_ui():
 def test_probe_and_merge_default_to_enabled():
     """The gates are opt-in — an existing deployment keeps serving both endpoints."""
     cfg = UIConfig()
-    assert cfg.probe_enabled is True
+    assert cfg.probe.enabled is True
     assert cfg.merge_enabled is True
 
 
 def test_probe_and_merge_env_overrides(monkeypatch):
     """Reachable via ``DK_UI__*`` so a deployment can close them without a config file."""
-    monkeypatch.setenv('DK_UI__PROBE_ENABLED', 'false')
+    monkeypatch.setenv('DK_UI__PROBE__ENABLED', 'false')
     monkeypatch.setenv('DK_UI__MERGE_ENABLED', 'false')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
-    assert cfg.ui.probe_enabled is False
+    assert cfg.ui.probe.enabled is False
     assert cfg.ui.merge_enabled is False

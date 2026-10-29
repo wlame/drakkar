@@ -1,9 +1,7 @@
-"""Health probes, top-level JSON APIs, and the WebSocket endpoint.
+"""The top-level JSON APIs and the WebSocket endpoint.
 
 Routes:
-  * ``/healthz``                    — Kubernetes liveness probe (public).
-  * ``/readyz``                     — Kubernetes readiness probe (public).
-  * ``/ws``                         — recorder-event WebSocket stream (public).
+  * ``/ws``                         — recorder-event WebSocket stream.
   * ``/api/v1/dashboard``           — dashboard JSON.
   * ``/api/v1/partitions``          — partition list JSON.
   * ``/api/v1/task/{task_id}``      — task detail JSON.
@@ -18,7 +16,7 @@ lives under ``/api/v1``, with no unprefixed ``/api/*`` alias and no
 server-rendered page.
 
 The factory ``create_pages_router(deps)`` returns two leaf ``APIRouter``s
-(public probes/WS + auth-gated everything else) that the server module
+(the WebSocket + auth-gated everything else) that the server module
 mounts onto the FastAPI app via ``app.include_router(...)``. Routes reach
 shared state through ``deps``.
 """
@@ -37,7 +35,7 @@ from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
 from drakkar.recorder.queries import ReadBound, ReadClass
 from drakkar.timefmt import format_rfc3339_micro
-from drakkar.uiserver.server_helpers import BACKEND_NAME, backend_version, origin_allowed
+from drakkar.uiserver.server_helpers import BACKEND_NAME, backend_version, capabilities_of, origin_allowed
 
 if TYPE_CHECKING:
     from drakkar.config import UIDocsConfig, UITimelineConfig
@@ -150,10 +148,12 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
     ``cluster_tasks_hash`` is the peer's cluster task hash when its card
     carries one in the contract form, else ``None``. ``cluster_tasks_match``
     compares it with ``own_hash`` for a peer of ``own_cluster``; it is
-    ``None`` for a peer of another cluster or with no hash.
+    ``None`` for a peer of another cluster or with no hash. ``ui_enabled``
+    is the card's ``features.ui`` when it is a boolean, else ``None``.
     """
     card = view.card
     peer_hash = card_cluster_hash(card)
+    ui_feature = card.get('features', {}).get('ui')
     same_cluster = card['cluster'] == own_cluster
     row: dict[str, Any] = {
         'worker_name': card['worker'],
@@ -169,6 +169,7 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
         'online': view.online,
         'cluster_tasks_hash': peer_hash,
         'cluster_tasks_match': peer_hash == own_hash if peer_hash is not None and same_cluster else None,
+        'ui_enabled': ui_feature if isinstance(ui_feature, bool) else None,
     }
     for key in _OPTIONAL_PEER_FIELDS:
         if key in card:
@@ -190,18 +191,17 @@ def _link_bases_wire(cfg: UIDocsConfig, link_bases: dict[str, str]) -> dict[str,
 def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
     """Build the routers that own the top-level APIs and the WS endpoint.
 
-    Returns two leaf routers — ``(public, gated)`` — for the app to include
+    Returns two leaf routers — ``(websocket, gated)`` — for the app to include
     directly. Every gated route goes through ``require_auth`` (a no-op when
-    ``auth_token`` is empty). The probes must stay public for the kubelet;
-    the WebSocket runs its own auth handshake inside the endpoint so it can
-    reply with a proper 4401 close code.
+    ``auth_token`` is empty). The WebSocket runs its own auth handshake inside
+    the endpoint so it can reply with a proper 4401 close code.
 
     The two routers are deliberately NOT combined behind a wrapper
     ``include_router``: newer FastAPI includes routers lazily, so a nesting
     router would hide its routes from the app-level table.
     """
-    # Public router: probes + WS (WS authenticates internally).
-    public = APIRouter()
+    # No auth dependency here: the WebSocket authenticates inside the endpoint.
+    websocket = APIRouter()
     # Everything else requires auth when a token is configured.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
     config = deps.config
@@ -273,56 +273,6 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'path': webapp_cfg.path,
         }
 
-    # --- Kubernetes probes (unauthenticated by design) ---
-    #
-    # ``/healthz`` and ``/readyz`` intentionally skip the auth dependency:
-    # Kubernetes probes have no facility for bearer tokens, and the
-    # endpoints expose only liveness / readiness signals — nothing that
-    # leaks message content, partition state, or operator credentials.
-    # They are fast-path (no I/O, no recorder access) so the kubelet's
-    # sub-second probe budget is respected even under load.
-    #
-    # Contract:
-    #   - ``/healthz`` — liveness: always 200 while the process is running
-    #     and the FastAPI loop is responsive. Kubernetes restarts the pod
-    #     on failure.
-    #   - ``/readyz`` — readiness: 200 only when ``DrakkarApp.is_ready`` is
-    #     True AND every registered sink reports ``is_connected``. 503
-    #     otherwise with a ``reasons`` list pointing at what's missing.
-    #     Kubernetes removes the pod from service endpoints on failure
-    #     (without restarting it).
-
-    @public.get('/healthz')
-    async def healthz() -> JSONResponse:
-        """Liveness probe — returns 200 as long as the event loop is alive."""
-        return JSONResponse({'status': 'ok'})
-
-    @public.get('/readyz')
-    async def readyz() -> JSONResponse:
-        """Readiness probe — 200 iff the worker is ready AND all sinks are connected."""
-        reasons: list[str] = []
-        if not drakkar_app.is_ready:
-            reasons.append('not_started')
-        # ``sink_manager`` is always constructed in ``DrakkarApp.__init__``
-        # and ``all_connected`` returns True for an empty manager, so we
-        # can consult it directly. Startup validation rejects a zero-sink
-        # config before the debug server is mounted.
-        mgr = drakkar_app.sink_manager
-        if not mgr.all_connected():
-            for sink_id in mgr.disconnected_sink_names():
-                reasons.append(f'sink_{sink_id}_not_connected')
-        # A partition whose loop gave up is stalled for the life of this
-        # process: its queue is never drained and its offsets are never
-        # committed. Failing readiness is what gets the pod replaced and
-        # the partition reassigned to a worker that can serve it — without
-        # this the worker looks healthy while silently processing nothing.
-        for pid, processor in sorted(drakkar_app.processors.items()):
-            if processor.is_dead:
-                reasons.append(f'partition_{pid}_processor_died')
-        if reasons:
-            return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
-        return JSONResponse({'status': 'ready'})
-
     async def _partitions_data() -> list[dict]:
         """Per-partition summary rows enriched with live processor state and lag.
 
@@ -389,13 +339,13 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         """The dashboard ``links`` payload, or ``None`` when nothing is configured.
 
         Key presence is the feature flag (like ``webapp_tile``): the key
-        appears only when ``prometheus_url`` is configured or ``custom_links``
+        appears only when ``prometheus.url`` is configured or ``custom_links``
         is non-empty. ``card_links`` / ``worker_links`` / ``cluster_links``
         come from ``build_prometheus_links`` verbatim (empty containers when
         only custom links are configured); ``custom_links`` passes the
         configured dicts through unchanged.
         """
-        if not config.prometheus_url and not config.custom_links:
+        if not config.prometheus.url and not config.custom_links:
             return None
         return {**deps.build_prometheus_links(), 'custom_links': config.custom_links}
 
@@ -446,6 +396,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'link_bases': _link_bases_wire(config.docs, config.link_bases),
             'custom_renderers': bool(config.custom_renderers_path),
             'timeline': _timeline_wire(config.timeline),
+            'capabilities': capabilities_of(drakkar_app._config, recorder),
         }
         # v1.22: absent rather than null when no docs site is configured.
         docs = _docs_wire(config.docs)
@@ -552,13 +503,14 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
 
     def _current_worker_row() -> dict[str, Any]:
         identity = drakkar_app.worker_identity
+        api = drakkar_app._config.api
         return {
             'worker_name': identity.worker,
             'cluster_name': identity.cluster or None,
             'cluster': identity.cluster,
             'ip_address': None,
-            'debug_port': config.port,
-            'debug_url': config.public_url or None,
+            'debug_port': api.port,
+            'debug_url': api.public_url or None,
             'url': identity.url,
             'is_current': True,
             # Serving this very response, so online by definition.
@@ -571,6 +523,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'instance': identity.instance,
             'cluster_tasks_hash': drakkar_app.cluster_tasks_hash,
             'cluster_tasks_match': True,
+            # This row is the answer of a UI route.
+            'ui_enabled': True,
         }
 
     @router.get('/api/v1/workers')
@@ -596,7 +550,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
 
     # --- WebSocket endpoint for live event streaming ---
 
-    @public.websocket('/ws')
+    @websocket.websocket('/ws')
     async def ws_events(ws: WebSocket):
         """Stream recorder events to connected clients in real-time.
 
@@ -613,7 +567,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         operator visited able to open ``ws://127.0.0.1:8080/ws`` from their
         browser and read the live stream. ``origin_allowed`` carries the
         decision table: absent Origin (non-browser clients) and same-origin
-        (the served SPA) always pass, ``ui.allowed_ws_origins`` decides when
+        (the served SPA) always pass, ``ui.allowed_origins`` decides when
         it is set, and an untokened worker still accepts the cross-origin
         handshakes the cluster view depends on — except a page that is not
         itself on loopback reaching a worker over loopback, which no cluster
@@ -683,7 +637,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             while not disconnected.is_set():
                 # Drain what is already queued, without ever blocking. The
                 # previous q.get(timeout=0.1) was a stdlib queue.Queue call —
-                # a real OS-level block inside an async handler. The UI server
+                # a real OS-level block inside an async handler. The server
                 # runs uvicorn on ONE thread with ONE loop, so during that
                 # wait nothing else on this server could run: not other
                 # WebSocket clients, not /healthz, not /readyz. An idle
@@ -715,4 +669,4 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             watcher.cancel()
             recorder.unsubscribe(sub)
 
-    return public, router
+    return websocket, router

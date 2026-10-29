@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from drakkar.config import UIConfig
+from drakkar.config import DrakkarConfig, UIConfig
+
+if TYPE_CHECKING:
+    from drakkar.recorder import EventRecorder
 
 # Default ports are implicit in browsers' Origin header but may appear
 # explicitly in the Host header (and vice-versa). We strip both sides to
@@ -128,7 +132,7 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     1. ``origin is None``  → accept. Non-browser clients (curl, websocat,
        Python websockets lib) typically omit ``Origin``; a page cannot omit
        it, so this lets tooling connect without weakening the browser case.
-    2. ``origin is not None`` + ``allowed_ws_origins`` non-empty → accept
+    2. ``origin is not None`` + ``allowed_origins`` non-empty → accept
        only if ``origin`` is in the allowlist. Case-insensitive compare
        on the parsed scheme://host:port form so trivial casing differences
        don't reject legitimate browsers.
@@ -136,7 +140,7 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
        ``origin`` and compare to the Host header after normalizing case and
        default ports.
     4. Cross-origin with ``auth_token`` set → reject. The operator opted
-       into a closed UI; ``allowed_ws_origins`` is how they name exceptions.
+       into a closed UI; ``allowed_origins`` is how they name exceptions.
     5. Cross-origin with no token → accept **unless** this worker is being
        reached over loopback by a page that is not itself on loopback.
 
@@ -151,7 +155,7 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
 
     The remaining gap is a page served from another loopback port, which
     this cannot distinguish from a co-located worker. Set
-    ``allowed_ws_origins`` to close it.
+    ``allowed_origins`` to close it.
 
     Returns False on any malformed origin — the WS endpoint will close
     with 4403 in that case.
@@ -163,7 +167,7 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
 
     # Case 2: explicit allowlist. Normalize both sides (case + default
     # ports) so operators don't have to match casing letter-for-letter.
-    if config.allowed_ws_origins:
+    if config.allowed_origins:
         try:
             parsed_origin = urlparse(origin)
         except ValueError:
@@ -174,7 +178,7 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
             parsed_origin.hostname or '',
             parsed_origin.port,
         )
-        for allowed in config.allowed_ws_origins:
+        for allowed in config.allowed_origins:
             try:
                 parsed_allowed = urlparse(allowed)
             except ValueError:
@@ -232,6 +236,32 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     worker_on_loopback = is_loopback_host(host_host)
     page_on_loopback = is_loopback_host(origin_host_norm)
     return not worker_on_loopback or page_on_loopback
+
+
+def capabilities_of(config: DrakkarConfig, recorder: EventRecorder | None) -> dict[str, Any]:
+    """The ``capabilities`` object of ``GET /api/v1/identity``: what this worker runs.
+
+    ``recorder`` is the worker's recorder object, ``None`` when it has none. The
+    memory store is reported as it is: a recorder with no event capture opens none.
+    """
+    autodiscover = config.autodiscover
+    return {
+        'recorder': {
+            'enabled': config.recorder.enabled,
+            'provider': config.resolved_persistence,
+            'history_search': config.recorder.enabled,
+        },
+        'memory': {
+            'enabled': recorder is not None and recorder.memory_store is not None,
+            'window_seconds': int(config.recorder.memory.window),
+            'max_rows': config.memory_max_rows,
+        },
+        'autodiscover': {
+            'enabled': autodiscover.enabled,
+            'provider': autodiscover.provider if autodiscover.enabled else None,
+        },
+        'cache_exchange': config.cache.enabled and config.cache.exchange.enabled and autodiscover.enabled,
+    }
 
 
 def worker_group(name: str) -> str:

@@ -170,7 +170,7 @@ def test_changes_url_keeps_a_path_prefix(base, expected):
     ],
 )
 def test_changes_url_drops_a_query_and_a_fragment(base, expected):
-    # ui.public_url is free text: a query or a fragment on a card URL must
+    # api.public_url is free text: a query or a fragment on a card URL must
     # not end up in front of the path (the shared card fixture has one).
     assert changes_url(base) == expected
 

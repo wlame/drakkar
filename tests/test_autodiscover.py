@@ -25,7 +25,8 @@ from tests.test_sources_validation import KafkaOnlyHandler
 def _config(tmp_path, **overrides) -> DrakkarConfig:
     values = {
         'storage': {'dir': str(tmp_path / 'storage')},
-        'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
+        'api': {'port': 8123},
+        'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
@@ -148,7 +149,7 @@ async def test_worker_with_autodiscover_off_publishes_no_card_and_runs_no_electi
     app = _app(tmp_path, storage={'dir': str(tmp_path / 'storage'), 'shared_dir': str(shared)})
 
     with capture_logs() as logs:
-        app._lifecycle._check_autodiscover_after_startup()
+        app._lifecycle._check_config_after_startup()
         app._lifecycle._build_periodic_roster()
         await app._lifecycle._start_fleet()
 
@@ -291,7 +292,7 @@ def test_a_hook_change_gets_the_message_of_the_load(tmp_path, changes, message):
         setattr(app._config.autodiscover, key, value)
 
     with pytest.raises(ValueError) as raised:
-        app._lifecycle._check_autodiscover_after_startup()
+        app._lifecycle._check_config_after_startup()
 
     assert str(raised.value) == message
 
@@ -372,7 +373,7 @@ def test_empty_cluster_name_warns_only_with_autodiscover_on(tmp_path, autodiscov
     app = _app(tmp_path, cluster_name=cluster_name, **sections)
 
     with capture_logs() as logs:
-        app._lifecycle._check_autodiscover_after_startup()
+        app._lifecycle._check_config_after_startup()
 
     lines = [entry for entry in logs if entry['event'] == 'cluster_name_empty']
     if not warns:

@@ -38,12 +38,8 @@ def _app(tmp_path, *, ui_enabled: bool, recorder_enabled: bool, **recorder) -> D
             connections=kafka_connections(),
             storage={'dir': str(tmp_path / 'storage')},
             cluster_name=CLUSTER,
-            ui={
-                'enabled': ui_enabled,
-                'port': 8123,
-                'public_url': 'http://w-1.example:8123',
-                'release': {'enabled': False},
-            },
+            api={'port': 8123, 'public_url': 'http://w-1.example:8123'},
+            ui={'enabled': ui_enabled, 'release': {'enabled': False}},
             recorder={'enabled': recorder_enabled, **recorder},
             metrics={'enabled': False},
             runtime_health={'enabled': False},
@@ -56,9 +52,9 @@ def _app(tmp_path, *, ui_enabled: bool, recorder_enabled: bool, **recorder) -> D
 
 
 @pytest.fixture
-def no_ui_server(monkeypatch) -> MagicMock:
+def no_api_server(monkeypatch) -> MagicMock:
     server = MagicMock(return_value=AsyncMock())
-    monkeypatch.setattr('drakkar.uiserver.server.UIServer', server)
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', server)
     return server
 
 
@@ -99,30 +95,32 @@ def _ids_in(path) -> list[int]:
 # --- which recorder a worker builds ---
 
 
-async def test_no_recorder_object_with_ui_and_recorder_off(tmp_path, no_ui_server):
+async def test_no_recorder_object_with_ui_and_recorder_off(tmp_path, no_api_server):
     app = _app(tmp_path, ui_enabled=False, recorder_enabled=False)
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
 
     assert app._recorder is None
-    no_ui_server.assert_not_called()
+    no_api_server.assert_called_once()
+    assert no_api_server.call_args.kwargs['ui'] is None
+    assert no_api_server.call_args.kwargs['recorder'] is None
 
 
-async def test_memory_only_with_ui_on_and_recorder_off(tmp_path, no_ui_server):
+async def test_memory_only_with_ui_on_and_recorder_off(tmp_path, no_api_server):
     app = _app(tmp_path, ui_enabled=True, recorder_enabled=False)
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder is not None
         assert app._recorder.persistence == 'none'
         assert app._recorder.memory_store is not None
         assert app._recorder.db_path == ''
-        no_ui_server.assert_called_once()
+        no_api_server.assert_called_once()
     finally:
         await app._recorder.stop()
 
 
-async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_ui_server):
+async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_api_server):
     (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=False, recorder_enabled=True, flush_interval='60s')
     for gauge in (
@@ -133,7 +131,7 @@ async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_ui_serve
     ):
         gauge.set(0)
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     recorder = app._recorder
     try:
         assert recorder is not None
@@ -141,7 +139,7 @@ async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_ui_serve
         assert recorder.memory_store is None
         assert recorder.memory_coverage() is None
         assert recorder.db_path != ''
-        no_ui_server.assert_not_called()
+        assert no_api_server.call_args.kwargs['ui'] is None
 
         recorder._record(_event(1))
         recorder._record(_event(2))
@@ -158,11 +156,11 @@ async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_ui_serve
         await recorder.stop()
 
 
-async def test_both_stores_with_ui_and_recorder_on(tmp_path, no_ui_server):
+async def test_both_stores_with_ui_and_recorder_on(tmp_path, no_api_server):
     (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=True, recorder_enabled=True)
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         assert app._recorder.memory_store is not None
         assert app._recorder.db_path != ''
@@ -391,11 +389,11 @@ async def _config_row(rec: EventRecorder, config: DrakkarConfig) -> dict:
         return dict(zip(columns, await cursor.fetchone(), strict=True))
 
 
-async def test_worker_config_debug_port_and_url_come_from_the_constructor(tmp_path, no_ui_server):
+async def test_worker_config_debug_port_and_url_come_from_the_constructor(tmp_path, no_api_server):
     (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=False, recorder_enabled=True, flush_interval='60s')
 
-    await app._lifecycle._start_ui_and_recorder()
+    await app._lifecycle._start_recorder_and_api()
     try:
         row = await _config_row(app._recorder, app._config)
     finally:

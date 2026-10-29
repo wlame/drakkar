@@ -207,7 +207,7 @@ def test_update_on_scalar_field_records_error(bound, errors):
 
 
 def _bound_state_with_caps(errors, **caps) -> _DetailsState:
-    """A bound state with explicit caps — the path ui.probe_details.* config takes."""
+    """A bound state with explicit caps — the path ui.probe.* config takes."""
     return _DetailsState(
         model=VerbDetails,
         layout=build_layout(VerbDetails),
@@ -231,7 +231,7 @@ def test_write_cap_records_one_error_then_drops(errors):
     # The message must name the tripped cap, its limit, and the config key —
     # a bare "write cap exceeded" sent operators raising the wrong knob.
     assert 'max_writes cap exceeded (3 writes)' in errors[0][3]
-    assert 'ui.probe_details.max_writes' in errors[0][3]
+    assert 'ui.probe.max_writes' in errors[0][3]
 
 
 def test_byte_cap_records_one_error_then_drops(errors):
@@ -247,8 +247,8 @@ def test_byte_cap_records_one_error_then_drops(errors):
     assert len(errors) == 1
     # Same-shaped error as the writes cap but naming ITS knob: the byte cap
     # trips independently, and raising max_writes does nothing for it.
-    assert 'max_total_bytes cap exceeded (10 bytes)' in errors[0][3]
-    assert 'ui.probe_details.max_total_bytes' in errors[0][3]
+    assert 'max_total_size cap exceeded (10 bytes)' in errors[0][3]
+    assert 'ui.probe.max_total_size' in errors[0][3]
 
 
 def test_to_user_details_serializes_data_layout_and_writes(bound):

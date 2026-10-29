@@ -1,4 +1,4 @@
-"""UI configuration: the server and the release bundle.
+"""UI configuration: the routes of the operator UI and the release bundle.
 
 Also holds the timeline tuning models (color rules, label roles, history
 depth) and the consume-pause presets, which are UI-driven controls.
@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
+from drakkar.config.units import ByteSize
 
 
 class UIReleaseConfig(ConfigModel):
@@ -82,15 +83,29 @@ class UIReleaseConfig(ConfigModel):
         return v
 
 
-class UIProbeDetailsConfig(ConfigModel):
-    """Caps for the Message Probe's user-defined details writes.
+class UIProbeConfig(ConfigModel):
+    """The Message Probe: its switch, and the caps on its user-defined details writes.
 
-    Both limits guard a single probe run against a handler that writes
+    Both caps guard a single probe run against a handler that writes
     unbounded diagnostics. The defaults are generous headroom for typical
     handler logic; raise them when a probe legitimately produces more
     (e.g. one table row per record across many large inputs).
     """
 
+    enabled: bool = Field(
+        default=True,
+        description=(
+            'Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that '
+            'runs caller-supplied bytes through the live handler and the real '
+            'executor subprocess pool, so it is neither read-only nor free: it '
+            'competes with production traffic for executor slots. Set to false '
+            'to serve 403 instead, whatever ``auth_token`` says: a deployment '
+            'that cannot set a token can still close the endpoint, and a '
+            'deployment that has one can still close it as defence in depth. '
+            'Probes never write sinks, recorder rows, cache entries, or offsets, '
+            'so switching it off costs no pipeline behaviour.'
+        ),
+    )
     max_writes: int = Field(
         default=10_000,
         ge=1,
@@ -100,13 +115,40 @@ class UIProbeDetailsConfig(ConfigModel):
             'writes are dropped silently.'
         ),
     )
-    max_total_bytes: int = Field(
+    max_total_size: ByteSize = Field(
         default=5_000_000,
         ge=1,
         description=(
-            'Maximum total serialized size (bytes) of all probe-details '
-            'writes per probe run. Past it, writes are dropped like the '
-            'max_writes cap.'
+            'Maximum total serialized size of all probe-details writes per '
+            'probe run. Past it, writes are dropped like the max_writes cap.'
+        ),
+    )
+
+
+class UIPrometheusConfig(ConfigModel):
+    """The Prometheus server that the UI links to."""
+
+    url: str = Field(
+        default='',
+        description='Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.',
+    )
+    rate_interval: str = Field(
+        default='5m',
+        description="Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+    )
+    worker_label: str = Field(
+        default='',
+        description=(
+            'PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, '
+            '{metrics_port}, and {debug_port} template variables. Empty defaults to '
+            'instance="{hostname}:{metrics_port}".'
+        ),
+    )
+    cluster_label: str = Field(
+        default='',
+        description=(
+            'PromQL label filter for cluster-wide queries, same template variables as '
+            'worker_label. Empty hides cluster-wide links.'
         ),
     )
 
@@ -472,23 +514,22 @@ class UIDocsConfig(ConfigModel):
 
 
 class UIConfig(ConfigModel):
-    """The operator web UI: HTTP server, presentation, and sub-sections.
+    """The operator web UI: its routes on the API server, presentation, and sub-sections.
 
     One first-class ``ui.*`` section covers the whole surface:
 
-    - top-level keys — the UI server itself (bind address, auth) and
-      presentation settings the pages/SPA consume;
-    - ``ui.release.*`` — drakkar-ui bundle fetching
-      (:class:`UIReleaseConfig`);
-    - ``ui.probe_details.*`` — write caps for the Message Probe's
-      user-defined details (:class:`UIProbeDetailsConfig`);
-    - ``ui.timeline.*`` — timeline history depth, bar color rules, and
+    - top-level keys: the auth of the UI routes and the presentation settings
+      the pages and the SPA consume;
+    - ``ui.release.*``: drakkar-ui bundle fetching (:class:`UIReleaseConfig`);
+    - ``ui.probe.*``: the Message Probe (:class:`UIProbeConfig`);
+    - ``ui.prometheus.*``: the Prometheus links (:class:`UIPrometheusConfig`);
+    - ``ui.timeline.*``: timeline history depth, bar color rules, and
       label roles (:class:`UITimelineConfig`);
-    - ``ui.docs.*`` — the operator docs site and its contextual anchors
+    - ``ui.docs.*``: the operator docs site and its contextual anchors
       (:class:`UIDocsConfig`).
 
-    Set ``enabled: false`` to disable the server and the bundle serving.
-    The recorder does not depend on it.
+    The routes share the listener of the ``api`` section. Set ``enabled: false``
+    to leave only the routes of that section.
 
     Every field is overridable through ``DK_UI__*`` environment variables.
     """
@@ -496,20 +537,15 @@ class UIConfig(ConfigModel):
     enabled: bool = Field(
         default=True,
         description=(
-            'Enable the UI feature: the server and the bundle serving. Off skips both, and the recorder '
-            'keeps no memory store.'
+            'Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs. It needs '
+            'api.enabled. Off: those routes answer 404, no bundle is fetched, and the recorder keeps no memory store.'
         ),
     )
-    host: str = Field(
-        default='127.0.0.1',
-        description='Bind address for the UI server. Use 0.0.0.0 to expose on all interfaces.',
-    )
-    port: int = Field(default=8080, ge=1, le=65535, description='Port for the UI server.')
     auth_token: str = Field(
         default='',
         description=(
-            'Bearer token for the UI. **Empty (the default) disables auth** '
-            'entirely — every endpoint (including database download, merge, and '
+            'Bearer token for the UI routes. **Empty (the default) disables auth** '
+            'entirely — every UI endpoint (including database download, merge, and '
             'message-probe) is reachable without credentials and the WebSocket '
             'live-event stream skips the token check (the Origin check always '
             'runs). This is a '
@@ -518,7 +554,7 @@ class UIConfig(ConfigModel):
             'intended for deployment inside a private contour (VPC / internal '
             'cluster / operator-only ingress). Most endpoints are read-only, '
             'but the probe and merge routes are not — close those with '
-            '``probe_enabled`` / ``merge_enabled``, which act independently of '
+            '``probe.enabled`` / ``merge_enabled``, which act independently of '
             'this token. A startup warning fires whenever the UI is enabled '
             'without a token so the unauthenticated posture is visible in logs, '
             'naming whichever side-effecting endpoint is still enabled. '
@@ -526,17 +562,18 @@ class UIConfig(ConfigModel):
             'an ``Authorization: Bearer <token>`` header or ``?token=<token>`` '
             'query parameter; WebSocket connections without a valid token are '
             'closed with code 4401, and the Origin header is validated against '
-            '``allowed_ws_origins`` (or the request Host header if that list is '
-            'empty). Comparison uses ``secrets.compare_digest`` to avoid timing '
+            '``allowed_origins`` (or the request Host header if that list is '
+            'empty). /healthz, /readyz and the peer route stay public. '
+            'Comparison uses ``secrets.compare_digest`` to avoid timing '
             'side-channels. Trailing/leading whitespace is stripped on load to '
             'avoid silent mismatches when YAML accidentally quotes spaces.'
         ),
         json_schema_extra={'drakkar_secret': True},
     )
-    allowed_ws_origins: list[str] = Field(
+    allowed_origins: list[str] = Field(
         default_factory=list,
         description=(
-            'Explicit allowlist of WebSocket origins. A non-empty list is '
+            'Explicit allowlist of browser origins for /ws and the fan-out reads. A non-empty list is '
             'strict: nothing outside it connects, token or not. Empty list '
             'with a token set means same-origin only. Empty list with no '
             'token allows the cross-origin handshakes the cluster view needs '
@@ -547,20 +584,6 @@ class UIConfig(ConfigModel):
             'browser cannot omit it.'
         ),
     )
-    probe_enabled: bool = Field(
-        default=True,
-        description=(
-            'Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that '
-            'runs caller-supplied bytes through the live handler and the real '
-            'executor subprocess pool, so it is neither read-only nor free: it '
-            'competes with production traffic for executor slots. Set to false '
-            'to serve 403 instead — independently of ``auth_token``, so a '
-            'deployment that cannot set a token can still close the endpoint, '
-            'and a deployment that has one can still close it as defence in '
-            'depth. Probes never write sinks, recorder rows, cache entries, or '
-            'offsets, so switching it off costs no pipeline behaviour.'
-        ),
-    )
     merge_enabled: bool = Field(
         default=True,
         description=(
@@ -569,7 +592,7 @@ class UIConfig(ConfigModel):
             'in the ``merged`` folder of the shared folder, kept for '
             '``recorder.archive.merged_retention``. Set to false to serve 403 '
             'instead — independently of ``auth_token``, per the reasoning on '
-            '``probe_enabled``.'
+            '``probe.enabled``.'
         ),
     )
     kafka_read_enabled: bool = Field(
@@ -580,7 +603,7 @@ class UIConfig(ConfigModel):
             'an arbitrary topic). Reads use assign()-only consumers that join '
             'no consumer group and commit no offsets, so they are invisible to '
             'the pipeline. Set to false to serve 403 instead — independently '
-            'of ``auth_token``, per the reasoning on ``probe_enabled``. When '
+            'of ``auth_token``, per the reasoning on ``probe.enabled``. When '
             'the resolved Kafka security of any readable topic is not '
             'PLAINTEXT while ``auth_token`` is empty, startup logs a warning '
             'naming the exposed aliases (the API stays available — gate it '
@@ -604,14 +627,6 @@ class UIConfig(ConfigModel):
             return v.strip()
         return v
 
-    public_url: str = Field(
-        default='',
-        description=(
-            "Externally reachable URL of this worker's UI, used for "
-            'cross-worker links in the workers list. Empty derives '
-            'http://<ip>:<port> from the bind address.'
-        ),
-    )
     max_rows: int = Field(
         default=5000,
         ge=100,
@@ -630,29 +645,6 @@ class UIConfig(ConfigModel):
         description=(
             'Minimum task duration (ms) to broadcast to the live UI over WebSocket. Failed '
             'tasks always appear. 0 shows all tasks.'
-        ),
-    )
-    prometheus_url: str = Field(
-        default='',
-        description='Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.',
-    )
-    prometheus_rate_interval: str = Field(
-        default='5m',
-        description="Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
-    )
-    prometheus_worker_label: str = Field(
-        default='',
-        description=(
-            'PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, '
-            '{metrics_port}, and {debug_port} template variables. Empty defaults to '
-            'instance="{hostname}:{metrics_port}".'
-        ),
-    )
-    prometheus_cluster_label: str = Field(
-        default='',
-        description=(
-            'PromQL label filter for cluster-wide queries, same template variables as '
-            'prometheus_worker_label. Empty hides cluster-wide links.'
         ),
     )
     custom_links: list[dict[str, str]] = Field(
@@ -687,8 +679,9 @@ class UIConfig(ConfigModel):
         ),
     )
     consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
+    prometheus: UIPrometheusConfig = Field(default_factory=UIPrometheusConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
-    probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
+    probe: UIProbeConfig = Field(default_factory=UIProbeConfig)
     timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
     docs: UIDocsConfig = Field(default_factory=UIDocsConfig)
 

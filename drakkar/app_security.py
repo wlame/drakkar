@@ -6,6 +6,7 @@ warning shape can be exercised without importing the full app.
 
 from __future__ import annotations
 
+from operator import attrgetter
 from typing import NamedTuple
 
 import structlog
@@ -19,7 +20,7 @@ class SideEffectingEndpoint(NamedTuple):
     """A UI endpoint that is not read-only, and the switch that closes it."""
 
     route: str
-    field: str  # attribute on UIConfig
+    field: str  # dotted path on UIConfig
     effect: str  # what it does, phrased to follow the route name
 
     @property
@@ -35,7 +36,7 @@ class SideEffectingEndpoint(NamedTuple):
 SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
     SideEffectingEndpoint(
         route='POST /api/v1/debug/probe',
-        field='probe_enabled',
+        field='probe.enabled',
         effect=(
             'runs caller-supplied bytes through the live handler and competes '
             'with production traffic for executor slots'
@@ -55,7 +56,7 @@ def _exposure_clause(config: DrakkarConfig) -> str:
     Only endpoints actually left enabled are named, so an operator who has
     already closed them is not warned about exposure they do not have.
     """
-    live = [e for e in SIDE_EFFECTING_ENDPOINTS if getattr(config.ui, e.field)]
+    live = [e for e in SIDE_EFFECTING_ENDPOINTS if attrgetter(e.field)(config.ui)]
     if not live:
         return (
             'Every endpoint still served is read-only (queries, downloads, and the '
@@ -92,7 +93,7 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
     To enable token-based auth, either set ``ui.auth_token`` in your
     YAML config or export ``DK_UI__AUTH_TOKEN=<32+ char value>``.
     Once set, the WebSocket live-event stream additionally validates the
-    ``Origin`` header (against ``ui.allowed_ws_origins`` when configured,
+    ``Origin`` header (against ``ui.allowed_origins`` when configured,
     otherwise against the request's ``Host`` header).
     """
     if not config.ui.enabled:
@@ -103,10 +104,10 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
     logger.warning(
         'ui_unauthenticated',
         category='lifecycle',
-        host=config.ui.host,
-        port=config.ui.port,
+        host=config.api.host,
+        port=config.api.port,
         message=(
-            f'The operator UI bound to {config.ui.host}:{config.ui.port} is running '
+            f'The operator UI bound to {config.api.host}:{config.api.port} is running '
             'without auth_token — every endpoint (including the database download, '
             'merge, and message-probe routes) is reachable to anyone who can reach '
             f'the port. {_exposure_clause(config)} Drakkar is intended for '
@@ -114,6 +115,6 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
             'ui.auth_token in your YAML config or export '
             'DK_UI__AUTH_TOKEN=<32+ char random value>; the '
             'WebSocket stream then also validates Origin against '
-            'ui.allowed_ws_origins (or the request Host header).'
+            'ui.allowed_origins (or the request Host header).'
         ),
     )

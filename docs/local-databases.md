@@ -91,7 +91,7 @@ needs `persistence: sqlite` and a folder; the memory store needs neither:
 
 | Config | Effect |
 |---|---|
-| `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and `storage.dir` is set. |
+| `ui.enabled: false` | No UI routes and no memory store. `/healthz`, `/readyz` and the peer route stay on `api.port`. The recorder writes its files as usual when `recorder.enabled` is true. The cache still runs if enabled and `storage.dir` is set. |
 | `storage.dir: ''` | **Memory-only mode.** The persistence mode derives to `none`. No recorder files, no watchdog file, nothing sealed or published, no archive pass. The UI reads the [memory store](recent-events.md): History, Trace, Task Detail, the Databases tab (the memory row) and the memory snapshot download work, and they cover the memory window only. With a `shared.dir` the worker still reads the sealed history of its cluster. The workers list needs `shared.dir` (or another [registry provider](fleet.md)) to see peers. |
 | `ui.recorder.persistence: none` with a `storage.dir` | Same recorder behaviour as memory-only mode. The cache file and the watchdog file stay in `storage.dir`. |
 | `ui.recorder.persistence: postgres` | No recorder files, as in memory-only mode. The worker also writes its events to a table in Postgres, and the trace with history reads that table instead of the sealed files. `storage.dir` is optional; with a folder, the cache file and the watchdog file stay there. See [Recorder History in Postgres](recorder-postgres.md). |

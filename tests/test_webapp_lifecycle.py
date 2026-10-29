@@ -114,6 +114,7 @@ def _build_config(*, http_enabled: bool, kafka_enabled: bool = True) -> DrakkarC
         logging=LoggingConfig(level='WARNING', format='console'),
         storage={'dir': ''},
         recorder={'enabled': False},
+        api={'enabled': False},
         ui={'enabled': False, 'release': {'enabled': False}},
         runtime_health={'enabled': False},
     )

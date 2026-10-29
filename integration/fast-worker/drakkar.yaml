@@ -77,18 +77,21 @@ logging:
   level: "INFO"
   format: "json"
 
-ui:
-  enabled: true
+api:
   host: "0.0.0.0"
   port: 8080
+
+ui:
+  enabled: true
   max_rows: 5000
   # Duration thresholds — tuned down for fast tasks (most finish in <100ms)
   log_min_duration_ms: 100       # log slow tasks above 100ms
   ws_min_duration_ms: 100        # stream all but the fastest to live UI
-  prometheus_url: "http://localhost:9099"
-  prometheus_rate_interval: "30s"
-  prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
-  prometheus_cluster_label: 'cluster="fast-cluster"'
+  prometheus:
+    url: "http://localhost:9099"
+    rate_interval: "30s"
+    worker_label: 'instance="{worker_id}:{metrics_port}"'
+    cluster_label: 'cluster="fast-cluster"'
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"

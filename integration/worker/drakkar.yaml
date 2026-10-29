@@ -220,20 +220,23 @@ logging:
   level: "INFO"
   format: "json"
 
-ui:
-  enabled: true
+api:
   host: "0.0.0.0"
   port: 8080
+
+ui:
+  enabled: true
   # Timed consume pause from the Live page. Deliberately enabled on the
   # main cluster only (the fast workers stay untouched) so the demo can
   # exercise pausing without stopping all intake.
   consume_pause:
     enabled: true
   max_rows: 5000
-  prometheus_url: "http://localhost:9099"
-  prometheus_rate_interval: "30s"
-  prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
-  prometheus_cluster_label: 'cluster="main-cluster"'
+  prometheus:
+    url: "http://localhost:9099"
+    rate_interval: "30s"
+    worker_label: 'instance="{worker_id}:{metrics_port}"'
+    cluster_label: 'cluster="main-cluster"'
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
@@ -371,7 +374,7 @@ cache:
   # unbounded growth (fine for small workers; set a cap in production).
   max_memory_entries: 10000
   # Cache exchange: pulls new cluster/global rows from the other workers
-  # over HTTP, at the URL on their registry card (ui.host 0.0.0.0 above
+  # over HTTP, at the URL on their registry card (api.host 0.0.0.0 above
   # makes this worker reachable to them), LWW-merges them into our local
   # DB, and invalidates overlapping memory entries so the next read sees
   # the newer value.

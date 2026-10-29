@@ -95,6 +95,22 @@
         }
       },
       "bytes": "{\"cluster\":\"search\",\"features\":{\"cache\":{},\"periodic\":{\"cluster_hash\":\"b5557e3108585ea3\"}},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
+    },
+    {
+      "name": "ui_feature",
+      "card": {
+        "schema": 1,
+        "worker": "w-1",
+        "cluster": "search",
+        "url": "http://10.0.0.5:8080/",
+        "features": {
+          "periodic": {
+            "cluster_hash": "0123456789abcdef"
+          },
+          "ui": false
+        }
+      },
+      "bytes": "{\"cluster\":\"search\",\"features\":{\"periodic\":{\"cluster_hash\":\"0123456789abcdef\"},\"ui\":false},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
     }
   ],
   "valid": [

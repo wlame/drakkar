@@ -1,7 +1,7 @@
 # Kafka Read API
 
 Two debug endpoints (plus a discovery listing) for reading the worker's
-Kafka topics directly from the operator UI server — fetch one message by
+Kafka topics directly from the API server — fetch one message by
 its exact coordinates, or stream a time window to traverse a topic. Built
 for the "what exactly is in that message?" moments: inspecting a DLQ
 entry, checking what a sink actually produced, or replaying a time range
@@ -149,7 +149,7 @@ Three layers, all deliberate:
 2. **`ui.auth_token`** — the standard optional UI bearer token gates
    these routes like every other `/api/*` route.
 3. **`ui.kafka_read_enabled`** (default `true`) — operator kill switch,
-   independent of auth, same pattern as `probe_enabled` / `merge_enabled`.
+   independent of auth, same pattern as `probe.enabled` / `merge_enabled`.
    When `false`, the routes answer `403` naming the config key.
 
 One posture gap gets a loud startup warning: if any readable alias

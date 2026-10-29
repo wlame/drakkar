@@ -51,10 +51,10 @@ spec:
           image: <image>:<tag>
           imagePullPolicy: IfNotPresent
           ports:
-            # Debug HTTP port. Hosts /healthz, /readyz, and the
+            # API server port. Hosts /healthz, /readyz, and the
             # Operator UI. Most endpoints are read-only, but the message
             # probe and the merge endpoint are not — close them with
-            # ui.probe_enabled=false / ui.merge_enabled=false,
+            # ui.probe.enabled=false / ui.merge_enabled=false,
             # independently of auth_token.
             - name: debug
               containerPort: 8080

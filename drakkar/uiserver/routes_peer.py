@@ -15,9 +15,10 @@ from fastapi.responses import JSONResponse
 
 from drakkar.cache.changes import parse_changes_query
 from drakkar.cache.models import _now_ms
+from drakkar.uiserver.server import dispatch_bounded
 
 if TYPE_CHECKING:
-    from drakkar.uiserver.server import UIDeps
+    from drakkar.app import DrakkarApp
 
 EXCHANGE_OFF_ERROR = 'The cache exchange is off on this worker'
 NO_ANSWER_ERROR = 'The cache did not answer in time'
@@ -27,8 +28,8 @@ NO_ANSWER_ERROR = 'The cache did not answer in time'
 _NO_ANSWER = object()
 
 
-def create_peer_router(deps: UIDeps) -> APIRouter:
-    """The public router of the peer routes."""
+def create_peer_router(drakkar_app: DrakkarApp) -> APIRouter:
+    """The public router of the peer routes; every worker with an API serves them, UI on or off."""
     router = APIRouter()
 
     @router.get('/api/v1/peer/cache/changes')
@@ -45,10 +46,14 @@ def create_peer_router(deps: UIDeps) -> APIRouter:
         query = parse_changes_query(dict(request.query_params))
         if isinstance(query, str):
             return JSONResponse({'error': query}, status_code=400)
-        engine = deps.drakkar_app.cache_engine
+        engine = drakkar_app.cache_engine
         if engine is None or not engine.serves_changes:
             return JSONResponse({'error': EXCHANGE_OFF_ERROR}, status_code=404)
-        answer = await deps.dispatch_bounded(engine.changes(query, now_ms=_now_ms()), default=_NO_ANSWER)
+        answer = await dispatch_bounded(
+            engine.changes(query, now_ms=_now_ms()),
+            drakkar_app.main_loop,
+            default=_NO_ANSWER,
+        )
         if answer is _NO_ANSWER:
             return JSONResponse({'error': NO_ANSWER_ERROR}, status_code=503)
         if answer is None:

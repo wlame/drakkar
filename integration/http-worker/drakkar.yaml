@@ -59,13 +59,16 @@ logging:
   level: "INFO"
   format: "json"
 
-ui:
-  enabled: true
+api:
   host: "0.0.0.0"
   port: 8080
-  prometheus_url: "http://localhost:9099"
-  prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
-  prometheus_cluster_label: 'cluster="http-cluster"'
+
+ui:
+  enabled: true
+  prometheus:
+    url: "http://localhost:9099"
+    worker_label: 'instance="{worker_id}:{metrics_port}"'
+    cluster_label: 'cluster="http-cluster"'
 
 recorder:
   capture:

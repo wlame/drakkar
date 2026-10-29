@@ -572,7 +572,7 @@ limits, its own read and header timeouts, request-rate limiting, TLS
 termination and body-size rejection at the edge — so a slow or hostile
 client never reaches the worker at all.
 
-The same applies to the debug UI port (`ui.port`) and, if enabled, the
+The same applies to the API server port (`api.port`) and, if enabled, the
 Prometheus exporter.
 
 This is one piece of a broader posture: the webapp's per-client tokens and
@@ -816,7 +816,7 @@ What to expect within ~30 seconds of the stack being healthy:
 | `integration/worker/drakkar.yaml` | `sources.http` block with two clients; `enabled=false` by default and flipped per-worker via env. |
 | `integration/http-worker/drakkar.yaml` | The HTTP-only worker's config: `sources.kafka.enabled: false`, one `mirror` client, a Kafka sink on `search-results-http`, DLQ off. |
 | `integration/worker/http_handler.py` | The HTTP-only handler, selected by `WORKER_HANDLER=http-search`. Subclasses the `worker/` ripgrep handler; its `arrange_http_request` reuses the same task-building code as `arrange`. |
-| `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes webapp port 8091 on `worker-1` and reuses the debug UI server's `/healthz` (port 8081) as the readiness gate — the webapp itself owns no `/healthz` route. |
+| `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes webapp port 8091 on `worker-1` and reuses the API server's `/healthz` (port 8081) as the readiness gate — the webapp itself owns no `/healthz` route. |
 | `integration/docker-compose.yml` (`http-worker` service) | The HTTP-only worker: `WORKER_HANDLER=http-search`, `DK_CONFIG=/app/http-worker.yaml`; its `/readyz` (not `/healthz`) is the health check, since it is ready as soon as its HTTP source binds. |
 
 ---

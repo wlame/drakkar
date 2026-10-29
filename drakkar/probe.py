@@ -35,7 +35,7 @@ _METADATA_KEY = 'drakkar_probe'
 _SCALARS = (str, int, float, bool)
 
 # Default write caps per probe run; the live values come from
-# ``ui.probe_details.*`` config and reach ``_DetailsState`` per instance.
+# ``ui.probe.*`` config and reach ``_DetailsState`` per instance.
 MAX_WRITES = 10_000
 MAX_TOTAL_BYTES = 5_000_000
 
@@ -663,7 +663,7 @@ class _DetailsState:
                 op,
                 'ProbeDetailsError',
                 f'max_writes cap exceeded ({self._max_writes} writes) — further writes are dropped; '
-                'raise ui.probe_details.max_writes (env DK_UI__PROBE_DETAILS__MAX_WRITES)',
+                'raise ui.probe.max_writes (env DK_UI__PROBE__MAX_WRITES)',
             )
             return False
         if self._bytes >= self._max_total_bytes:
@@ -672,8 +672,8 @@ class _DetailsState:
                 field,
                 op,
                 'ProbeDetailsError',
-                f'max_total_bytes cap exceeded ({self._max_total_bytes} bytes) — further writes are dropped; '
-                'raise ui.probe_details.max_total_bytes (env DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES)',
+                f'max_total_size cap exceeded ({self._max_total_bytes} bytes) — further writes are dropped; '
+                'raise ui.probe.max_total_size (env DK_UI__PROBE__MAX_TOTAL_SIZE)',
             )
             return False
         if field not in self._entries:

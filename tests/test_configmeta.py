@@ -58,7 +58,7 @@ def test_artifact_is_valid_json_matching_the_schema():
     raw = json.loads(ARTIFACT_PATH.read_text())
     # Round-trips through the pydantic model without error.
     parsed = ConfigMetadata.model_validate(raw)
-    assert len(parsed.groups) == 16
+    assert len(parsed.groups) == 17
 
 
 # --- 2. Anchor parity: every doc_anchor must exist on the real docs page ---
@@ -238,8 +238,8 @@ def test_non_secret_fields_are_not_flagged():
     secret_paths = _secret_paths()
     assert 'connections.kafka.*.brokers' not in secret_paths
     assert 'sinks.http.*.url' not in secret_paths
-    assert 'ui.public_url' not in secret_paths
-    assert 'ui.prometheus_url' not in secret_paths
+    assert 'api.public_url' not in secret_paths
+    assert 'ui.prometheus.url' not in secret_paths
 
 
 # --- 5. Env correctness ---

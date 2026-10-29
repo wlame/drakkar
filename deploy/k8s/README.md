@@ -137,7 +137,7 @@ contents, and live event streams. Most endpoints are read-only, but
 two are not: `POST /api/debug/probe` runs caller-supplied bytes
 through the live handler, and `POST /api/debug/merge` writes a file
 that nothing reclaims. Close either independently of `auth_token` with
-`ui.probe_enabled: false` / `ui.merge_enabled: false`.
+`ui.probe.enabled: false` / `ui.merge_enabled: false`.
 
 Out of the box `ui.auth_token` is empty and a startup warning fires
 (`ui_unauthenticated`) so the unauthenticated posture — and any

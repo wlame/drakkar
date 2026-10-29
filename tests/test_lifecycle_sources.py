@@ -90,6 +90,7 @@ def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
         # artifact) out of the test; ``test_watchdog.py`` covers that path.
         storage={'dir': ''},
         recorder={'enabled': False},
+        api={'enabled': False},
         ui={'enabled': False, 'release': {'enabled': False}},
         metrics={'enabled': False},
         runtime_health={'enabled': False},

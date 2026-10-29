@@ -17,7 +17,7 @@ page is the map.
 
 Plus service threads you never size: the runtime-health sampler (it must
 observe the loop from outside — [Runtime Health](runtime-health.md)), the
-debug UI server and webapp server (each on its own thread with its own
+API server and webapp server (each on its own thread with its own
 loop, reaching main-loop state only through bounded dispatches), the
 Prometheus exporter, and one worker thread per aiosqlite connection. The
 archive pass runs on a thread of its own (`drakkar-archive`), and the
@@ -36,11 +36,11 @@ read-only reader connection, each with its own aiosqlite thread, so a hung
 disk holds only the file loop and its connection. A memory read stops after
 2 seconds. The memory snapshot download and the memory row of the databases
 list open a short-lived connection to the store by name on a thread of the
-UI server loop's `to_thread` pool; a snapshot runs for at most 30 seconds.
+API server loop's `to_thread` pool; a snapshot runs for at most 30 seconds.
 
 The debug UI routes that work on `shared.dir` (the databases list, the
 history trace, the merge, the downloads and the archive list) read such a
-folder from a `to_thread` pool. They run on the UI server's own event loop,
+folder from a `to_thread` pool. They run on the API server's own event loop,
 and their file calls use the thread pools of that loop, not the pool that
 `io.max_threads` sizes. A hung mount holds those threads and slows the debug
 pages, not the pipeline.
@@ -73,7 +73,7 @@ you when this rule was broken and by which call site.
 ## The blocking-I/O pool (`io.max_threads`)
 
 Every `asyncio.to_thread` call on the main event loop shares **one** pool:
-asyncio's default executor. (The debug UI server and the webapp server run
+asyncio's default executor. (The API server and the webapp server run
 their own loops, and with them their own pools.) Python sizes it `min(32, cpu_count + 4)` —
 which quietly means a 32-thread ceiling on any host with 28+ CPUs. If a
 handler fans out blocking filesystem reads, that ceiling caps I/O

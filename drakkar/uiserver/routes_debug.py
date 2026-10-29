@@ -1087,14 +1087,14 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         also returns 200 but with ``truncated=true`` and whatever partial
         state the runner had captured up to the cancellation point.
 
-        Returns 403 when ``ui.probe_enabled`` is false. That gate is
+        Returns 403 when ``ui.probe.enabled`` is false. That gate is
         independent of ``auth_token``: the probe runs caller-supplied bytes
         through the live handler and competes with production traffic for
         executor slots, so an operator may want it closed regardless of
         whether auth is configured.
         """
-        if not config.probe_enabled:
-            return _disabled_response('probe', 'ui.probe_enabled')
+        if not config.probe.enabled:
+            return _disabled_response('probe', 'ui.probe.enabled')
         runner = _get_probe_runner()
         # Default empty topic to the configured source topic so handlers
         # that key on ``msg.topic`` see a realistic value. A worker with

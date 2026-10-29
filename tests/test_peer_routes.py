@@ -51,7 +51,7 @@ def _ui(cache_engine: CacheEngine | None, *, token: str = TOKEN):
     drakkar_app._config.ui.release.enabled = False
     drakkar_app.cache_engine = cache_engine
     drakkar_app._cache_engine = cache_engine
-    config = UIConfig(enabled=True, port=8080, auth_token=token)
+    config = UIConfig(enabled=True, auth_token=token)
     return create_ui_app(config, MagicMock(), drakkar_app)
 
 

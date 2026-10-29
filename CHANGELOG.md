@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The HTTP server is its own section, `api`.** `ui.host`, `ui.port` and `ui.public_url` are
+  `api.host`, `api.port` and `api.public_url`. With `ui.enabled: false` the worker still
+  serves `/healthz`, `/readyz` and `/api/v1/peer/cache/changes`; every other route answers
+  404 and no bundle is fetched. `api.enabled: false` starts no server. `ui.enabled` and
+  `autodiscover.enabled` each need `api.enabled`, and the load fails without it. The registry
+  now runs with the UI off. `ui_disabled_no_probes` follows `api.enabled`.
+  `fleet_registry_disabled_no_ui` is gone. `UIServer` is `APIServer`, and `DrakkarApp.ui_url`
+  is `api_url`.
+- **Keys grouped under `ui`.** `ui.allowed_ws_origins` is `ui.allowed_origins`.
+  `ui.probe_enabled` and `ui.probe_details.*` are `ui.probe.enabled`, `.max_writes` and
+  `.max_total_size`, which takes a size such as `5MB`. `ui.prometheus_*` is `ui.prometheus.*`.
+- **API contract v1.28.** `GET /api/v1/identity` gains `capabilities`; `Worker` rows of
+  `GET /api/v1/workers` gain `ui_enabled`, from the card's new `features.ui`.
 - **Autodiscover is one optional feature, off by default.** `fleet.registry` and
   `periodic.election` become the root section `autodiscover`, with `enabled`, one
   `provider` for the registry and the election, `connection`, `heartbeat`, `refresh`,

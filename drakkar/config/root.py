@@ -13,6 +13,7 @@ import yaml
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from drakkar.config.api import APIConfig
 from drakkar.config.autodiscover import CONNECTION_PROVIDERS, FILESYSTEM_PROVIDER, AutodiscoverConfig
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
@@ -52,6 +53,10 @@ SQLITE_WITHOUT_DIR_MESSAGE = (
 )
 
 FILESYSTEM_WITHOUT_SHARED_DIR_MESSAGE = 'autodiscover.provider filesystem needs storage.shared_dir'
+
+UI_WITHOUT_API_MESSAGE = 'ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true'
+
+AUTODISCOVER_WITHOUT_API_MESSAGE = 'autodiscover.enabled needs api.enabled: peers reach a worker through its API'
 
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
 # map names resolved. No variable name can start with NUL, so with this prefix the
@@ -136,6 +141,7 @@ class DrakkarConfig(BaseSettings):
     io: IOConfig = Field(default_factory=IOConfig)
     offload: OffloadConfig = Field(default_factory=OffloadConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -162,6 +168,12 @@ class DrakkarConfig(BaseSettings):
         """
         if not self.sources.enabled_names:
             raise ValueError('no input source enabled: set sources.kafka.enabled or sources.http.enabled')
+        return self
+
+    @model_validator(mode='after')
+    def _validate_what_needs_the_api(self) -> 'DrakkarConfig':
+        """The UI and ``autodiscover`` both need the API server."""
+        self.check_what_needs_the_api()
         return self
 
     @model_validator(mode='after')
@@ -266,15 +278,14 @@ class DrakkarConfig(BaseSettings):
         return os.path.normpath(os.path.join(self.storage.shared_dir, 'fleet'))
 
     @property
-    def fleet_summary(self) -> str:
-        """The registry the worker will run: the provider name, or ``off``.
+    def memory_max_rows(self) -> int:
+        """The row cap of the recorder memory store: one share per executor slot."""
+        return self.recorder.memory.rows_per_executor * self.executor.max_executors
 
-        ``off`` with ``autodiscover`` off, and with the UI off, because peers
-        reach a worker through the UI server.
-        """
-        if not self.autodiscover.enabled or not self.ui.enabled:
-            return 'off'
-        return self.autodiscover.provider
+    @property
+    def fleet_summary(self) -> str:
+        """The registry the worker will run: the provider name, or ``off`` with ``autodiscover`` off."""
+        return self.autodiscover.provider if self.autodiscover.enabled else 'off'
 
     @property
     def election_summary(self) -> str:
@@ -315,6 +326,22 @@ class DrakkarConfig(BaseSettings):
         if not self.dlq_enabled:
             return None
         return self.declared_connection('dlq.connection', self.dlq.provider, self.dlq.connection)
+
+    def check_what_needs_the_api(self) -> None:
+        """Refuse a UI or an ``autodiscover`` with no API server to serve them.
+
+        The load calls this, and so does the startup after ``on_startup``, which
+        may have changed the keys: both give the same messages.
+
+        Raises:
+            ValueError: ``ui`` or ``autodiscover`` is on while ``api`` is off.
+        """
+        if self.api.enabled:
+            return
+        if self.ui.enabled:
+            raise ValueError(UI_WITHOUT_API_MESSAGE)
+        if self.autodiscover.enabled:
+            raise ValueError(AUTODISCOVER_WITHOUT_API_MESSAGE)
 
     def check_autodiscover(self) -> None:
         """Refuse an ``autodiscover`` section that cannot run.
@@ -376,8 +403,8 @@ class DrakkarConfig(BaseSettings):
         [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul election=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
-        (kafka, then http). The ``ui`` token reports the UI server state;
-        the ``ui.release`` bundle-fetch settings are deliberately excluded
+        (kafka, then http). The ``ui`` token reports the UI state and the port
+        of the server it runs on; the ``ui.release`` bundle-fetch settings are deliberately excluded
         (they never affect pipeline behavior). ``storage`` is the own-files
         folder (``mem`` for memory-only), ``shared`` appears only when the
         shared folder differs from it, and ``fleet`` names the registry the
@@ -401,7 +428,7 @@ class DrakkarConfig(BaseSettings):
         exec_part = f'{ex.max_executors}w/{ex.window_size}win'
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
-        ui_part = f'on:{self.ui.port}' if self.ui.enabled else 'off'
+        ui_part = f'on:{self.api.port}' if self.ui.enabled else 'off'
 
         # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
         # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping

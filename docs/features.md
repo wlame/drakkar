@@ -15,16 +15,17 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Feature | Toggle | Default | What it controls |
 |---|---|---|---|
 | Metrics exporter | `metrics.enabled` | **on** (`:9090`) | Raw Prometheus endpoint on its own port |
-| Operator UI + probes | `ui.enabled` | **on** (`:8080`) | UI server, `/api/v1`, `/ws`, **`/healthz` + `/readyz`**, and the flight recorder |
-| Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/v1/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
+| API server + probes | `api.enabled` | **on** (`:8080`) | The HTTP server: **`/healthz` + `/readyz`** and the peer route |
+| Operator UI | `ui.enabled` | **on** (same port) | The pages, the bundle fetch, `/api/v1`, `/ws` and the docs; needs `api.enabled` |
+| Message probe endpoint | `ui.probe.enabled` | **on** | `POST /api/v1/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
 | Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes a `merged-<ts>-<token>.db` into `<shared.dir>/merged/` per call, deleted after `history.merged_retention_days` while archiving is on; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Own storage | `storage.dir` | `/tmp/drakkar` | Where this worker's event history, cache file and crash marker live; empty = memory-only |
 | Recorder archiving | `history.archive.enabled` | **on** | Fold the sealed files of each cluster history folder into per-cluster `.db.gz` window archives; off = sealed files and merge results are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
-| Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
-| Worker registry | `autodiscover.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `ui.enabled` |
+| Prometheus panel + links | `ui.prometheus.url` | off (empty) | Dashboard deep-links into a Prometheus instance |
+| Worker registry | `autodiscover.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `api.enabled` |
 | Cross-worker fleet view | a `shared.dir` every worker mounts (or one shared `storage.dir`) | — | History trace over the cluster's sealed files, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
@@ -54,12 +55,12 @@ The framework prefers degrading over refusing to start — which means
 several of these edges are **silent** at startup. Each rule below names
 the failure mode so you can decide what your deployment needs.
 
-1. **Probes need the UI server.** `/healthz` and `/readyz` are served
-   *only* by the UI server. `ui.enabled: false` means **no probe
+1. **Probes need the API server.** `/healthz` and `/readyz` are served
+   *only* by the API server. `api.enabled: false` means **no probe
    endpoints at all** — Kubernetes liveness/readiness checks simply
    fail. The worker logs the warning `ui_disabled_no_probes` at
-   startup; under Kubernetes, keep the UI enabled (auth-token it
-   instead of disabling it).
+   startup; under Kubernetes, keep the API enabled. The UI may be off
+   (`ui.enabled: false`): the probes do not depend on it.
 2. **The flight recorder runs only when `ui.enabled`.** UI off = no
    event history, no config snapshot, no state timeline — and none of
    the features below that read them.
@@ -67,7 +68,7 @@ the failure mode so you can decide what your deployment needs.
    creates it (mode `0700`) when it is missing. Empty `storage.dir`
    switches to a short in-memory window (lost on restart) and disables
    the OOM watchdog (`{storage.dir}/{worker}.watchdog`).
-4. **The SPA bundle needs the UI server.** `ui.release.enabled` fetches
+4. **The SPA bundle needs the UI.** `ui.release.enabled` fetches
    and serves the drakkar-ui release; a fetch failure is non-fatal, and
    release tags are immutable, so a bundle downloaded once serves from the
    shared cache on every later start — offline ones included. There is no
@@ -79,26 +80,26 @@ the failure mode so you can decide what your deployment needs.
 5. **The workers list needs the registry; cross-tracing needs a SHARED
    folder.** Workers find each other through the
    [fleet registry](fleet.md), part of the optional `autodiscover` feature.
-   It needs `ui.enabled` and, for the `filesystem` provider, a
+   It needs `api.enabled` and, for the `filesystem` provider, a
    `storage.shared_dir` all workers see. Every worker seals its finished
    recorder files into `<shared.dir>/history/<cluster>/`, and a history
    trace reads the sealed files there (see
    [Local Databases](local-databases.md#sealing-and-the-history-folder));
    every worker must see the same shared folder (the mount path may
    differ: no file stores an absolute path). Unshared
-   folders are silent: each worker simply sees only itself. Set `ui.public_url` per worker so the card and
+   folders are silent: each worker simply sees only itself. Set `api.public_url` per worker so the card and
    cross-links carry a reachable address instead of the bind IP.
 6. **The cache engine needs `storage.dir` too.** The cache file lives
    there, private to the worker; with `storage.dir` empty the cache runs
    memory-only (WARN `cache_engine_disabled_no_storage_dir`) and the cache
    exchange turns itself off.
-7. **Cache exchange needs the registry and reachable UI ports.** A worker
+7. **Cache exchange needs the registry and reachable API ports.** A worker
    pulls only the peers that the [fleet registry](fleet.md) lists, at the
-   URL on each card, so it needs the registry of rule 5 (`ui.enabled` and
+   URL on each card, so it needs the registry of rule 5 (`api.enabled` and
    a card folder all workers see). A peer the registry does not list is
    never pulled; with the registry off nothing is pulled. Every worker must
-   also reach the UI port of its peers: across hosts, bind `ui.host` to a
-   reachable address or set `ui.public_url`. The cache file itself is
+   also reach the API port of its peers: across hosts, bind `api.host` to a
+   reachable address or set `api.public_url`. The cache file itself is
    never shared. **Silent** when unmet: the cache simply stays local.
 8. **The webapp needs handler support — checked at construction.** A
    worker with `sources.http.enabled` and a handler that lacks the HTTP
@@ -106,14 +107,14 @@ the failure mode so you can decide what your deployment needs.
    3rd/4th generic models) fails fast with a `ConfigurationError`. A
    webapp **bind** failure at startup is fatal too: the webapp is an
    input source, so a worker that cannot bind its socket stops rather
-   than run with nothing to read. A UI-server bind failure is fatal as
+   than run with nothing to read. An API-server bind failure is fatal as
    well.
 9. **The webapp's dashboard tile needs the UI + recorder.** The tile on
    the operator dashboard reads request counts from recorder events; UI
    off = no tile, memory-only recorder = zeroed counts.
-10. **The Prometheus panel needs `ui.prometheus_url`.** Unset = the
+10. **The Prometheus panel needs `ui.prometheus.url`.** Unset = the
     dashboard links section is hidden. The optional
-    `ui.prometheus_worker_label` / `ui.prometheus_cluster_label` /
+    `ui.prometheus.worker_label` / `ui.prometheus.cluster_label` /
     `ui.custom_links` keys refine it.
 11. **At least one source must be enabled.** `sources.kafka.enabled` and
     `sources.http.enabled` both default to `false`; a config with neither
@@ -179,7 +180,9 @@ and the OOM watchdog. This is the sensible production baseline.
 ui:
   release:
     enabled: true          # default — fetches the drakkar-ui SPA
-  prometheus_url: "http://prometheus:9090"
+  prometheus:
+    url: "http://prometheus:9090"
+api:
   public_url: "http://worker-1.internal:8080"
 ```
 
@@ -210,7 +213,7 @@ cache:
 worker pulls the `cluster` and `global` rows of the peers it finds through
 the Tier 3 registry, over HTTP, and merges them by last-write-wins (see
 [Cache exchange](cache.md#cache-exchange)). The workers must reach each
-other's UI port.
+other's API port.
 
 ### Tier 5 — synchronous HTTP ingress
 
@@ -231,15 +234,15 @@ config and the worker serves HTTP only.
 
 ## Quick sanity checklist
 
-- Kubernetes? → `ui.enabled: true` (rule 1), probes pointed at the UI
+- Kubernetes? → `api.enabled: true` (rule 1), probes pointed at the API
   port.
-- More than one worker? → one shared folder on every worker (rule 5), `ui.public_url` set per worker.
+- More than one worker? → one shared folder on every worker (rule 5), `api.public_url` set per worker.
 - Cache not syncing? → check that the peers appear in the workers list
   (rule 7), that `drakkar_fleet_peer_requests_total` shows `ok` requests
-  (otherwise the UI ports are not reachable at the card URLs), and that
+  (otherwise the API ports are not reachable at the card URLs), and that
   both workers are in the same cluster for `cluster`-scoped keys.
 - Token set and the UI shows other workers as unreachable? → list every
-  worker origin in `ui.allowed_ws_origins`
+  worker origin in `ui.allowed_origins`
   ([Cross-origin reads](security.md#cross-origin-reads)).
 - Webapp 500s at the first request? → it can't: the worker rejects a
   hook-less handler at startup (rule 8).

@@ -1407,6 +1407,53 @@
       ]
     },
     {
+      "key": "api",
+      "title": "API (api:)",
+      "doc_anchor": "api-api",
+      "entries": [
+        {
+          "path": "api.enabled",
+          "env": "DK_API__ENABLED",
+          "description": "Run the HTTP server: /healthz, /readyz and the peer route.",
+          "full_description": "Run the HTTP server: /healthz, /readyz and the peer route. Off means no listener at all, so nothing answers the Kubernetes probes, and ui.enabled and autodiscover.enabled must both be false.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.host",
+          "env": "DK_API__HOST",
+          "description": "Bind address for the HTTP server.",
+          "full_description": "Bind address for the HTTP server. Use 0.0.0.0 to expose on all interfaces.",
+          "type": "string",
+          "default": "127.0.0.1",
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.port",
+          "env": "DK_API__PORT",
+          "description": "Port for the HTTP server.",
+          "full_description": "Port for the HTTP server.",
+          "type": "integer",
+          "default": 8080,
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.public_url",
+          "env": "DK_API__PUBLIC_URL",
+          "description": "Externally reachable URL of this worker's HTTP server.",
+          "full_description": "Externally reachable URL of this worker's HTTP server. Peers and browsers reach the worker through it, and the registry card carries it. Empty derives http://<outbound ip>:<port>/.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "api"
+        }
+      ]
+    },
+    {
       "key": "ui",
       "title": "UI (ui:)",
       "doc_anchor": "ui-ui",
@@ -1414,60 +1461,30 @@
         {
           "path": "ui.enabled",
           "env": "DK_UI__ENABLED",
-          "description": "Enable the UI feature: the server and the bundle serving.",
-          "full_description": "Enable the UI feature: the server and the bundle serving. Off skips both, and the recorder keeps no memory store.",
+          "description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs.",
+          "full_description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs. It needs api.enabled. Off: those routes answer 404, no bundle is fetched, and the recorder keeps no memory store.",
           "type": "boolean",
           "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.host",
-          "env": "DK_UI__HOST",
-          "description": "Bind address for the UI server.",
-          "full_description": "Bind address for the UI server. Use 0.0.0.0 to expose on all interfaces.",
-          "type": "string",
-          "default": "127.0.0.1",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.port",
-          "env": "DK_UI__PORT",
-          "description": "Port for the UI server.",
-          "full_description": "Port for the UI server.",
-          "type": "integer",
-          "default": 8080,
           "secret": false,
           "group": "ui"
         },
         {
           "path": "ui.auth_token",
           "env": "DK_UI__AUTH_TOKEN",
-          "description": "Bearer token for the UI. **Empty (the default) disables auth** entirely — every endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs).",
-          "full_description": "Bearer token for the UI. **Empty (the default) disables auth** entirely — every endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs). This is a deliberate opt-in design: no endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended for deployment inside a private contour (VPC / internal cluster / operator-only ingress). Most endpoints are read-only, but the probe and merge routes are not — close those with ``probe_enabled`` / ``merge_enabled``, which act independently of this token. A startup warning fires whenever the UI is enabled without a token so the unauthenticated posture is visible in logs, naming whichever side-effecting endpoint is still enabled. When set to a non-empty value, protected HTTP endpoints require an ``Authorization: Bearer <token>`` header or ``?token=<token>`` query parameter; WebSocket connections without a valid token are closed with code 4401, and the Origin header is validated against ``allowed_ws_origins`` (or the request Host header if that list is empty). Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. Trailing/leading whitespace is stripped on load to avoid silent mismatches when YAML accidentally quotes spaces.",
+          "description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs).",
+          "full_description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs). This is a deliberate opt-in design: no endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended for deployment inside a private contour (VPC / internal cluster / operator-only ingress). Most endpoints are read-only, but the probe and merge routes are not — close those with ``probe.enabled`` / ``merge_enabled``, which act independently of this token. A startup warning fires whenever the UI is enabled without a token so the unauthenticated posture is visible in logs, naming whichever side-effecting endpoint is still enabled. When set to a non-empty value, protected HTTP endpoints require an ``Authorization: Bearer <token>`` header or ``?token=<token>`` query parameter; WebSocket connections without a valid token are closed with code 4401, and the Origin header is validated against ``allowed_origins`` (or the request Host header if that list is empty). /healthz, /readyz and the peer route stay public. Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. Trailing/leading whitespace is stripped on load to avoid silent mismatches when YAML accidentally quotes spaces.",
           "type": "string",
           "default": "",
           "secret": true,
           "group": "ui"
         },
         {
-          "path": "ui.allowed_ws_origins",
-          "env": "DK_UI__ALLOWED_WS_ORIGINS",
-          "description": "Explicit allowlist of WebSocket origins.",
-          "full_description": "Explicit allowlist of WebSocket origins. A non-empty list is strict: nothing outside it connects, token or not. Empty list with a token set means same-origin only. Empty list with no token allows the cross-origin handshakes the cluster view needs but rejects a page that is not itself on loopback asking for a worker that is — a peer worker is never at the browser own loopback address, only a web page reaching into the machine is. A missing Origin header (curl, websocat) is always accepted; a browser cannot omit it.",
+          "path": "ui.allowed_origins",
+          "env": "DK_UI__ALLOWED_ORIGINS",
+          "description": "Explicit allowlist of browser origins for /ws and the fan-out reads.",
+          "full_description": "Explicit allowlist of browser origins for /ws and the fan-out reads. A non-empty list is strict: nothing outside it connects, token or not. Empty list with a token set means same-origin only. Empty list with no token allows the cross-origin handshakes the cluster view needs but rejects a page that is not itself on loopback asking for a worker that is — a peer worker is never at the browser own loopback address, only a web page reaching into the machine is. A missing Origin header (curl, websocat) is always accepted; a browser cannot omit it.",
           "type": "array",
           "default": [],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.probe_enabled",
-          "env": "DK_UI__PROBE_ENABLED",
-          "description": "Serve ``POST /api/v1/debug/probe``.",
-          "full_description": "Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it is neither read-only nor free: it competes with production traffic for executor slots. Set to false to serve 403 instead — independently of ``auth_token``, so a deployment that cannot set a token can still close the endpoint, and a deployment that has one can still close it as defence in depth. Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behaviour.",
-          "type": "boolean",
-          "default": true,
           "secret": false,
           "group": "ui"
         },
@@ -1475,7 +1492,7 @@
           "path": "ui.merge_enabled",
           "env": "DK_UI__MERGE_ENABLED",
           "description": "Serve ``POST /api/v1/debug/merge``.",
-          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of the shared folder, kept for ``recorder.archive.merged_retention``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
+          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of the shared folder, kept for ``recorder.archive.merged_retention``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``.",
           "type": "boolean",
           "default": true,
           "secret": false,
@@ -1485,19 +1502,9 @@
           "path": "ui.kafka_read_enabled",
           "env": "DK_UI__KAFKA_READ_ENABLED",
           "description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic).",
-          "full_description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic). Reads use assign()-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``. When the resolved Kafka security of any readable topic is not PLAINTEXT while ``auth_token`` is empty, startup logs a warning naming the exposed aliases (the API stays available — gate it with ``auth_token`` or close it here).",
+          "full_description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic). Reads use assign()-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``. When the resolved Kafka security of any readable topic is not PLAINTEXT while ``auth_token`` is empty, startup logs a warning naming the exposed aliases (the API stays available — gate it with ``auth_token`` or close it here).",
           "type": "boolean",
           "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.public_url",
-          "env": "DK_UI__PUBLIC_URL",
-          "description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list.",
-          "full_description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list. Empty derives http://<ip>:<port> from the bind address.",
-          "type": "string",
-          "default": "",
           "secret": false,
           "group": "ui"
         },
@@ -1528,46 +1535,6 @@
           "full_description": "Minimum task duration (ms) to broadcast to the live UI over WebSocket. Failed tasks always appear. 0 shows all tasks.",
           "type": "integer",
           "default": 500,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus_url",
-          "env": "DK_UI__PROMETHEUS_URL",
-          "description": "Base URL of the Prometheus server used for UI links.",
-          "full_description": "Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus_rate_interval",
-          "env": "DK_UI__PROMETHEUS_RATE_INTERVAL",
-          "description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
-          "full_description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
-          "type": "string",
-          "default": "5m",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus_worker_label",
-          "env": "DK_UI__PROMETHEUS_WORKER_LABEL",
-          "description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
-          "full_description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables. Empty defaults to instance=\"{hostname}:{metrics_port}\".",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus_cluster_label",
-          "env": "DK_UI__PROMETHEUS_CLUSTER_LABEL",
-          "description": "PromQL label filter for cluster-wide queries, same template variables as prometheus_worker_label.",
-          "full_description": "PromQL label filter for cluster-wide queries, same template variables as prometheus_worker_label. Empty hides cluster-wide links.",
-          "type": "string",
-          "default": "",
           "secret": false,
           "group": "ui"
         },
@@ -1627,6 +1594,46 @@
           "group": "ui"
         },
         {
+          "path": "ui.prometheus.url",
+          "env": "DK_UI__PROMETHEUS__URL",
+          "description": "Base URL of the Prometheus server used for UI links.",
+          "full_description": "Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.rate_interval",
+          "env": "DK_UI__PROMETHEUS__RATE_INTERVAL",
+          "description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+          "full_description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+          "type": "string",
+          "default": "5m",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.worker_label",
+          "env": "DK_UI__PROMETHEUS__WORKER_LABEL",
+          "description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
+          "full_description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables. Empty defaults to instance=\"{hostname}:{metrics_port}\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.cluster_label",
+          "env": "DK_UI__PROMETHEUS__CLUSTER_LABEL",
+          "description": "PromQL label filter for cluster-wide queries, same template variables as worker_label.",
+          "full_description": "PromQL label filter for cluster-wide queries, same template variables as worker_label. Empty hides cluster-wide links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.release.enabled",
           "env": "DK_UI__RELEASE__ENABLED",
           "description": "Resolve and serve the drakkar-ui bundle.",
@@ -1677,8 +1684,18 @@
           "group": "ui"
         },
         {
-          "path": "ui.probe_details.max_writes",
-          "env": "DK_UI__PROBE_DETAILS__MAX_WRITES",
+          "path": "ui.probe.enabled",
+          "env": "DK_UI__PROBE__ENABLED",
+          "description": "Serve ``POST /api/v1/debug/probe``.",
+          "full_description": "Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it is neither read-only nor free: it competes with production traffic for executor slots. Set to false to serve 403 instead, whatever ``auth_token`` says: a deployment that cannot set a token can still close the endpoint, and a deployment that has one can still close it as defence in depth. Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behaviour.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.probe.max_writes",
+          "env": "DK_UI__PROBE__MAX_WRITES",
           "description": "Maximum probe.set/append/update calls recorded per probe run.",
           "full_description": "Maximum probe.set/append/update calls recorded per probe run. The first write past the cap records one ProbeError; further writes are dropped silently.",
           "type": "integer",
@@ -1687,12 +1704,12 @@
           "group": "ui"
         },
         {
-          "path": "ui.probe_details.max_total_bytes",
-          "env": "DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES",
-          "description": "Maximum total serialized size (bytes) of all probe-details writes per probe run.",
-          "full_description": "Maximum total serialized size (bytes) of all probe-details writes per probe run. Past it, writes are dropped like the max_writes cap.",
-          "type": "integer",
-          "default": 5000000,
+          "path": "ui.probe.max_total_size",
+          "env": "DK_UI__PROBE__MAX_TOTAL_SIZE",
+          "description": "Maximum total serialized size of all probe-details writes per probe run.",
+          "full_description": "Maximum total serialized size of all probe-details writes per probe run. Past it, writes are dropped like the max_writes cap.",
+          "type": "size",
+          "default": "5MB",
           "secret": false,
           "group": "ui"
         },

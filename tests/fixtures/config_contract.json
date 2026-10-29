@@ -476,9 +476,130 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "api_port",
+      "yaml": {
+        "api": {
+          "port": 8123
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8123 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "api_and_ui_off",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "ui_off_keeps_the_registry",
+      "yaml": {
+        "ui": {
+          "enabled": false
+        },
+        "storage": {
+          "shared_dir": "/mnt/fleet"
+        },
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
+    {
+      "name": "ui_needs_api",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": true
+        }
+      },
+      "message": "ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true"
+    },
+    {
+      "name": "autodiscover_needs_api",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": false
+        },
+        "storage": {
+          "shared_dir": "/tmp/shared"
+        },
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        }
+      },
+      "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
+    },
+    {
+      "name": "ui_and_autodiscover_need_api_ui_first",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": true
+        },
+        "storage": {
+          "shared_dir": "/tmp/shared"
+        },
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        }
+      },
+      "message": "ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true"
+    },
+    {
+      "name": "api_checks_run_before_the_recorder_checks",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "storage": {
+          "dir": ""
+        }
+      },
+      "message": "ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true"
+    },
+    {
+      "name": "api_checks_run_before_the_autodiscover_checks",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": false
+        },
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        }
+      },
+      "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
+    },
     {
       "name": "window_shorter_than_rotation",
       "yaml": {
@@ -2749,6 +2870,92 @@
       "yaml": {},
       "path": "cache.exchange.page_size",
       "value": 500
+    },
+    {
+      "name": "api_enabled_default",
+      "yaml": {},
+      "path": "api.enabled",
+      "value": true
+    },
+    {
+      "name": "api_host_default",
+      "yaml": {},
+      "path": "api.host",
+      "value": "127.0.0.1"
+    },
+    {
+      "name": "api_port_default",
+      "yaml": {},
+      "path": "api.port",
+      "value": 8080
+    },
+    {
+      "name": "api_public_url_default",
+      "yaml": {},
+      "path": "api.public_url",
+      "value": ""
+    },
+    {
+      "name": "ui_allowed_origins_given",
+      "yaml": {
+        "ui": {
+          "allowed_origins": [
+            "https://ops.example"
+          ]
+        }
+      },
+      "path": "ui.allowed_origins",
+      "value": [
+        "https://ops.example"
+      ]
+    },
+    {
+      "name": "ui_probe_enabled_default",
+      "yaml": {},
+      "path": "ui.probe.enabled",
+      "value": true
+    },
+    {
+      "name": "ui_probe_max_writes_default",
+      "yaml": {},
+      "path": "ui.probe.max_writes",
+      "value": 10000
+    },
+    {
+      "name": "ui_probe_max_total_size_default",
+      "yaml": {},
+      "path": "ui.probe.max_total_size",
+      "value": 5000000
+    },
+    {
+      "name": "ui_probe_max_total_size_text",
+      "yaml": {
+        "ui": {
+          "probe": {
+            "max_total_size": "1MiB"
+          }
+        }
+      },
+      "path": "ui.probe.max_total_size",
+      "value": 1048576
+    },
+    {
+      "name": "ui_prometheus_rate_interval_default",
+      "yaml": {},
+      "path": "ui.prometheus.rate_interval",
+      "value": "5m"
+    },
+    {
+      "name": "ui_prometheus_url_given",
+      "yaml": {
+        "ui": {
+          "prometheus": {
+            "url": "http://prom:9090"
+          }
+        }
+      },
+      "path": "ui.prometheus.url",
+      "value": "http://prom:9090"
     }
   ],
   "sink_policies": [

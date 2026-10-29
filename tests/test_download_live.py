@@ -45,7 +45,7 @@ def _live_file(path, events: int) -> sqlite3.Connection:
 
 
 def _client(tmp_path, *, memory_only: bool = False) -> tuple[AsyncClient, EventRecorder]:
-    config = UIConfig(enabled=True, port=8080)
+    config = UIConfig(enabled=True)
     recorder = EventRecorder(
         RecorderConfig(),
         worker_name='w-1',

@@ -6,6 +6,6 @@ re-exports the public API so existing call sites continue to work.
 
 from __future__ import annotations
 
-from drakkar.uiserver.server import UIServer, create_ui_app
+from drakkar.uiserver.server import APIServer, create_api_app, create_ui_app
 
-__all__ = ['UIServer', 'create_ui_app']
+__all__ = ['APIServer', 'create_api_app', 'create_ui_app']

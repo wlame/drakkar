@@ -2,7 +2,7 @@
 
 The page served by one worker reads these three paths from every worker of
 its cluster. They answer cross-origin requests with the same origin rule as
-the WebSocket (``origin_allowed``, ``ui.allowed_ws_origins``); a preflight
+the WebSocket (``origin_allowed``, ``ui.allowed_origins``); a preflight
 never needs the token, because a browser sends none with it.
 """
 
@@ -25,7 +25,7 @@ def _client(*, token: str = '', allowed: list[str] | None = None) -> AsyncClient
     drakkar_app = MagicMock()
     drakkar_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
-    config = UIConfig(enabled=True, port=8080, auth_token=token, allowed_ws_origins=allowed or [])
+    config = UIConfig(enabled=True, auth_token=token, allowed_origins=allowed or [])
     # No memory store: the databases answer has no memory row.
     recorder = MagicMock(storage_dir='', shared_dir='', db_path='', has_file=False)
     recorder.memory_coverage.return_value = None
