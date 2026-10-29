@@ -191,6 +191,14 @@ async def test_ui_off_fetches_no_bundle(monkeypatch):
         assert (await client.get('/api/v1/identity')).status_code == 404
 
 
+async def test_the_ui_without_a_recorder_refuses_to_start():
+    config = _config()
+    server = APIServer(config.api, _drakkar_app(config), ui=config.ui, recorder=None)
+
+    with pytest.raises(ValueError, match='the UI routes need a recorder'):
+        await server.start()
+
+
 async def test_api_off_starts_no_server(monkeypatch):
     server = MagicMock(return_value=AsyncMock())
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', server)

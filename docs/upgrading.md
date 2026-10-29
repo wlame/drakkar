@@ -21,7 +21,9 @@ This page has two guides, one for each move:
   keeps the history in Postgres; see
   [The recorder history in Postgres](#recorder-history-in-postgres). The
   DLQ now holds the original messages, and every sink declares a failure
-  policy; see [The DLQ record](#dlq-record).
+  policy; see [The DLQ record](#dlq-record). The HTTP server has its own
+  section, `api`, and the UI may be off; see
+  [The API server and the UI](#api-and-ui).
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.

@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (autodiscover, cache exchange, recorder, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (api, autodiscover, cache exchange, recorder, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {

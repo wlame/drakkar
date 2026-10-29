@@ -765,9 +765,15 @@ class APIServer:
         self._thread: threading.Thread | None = None
 
     async def _build_app(self) -> FastAPI:
-        """The application to serve; only a worker with the UI on resolves a bundle."""
-        if self._ui is None or self._recorder is None:
+        """The application to serve; only a worker with the UI on resolves a bundle.
+
+        Raises:
+            ValueError: ``ui`` is given without the ``recorder`` its routes read.
+        """
+        if self._ui is None:
             return create_api_app(self._drakkar_app)
+        if self._recorder is None:
+            raise ValueError('APIServer: the UI routes need a recorder')
         bundle = await self._resolve_ui_bundle(self._ui)
         return create_ui_app(
             self._ui,
