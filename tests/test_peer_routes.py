@@ -17,10 +17,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine
-from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig
+from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig, UIConfig
 from drakkar.uiserver import server as server_module
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'cache_changes.json').read_text(encoding='utf-8'))
 TOKEN = 'secret-token'
@@ -46,7 +46,7 @@ def _ui(cache_engine: CacheEngine | None, *, token: str = TOKEN):
     drakkar_app._config.ui.release.enabled = False
     drakkar_app.cache_engine = cache_engine
     drakkar_app._cache_engine = cache_engine
-    config = make_ui_config(enabled=True, port=8080, auth_token=token)
+    config = UIConfig(enabled=True, port=8080, auth_token=token)
     return create_ui_app(config, MagicMock(), drakkar_app)
 
 

@@ -67,7 +67,7 @@ recorder:
     store_completed_output: false  # send the stdout and stderr columns to Postgres
     batch_rows: 5000            # most rows in one COPY
     max_queue: 128MiB           # most text waiting for Postgres, counted in characters
-      resilience: {}              # timeout, retries, backoff and breaker of the recorder calls
+    resilience: {}              # timeout, retries, backoff and breaker of the recorder calls
 ```
 
 | Key | Type | Default | Bounds | Env |

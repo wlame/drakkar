@@ -691,7 +691,7 @@ def warn_if_archives_unbounded(archive: RecorderArchiveConfig, folder: str) -> N
             f'{folder} are kept forever and nothing reclaims that disk. Watch '
             f'drakkar_recorder_archive_bytes, prune the folder yourself, or set '
             f'recorder.archive.retention (or DK_RECORDER__ARCHIVE__RETENTION) '
-            f'to a number of days covering the {archive.due_after}h due delay plus one '
+            f'to a duration in whole days, for example 30d, covering the {archive.due_after}h due delay plus one '
             f'{archive.window}h window.'
         ),
     )

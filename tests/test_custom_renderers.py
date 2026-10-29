@@ -24,7 +24,7 @@ from drakkar.config import (
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 RENDERERS_JS = 'export default { orderCard(value, row, cell) { return document.createElement("b") } }\n'
 
@@ -62,7 +62,7 @@ def app_factory():
             async def arrange(self, messages, pending):
                 return []
 
-        ui = make_ui_config(**(ui_overrides or {}))
+        ui = UIConfig(**(ui_overrides or {}))
         return DrakkarApp(handler=_Handler(), config=_minimal_config(ui))
 
     return _build
@@ -98,13 +98,13 @@ def _make_client(ui_config: UIConfig) -> AsyncClient:
 
 @pytest.fixture
 async def client():
-    async with _make_client(make_ui_config()) as c:
+    async with _make_client(UIConfig()) as c:
         yield c
 
 
 @pytest.fixture
 async def client_with_renderers(renderers_file):
-    async with _make_client(make_ui_config(custom_renderers_path=str(renderers_file))) as c:
+    async with _make_client(UIConfig(custom_renderers_path=str(renderers_file))) as c:
         yield c
 
 

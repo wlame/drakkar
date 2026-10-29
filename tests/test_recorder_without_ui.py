@@ -18,8 +18,9 @@ from drakkar.metrics import (
 )
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
+from drakkar.recorder.helpers import make_db_path
 from drakkar.recorder.postgres import RecorderPostgresSettings, build_record
-from drakkar.recorder.schema import EVENT_COLUMNS, EventType
+from drakkar.recorder.schema import EVENT_COLUMNS, SCHEMA_EVENTS, EventType
 from drakkar.uiserver import routes_debug
 from tests.conftest import kafka_connections, wait_for
 from tests.recorder_pg_fake import RecorderFakePostgres
@@ -429,11 +430,20 @@ async def test_history_search_with_recorder_off_reads_no_folder(tmp_path, monkey
         raise AssertionError('the sealed history folder was searched')
 
     monkeypatch.setattr(routes_debug, 'trace_history', no_sealed_files)
+    storage = tmp_path / 'storage'
+    storage.mkdir()
+    closed_file = make_db_path(str(storage), WORKER)
+    conn = sqlite3.connect(closed_file)
+    conn.executescript(SCHEMA_EVENTS)
+    conn.execute(core_mod.INSERT_EVENT_SQL, core_mod._row_tuple(1, _event(42, task_id='in-a-closed-file', dt='d')))
+    conn.commit()
+    conn.close()
     rec = EventRecorder(
         RecorderConfig(flush_interval='60s'),
         worker_name=WORKER,
         cluster_name=CLUSTER,
         persistence='none',
+        storage_dir=str(storage),
         shared_dir=str(tmp_path / 'shared'),
     )
     await rec.start()
@@ -441,12 +451,14 @@ async def test_history_search_with_recorder_off_reads_no_folder(tmp_path, monkey
         rec._record(_event(42, task_id='t-1'))
         await rec.flush_memory()
         async with _client(rec) as client:
-            resp = await client.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 42, 'history': 1})
+            history = await client.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 42, 'history': 1})
+            live = await client.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 42})
     finally:
         await rec.stop()
 
-    assert resp.status_code == 200
-    assert [row['offset'] for row in resp.json()] == [42]
+    assert history.status_code == 200
+    assert [row['task_id'] for row in history.json()] == ['t-1']
+    assert [row['task_id'] for row in live.json()] == ['t-1']
 
 
 # --- runtime health data and the Postgres row builder ---

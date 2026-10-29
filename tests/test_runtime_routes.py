@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, RuntimeHealthConfig
+from drakkar.config import DrakkarConfig, RuntimeHealthConfig, UIConfig
 from drakkar.runtimehealth import RuntimeHealthMonitor
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def mock_app():
 
 @pytest.fixture
 async def client(mock_app):
-    fastapi_app = create_ui_app(make_ui_config(enabled=True, port=8080), MagicMock(), mock_app)
+    fastapi_app = create_ui_app(UIConfig(enabled=True, port=8080), MagicMock(), mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c

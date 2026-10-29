@@ -38,10 +38,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import Cache, CacheEngine
-from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig
+from drakkar.config import CacheConfig, CacheExchangeConfig, DrakkarConfig, UIConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -120,7 +120,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return make_ui_config(enabled=True, port=8080)
+    return UIConfig(enabled=True, port=8080)
 
 
 # ---------------------------------------------------------------------------

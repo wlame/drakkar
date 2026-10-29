@@ -22,13 +22,14 @@ from drakkar.config import (
     DrakkarConfig,
     KafkaSinkConfig,
     PostgresConnectionConfig,
+    UIConfig,
     WebClientConfig,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_config_reference import SECRET_MASK
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -148,7 +149,7 @@ class TestShape:
         }
 
     async def test_requires_auth_when_token_configured(self):
-        ui_config = make_ui_config(enabled=True, port=8080, auth_token='top-secret')
+        ui_config = UIConfig(enabled=True, port=8080, auth_token='top-secret')
         recorder = AsyncMock(spec=EventRecorder)
         recorder._db = None
         recorder.file_reader_db = None

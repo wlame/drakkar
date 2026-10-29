@@ -744,8 +744,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
         The history search never touches the worker's main loop. With
         ``postgres`` it reads the events table rows of the worker's own
-        cluster on this loop, and a failed or timed-out search answers 503;
-        otherwise it reads the sealed files in a thread.
+        cluster on this loop, and a failed or timed-out search answers 503.
+        With ``sqlite`` it reads the sealed files in a thread. With the
+        recorder off (``none``) it reads no folder and no table and answers
+        the memory rows.
         """
         if history and recorder.persistence == PERSISTENCE_POSTGRES and recorder.postgres_settings is not None:
             return await _trace_postgres_history(recorder.postgres_settings, partition, offset)

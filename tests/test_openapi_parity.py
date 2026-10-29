@@ -24,11 +24,11 @@ import jsonschema
 import yaml
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, RecorderConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_openapi import SPEC_PATH
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 _HTTP_METHODS = {'get', 'post', 'put', 'delete', 'patch'}
 
@@ -133,13 +133,13 @@ def _app_routes(app) -> set[tuple[str, str]]:
 
 def _stub_app():
     recorder = AsyncMock(spec=EventRecorder)
-    recorder.config = make_ui_config()
+    recorder.config = UIConfig()
     app = MagicMock()
     app._worker_id = 'parity-worker'
     app._cluster_name = ''
     app._start_time = time.monotonic()
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
-    return create_ui_app(make_ui_config(), recorder, app)
+    return create_ui_app(UIConfig(), recorder, app)
 
 
 def test_served_routes_equal_spec():
@@ -181,7 +181,7 @@ async def test_api_docs_page_propagates_token():
 
 async def test_api_docs_gated_when_token_configured():
     recorder = AsyncMock(spec=EventRecorder)
-    cfg = make_ui_config(auth_token='secret-123')
+    cfg = UIConfig(auth_token='secret-123')
     recorder.config = cfg
     app = MagicMock()
     app._worker_id = 'parity-worker'
@@ -207,7 +207,7 @@ async def test_framework_openapi_route_is_not_served():
     route may serve the contract.
     """
     recorder = AsyncMock(spec=EventRecorder)
-    cfg = make_ui_config(auth_token='secret-123')
+    cfg = UIConfig(auth_token='secret-123')
     recorder.config = cfg
     app = MagicMock()
     app._worker_id = 'parity-worker'
@@ -268,7 +268,7 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
             ],
         }
     )
-    cfg = make_ui_config(timeline=timeline_cfg, docs=docs_cfg)
+    cfg = UIConfig(timeline=timeline_cfg, docs=docs_cfg)
 
     # A single shared in-memory connection standing in for both the writer
     # and reader handles, same pattern as the debug-server route tests —
@@ -364,7 +364,7 @@ async def test_timeline_events_payload_matches_schema():
     )
     await db.commit()
 
-    cfg = make_ui_config()
+    cfg = UIConfig()
     recorder = AsyncMock(spec=EventRecorder)
     recorder._db = db
     recorder.file_reader_db = db
@@ -416,7 +416,7 @@ async def test_archives_payload_matches_schema(tmp_path):
     with gzip.open(folder / name, 'wb') as f:
         f.write(b'archived-bytes')
 
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     recorder.storage_dir = str(tmp_path / 'storage')
@@ -480,7 +480,7 @@ async def test_workers_payload_matches_schema():
                 peer('w-unknown', 'search', {'cache': {}}),
             ]
 
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -533,7 +533,7 @@ async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch
 
     monkeypatch.setattr(UIDeps, 'recorder_select', unavailable_read)
 
-    cfg = make_ui_config()
+    cfg = UIConfig()
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -560,7 +560,7 @@ async def test_databases_payload_matches_schema(tmp_path):
     schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
     storage = tmp_path / 'storage'
     storage.mkdir()
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     recorder = EventRecorder(
         RecorderConfig(flush_interval='60s'),
         worker_name='schema-worker',

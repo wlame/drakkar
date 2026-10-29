@@ -23,12 +23,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig, RecorderConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 LIVE_NAME = 'w-1-2026-10-14__09_00_00.db'
 
@@ -45,7 +45,7 @@ def _live_file(path, events: int) -> sqlite3.Connection:
 
 
 def _client(tmp_path, *, memory_only: bool = False) -> tuple[AsyncClient, EventRecorder]:
-    config = make_ui_config(enabled=True, port=8080)
+    config = UIConfig(enabled=True, port=8080)
     recorder = EventRecorder(
         RecorderConfig(),
         worker_name='w-1',
@@ -188,7 +188,7 @@ def _drakkar_config() -> DrakkarConfig:
 def _client_of(rec: EventRecorder) -> AsyncClient:
     drakkar_app = MagicMock()
     drakkar_app._config = _drakkar_config()
-    app = create_ui_app(make_ui_config(), rec, drakkar_app)
+    app = create_ui_app(UIConfig(), rec, drakkar_app)
     return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
 
 

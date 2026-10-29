@@ -537,8 +537,8 @@ This worker's own files (the live recorder file, the cache file, the crash marke
 
 ```yaml
 storage:
-  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = no own files, and
-                                   # recorder.provider sqlite then fails the load. env: DK_STORAGE__DIR
+  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = no own files; with
+                                   # recorder.enabled and provider sqlite the load fails. env: DK_STORAGE__DIR
   shared_dir: ''                   # '' = the same folder as dir (one host). env: DK_STORAGE__SHARED_DIR
 ```
 

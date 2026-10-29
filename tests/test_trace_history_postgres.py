@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig, PostgresConnectionConfig, RecorderConfig, ResilienceConfig
+from drakkar.config import DrakkarConfig, PostgresConnectionConfig, RecorderConfig, ResilienceConfig, UIConfig
 from drakkar.providers.postgres import RECORDER_STATEMENT_TEMPLATES, render_recorder
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
@@ -30,7 +30,7 @@ from drakkar.recorder.schema import EVENT_COLUMNS
 from drakkar.uiserver import routes_debug
 from drakkar.uiserver.routes_debug import create_debug_router
 from drakkar.uiserver.server import UIDeps
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 WORKER = 'w-1'
@@ -387,7 +387,7 @@ def _drakkar_app() -> MagicMock:
 
 def _client(rec: EventRecorder, clock: FakeClock | None = None) -> AsyncClient:
     """A client of the debug routes alone, with the rate limit of the failure line on ``clock``."""
-    deps = UIDeps(make_ui_config(), rec, _drakkar_app())
+    deps = UIDeps(UIConfig(), rec, _drakkar_app())
     if clock is not None:
         deps.postgres_read_log = RateLimitedLog(clock)
     app = FastAPI()

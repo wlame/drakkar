@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, UIDocsConfig
+from drakkar.config import DrakkarConfig, UIConfig, UIDocsConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 SITE_FILES = {
     'index.html': b'<html><body>Docs home</body></html>',
@@ -49,7 +49,7 @@ def secret_outside(tmp_path) -> Path:
 def make_docs_app(tmp_path, site_dir: str | None = None, auth_token: str = ''):
     """Build a UI app whose ``ui.docs.site_dir`` is ``site_dir`` (or unset)."""
     docs = UIDocsConfig(site_dir=site_dir) if site_dir is not None else UIDocsConfig()
-    cfg = make_ui_config(enabled=True, port=8080, auth_token=auth_token, docs=docs)
+    cfg = UIConfig(enabled=True, port=8080, auth_token=auth_token, docs=docs)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -244,7 +244,7 @@ async def test_docs_unconfigured_keeps_the_hint_404_with_a_bundle_present(tmp_pa
     from tests.test_uihost import BUNDLE_FILES, seed_cache
 
     ui_root = seed_cache(tmp_path, 'v1.0.0')
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()
@@ -266,7 +266,7 @@ async def test_spa_still_owns_non_docs_paths(tmp_path, docs_site):
 
     ui_root = seed_cache(tmp_path, 'v1.0.0')
     docs = UIDocsConfig(site_dir=str(docs_site))
-    cfg = make_ui_config(enabled=True, port=8080, docs=docs)
+    cfg = UIConfig(enabled=True, port=8080, docs=docs)
     recorder = AsyncMock(spec=EventRecorder)
     recorder.config = cfg
     app = MagicMock()

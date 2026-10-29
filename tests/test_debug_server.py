@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from drakkar.annotations import Annotator
-from drakkar.config import DrakkarConfig, RecorderConfig, TimelineEventType, UITimelineConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, TimelineEventType, UIConfig, UITimelineConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import PeerView
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -29,7 +29,7 @@ from drakkar.uiserver.server import (
     origin_allowed,
     worker_group,
 )
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 TEST_IDENTITY = WorkerIdentity(
     worker='test-worker',
@@ -216,7 +216,7 @@ def mock_app():
 
 @pytest.fixture
 def debug_config():
-    return make_ui_config(enabled=True, port=8080)
+    return UIConfig(enabled=True, port=8080)
 
 
 @pytest.fixture
@@ -318,7 +318,7 @@ class TestBuildPrometheusLinks:
     async def test_empty_prometheus_url_omits_the_links_key(self, mock_recorder, mock_app):
         """Key presence is the feature flag — an unconfigured Prometheus
         must not produce an empty ``links`` object for the UI to render."""
-        cfg = make_ui_config(enabled=True, port=8080, prometheus_url='')
+        cfg = UIConfig(enabled=True, port=8080, prometheus_url='')
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
@@ -330,7 +330,7 @@ class TestBuildPrometheusLinks:
         assert 'links' not in resp.json()
 
     async def test_prometheus_url_set_returns_links(self, mock_recorder, mock_app):
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             prometheus_url='http://prom:9090',
@@ -349,7 +349,7 @@ class TestBuildPrometheusLinks:
 
     async def test_prometheus_links_card_keys(self, mock_recorder, mock_app):
         """Verify _build_prometheus_links returns expected card/worker/cluster keys."""
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             prometheus_url='http://prom:9090',
@@ -375,7 +375,7 @@ class TestBuildPrometheusLinks:
 
     async def test_prometheus_links_no_cluster_label(self, mock_recorder, mock_app):
         """When prometheus_cluster_label is empty, cluster_links should be empty."""
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             prometheus_url='http://prom:9090',
@@ -538,7 +538,7 @@ class TestMemoryOnlyRecorderServesNoFiles:
     @staticmethod
     def _app_in(cwd, monkeypatch, mock_recorder, mock_app):
         monkeypatch.chdir(cwd)
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.storage_dir = ''
         return ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
 
@@ -584,7 +584,7 @@ class TestDownloadContainment:
         db_dir.mkdir()
         os.symlink(outside / 'secrets.db', db_dir / 'escape.db')
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.storage_dir = str(db_dir)
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1465,7 +1465,7 @@ async def test_api_workers_unclustered_at_end(client, mock_app):
 @pytest.fixture
 async def debug_client(tmp_path, mock_recorder, mock_app):
     """Client with a real db_dir for debug database endpoints."""
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.storage_dir = str(tmp_path)
     mock_recorder.shared_dir = str(tmp_path)
     fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -1502,7 +1502,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
         db.commit()
         db.close()
 
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.storage_dir = str(tmp_path / 'storage')
     mock_recorder.shared_dir = str(tmp_path)
     fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -1553,7 +1553,7 @@ def _write_merge_sources(tmp_path) -> None:
 
 async def test_api_debug_merge_twice_in_one_second_keeps_both_results(tmp_path, mock_recorder, mock_app):
     _write_merge_sources(tmp_path)
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.storage_dir = str(tmp_path / 'storage')
     mock_recorder.shared_dir = str(tmp_path)
     transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
@@ -1580,7 +1580,7 @@ async def test_api_debug_merge_failure_answers_500_and_leaves_nothing(tmp_path, 
         raise sqlite3.OperationalError('disk I/O error')
 
     monkeypatch.setattr(merge_module, 'merge_databases', failing_merge)
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.storage_dir = str(tmp_path / 'storage')
     mock_recorder.shared_dir = str(tmp_path)
     transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
@@ -1749,7 +1749,7 @@ class TestApiEvents:
             )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
 
         # Same connection for read and write paths in this unit-test
         # shim — the dedicated reader connection that the real recorder
@@ -1872,7 +1872,7 @@ class TestApiRecentTasks:
         )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
 
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
@@ -2054,7 +2054,7 @@ class TestApiTimelineEvents:
             )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
@@ -2146,7 +2146,7 @@ class TestApiRecentTasksDepthAndWindow:
         kwargs = {'enabled': True, 'port': 8080}
         if timeline is not None:
             kwargs['timeline'] = timeline
-        cfg = make_ui_config(**kwargs)
+        cfg = UIConfig(**kwargs)
 
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
@@ -2552,7 +2552,7 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
 
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
@@ -2586,7 +2586,7 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
 
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
@@ -2608,7 +2608,7 @@ class TestPrometheusWorkerLabel:
     """Cover _build_prometheus_links with prometheus_worker_label set (line 142)."""
 
     async def test_prometheus_worker_label_used_in_links(self, mock_recorder, mock_app):
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             prometheus_url='http://prom:9090',
@@ -2664,7 +2664,7 @@ class TestAuthToken:
     ]
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2675,7 +2675,7 @@ class TestAuthToken:
                 assert resp.status_code == 401, f'{method} {path} should require auth'
 
     async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2686,7 +2686,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2696,7 +2696,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_archives_list_accepts_bearer_header(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2706,7 +2706,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_archives_list_accepts_query_param(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2716,7 +2716,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2726,7 +2726,7 @@ class TestAuthToken:
             assert resp.status_code == 401
 
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2743,7 +2743,7 @@ class TestAuthToken:
         gate: without a token they must 401 rather than reveal whether a
         bundle exists.
         """
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2758,7 +2758,7 @@ class TestAuthToken:
     async def test_probes_stay_public_with_token_configured(self, mock_recorder, mock_app):
         """/healthz and /readyz must remain unauthenticated — Kubernetes
         probes cannot send bearer tokens."""
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2770,7 +2770,7 @@ class TestAuthToken:
             assert resp.status_code in (200, 503)  # readiness depends on mock state
 
     async def test_ui_routes_open_when_no_token_configured(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2781,7 +2781,7 @@ class TestAuthToken:
                 assert resp.status_code != 401, f'{path} should be open when no token is configured'
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2807,7 +2807,7 @@ class TestAuthToken:
         ``/debug/download/{filename}``).
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
@@ -2826,7 +2826,7 @@ class TestAuthToken:
 
     async def test_merge_disabled_returns_403_naming_the_config_key(self, tmp_path, mock_recorder, mock_app):
         """``ui.merge_enabled=false`` closes the one UI endpoint that writes files."""
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='', merge_enabled=False)
+        cfg = UIConfig(enabled=True, port=8080, auth_token='', merge_enabled=False)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2843,7 +2843,7 @@ class TestAuthToken:
         your JSON was bad", and the request body would be parsed on an
         endpoint the operator has switched off.
         """
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='', merge_enabled=False)
+        cfg = UIConfig(enabled=True, port=8080, auth_token='', merge_enabled=False)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2859,7 +2859,7 @@ class TestAuthToken:
     async def test_probe_disabled_returns_403_naming_the_config_key(self, mock_recorder, _probe_mock_app):
         """``ui.probe_enabled=false`` closes the endpoint that runs caller bytes."""
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='', probe_enabled=False)
+        cfg = UIConfig(enabled=True, port=8080, auth_token='', probe_enabled=False)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
@@ -2877,7 +2877,7 @@ class TestAuthToken:
         the same as consent to burn executor slots on demand.
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123', probe_enabled=False)
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123', probe_enabled=False)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
@@ -2893,7 +2893,7 @@ class TestAuthToken:
     async def test_probe_and_merge_are_enabled_by_default(self, tmp_path, mock_recorder, _probe_mock_app):
         """Defaults preserve behaviour — the gates are opt-in, not opt-out."""
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         assert cfg.probe_enabled is True
         assert cfg.merge_enabled is True
         mock_recorder.config = RecorderConfig()
@@ -2922,7 +2922,7 @@ class TestAuthToken:
         actually send and funnels through starlette's header decoder the
         same way a real request would.
         """
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -2945,7 +2945,7 @@ class TestAuthToken:
         itself is non-ASCII, every auth check must fail-closed with 401,
         not explode into 500s that fill logs and trip 5xx alerting.
         """
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='non-ascïi')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='non-ascïi')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -3002,7 +3002,7 @@ class TestWebSocketAuth:
 
         monkeypatch.setattr(ds.secrets, 'compare_digest', capturing_compare)
 
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.storage_dir = '/tmp'
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
@@ -3035,7 +3035,7 @@ class TestWebSocketAuth:
         """WS connect without token while ``auth_token`` is set is rejected."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3051,7 +3051,7 @@ class TestWebSocketAuth:
         """WS with ``Origin`` outside ``allowed_ws_origins`` is closed 4403."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             auth_token='secret-123',
@@ -3078,7 +3078,7 @@ class TestWebSocketAuth:
         """
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3097,7 +3097,7 @@ class TestWebSocketAuth:
         worker served, so the handshake is cross-origin by design. It must
         still be accepted on an untokened worker reached over the network.
         """
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3115,7 +3115,7 @@ class TestWebSocketAuth:
 
     def test_ws_without_a_token_accepts_a_same_origin_page(self, mock_recorder, mock_app):
         """The served SPA — the normal case — must keep working."""
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3133,7 +3133,7 @@ class TestWebSocketAuth:
 
     def test_ws_correct_token_and_origin_accepted(self, mock_recorder, mock_app):
         """WS with valid token + allowlisted origin is accepted and streams events."""
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             auth_token='secret-123',
@@ -3156,7 +3156,7 @@ class TestWebSocketAuth:
 
     def test_ws_no_auth_configured_still_works(self, mock_recorder, mock_app):
         """Default dev workflow: ``auth_token=''`` → connection accepted without token."""
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3171,7 +3171,7 @@ class TestWebSocketAuth:
 
     def test_ws_same_origin_fallback_accepted(self, mock_recorder, mock_app):
         """With ``auth_token`` set + empty allowlist, Origin's host must equal Host."""
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             auth_token='secret-123',
@@ -3198,7 +3198,7 @@ class TestWebSocketAuth:
         """Empty allowlist + mismatched Origin Host → 4403."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             auth_token='secret-123',
@@ -3228,7 +3228,7 @@ class TestWebSocketAuth:
         """
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         real_recorder = EventRecorder(RecorderConfig(), persistence='sqlite', storage_dir='/tmp')
         real_recorder._running = True
         fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
@@ -3249,7 +3249,7 @@ class TestWebSocketAuth:
         comparing. Without the normalization, this handshake would be closed
         with 4403 even though the two headers point to the same origin.
         """
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             auth_token='secret-123',
@@ -3293,74 +3293,74 @@ class TestOriginAllowedHelper:
 
     def test_absent_origin_accepted(self):
         """Non-browser clients omit Origin — accept (token was already checked)."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_absent_origin_accepted_even_with_allowlist(self):
         """Absent Origin is accepted regardless of allowlist — we err on the
         side of letting authenticated tools connect rather than rejecting a
         missing header a malicious browser couldn't omit anyway."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_allowlist_match_accepted(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_case_insensitive(self):
         """Uppercase Origin must match lowercase allowlist entry."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://OPS.INTERNAL', 'ignored', cfg) is True
 
     def test_allowlist_default_port_ignored(self):
         """Browsers strip :443 from https Origin but operators may write it
         explicitly in the allowlist. Normalization must treat the two forms
         as equal."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
         assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_miss_rejected(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://evil.com', 'ignored', cfg) is False
 
     def test_same_origin_exact_match(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://testserver', 'testserver', cfg) is True
 
     def test_same_origin_case_insensitive(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://Example.com', 'example.com', cfg) is True
 
     def test_same_origin_default_port_on_origin_missing_on_host(self):
         """Browser may send ``Origin: http://example.com`` (no port) while
         the Host header is ``example.com:80``. Normalization collapses both
         to ``(example.com, None)`` so the compare succeeds."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com', 'example.com:80', cfg) is True
 
     def test_same_origin_default_port_on_host_missing_on_origin(self):
         """Inverse of the above: ``Origin: http://example.com:80`` + Host
         ``example.com`` must also match."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com:80', 'example.com', cfg) is True
 
     def test_same_origin_non_default_port_mismatch_rejected(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com:8080', 'example.com:9090', cfg) is False
 
     def test_same_origin_ipv6_host_bracketed(self):
         """RFC 7230 allows ``Host: [::1]:8080`` for IPv6 literals."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://[::1]:8080', '[::1]:8080', cfg) is True
 
     def test_same_origin_host_mismatch_rejected(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('https://evil.com', 'testserver', cfg) is False
 
     def test_malformed_origin_rejected(self):
         """Garbage in the Origin header must not cause the helper to raise —
         return False so the endpoint closes the connection cleanly."""
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         # No scheme → urlparse returns empty hostname → mismatch
         assert origin_allowed('not-a-url', 'testserver', cfg) is False
 
@@ -3372,19 +3372,19 @@ class TestOriginAllowedHelper:
         ``ws://127.0.0.1:8080/ws`` from their browser and read the live task
         stream. No peer worker is ever at the browser's own loopback.
         """
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=[])
         assert origin_allowed('https://news.example.com', '127.0.0.1:8080', cfg) is False
         assert origin_allowed('https://news.example.com', 'localhost:8080', cfg) is False
         assert origin_allowed('https://news.example.com', '[::1]:8080', cfg) is False
 
     def test_untokened_same_origin_accepted(self):
         """The served SPA, which is the normal case."""
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=[])
         assert origin_allowed('http://127.0.0.1:8080', '127.0.0.1:8080', cfg) is True
 
     def test_untokened_absent_origin_accepted(self):
         """curl / websocat / the Python websockets lib send no Origin."""
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=[])
         assert origin_allowed(None, '127.0.0.1:8080', cfg) is True
 
     def test_untokened_cluster_peer_across_hosts_accepted(self):
@@ -3392,7 +3392,7 @@ class TestOriginAllowedHelper:
         serves opens a socket to each of its peers. Rejecting every
         cross-origin handshake would break it.
         """
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=[])
         assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is True
 
     def test_untokened_cluster_peer_co_located_on_loopback_accepted(self):
@@ -3400,13 +3400,13 @@ class TestOriginAllowedHelper:
         ports, so the cluster view there is loopback-to-loopback. That is a
         peer, not a web page reaching into the machine.
         """
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=[])
         assert origin_allowed('http://127.0.0.1:8080', '127.0.0.1:8081', cfg) is True
         assert origin_allowed('http://localhost:8080', '127.0.0.1:8081', cfg) is True
 
     def test_untokened_allowlist_still_decides_when_set(self):
         """An operator who names origins gets a strict allowlist, token or not."""
-        cfg = make_ui_config(auth_token='', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://ops.internal', '127.0.0.1:8080', cfg) is True
         assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is False
 
@@ -3414,7 +3414,7 @@ class TestOriginAllowedHelper:
         """With a token the operator opted into a closed UI; the allowlist is
         how they name exceptions. Unchanged behaviour.
         """
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is False
 
 
@@ -3442,7 +3442,7 @@ class TestApiPeriodicTasks:
         await db.executescript(SCHEMA_EVENTS)
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
@@ -3484,7 +3484,7 @@ class TestApiPeriodicTasks:
         )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
@@ -3555,7 +3555,7 @@ class TestApiLabelTrace:
         )
         await db.commit()
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
@@ -3617,7 +3617,7 @@ class TestApiLabelTrace:
         db = await aiosqlite.connect(':memory:')
         await db.executescript(SCHEMA_EVENTS)
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder._db = db
         mock_recorder.file_reader_db = db
         mock_recorder.flush = AsyncMock()
@@ -4709,7 +4709,7 @@ async def test_healthz_returns_200_without_auth(debug_config, mock_recorder, pro
     Kubernetes probes have no way to supply a bearer token, so ``/healthz``
     must accept anonymous requests regardless of ``config.auth_token``.
     """
-    cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-token')
+    cfg = UIConfig(enabled=True, port=8080, auth_token='secret-token')
     mock_recorder.storage_dir = '/tmp'
     fastapi_app = create_ui_app(cfg, mock_recorder, probe_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4852,7 +4852,7 @@ async def test_readyz_ignores_supplied_auth_token(probe_client, probe_app):
 
 async def test_readyz_with_auth_token_configured_still_accessible(debug_config, mock_recorder, probe_app):
     """When an auth_token is configured globally, /readyz remains unauthenticated."""
-    cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-token')
+    cfg = UIConfig(enabled=True, port=8080, auth_token='secret-token')
     probe_app.is_ready = True
     probe_app.sink_manager.all_connected.return_value = True
     probe_app.sink_manager.disconnected_sink_names.return_value = []
@@ -4883,7 +4883,7 @@ async def test_dispatch_bounded_returns_default_on_main_loop_timeout(mock_record
     stuck_loop = asyncio.new_event_loop()  # real loop, never run — wedged
     try:
         mock_app.main_loop = stuck_loop
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         deps = UIDeps(config=cfg, recorder=mock_recorder, drakkar_app=mock_app)
 
         async def _never_answers():
@@ -5002,18 +5002,18 @@ class TestOriginAllowedMalformedUrls:
     treat those as a rejection (or skip the bad allowlist entry), not crash."""
 
     def test_malformed_origin_with_allowlist_rejected(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('http://[::1', 'testserver', cfg) is False
 
     def test_malformed_allowlist_entry_skipped_but_valid_entry_matches(self):
-        cfg = make_ui_config(
+        cfg = UIConfig(
             auth_token='secret',
             allowed_ws_origins=['http://[::1', 'https://ops.internal'],
         )
         assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_malformed_origin_same_origin_fallback_rejected(self):
-        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        cfg = UIConfig(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://[::1', 'testserver', cfg) is False
 
 
@@ -5052,7 +5052,7 @@ class TestUIServerBodyLimit:
     async def test_oversized_declared_body_is_rejected_before_buffering(self, tmp_path, mock_recorder, mock_app):
         from drakkar.uiserver.server import MAX_BODY_BYTES
 
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.storage_dir = str(tmp_path)
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -5065,7 +5065,7 @@ class TestUIServerBodyLimit:
         assert resp.json()['max_bytes'] == MAX_BODY_BYTES
 
     async def test_malformed_content_length_is_a_400(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.storage_dir = str(tmp_path)
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -5078,7 +5078,7 @@ class TestUIServerBodyLimit:
 
     async def test_normal_requests_pass_through(self, tmp_path, mock_recorder, mock_app):
         """The middleware must not disturb ordinary traffic."""
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.storage_dir = str(tmp_path)
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:

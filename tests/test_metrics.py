@@ -945,6 +945,6 @@ def test_recorder_requeue_overflow_help_text():
     assert recorder_requeue_overflow._name == 'drakkar_recorder_requeue_overflow'
     assert recorder_requeue_overflow._documentation == (
         'Total events dropped from the tail of a full recorder queue (the intake or the file queue, '
-        'max_buffer) while a chunk was put back at its front after a failed or cancelled write. '
+        'max_buffer_rows) while a chunk was put back at its front after a failed or cancelled write. '
         'Any nonzero value indicates data loss.'
     )

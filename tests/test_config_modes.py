@@ -24,6 +24,7 @@ from drakkar.config import (
     MetricsConfig,
     RecorderConfig,
     SinksConfig,
+    UIConfig,
 )
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
@@ -37,7 +38,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
-from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 # --- Helpers ---
@@ -106,7 +107,7 @@ def make_config(**overrides) -> DrakkarConfig:
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
-        'ui': make_ui_config(enabled=False),
+        'ui': UIConfig(enabled=False),
         # Memory-only: a test that reaches startup must not create the
         # default own-files folder on the host.
         'storage': {'dir': ''},
@@ -125,13 +126,13 @@ class TestDebugModes:
     """Verify app works identically with debug on and off."""
 
     def test_app_creation_debug_disabled(self):
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         assert app._recorder is None
         assert app._ui_server is None
 
     def test_app_creation_debug_enabled_no_server_yet(self):
-        config = make_config(ui=make_ui_config(enabled=True))
+        config = make_config(ui=UIConfig(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         # recorder and debug_server are set during _async_run, not __init__
         assert app._recorder is None
@@ -139,7 +140,7 @@ class TestDebugModes:
 
     async def test_on_assign_without_recorder(self):
         """Partition assignment works when debug is disabled (recorder=None)."""
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         wire_kafka_source(app, MagicMock())
@@ -154,7 +155,7 @@ class TestDebugModes:
 
     async def test_on_revoke_without_recorder(self):
         """Partition revocation works when debug is disabled."""
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         wire_kafka_source(app)
@@ -167,7 +168,7 @@ class TestDebugModes:
 
     async def test_handle_commit_without_recorder(self):
         """Offset commits work when debug is disabled."""
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         wire_kafka_source(app)
 
@@ -176,7 +177,7 @@ class TestDebugModes:
 
     async def test_handle_collect_without_recorder(self):
         """Sink delivery works when debug is disabled."""
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         _setup_app_sinks(app)
 
@@ -188,7 +189,7 @@ class TestDebugModes:
 
     async def test_shutdown_without_debug(self):
         """Shutdown completes cleanly when debug is disabled."""
-        config = make_config(ui=make_ui_config(enabled=False))
+        config = make_config(ui=UIConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         wire_kafka_source(app)
         _setup_app_sinks(app)
@@ -203,7 +204,7 @@ class TestDebugModes:
 
     async def test_shutdown_with_debug_mocked(self):
         """Shutdown stops recorder and debug_server if they exist."""
-        config = make_config(ui=make_ui_config(enabled=True))
+        config = make_config(ui=UIConfig(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         wire_kafka_source(app)
         _setup_app_sinks(app)
@@ -659,7 +660,7 @@ class TestCombinedModes:
         """Full message -> arrange -> execute -> collect -> commit with
         debug disabled and metrics disabled."""
         config = make_config(
-            ui=make_ui_config(enabled=False),
+            ui=UIConfig(enabled=False),
             metrics=MetricsConfig(enabled=False),
         )
         handler = CollectHandler()
@@ -694,7 +695,7 @@ class TestCombinedModes:
                 window_size=1,
                 max_retries=0,
             ),
-            ui=make_ui_config(enabled=False),
+            ui=UIConfig(enabled=False),
             metrics=MetricsConfig(enabled=False),
         )
         handler = CollectHandler()
@@ -729,7 +730,7 @@ class TestCombinedModes:
                 task_timeout_seconds=10,
                 max_retries=0,
             ),
-            ui=make_ui_config(enabled=False),
+            ui=UIConfig(enabled=False),
         )
         handler = RetryHandler()  # asks for RETRY but max_retries=0 blocks it
         app = DrakkarApp(handler=handler, config=config)
@@ -867,7 +868,7 @@ class TestConfigSummary:
         assert summary.startswith('[?]')
 
     def test_summary_debug_on(self):
-        cfg = make_config(ui=make_ui_config(enabled=True, port=8080))
+        cfg = make_config(ui=UIConfig(enabled=True, port=8080))
         summary = cfg.config_summary(worker_id='w')
         assert 'ui=on:8080' in summary
 

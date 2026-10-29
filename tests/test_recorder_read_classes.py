@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig, RecorderConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
@@ -21,7 +21,7 @@ from drakkar.recorder.memstore import MemoryCoverage
 from drakkar.recorder.queries import ReadBound, ReadClass, pick_source, still_covered
 from drakkar.uiserver import server as server_mod
 from drakkar.uiserver.server import UIDeps, create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 WORKER = 'w-1'
 LARGE_WINDOW_SECONDS = 86_400
@@ -128,12 +128,12 @@ def _drakkar_app() -> MagicMock:
 
 
 def _client(rec: EventRecorder) -> AsyncClient:
-    app = create_ui_app(make_ui_config(), rec, _drakkar_app())
+    app = create_ui_app(UIConfig(), rec, _drakkar_app())
     return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
 
 
 def _deps(rec: EventRecorder) -> UIDeps:
-    return UIDeps(make_ui_config(), rec, _drakkar_app())
+    return UIDeps(UIConfig(), rec, _drakkar_app())
 
 
 def _consumed(offset: int, ts: float | None = None) -> dict:

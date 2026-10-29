@@ -15,7 +15,7 @@ from drakkar import partition as partition_module
 from drakkar.cache.changes import parse_changes_query
 from drakkar.cache.models import _now_ms
 from drakkar.cache.sql import CHANGES_FIELDS, OWN_MARK_SQL, SCHEMA_CACHE_ENTRIES, changes_query
-from drakkar.config import CacheExchangeConfig, UIConfig
+from drakkar.config import CacheExchangeConfig
 from drakkar.fleet.service import PeerView
 from drakkar.models import (
     ExecutorError,
@@ -35,11 +35,6 @@ def kafka_connections(**settings: Any) -> dict[str, Any]:
     connection and fails to load without it.
     """
     return {'kafka': {'main': settings}}
-
-
-def make_ui_config(**kwargs) -> UIConfig:
-    """Build a ``UIConfig`` from its keys."""
-    return UIConfig(**kwargs)
 
 
 def split_cache_overrides(overrides: dict | None) -> tuple[dict, CacheExchangeConfig]:

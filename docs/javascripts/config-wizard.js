@@ -111,11 +111,6 @@
   }
 
   /** The canonical text of a duration given in milliseconds: descending terms, no zero term. */
-  // A zero threshold prints as the number 0, the one duration with no unit.
-  function minDuration(milliseconds) {
-    return milliseconds > 0 ? durationText(milliseconds) : 0;
-  }
-
   function durationText(milliseconds) {
     var units = [['d', 86400000], ['h', 3600000], ['m', 60000], ['s', 1000], ['ms', 1]];
     var remaining = milliseconds;
@@ -126,6 +121,11 @@
       remaining -= count * unit[1];
     });
     return text || '0';
+  }
+
+  // A zero threshold prints as the number 0, the one duration with no unit.
+  function minDuration(milliseconds) {
+    return milliseconds > 0 ? durationText(milliseconds) : 0;
   }
 
   /** The YAML part that the calculator values set. */

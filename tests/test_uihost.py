@@ -32,7 +32,7 @@ from drakkar.uihost import (
     resolve,
 )
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 # ---------------------------------------------------------------------------
 # Stub GitHub server
@@ -504,7 +504,7 @@ def make_client(cfg, recorder, app, ui_root=None) -> AsyncClient:
 
 @pytest.fixture
 async def spa_client(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.config = cfg
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
@@ -568,7 +568,7 @@ async def test_spa_mode_keeps_probes_public(spa_client):
 async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
     (tmp_path / 'history' / 'main').mkdir(parents=True)
     (tmp_path / 'history' / 'main' / 'w1.db').write_bytes(b'sqlite-bytes')
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.config = cfg
     mock_recorder.storage_dir = str(tmp_path / 'storage')
     mock_recorder.shared_dir = str(tmp_path)
@@ -579,7 +579,7 @@ async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_
 
 
 async def test_spa_mode_auth_gates_pages_like_html(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
-    cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+    cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
     mock_recorder.config = cfg
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
@@ -604,7 +604,7 @@ async def test_spa_owns_every_page_path(spa_client):
 async def test_without_a_bundle_pages_report_503_and_the_api_still_answers(tmp_path, mock_recorder, mock_app):
     """No bundle is not an outage. There is no built-in HTML fallback, so
     page requests say what is missing while everything else keeps working."""
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.config = cfg
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -623,7 +623,7 @@ async def test_ui_server_resolve_ui_bundle_disabled_returns_none(tmp_path, mock_
     from drakkar.uiserver.server import UIServer
 
     mock_app._config.ui = UIConfig(release=ui_config(tmp_path, enabled=False))
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     server = UIServer(cfg, mock_recorder, mock_app)
     assert await server._resolve_ui_bundle() is None
 
@@ -633,7 +633,7 @@ async def test_ui_server_resolve_ui_bundle_enabled_resolves(tmp_path, mock_recor
 
     mock_app._config.ui = UIConfig(release=ui_config(tmp_path, repo=''))
     seed_cache(tmp_path, 'v1.0.0')
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     server = UIServer(cfg, mock_recorder, mock_app)
     bundle = await server._resolve_ui_bundle()
     assert bundle is not None

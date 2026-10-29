@@ -25,7 +25,7 @@ from drakkar.config import (
     WebClientConfig,
     load_config,
 )
-from tests.conftest import KAFKA_CONNECTION_YAML, kafka_connections, make_ui_config
+from tests.conftest import KAFKA_CONNECTION_YAML, kafka_connections
 
 # --- KafkaConnectionConfig ---
 
@@ -337,7 +337,7 @@ def test_metrics_config_rejects_invalid_port():
 
 
 def test_ui_config_defaults():
-    cfg = make_ui_config()
+    cfg = UIConfig()
     assert cfg.max_rows == 5000
 
 

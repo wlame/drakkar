@@ -16,13 +16,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, RecorderConfig
+from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import archive_file_name
 from drakkar.recorder.history import meta_path, serialize_json
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 CLUSTER = 'search'
 LIVE_NAME = 'w-1-2026-10-14__09_00_00.db'
@@ -94,7 +94,7 @@ def shared(tmp_path):
 
 def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merge_enabled: bool = True):
     """``memory_only``: no folder at all. ``shared_only``: no recorder file, a shared folder."""
-    config = make_ui_config(enabled=True, port=8080, merge_enabled=merge_enabled)
+    config = UIConfig(enabled=True, port=8080, merge_enabled=merge_enabled)
     recorder = EventRecorder(
         RecorderConfig(),
         worker_name='w-1',

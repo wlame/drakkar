@@ -16,11 +16,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, UIConsumePauseConfig
+from drakkar.config import DrakkarConfig, UIConfig, UIConsumePauseConfig
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 
 def _mock_recorder() -> AsyncMock:
@@ -55,7 +55,7 @@ def _mock_app(*, enabled: bool = True, consumer: AsyncMock | None = None) -> Mag
 
 
 def _client(app: MagicMock, ui_config=None) -> AsyncClient:
-    ui_config = ui_config or make_ui_config(enabled=True)
+    ui_config = ui_config or UIConfig(enabled=True)
     recorder = _mock_recorder()
     recorder.config = ui_config
     fastapi_app = create_ui_app(ui_config, recorder, app)
@@ -97,7 +97,7 @@ async def test_mutating_routes_403_when_disabled():
 
 
 async def test_routes_require_token_when_configured():
-    async with _client(_mock_app(), make_ui_config(enabled=True, auth_token='secret-t')) as client:
+    async with _client(_mock_app(), UIConfig(enabled=True, auth_token='secret-t')) as client:
         anonymous = await client.get('/api/v1/debug/consume-pause')
         authed = await client.get('/api/v1/debug/consume-pause', headers={'Authorization': 'Bearer secret-t'})
     assert anonymous.status_code == 401

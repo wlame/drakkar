@@ -16,6 +16,7 @@ from drakkar.config import (
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
+    UIConfig,
     load_config,
 )
 from drakkar.handler import BaseDrakkarHandler
@@ -27,8 +28,6 @@ from drakkar.kafka_security import (
     validate_client_config,
 )
 from drakkar.models import ExecutorTask
-
-from .conftest import make_ui_config
 
 
 class _SecurityProbeHandler(BaseDrakkarHandler):
@@ -367,7 +366,7 @@ def _app_with(consumer_security: KafkaSecurityConfig, sink_config: KafkaSinkConf
         sinks=SinksConfig(kafka={'out': sink_config}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
-        ui=make_ui_config(enabled=False),
+        ui=UIConfig(enabled=False),
     )
     return DrakkarApp(handler=_SecurityProbeHandler(), config=config)
 

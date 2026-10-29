@@ -886,7 +886,7 @@ recorder_requeue_overflow = Counter(
     'drakkar_recorder_requeue_overflow_total',
     (
         'Total events dropped from the tail of a full recorder queue (the intake '
-        'or the file queue, max_buffer) while a chunk was put back at its front '
+        'or the file queue, max_buffer_rows) while a chunk was put back at its front '
         'after a failed or cancelled write. Any nonzero value indicates data loss.'
     ),
 )
@@ -906,7 +906,7 @@ recorder_archive_bytes = Gauge(
     'drakkar_recorder_archive_bytes',
     (
         'Total size on disk of this cluster compressed recorder archives in '
-        'its history folder. Bounded by history.archive.retention_days; grows '
+        'its history folder. Bounded by recorder.archive.retention; grows '
         'without limit while that is 0.'
     ),
 )
@@ -968,8 +968,8 @@ annotations_dropped = Counter(
     (
         'Total handler annotations discarded before reaching the flight '
         'recorder, labeled by reason: oversize (payload exceeds '
-        'annotation_max_bytes), budget_exhausted (hook invocation reached '
-        'annotation_max_bytes_per_call), no_context (called outside a '
+        'recorder.annotations.max_size), budget_exhausted (hook invocation reached '
+        'recorder.annotations.max_size_per_call), no_context (called outside a '
         'framework-invoked hook), unserializable (payload failed JSON '
         'encoding). Payloads are never truncated to fit — they are dropped.'
     ),

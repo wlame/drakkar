@@ -435,7 +435,7 @@ async def test_recorder_started_logs_the_memory_fields(tmp_path):
             memory_max_bytes=16777216,
         )
     )
-    assert none_line['db_path'] == '(memory only)'
+    assert none_line['db_path'] == ''
     assert none_line['persistence'] == 'none'
     assert none_line['memory_window_seconds'] == 60
     assert none_line['memory_max_rows'] == 800

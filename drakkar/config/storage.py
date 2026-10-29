@@ -18,7 +18,7 @@ class StorageConfig(ConfigModel):
         description=(
             "Folder for this worker's own files (live recorder file, cache file, crash marker). "
             'Only this worker opens them. The worker creates it with mode 0700. Empty: no own files and '
-            'no cache file; recorder.provider sqlite then fails the load.'
+            'no cache file; with recorder.enabled and provider sqlite the load fails.'
         ),
     )
     shared_dir: str = Field(

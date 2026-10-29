@@ -21,7 +21,7 @@ import pytest
 import structlog.testing
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig, UIConfig
 from drakkar.kafka_read import (
     AliasTarget,
     KafkaReadMessage,
@@ -33,7 +33,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.uiserver import routes_kafka_read
 from drakkar.uiserver.routes_kafka_read import _warn_if_exposed_without_ui_auth
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -71,7 +71,7 @@ def _mock_app(config: DrakkarConfig | None = None) -> MagicMock:
 
 
 def _client(ui_config=None, config: DrakkarConfig | None = None) -> AsyncClient:
-    ui_config = ui_config or make_ui_config(enabled=True)
+    ui_config = ui_config or UIConfig(enabled=True)
     recorder = _mock_recorder()
     recorder.config = ui_config
     fastapi_app = create_ui_app(ui_config, recorder, _mock_app(config))
@@ -132,14 +132,14 @@ async def test_topics_served_under_v1_alias():
     ],
 )
 async def test_kafka_read_disabled_serves_403(path):
-    async with _client(make_ui_config(enabled=True, kafka_read_enabled=False)) as client:
+    async with _client(UIConfig(enabled=True, kafka_read_enabled=False)) as client:
         resp = await client.get(path)
     assert resp.status_code == 403
     assert 'ui.kafka_read_enabled' in resp.json()['error']
 
 
 async def test_kafka_read_requires_token_when_configured():
-    async with _client(make_ui_config(enabled=True, auth_token='secret-t')) as client:
+    async with _client(UIConfig(enabled=True, auth_token='secret-t')) as client:
         anonymous = await client.get('/api/v1/debug/kafka/topics')
         authed = await client.get('/api/v1/debug/kafka/topics', headers={'Authorization': 'Bearer secret-t'})
     assert anonymous.status_code == 401

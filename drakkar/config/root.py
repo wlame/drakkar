@@ -25,6 +25,7 @@ from drakkar.config.recorder import (
     RecorderConfig,
     duration_of_hours,
 )
+from drakkar.config.resilience import validate_resilience
 from drakkar.config.runtime import (
     ExecutorConfig,
     IOConfig,
@@ -199,6 +200,12 @@ class DrakkarConfig(BaseSettings):
             raise ValueError(
                 f'recorder.archive.due_after ({duration_of_hours(archive.due_after)}) must be >= {rotation_text}'
             )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_recorder_resilience(self) -> 'DrakkarConfig':
+        """Check the rules of the recorder's resilience block that span fields, naming it by its YAML path."""
+        validate_resilience('recorder.postgres.resilience', self.recorder.postgres.resilience)
         return self
 
     @model_validator(mode='after')

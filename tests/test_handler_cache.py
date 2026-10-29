@@ -41,6 +41,7 @@ from drakkar.config import (
     LoggingConfig,
     MetricsConfig,
     SinksConfig,
+    UIConfig,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -52,7 +53,7 @@ from drakkar.models import (
     PrecomputedResult,
     SourceMessage,
 )
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 # -- NoOpCache defaults ------------------------------------------------------
 
@@ -155,7 +156,7 @@ def _make_config_with_cache(
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
-        ui=make_ui_config(enabled=debug_enabled),
+        ui=UIConfig(enabled=debug_enabled),
         recorder={
             'enabled': False,
             'capture': {'events': False, 'config': False},

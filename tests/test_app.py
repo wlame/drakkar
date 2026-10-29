@@ -36,7 +36,7 @@ from drakkar.models import (
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
 from tests.archive_helpers import idle_archive_task
-from tests.conftest import kafka_connections, make_ui_config, wait_for, wire_kafka_source
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
 from tests.sink_mocks import make_message_context
 from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
@@ -1221,7 +1221,7 @@ def _captured_unauth_events(records: list[dict]) -> list[dict]:
 
 def test_warn_if_ui_unauthenticated_emits_warning(config_with_ui):
     """debug.enabled + empty auth_token emits a structured warning naming host:port."""
-    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1252,7 +1252,7 @@ def test_warn_if_ui_unauthenticated_names_the_side_effecting_endpoints(config_wi
     caller-supplied bytes and merge writes files. Each live endpoint is
     named alongside the key that closes it.
     """
-    config = config_with_ui(make_ui_config(enabled=True, auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, auth_token=''))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1274,7 +1274,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
 ):
     """An operator who already closed one endpoint isn't warned about it."""
     config = config_with_ui(
-        make_ui_config(
+        UIConfig(
             enabled=True,
             auth_token='',
             probe_enabled=probe_enabled,
@@ -1294,7 +1294,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
 
 def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui):
     """With both side-effecting endpoints closed, the read-only claim is true again."""
-    config = config_with_ui(make_ui_config(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False))
+    config = config_with_ui(UIConfig(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1305,7 +1305,7 @@ def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui)
 
 def test_warn_if_ui_unauthenticated_silent_when_token_set(config_with_ui):
     """Setting auth_token (any non-empty value) silences the unauthenticated warning."""
-    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token='secret-token'))
+    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
@@ -1315,7 +1315,7 @@ def test_warn_if_ui_unauthenticated_warns_on_loopback_too(config_with_ui):
     """Warning fires regardless of host — even on 127.0.0.1 with empty token,
     so the unauthenticated posture is always visible in logs (no host-based
     silent path that masks the same default in dev vs prod)."""
-    config = config_with_ui(make_ui_config(enabled=True, host='127.0.0.1', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, host='127.0.0.1', auth_token=''))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
@@ -1323,7 +1323,7 @@ def test_warn_if_ui_unauthenticated_warns_on_loopback_too(config_with_ui):
 
 def test_warn_if_ui_unauthenticated_silent_when_debug_disabled(config_with_ui):
     """debug.enabled=False means no debug server starts, so the warning is skipped."""
-    config = config_with_ui(make_ui_config(enabled=False, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(UIConfig(enabled=False, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
@@ -1333,7 +1333,7 @@ def test_warn_if_ui_unauthenticated_whitespace_token_treated_as_empty(config_wit
     """A token of only spaces is stripped to empty by the field validator, so
     the helper sees ``''`` and warns. This prevents a 'spaces token' from
     silently looking secured to a careless operator."""
-    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token='   '))
+    config = config_with_ui(UIConfig(enabled=True, host='0.0.0.0', auth_token='   '))
     # Pre-condition: the field validator already stripped the whitespace.
     assert config.ui.auth_token == ''
     with capture_logs() as cap:
@@ -1344,7 +1344,7 @@ def test_warn_if_ui_unauthenticated_whitespace_token_treated_as_empty(config_wit
 @pytest.mark.parametrize('host', ['127.0.0.1', 'localhost', '::1', '0.0.0.0', 'worker.internal'])
 def test_warn_if_ui_unauthenticated_host_independent(config_with_ui, host: str):
     """Warning fires for every host — auth gating is no longer host-based."""
-    config = config_with_ui(make_ui_config(enabled=True, host=host, auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, host=host, auth_token=''))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
     events = _captured_unauth_events(cap)

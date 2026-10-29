@@ -869,7 +869,7 @@ class EventRecorder(EventWriter):
         await logger.ainfo(
             'recorder_started',
             category='recorder',
-            db_path=self._db_path or '(memory only)',
+            db_path=self._db_path,
             **self._started_fields(),
         )
 
@@ -2321,7 +2321,7 @@ class EventRecorder(EventWriter):
                         await close_quietly(connection)
             raise
         try:
-            # The new file needs the config row; the memory store has it.
+            # The new file needs the config row.
             await self._write_config_to_file()
 
             if old_reader:

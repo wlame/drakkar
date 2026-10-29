@@ -29,6 +29,7 @@ from drakkar.config import (
     TimelineColorRule,
     TimelineLabels,
     TimelineRuleCondition,
+    UIConfig,
     UIDocsConfig,
     UITimelineConfig,
 )
@@ -40,7 +41,7 @@ from drakkar.recorder import queries as queries_mod
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 from tests.recorder_pg_fake import RecorderFakePostgres
 
 _INT32_MAX = 2**31 - 1
@@ -109,7 +110,7 @@ def mock_app():
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return make_ui_config(enabled=True, port=8080)
+    return UIConfig(enabled=True, port=8080)
 
 
 def make_client(cfg, recorder, app) -> AsyncClient:
@@ -126,7 +127,7 @@ async def client(debug_config, mock_recorder, mock_app):
 
 @pytest.fixture
 async def client_with_link_bases(tmp_path, mock_recorder, mock_app):
-    cfg = make_ui_config(enabled=True, port=8080, link_bases={'jira': 'https://jira.internal.example.com'})
+    cfg = UIConfig(enabled=True, port=8080, link_bases={'jira': 'https://jira.internal.example.com'})
     mock_app.config_summary = '[test-worker]'
     mock_recorder.config = RecorderConfig()
     mock_recorder.storage_dir = str(tmp_path)
@@ -153,7 +154,7 @@ async def client_with_pages(tmp_path, mock_recorder, mock_app):
         ],
     )
     mock_app.ui_pages = build_pages([page])
-    cfg = make_ui_config(enabled=True, port=8080)
+    cfg = UIConfig(enabled=True, port=8080)
     mock_recorder.config = RecorderConfig()
     mock_recorder.storage_dir = str(tmp_path)
     async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -209,7 +210,7 @@ class TestSingleAPISurface:
     async def test_download_serves_only_under_v1(self, tmp_path, mock_recorder, mock_app):
         (tmp_path / 'history' / 'main').mkdir(parents=True)
         (tmp_path / 'history' / 'main' / 'w1.db').write_bytes(b'sqlite-bytes')
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path / 'storage')
         mock_recorder.shared_dir = str(tmp_path)
@@ -228,7 +229,7 @@ class TestSingleAPISurface:
         name = archive_file_name('search-fleet', 0.0, 86400.0)
         (tmp_path / 'history' / 'search-fleet').mkdir(parents=True)
         (tmp_path / 'history' / 'search-fleet' / name).write_bytes(b'gzip-bytes')
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path / 'storage')
         mock_recorder.shared_dir = str(tmp_path)
@@ -281,7 +282,7 @@ class TestV1Auth:
     ]
 
     def _make_authed_client(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         return make_client(cfg, mock_recorder, mock_app)
@@ -771,7 +772,7 @@ class TestDownloadFilenameHardening:
         folder = tmp_path / 'history' / 'main'
         folder.mkdir(parents=True)
         (folder / bad_name).write_bytes(b'sqlite-bytes')
-        cfg = make_ui_config(enabled=True, port=8080)
+        cfg = UIConfig(enabled=True, port=8080)
         mock_recorder.config = RecorderConfig()
         mock_recorder.shared_dir = str(tmp_path)
 
@@ -901,7 +902,7 @@ class TestApiV1Identity:
         assert resp.json()['cluster'] == 'main'
 
     async def test_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_app.config_summary = '[test-worker]'
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
@@ -918,7 +919,7 @@ class TestApiV1Identity:
     async def test_identity_reports_custom_renderers_when_configured(self, tmp_path, mock_recorder, mock_app):
         renderers_path = tmp_path / 'custom-renderers.js'
         renderers_path.write_text('export default {}\n')
-        cfg = make_ui_config(enabled=True, port=8080, custom_renderers_path=str(renderers_path))
+        cfg = UIConfig(enabled=True, port=8080, custom_renderers_path=str(renderers_path))
         mock_app.config_summary = '[test-worker]'
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
@@ -952,7 +953,7 @@ class TestApiV1Identity:
             ],
             labels=TimelineLabels(tag='env', marker='urgent'),
         )
-        cfg = make_ui_config(enabled=True, port=8080, timeline=timeline_cfg)
+        cfg = UIConfig(enabled=True, port=8080, timeline=timeline_cfg)
         mock_app.config_summary = '[test-worker]'
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
@@ -1044,7 +1045,7 @@ class TestApiV1Identity:
         }
 
     async def test_identity_omits_docs_and_builtin_base_when_feature_is_off(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             link_bases={'jira': 'https://jira.internal.example.com'},
@@ -1065,7 +1066,7 @@ class TestApiV1Identity:
                 'anchors': [{'match': {'page': 'scanners'}, 'path': 'architecture/scanners/'}],
             }
         )
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             link_bases={'jira': 'https://jira.internal.example.com'},
@@ -1102,7 +1103,7 @@ class TestApiV1Pages:
         assert res.json() == []
 
     async def test_pages_endpoint_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, auth_token='secret-123')
+        cfg = UIConfig(enabled=True, port=8080, auth_token='secret-123')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -1128,7 +1129,7 @@ class TestDashboardLinks:
         assert 'links' not in resp.json()
 
     async def test_links_present_with_prometheus_url(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, prometheus_url='http://prom:9090')
+        cfg = UIConfig(enabled=True, port=8080, prometheus_url='http://prom:9090')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -1151,7 +1152,7 @@ class TestDashboardLinks:
         assert links['custom_links'] == []
 
     async def test_cluster_links_with_cluster_label(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(
+        cfg = UIConfig(
             enabled=True,
             port=8080,
             prometheus_url='http://prom:9090',
@@ -1170,7 +1171,7 @@ class TestDashboardLinks:
 
     async def test_custom_links_alone_enable_key_and_pass_verbatim(self, tmp_path, mock_recorder, mock_app):
         custom = [{'name': 'Grafana', 'url': 'http://grafana/{worker_id}'}]
-        cfg = make_ui_config(enabled=True, port=8080, custom_links=custom)
+        cfg = UIConfig(enabled=True, port=8080, custom_links=custom)
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -1183,7 +1184,7 @@ class TestDashboardLinks:
         assert links['custom_links'] == custom  # URL templates NOT expanded
 
     async def test_legacy_alias_carries_links_too(self, tmp_path, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, prometheus_url='http://prom:9090')
+        cfg = UIConfig(enabled=True, port=8080, prometheus_url='http://prom:9090')
         mock_recorder.config = RecorderConfig()
         mock_recorder.storage_dir = str(tmp_path)
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -1460,7 +1461,7 @@ async def _databases(rec: EventRecorder) -> dict:
     app = MagicMock()
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
-    async with make_client(make_ui_config(), rec, app) as c:
+    async with make_client(UIConfig(), rec, app) as c:
         resp = await c.get('/api/v1/debug/databases')
     assert resp.status_code == 200
     return resp.json()
@@ -1483,7 +1484,7 @@ async def test_download_live_defaults_to_memory_and_databases_has_one_memory_row
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
-    async with make_client(make_ui_config(), rec, app) as c:
+    async with make_client(UIConfig(), rec, app) as c:
         databases = (await c.get('/api/v1/debug/databases')).json()
         download = await c.get('/api/v1/debug/download-live')
         file_download = await c.get('/api/v1/debug/download-live', params={'source': 'file'})
@@ -1513,7 +1514,7 @@ async def test_postgres_worker_answers_live_and_label_reads_from_memory(started_
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app._config.ui.release.enabled = False
 
-    async with make_client(make_ui_config(), rec, app) as c:
+    async with make_client(UIConfig(), rec, app) as c:
         trace = (await c.get('/api/v1/debug/trace', params={'partition': 0, 'offset': 1})).json()
         by_label = (await c.get('/api/v1/debug/trace-by-label', params={'key': 'color', 'value': 'red'})).json()
         label_keys = (await c.get('/api/v1/debug/label-keys')).json()
@@ -1588,14 +1589,14 @@ async def test_databases_and_download_after_stop_answer_empty_shapes(started_rec
     # the stop): the guard answers nothing and no empty store is created.
     store = rec.memory_store
     await store.close()
-    async with make_client(make_ui_config(), rec, app) as c:
+    async with make_client(UIConfig(), rec, app) as c:
         racing = (await c.get('/api/v1/debug/databases')).json()
         racing_download = await c.get('/api/v1/debug/download-live')
     with contextlib.closing(sqlite3.connect(store.uri, uri=True)) as raw:
         assert raw.execute("SELECT name FROM sqlite_master WHERE name = 'events'").fetchall() == []
 
     await rec.stop()
-    async with make_client(make_ui_config(), rec, app) as c:
+    async with make_client(UIConfig(), rec, app) as c:
         stopped = (await c.get('/api/v1/debug/databases')).json()
         stopped_download = await c.get('/api/v1/debug/download-live')
 

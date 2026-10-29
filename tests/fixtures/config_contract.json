@@ -890,6 +890,20 @@
       "message": "periodic.election.resilience.max_backoff (1s) must be >= periodic.election.resilience.backoff (2s)"
     },
     {
+      "name": "recorder_resilience_max_backoff_below_backoff",
+      "yaml": {
+        "recorder": {
+          "postgres": {
+            "resilience": {
+              "backoff": "2s",
+              "max_backoff": "1s"
+            }
+          }
+        }
+      },
+      "message": "recorder.postgres.resilience.max_backoff (1s) must be >= recorder.postgres.resilience.backoff (2s)"
+    },
+    {
       "name": "postgres_pool_max_below_min",
       "yaml": {
         "connections": {

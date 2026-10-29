@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, UIConfig
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections, make_ui_config
+from tests.conftest import kafka_connections
 
 PEER_PAGE = 'http://10.0.0.2:8080'
 FANOUT = ['/api/v1/debug/trace', '/api/v1/debug/trace-by-label', '/api/v1/debug/databases']
@@ -25,7 +25,7 @@ def _client(*, token: str = '', allowed: list[str] | None = None) -> AsyncClient
     drakkar_app = MagicMock()
     drakkar_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     drakkar_app._config.ui.release.enabled = False
-    config = make_ui_config(enabled=True, port=8080, auth_token=token, allowed_ws_origins=allowed or [])
+    config = UIConfig(enabled=True, port=8080, auth_token=token, allowed_ws_origins=allowed or [])
     # No memory store: the databases answer has no memory row.
     recorder = MagicMock(storage_dir='', shared_dir='', db_path='', has_file=False)
     recorder.memory_coverage.return_value = None
