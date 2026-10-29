@@ -7,8 +7,6 @@ peers. Neither is needed for the pipeline itself: sources, executor, sinks
 and offset commits work the same with both switched off.
 """
 
-from typing import Literal
-
 from pydantic import BaseModel, Field, model_validator
 
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
@@ -27,69 +25,6 @@ MIN_OFFLINE_AFTER_SECONDS = 10
 CONSUL_MAX_OFFLINE_AFTER_SECONDS = 86_400
 
 
-class StaticPeerConfig(BaseModel):
-    """One peer of the ``static`` registry provider."""
-
-    name: str = Field(min_length=1, description='Worker name of the peer.')
-    cluster: str = Field(default='', description='Cluster name of the peer; empty for none.')
-    url: str = Field(min_length=1, description='Base URL of the peer UI server, for example http://10.0.3.17:8080/.')
-
-
-class StaticRegistryConfig(BaseModel):
-    """Settings of the ``static`` registry provider."""
-
-    peers: list[StaticPeerConfig] = Field(
-        default_factory=list,
-        description='Fixed list of peers. Their liveness is unknown, so the workers list shows them as neither online nor offline.',
-    )
-
-
-class FilesystemRegistryConfig(BaseModel):
-    """Settings of the ``filesystem`` registry provider."""
-
-    dir: str = Field(
-        default='',
-        description=(
-            'Folder for the worker cards. Empty means <shared.dir>/fleet (or <storage.dir>/fleet '
-            'when shared.dir is empty). A folder set here that cannot be created or written fails startup.'
-        ),
-    )
-
-
-class ConsulRegistryConfig(BaseModel):
-    """Settings of the ``consul`` registry provider."""
-
-    mode: Literal['publish', 'catalog'] = Field(
-        default='publish',
-        description=(
-            'publish: every worker stores its own card in Consul under a session and reads the cards of '
-            'its peers. catalog is reserved for a later release; this release ships publish only.'
-        ),
-    )
-    service_name: str = Field(
-        default='drakkar',
-        min_length=1,
-        description=(
-            'Name of the Consul service that lists the workers in catalog mode, which a later release adds. '
-            'Unused in this release.'
-        ),
-    )
-
-
-class RedisRegistryConfig(BaseModel):
-    """Settings of the ``redis`` registry provider; none yet.
-
-    The key prefix comes from the Redis connection named by ``fleet.registry.connection``.
-    """
-
-
-class PostgresRegistryConfig(BaseModel):
-    """Settings of the ``postgres`` registry provider; none yet.
-
-    The schema comes from the Postgres connection named by ``fleet.registry.connection``.
-    """
-
-
 class FleetRegistryConfig(BaseModel):
     """The registry of worker cards."""
 
@@ -97,8 +32,8 @@ class FleetRegistryConfig(BaseModel):
         default='filesystem',
         min_length=1,
         description=(
-            'Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), '
-            'none (no peers), postgres (cards in a table of the database named by '
+            'Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when '
+            'shared.dir is empty), postgres (cards in a table of the database named by '
             'fleet.registry.connection), redis (cards in keys of the Redis server named by '
             'fleet.registry.connection), consul (cards in keys of the Consul agent named by '
             'fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.'
@@ -132,20 +67,6 @@ class FleetRegistryConfig(BaseModel):
         default_factory=ResilienceConfig,
         description='Time limit, retries and circuit breaker for the calls to the registry provider.',
     )
-    filesystem: FilesystemRegistryConfig = Field(default_factory=FilesystemRegistryConfig)
-    static: StaticRegistryConfig = Field(default_factory=StaticRegistryConfig)
-    consul: ConsulRegistryConfig = Field(
-        default_factory=ConsulRegistryConfig,
-        description='Settings of the consul provider.',
-    )
-    redis: RedisRegistryConfig = Field(
-        default_factory=RedisRegistryConfig,
-        description='Settings of the redis provider; none yet. The key prefix comes from the connection.',
-    )
-    postgres: PostgresRegistryConfig = Field(
-        default_factory=PostgresRegistryConfig,
-        description='Settings of the postgres provider; none yet. The schema and the pool come from the connection.',
-    )
 
     @model_validator(mode='after')
     def _validate_timing(self) -> 'FleetRegistryConfig':
@@ -169,13 +90,9 @@ class FleetRegistryConfig(BaseModel):
 
     @model_validator(mode='after')
     def _validate_consul(self) -> 'FleetRegistryConfig':
-        """The consul registry ships publish mode only, and its card session lives at most a day."""
+        """The consul registry's card session lives at most a day."""
         if self.provider != 'consul':
             return self
-        if self.consul.mode == 'catalog':
-            raise ValueError(
-                'fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only'
-            )
         if self.offline_after_seconds > CONSUL_MAX_OFFLINE_AFTER_SECONDS:
             raise ValueError(
                 f'fleet.registry.offline_after_seconds ({self.offline_after_seconds}) must be <= '

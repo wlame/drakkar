@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_task_speed`, `drakkar_throughput` and `drakkar_task_rate` are gone.
   Merge still reads recorder files that carry extra `worker_state` columns.
   See `docs/upgrading.md`.
+- **Periodic task overrides and the `static` and `none` registry providers are
+  removed.** `periodic.tasks` is not a config key: the schedule and the lease of
+  a task come from its `@periodic` decorator only. The `fleet.registry.provider`
+  values `static` and `none`, and the keys `fleet.registry.static`,
+  `fleet.registry.filesystem.dir`, `fleet.registry.consul` (`mode`,
+  `service_name`), `fleet.registry.redis` and `fleet.registry.postgres`, are
+  gone. The card folder is `<shared.dir>/fleet`, or `<storage.dir>/fleet`.
+  A registry that is off shows only the current worker. See `docs/upgrading.md`.
 - **Provider settings changed.** `fleet.registry.timeout_seconds` is now
   `fleet.registry.resilience.timeout_seconds` (env
   `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the

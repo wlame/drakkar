@@ -1186,8 +1186,7 @@ see [Upgrading](upgrading.md#periodic-tasks-and-the-archive).
 
 ## Periodic tasks (`periodic:`) {#periodic}
 
-The election of cluster periodic tasks (the archive included) and the
-overrides of the handler's declared `@periodic` tasks. See
+The election of cluster periodic tasks (the archive included). See
 [Periodic Tasks](periodic-tasks.md).
 
 | Field | Type | Default | Constraints | Description |
@@ -1195,25 +1194,13 @@ overrides of the handler's declared `@periodic` tasks. See
 | `election.provider` | `str` | `filesystem` | non-empty | Which worker of a cluster runs each slot of a cluster task: `filesystem` (a lock file in `<shared.dir>/tasks/<cluster>/`), `postgres` (a row in a table of the database named by `election.connection`; see [The postgres election provider](local-databases.md#the-postgres-election-provider)), `redis` (a key on the Redis server named by `election.connection`; see [The redis election provider](local-databases.md#the-redis-election-provider)), `consul` (a key of the Consul agent named by `election.connection`, held by a session; see [The consul election provider](local-databases.md#the-consul-election-provider)). Every worker of one cluster must use the same provider. The name is resolved only when the worker runs at least one cluster task; an unknown name then fails startup. |
 | `election.connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `election.resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the election provider. |
-| `tasks.<name>.enabled` | `bool` | `true` | | `false`: this worker does not run the declared task `<name>`. |
-| `tasks.<name>.interval` | `float \| null` | `null` | at most one of `interval` and `cron`; a cluster task needs a whole number of at least `30` | A new interval; replaces the declared interval or cron. |
-| `tasks.<name>.cron` | `str \| null` | `null` | the [accepted cron subset](periodic-tasks.md#cron) | A new cron expression; replaces the declared interval or cron. |
-| `tasks.<name>.lease_seconds` | `int \| null` | `null` | `40` to `86400`; cluster tasks only | A new lease. |
 
-`<name>` is the method name of a declared task. A name with a dot (a system
-task) fails the load; a name the handler does not declare fails startup.
-From the environment: `DK_PERIODIC__ELECTION__PROVIDER`,
-`DK_PERIODIC__TASKS__<NAME>__<KEY>`.
+From the environment: `DK_PERIODIC__ELECTION__PROVIDER`.
 
 ```yaml
 periodic:
   election:
     provider: filesystem
-  tasks:
-    refresh_shared_exchange_rates:
-      cron: '*/5 * * * *'
-    send_weekday_morning_report:
-      enabled: false
 ```
 
 ---
@@ -1230,19 +1217,13 @@ How the registry works, the card format and liveness are on
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in a shared folder), `static` (a fixed peer list), `none` (no peers), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)). Needs `ui.enabled: true`; with the UI off the registry runs as `none`. |
+| `provider` | `str` | `filesystem` | non-empty | `filesystem` (cards in `<shared.dir>/fleet`, or `<storage.dir>/fleet` when `shared.dir` is empty), `postgres` (cards in a table of the database named by `connection`; see [Fleet registry](fleet.md#postgres)), `redis` (cards in keys of the Redis server named by `connection`; see [Fleet registry](fleet.md#redis)), `consul` (cards in keys of the Consul agent named by `connection`, each held by a session of its worker; see [Fleet registry](fleet.md#consul)). Needs `ui.enabled: true`; with the UI off the registry is off. |
 | `connection` | `str` | `main` | non-empty | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. With one of these names, the entry must be declared. Other providers ignore it. |
 | `heartbeat_seconds` | `int` | `10` | >= 1 | Seconds between card publishes. |
 | `refresh_seconds` | `int` | `15` | >= 1 | Seconds between reads of the peer cards. |
 | `offline_after_seconds` | `int` | `60` | >= 10, and >= `2 * heartbeat_seconds`; at most `86400` when `provider` is `consul` | A peer whose card is older than this (on the provider's clock) is reported `online: false` in the workers list. A provider that decides liveness itself overrides this rule. The `consul` provider decides it: its card is online while a session holds the key, and this value sets the session's time to live (half of it, at least 10 seconds). |
 | `prune_after_seconds` | `int` | `86400` | >= `offline_after_seconds` | Cards older than this are deleted. Not used by the `consul` provider: Consul deletes a card when its session ends. |
 | `resilience` | block | see [Resilience](#resilience-block) | | Time limit, retries and circuit breaker for the calls to the registry provider. It replaces the key `timeout_seconds`, now `resilience.timeout_seconds`. |
-| `filesystem.dir` | `str` | `''` | | Card folder of the `filesystem` provider. `''` means `<shared.dir>/fleet`. |
-| `static.peers` | `list` | `[]` | each entry needs `name` and `url` | Fixed peers of the `static` provider: `[{name, cluster, url}]`. Their liveness is unknown. |
-| `consul.mode` | `str` | `publish` | `publish` or `catalog`; `catalog` fails the load when `provider` is `consul` | Setting of the `consul` provider. `publish`: every worker stores its own card and reads the cards of its peers. `catalog` is reserved for a later release, in which workers would be listed from the Consul service catalog and this worker would publish nothing; the load refuses it with the `consul` provider. |
-| `consul.service_name` | `str` | `drakkar` | non-empty | Setting for the catalog mode of a later release; it is not used now. The Consul service that would list the workers. |
-| `redis` | block | `{}` | | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
-| `postgres` | block | `{}` | | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
 
 ### Resilience block (`resilience:`) {#resilience-block}
 
@@ -1356,7 +1337,6 @@ The config load checks the rest, with the path and the rule in the message:
 - `connections.consul.<name>.key_prefix '<value>' must be segments of letters, digits, '_', '.' and '-' joined by '/', with no leading or trailing '/', and no segment may be '.' or '..'`
 - `connections.consul.<name>.datacenter '<value>' may only contain letters, digits, '_', '.' and '-'`
 - `fleet.registry.offline_after_seconds (<n>) must be <= 86400 when fleet.registry.provider is consul`
-- `fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only`, for the catalog mode with the `consul` registry.
 
 The client does no retrying of its own: the [`resilience`
 block](#resilience-block) of the feature is the only retry and the only time

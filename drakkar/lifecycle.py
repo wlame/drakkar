@@ -62,7 +62,7 @@ from drakkar.cluster_tasks import (
 from drakkar.config.ui import PERSISTENCE_POSTGRES
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
-from drakkar.fleet.providers import BUILTIN_PROVIDERS, FleetRegistryFolderError, prepare_registry_folder
+from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
@@ -153,8 +153,6 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
             'dir': config.resolved_registry_dir,
             'prune_after_seconds': registry.prune_after_seconds,
         },
-        'static': lambda: {'peers': [peer.model_dump() for peer in registry.static.peers]},
-        'none': dict,
         'postgres': lambda: _connection_and_prune(registry),
         'redis': lambda: _connection_and_prune(registry),
         # A consul card lives as long as its session, whose TTL comes from the offline limit; it is never pruned.
@@ -662,17 +660,12 @@ class AppLifecycle:
         """Resolve the handler's periodic tasks and make the election of its cluster tasks.
 
         Runs after ``on_startup`` and before any connection opens, the
-        registry starts or a sink connects: an override that names no
-        declared task or breaks a rule fails startup here, and the registry
-        card carries the definition hash from its first publish. The
-        election serves every enabled cluster task, ``history.archive``
-        included when the worker runs it.
-
-        Raises:
-            PeriodicConfigError: an override names no declared task or breaks a periodic rule.
+        registry starts or a sink connects, so the registry card carries the
+        definition hash from its first publish. The election serves every
+        cluster task, ``history.archive`` included when the worker runs it.
         """
         app = self._app
-        app._periodic_roster = resolve_periodic_roster(app._handler, app._config, now_epoch=int(self._clock.time()))
+        app._periodic_roster = resolve_periodic_roster(app._handler, app._config)
         app._cluster_election = self._build_cluster_election(app._periodic_roster.cluster_task_names)
 
     def _build_cluster_election(self, cluster_task_names: Sequence[str]) -> ClusterElection | None:
@@ -758,8 +751,6 @@ class AppLifecycle:
         config = app._config
         registry = config.fleet.registry
         log = logger.bind(worker_id=app._worker_id)
-        if registry.provider == 'none':
-            return
         if not config.ui.enabled:
             await log.awarning(
                 'fleet_registry_disabled_no_ui',
@@ -772,11 +763,9 @@ class AppLifecycle:
             await log.awarning(
                 'fleet_registry_disabled_no_dir',
                 category='fleet',
-                hint='set storage.dir, shared.dir or fleet.registry.filesystem.dir for the card folder',
+                hint='set storage.dir or shared.dir for the card folder',
             )
             return
-        if registry.provider == 'filesystem' and registry.filesystem.dir:
-            await self._prepare_explicit_registry_folder(registry.filesystem.dir, registry.resilience.timeout_seconds)
         factory = _builtin_factory(BUILTIN_PROVIDERS, registry.provider, config_path='fleet.registry.provider')
         options = registry_provider_options(config)
         provider = factory(options)
@@ -800,16 +789,6 @@ class AppLifecycle:
         app = self._app
         cache = app._cache_engine.features() if app._cache_engine is not None else {}
         return {'periodic': {'cluster_hash': app.cluster_tasks_hash}, **cache}
-
-    async def _prepare_explicit_registry_folder(self, folder: str, timeout_seconds: float) -> None:
-        """Fail startup when a card folder the operator named cannot be created or written."""
-        try:
-            await asyncio.wait_for(asyncio.to_thread(prepare_registry_folder, folder), timeout=timeout_seconds)
-        except (OSError, TimeoutError) as exc:
-            reason = str(exc) or 'timed out'
-            raise FleetRegistryFolderError(
-                f"fleet.registry.filesystem.dir '{folder}' cannot be used: {reason}"
-            ) from exc
 
     def _set_lifecycle_state(self, state: str) -> None:
         """Record the worker's state and publish it in the registry card at once."""

@@ -117,13 +117,11 @@ These keys are new. Their defaults work for most deployments.
 | `history.archive.due_after_hours` | `48` | A window is archived this many hours after it ends. |
 | `history.archive.lock_stale_seconds` | `7200` | An archive lock or work file older than this belongs to a dead archiver. The second guide replaces it with `history.archive.lease_seconds` and `history.archive.sweep_after_seconds`. |
 | `history.merged_retention_days` | `32` | UI merge results older than this are deleted. `0` = never. |
-| `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `static`, `none`, `postgres`, `redis` or `consul`. Needs `ui.enabled`. |
+| `fleet.registry.provider` | `filesystem` | How workers find each other: `filesystem`, `postgres`, `redis` or `consul`. Needs `ui.enabled`. |
 | `fleet.registry.heartbeat_seconds` | `10` | How often a worker publishes its card. |
 | `fleet.registry.refresh_seconds` | `15` | How often a worker reads the other cards. |
 | `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. |
 | `fleet.registry.resilience.timeout_seconds` | `5` | Time limit for one attempt of a registry operation. The `resilience` block also holds retries and a circuit breaker; see [Fleet registry](fleet.md#resilience). |
-| `fleet.registry.filesystem.dir` | `''` | Card folder. `''` = `<shared.dir>/fleet`. |
-| `fleet.registry.static.peers` | `[]` | Fixed peer list for the `static` provider. |
 | `fleet.cache_exchange.max_concurrent_peers` | `4` | Peers pulled from in parallel. |
 | `ui.trace.history_max_files` | `256` | Most history files one trace request reads. |
 | `ui.trace.history_max_seconds` | `10` | Time limit for one trace request over history. |
@@ -328,9 +326,8 @@ are new. See [Fleet registry](fleet.md#metrics).
   Installing `py-drakkar` brings a matching version; check it only when you
   pin `redis` yourself.
 - **New sections and keys** need no action. `connections` is empty by
-  default. `fleet.registry.connection`, `fleet.registry.consul`,
-  `periodic.election` and the `resilience` blocks have working
-  defaults.
+  default. `fleet.registry.connection`, `periodic.election` and the
+  `resilience` blocks have working defaults.
 
 ### 5. If you wrote a plugin
 
@@ -351,6 +348,31 @@ it and any `DK_THROUGHPUT__*` variable. The `cost` and `speed` keys of
 `/ws` and the `worker_state.throughput` column do not exist. Remove
 dashboards and alerts on `drakkar_task_speed`, `drakkar_throughput` and
 `drakkar_task_rate`.
+
+### 6b. Periodic task overrides and registry providers
+
+`periodic.tasks` is not a config key; delete it and any
+`DK_PERIODIC__TASKS__*` variable. To change the schedule or the lease of a
+task, change the arguments of its `@periodic` decorator. To stop a task from
+running, do not declare it.
+
+The registry providers `static` and `none` do not exist. A config that names
+one fails startup (with the UI on) with
+`fleet.registry.provider '<name>' is not known; known providers: consul, filesystem, postgres, redis`.
+Delete `fleet.registry.static.peers`. A worker that needs no registry runs
+with `ui.enabled: false`, or with the `filesystem` provider and no
+`storage.dir` and no `shared.dir`: the registry is then off, and the workers
+list shows only the current worker.
+
+These keys of `fleet.registry` are not config keys either; delete them:
+
+- `filesystem.dir`. The card folder is `<shared.dir>/fleet`, or
+  `<storage.dir>/fleet` when `shared.dir` is empty. The worker no longer
+  checks the folder at startup: a folder that cannot be written only fails
+  the publishes, which are counted and retried.
+- `consul.mode` and `consul.service_name`. The `consul` provider has one
+  mode, which is the one `publish` selected.
+- `redis` and `postgres`. These blocks had no keys.
 
 ### 6. Periodic tasks and the archive {#periodic-tasks-and-the-archive}
 

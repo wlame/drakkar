@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-import stat
 import threading
 import time
 from pathlib import Path
@@ -17,8 +16,8 @@ from drakkar import cluster_tasks as cluster_tasks_module
 from drakkar.app import DrakkarApp
 from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_task_runs
 from drakkar.config import DrakkarConfig
-from drakkar.fleet.provider import PeerCardList, RegistryContext
-from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry, FleetRegistryFolderError, StaticRegistry
+from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
+from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry
 from drakkar.lifecycle import UnknownProviderError, election_provider_options, registry_provider_options
 from drakkar.models import SourceMessage
 from drakkar.periodic import periodic
@@ -74,6 +73,31 @@ def _install_registry_factory(monkeypatch, factory) -> None:
 def _install_election_factory(monkeypatch, factory) -> None:
     """Make ``factory`` the factory of the ``filesystem`` election provider for the test."""
     monkeypatch.setitem(BUILTIN_ELECTIONS, 'filesystem', factory)
+
+
+class _FixedPeersRegistry:
+    """A registry fake: lists a fixed set of peers with unknown ages and ignores every write."""
+
+    def __init__(self, peers: list[dict[str, str]]) -> None:
+        self._cards = [
+            {'schema': 1, 'worker': peer['name'], 'cluster': peer.get('cluster', ''), 'url': peer['url']}
+            for peer in peers
+        ]
+
+    async def start(self, ctx: RegistryContext) -> None:
+        return None
+
+    async def publish(self, card: dict) -> None:
+        return None
+
+    async def list(self) -> PeerCardList:
+        return [PeerCard(card=dict(card), age_seconds=None) for card in self._cards]
+
+    async def withdraw(self, worker: str, instance: str) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
 
 
 # --- which provider runs ---
@@ -133,22 +157,10 @@ async def test_a_shared_dir_holds_the_card_folder(tmp_path):
     await app._fleet.stop()
 
 
-async def test_the_static_provider_gets_the_configured_peers(tmp_path):
-    peers = [{'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.2:8080/'}]
-    app = _app(tmp_path, fleet={'registry': {'provider': 'static', 'static': {'peers': peers}}})
-
-    await app._lifecycle._start_fleet()
-    await wait_for(lambda: app.fleet.snapshot().refreshed_at is not None)
-    await app._fleet.stop()
-
-    assert isinstance(app.fleet._provider, StaticRegistry)
-    assert [(view.card['worker'], view.card['cluster']) for view in app.fleet.peer_views()] == [('w-2', 'search')]
-
-
 async def test_the_registry_factory_gets_the_provider_options_and_the_worker_context(tmp_path, monkeypatch):
     received = {}
 
-    class _Recording(StaticRegistry):
+    class _Recording(_FixedPeersRegistry):
         async def start(self, ctx: RegistryContext) -> None:
             received['ctx'] = ctx
 
@@ -300,11 +312,16 @@ def test_election_is_built_only_when_the_archive_runs(tmp_path, monkeypatch, ove
     assert app._cluster_election is None
 
 
-async def test_an_unknown_provider_fails_startup(tmp_path, monkeypatch):
-    app = _app(tmp_path, fleet={'registry': {'provider': 'etcd'}})
+@pytest.mark.parametrize('name', ['etcd', 'static', 'none'])
+async def test_a_registry_provider_outside_the_four_built_in_ones_fails_startup(tmp_path, name):
+    app = _app(tmp_path, fleet={'registry': {'provider': name}})
 
-    with pytest.raises(UnknownProviderError, match="'etcd'"):
+    with pytest.raises(UnknownProviderError) as raised:
         await app._lifecycle._start_fleet()
+
+    assert str(raised.value) == (
+        f"fleet.registry.provider '{name}' is not known; known providers: consul, filesystem, postgres, redis"
+    )
 
 
 async def test_unknown_election_provider_fails_startup_when_the_archive_runs(tmp_path, monkeypatch):
@@ -340,45 +357,7 @@ async def test_no_folder_turns_the_filesystem_registry_off_with_one_warning(tmp_
     assert [entry['event'] for entry in logs] == ['fleet_registry_disabled_no_dir']
 
 
-async def test_provider_none_runs_no_registry_and_logs_nothing(tmp_path):
-    app = _app(tmp_path, fleet={'registry': {'provider': 'none'}})
-
-    with capture_logs() as logs:
-        await app._lifecycle._start_fleet()
-
-    assert app.fleet is None
-    assert logs == []
-
-
-async def test_the_ui_off_with_provider_none_logs_nothing(tmp_path):
-    app = _app(tmp_path, ui={'enabled': False, 'release': {'enabled': False}}, fleet={'registry': {'provider': 'none'}})
-
-    with capture_logs() as logs:
-        await app._lifecycle._start_fleet()
-
-    assert logs == []
-
-
 # --- the card folder ---
-
-
-async def test_an_explicit_folder_that_cannot_be_created_fails_startup(tmp_path):
-    blocker = tmp_path / 'blocker'
-    blocker.write_text('a file where the folder should be')
-    app = _app(tmp_path, fleet={'registry': {'filesystem': {'dir': str(blocker / 'fleet')}}})
-
-    with pytest.raises(FleetRegistryFolderError, match=re.escape('fleet.registry.filesystem.dir')):
-        await app._lifecycle._start_fleet()
-
-
-async def test_an_explicit_folder_is_created_owner_only(tmp_path):
-    folder = tmp_path / 'registry'
-    app = _app(tmp_path, fleet={'registry': {'filesystem': {'dir': str(folder)}}})
-
-    await app._lifecycle._start_fleet()
-    await app._fleet.stop()
-
-    assert stat.S_IMODE((folder / 'workers').stat().st_mode) == 0o700
 
 
 async def test_a_derived_folder_that_cannot_be_created_only_fails_publishes(tmp_path):
@@ -396,7 +375,7 @@ async def test_a_derived_folder_that_cannot_be_created_only_fails_publishes(tmp_
 # --- states and order in the worker's life ---
 
 
-class _RecordingRegistry(StaticRegistry):
+class _RecordingRegistry(_FixedPeersRegistry):
     """A provider that records the state of every published card."""
 
     def __init__(self) -> None:
@@ -469,12 +448,13 @@ async def test_states_follow_the_worker_life_and_the_card_goes_before_the_ui_ser
     assert order.index('recorder.stop') < order.index('fleet.stop') < order.index('ui_server.stop')
 
 
-@pytest.mark.parametrize(('provider', 'reserve'), [('filesystem', 0.7), ('none', 0.0)], ids=['registry', 'no-registry'])
+@pytest.mark.parametrize(('ui_enabled', 'reserve'), [(True, 0.7), (False, 0.0)], ids=['registry', 'no-registry'])
 async def test_the_recorder_stop_keeps_one_registry_call_only_while_a_registry_runs(
-    tmp_path, monkeypatch, provider, reserve
+    tmp_path, monkeypatch, ui_enabled, reserve
 ):
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
-    app._config.fleet.registry.provider = provider
+    # The registry needs the UI server, so a worker with the UI off runs none.
+    app._config.ui.enabled = ui_enabled
     app._config.fleet.registry.resilience.timeout_seconds = 0.7
 
     run = asyncio.create_task(app._lifecycle._async_run())
@@ -564,7 +544,7 @@ async def test_a_connection_close_that_raises_is_logged_and_the_closers_after_it
 
 
 async def test_the_cache_engine_reads_the_registrys_peer_views(tmp_path, monkeypatch):
-    provider = StaticRegistry([{'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.2:8080/'}])
+    provider = _FixedPeersRegistry([{'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.2:8080/'}])
     app, _source, _order = _runnable_app(tmp_path, monkeypatch, lambda _options: provider)
     app._config.cache.enabled = True
 
@@ -705,7 +685,6 @@ def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[
     values = {
         'shared': {'dir': str(tmp_path / 'shared')},
         'cluster_name': CLUSTER,
-        'fleet': {'registry': {'provider': 'none'}},
     }
     values.update(overrides)
     app = _app(tmp_path, **values)
@@ -911,7 +890,7 @@ class _ClusterTaskHandler(KafkaOnlyHandler):
         return None
 
 
-class _CardRecording(StaticRegistry):
+class _CardRecording(_FixedPeersRegistry):
     """A provider that keeps every published card and notes the withdraw."""
 
     def __init__(self) -> None:
@@ -999,19 +978,19 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
 
 
 @pytest.mark.parametrize(
-    ('handler', 'provider', 'logged'),
+    ('handler', 'ui_enabled', 'logged'),
     [
-        (_ClusterTaskHandler, 'none', True),
-        (KafkaOnlyHandler, 'none', False),
-        (_ClusterTaskHandler, 'filesystem', False),
+        (_ClusterTaskHandler, False, True),
+        (KafkaOnlyHandler, False, False),
+        (_ClusterTaskHandler, True, False),
     ],
     ids=['registry-off', 'no-cluster-task', 'registry-on'],
 )
 async def test_check_off_logged_once_when_the_registry_is_off_and_cluster_tasks_exist(
-    tmp_path, handler, provider, logged
+    tmp_path, handler, ui_enabled, logged
 ):
     overrides = {} if handler is _ClusterTaskHandler else {'history': {'archive': {'enabled': False}}}
-    app = _app(tmp_path, handler=handler(), fleet={'registry': {'provider': provider}}, **overrides)
+    app = _app(tmp_path, handler=handler(), ui={'enabled': ui_enabled, 'release': {'enabled': False}}, **overrides)
     app._lifecycle._build_periodic_roster()
 
     with capture_logs() as logs:
@@ -1025,7 +1004,8 @@ async def test_check_off_logged_once_when_the_registry_is_off_and_cluster_tasks_
             'event': 'periodic_cluster_check_off',
             'log_level': 'info',
             'category': 'periodic',
-            'cluster_tasks': 2,
+            # The archive needs the UI server too, so only the handler's own task counts.
+            'cluster_tasks': 1,
             'reason': 'the worker registry is off',
         }
     ]

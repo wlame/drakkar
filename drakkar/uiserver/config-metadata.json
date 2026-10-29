@@ -2527,46 +2527,6 @@
           "default": 30.0,
           "secret": false,
           "group": "periodic"
-        },
-        {
-          "path": "periodic.tasks.*.enabled",
-          "env": null,
-          "description": "false = the task does not run on this worker (and leaves the cluster definitions).",
-          "full_description": "false = the task does not run on this worker (and leaves the cluster definitions).",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.tasks.*.interval",
-          "env": null,
-          "description": "New interval in seconds; replaces the declared interval or cron.",
-          "full_description": "New interval in seconds; replaces the declared interval or cron. Give at most one of interval and cron. A cluster task needs a whole number of at least 30.",
-          "type": "number",
-          "default": null,
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.tasks.*.cron",
-          "env": null,
-          "description": "New five-field UTC cron expression; replaces the declared interval or cron.",
-          "full_description": "New five-field UTC cron expression; replaces the declared interval or cron. Give at most one of interval and cron.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "periodic"
-        },
-        {
-          "path": "periodic.tasks.*.lease_seconds",
-          "env": null,
-          "description": "New lease of a cluster task in seconds, a whole number from 40 to 86400.",
-          "full_description": "New lease of a cluster task in seconds, a whole number from 40 to 86400. Only cluster tasks take a lease.",
-          "type": "integer",
-          "default": null,
-          "secret": false,
-          "group": "periodic"
         }
       ]
     },
@@ -2578,8 +2538,8 @@
         {
           "path": "fleet.registry.provider",
           "env": "DK_FLEET__REGISTRY__PROVIDER",
-          "description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker).",
-          "full_description": "Registry provider: filesystem (cards in a shared folder), static (a fixed peer list), none (no peers), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.",
+          "description": "Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when shared.dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker).",
+          "full_description": "Registry provider: filesystem (cards in <shared.dir>/fleet, or <storage.dir>/fleet when shared.dir is empty), postgres (cards in a table of the database named by fleet.registry.connection), redis (cards in keys of the Redis server named by fleet.registry.connection), consul (cards in keys of the Consul agent named by fleet.registry.connection, each held by a session of its worker). Needs ui.enabled.",
           "type": "string",
           "default": "filesystem",
           "secret": false,
@@ -2692,46 +2652,6 @@
           "full_description": "Time the breaker stays open before one probe operation is allowed through; success closes it, failure reopens it with a fresh cooldown.",
           "type": "number",
           "default": 30.0,
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.filesystem.dir",
-          "env": "DK_FLEET__REGISTRY__FILESYSTEM__DIR",
-          "description": "Folder for the worker cards.",
-          "full_description": "Folder for the worker cards. Empty means <shared.dir>/fleet (or <storage.dir>/fleet when shared.dir is empty). A folder set here that cannot be created or written fails startup.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.static.peers",
-          "env": "DK_FLEET__REGISTRY__STATIC__PEERS",
-          "description": "Fixed list of peers.",
-          "full_description": "Fixed list of peers. Their liveness is unknown, so the workers list shows them as neither online nor offline.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.consul.mode",
-          "env": "DK_FLEET__REGISTRY__CONSUL__MODE",
-          "description": "publish: every worker stores its own card in Consul under a session and reads the cards of its peers. catalog is reserved for a later release; this release ships publish only.",
-          "full_description": "publish: every worker stores its own card in Consul under a session and reads the cards of its peers. catalog is reserved for a later release; this release ships publish only.",
-          "type": "string",
-          "default": "publish",
-          "secret": false,
-          "group": "fleet"
-        },
-        {
-          "path": "fleet.registry.consul.service_name",
-          "env": "DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME",
-          "description": "Name of the Consul service that lists the workers in catalog mode, which a later release adds.",
-          "full_description": "Name of the Consul service that lists the workers in catalog mode, which a later release adds. Unused in this release.",
-          "type": "string",
-          "default": "drakkar",
           "secret": false,
           "group": "fleet"
         },

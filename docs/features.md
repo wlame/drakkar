@@ -96,8 +96,7 @@ the failure mode so you can decide what your deployment needs.
    pulls only the peers that the [fleet registry](fleet.md) lists, at the
    URL on each card, so it needs the registry of rule 5 (`ui.enabled` and
    a card folder all workers see). A peer the registry does not list is
-   never pulled; with the registry off nothing is pulled. `static` peers
-   (their cards carry no cache marks) are pulled every cycle. Every worker must
+   never pulled; with the registry off nothing is pulled. Every worker must
    also reach the UI port of its peers: across hosts, bind `ui.host` to a
    reachable address or set `ui.public_url`. The cache file itself is
    never shared. **Silent** when unmet: the cache simply stays local.

@@ -1197,8 +1197,8 @@ day). To tell such workers apart from healthy ones, every row of
 
 - `online` -- `true` when the peer's card is no older than
   `fleet.registry.offline_after_seconds` (default 60), `false` when it is
-  older, and `null` when the provider cannot tell (a `static` peer list,
-  or a worker whose own first card write has not succeeded yet). The worker
+  older, and `null` when the provider cannot tell (a worker whose own first card
+  write has not succeeded yet). The worker
   serving the request always reports itself online. A provider whose
   service decides liveness itself gives its own verdict, which replaces the
   age rule.
@@ -1342,8 +1342,7 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
 
 - **Discovery**: at startup, after `on_startup` and before the recorder,
   the registry and the sinks start, the framework finds the methods
-  decorated with `@periodic` and applies the `periodic.tasks` overrides. A
-  broken override fails startup. Only `async` functions are accepted --
+  decorated with `@periodic`. Only `async` functions are accepted --
   decorating a sync function raises `TypeError`.
 - **Scheduling**: each periodic task runs in its own `asyncio.Task` within
   the main event loop. Runs of one task never overlap on one worker.

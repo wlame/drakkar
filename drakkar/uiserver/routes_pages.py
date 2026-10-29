@@ -140,7 +140,7 @@ def _docs_wire(cfg: UIDocsConfig) -> dict[str, object] | None:
 
 
 # Card fields a peer row copies when the card has them; a card without one
-# (a static peer, an older release) leaves the key out of the row.
+# (an older release) leaves the key out of the row.
 _OPTIONAL_PEER_FIELDS = ('backend', 'version', 'state', 'started_at', 'instance')
 
 
@@ -579,7 +579,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
 
         Answered from memory: the registry service refreshes the snapshot in
         the background, so this route does no storage I/O. Without a
-        registry (UI off, provider ``none``, no card folder) only this
+        registry (UI off, no card folder) only this
         worker is listed. Sorted clustered first (by cluster, then name),
         unclustered last (by name).
         """

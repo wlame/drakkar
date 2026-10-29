@@ -120,8 +120,7 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 
 The three loops are worker-scope system tasks: every worker runs its own,
 on its own timer. They are configured here, under `cache.*` and
-`fleet.cache_exchange.*`, not under `periodic.tasks` (a name with a dot is
-refused there). See [Periodic Tasks](periodic-tasks.md).
+`fleet.cache_exchange.*`. See [Periodic Tasks](periodic-tasks.md).
 
 A reader aiosqlite connection is opened alongside the writer so `get()`
 DB-fallback queries never queue behind a flush/sync/cleanup commit. WAL
@@ -242,17 +241,16 @@ The peers come from the [fleet registry](fleet.md) snapshot. In each cycle
 a peer is pulled only when all of these hold:
 
 - The registry lists it. A worker the registry does not list is never
-  pulled. With no registry (provider `none`, or the UI off) nothing is
+  pulled. With no registry (the UI off, or no card folder) nothing is
   pulled.
 - Its `online` is not `false`. `online: null` (liveness unknown) does not
   stop a pull.
 - Its card `state` is not `starting`.
 - Its card carries `features.cache`. A worker puts it on its card only
   while it serves the exchange: the cache, `storage.dir` and
-  `fleet.cache_exchange` are on. Cards of the `static` provider come from
-  the config and carry no `features` object at all: such a peer is pulled
-  every cycle, without the mark check below. A `static` peer with the
-  cache off answers 404 and backs off like any failing peer.
+  `fleet.cache_exchange` are on. A card with no `features` object at all is
+  pulled every cycle, without the mark check below; a peer with the cache
+  off answers 404 and backs off like any failing peer.
 - It is not backing off after failures (see
   [Peer unreachable](#peer-unreachable)).
 - One of the scopes asked of it has a card mark past this worker's cursor

@@ -222,7 +222,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | Page | Contents |
 |------|----------|
 | [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, lifecycle hooks |
-| [Periodic Tasks](periodic-tasks.md) | `@periodic` by interval or UTC cron, on every worker or on one worker of the cluster per slot; overrides, the slot rule, the definition hash |
+| [Periodic Tasks](periodic-tasks.md) | `@periodic` by interval or UTC cron, on every worker or on one worker of the cluster per slot; the slot rule, the definition hash |
 | [Cache](cache.md) | `self.cache` API, scope rules, the cache exchange, LWW semantics, "delete is local-only" sharp edge |
 | [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
 | [Annotations](annotations.md) | `self.annotate(...)` — handler-authored diagnostics surfaced per message/task/window in the UI |

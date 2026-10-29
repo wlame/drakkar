@@ -73,11 +73,6 @@ the handler module is imported. A broken declaration raises
 The rules are checked in the order of the table. Decorating a function that
 is not `async` raises `TypeError`.
 
-The name rule exists because the [overrides](#overrides) are also read from
-the environment, and the environment loader writes every key in lower case:
-a method named `refreshRates` could never be addressed by an environment
-variable.
-
 ## Schedules
 
 Every time is the worker's own wall clock in UTC, cut to the whole second.
@@ -267,64 +262,12 @@ stops at shutdown, after the recorder. Cluster tasks need no UI: a worker
 with `ui.enabled: false` runs them too (only the archive needs the
 recorder).
 
-## Overrides
-
-An operator can change a declared task in YAML, under `periodic.tasks`,
-keyed by the method name:
-
-```yaml
-periodic:
-  tasks:
-    refresh_shared_exchange_rates:
-      cron: '*/5 * * * *'       # or interval: 300; replaces the declared schedule
-      lease_seconds: 120        # cluster tasks only
-    send_weekday_morning_report:
-      enabled: false            # this worker does not run the task
-```
-
-| Key | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | `false`: this worker does not run the task, and the task leaves this worker's [definition hash](#definition-hash). |
-| `interval` | not set | A new interval. It replaces the declared interval or cron. |
-| `cron` | not set | A new cron expression. It replaces the declared interval or cron. |
-| `lease_seconds` | not set | A new lease, 40 to 86400. Cluster tasks only. |
-
-From the environment, each key is one variable:
-`DK_PERIODIC__TASKS__<NAME>__<KEY>`, for example
-`DK_PERIODIC__TASKS__REFRESH_SHARED_EXCHANGE_RATES__CRON='*/5 * * * *'` or
-`DK_PERIODIC__TASKS__SEND_WEEKDAY_MORNING_REPORT__ENABLED=false`. The loader
-writes the name in lower case, which is why task names are lower case.
-
-The config load checks each entry, in sorted name order:
-
-- An entry with no value (`refresh_shared_exchange_rates:` and nothing
-  after it) fails with
-  `periodic.tasks.<name> has no value; write {} to keep the declared settings`.
-- A name with a dot is a system task and fails with
-  `periodic.tasks.<name>: a name with a dot is a system task; configure it in its own section (cache.*, history.archive)`.
-  The cache loops are configured under `cache.*`, the archive under
-  `history.archive`.
-- `interval` and `cron` together fail with
-  `periodic.tasks.<name>: give at most one of interval and cron`.
-- A cron expression is checked like in the decorator, and `lease_seconds`
-  against its bounds.
-
-The worker checks the rest at startup, once it has found the handler's
-tasks. Each message starts with `periodic.tasks.<name>: `:
-
-- An override names a task the handler does not declare:
-  `the handler declares no periodic task of that name`.
-- The task breaks a [decorator rule](#the-decorator) once the override is
-  applied, for example `interval: 5` on a cluster task, or `lease_seconds`
-  on a worker task. An entry with `enabled: false` is checked too.
-
 ## Startup
 
-The worker finds the handler's periodic tasks and applies the overrides once
-at startup: after `on_startup`, and before the recorder, the registry, the
-UI server, the sinks and the sources start. A broken override fails
-startup before any of them connects. The loops start after `on_ready`, before the sources take
-input.
+The worker finds the handler's periodic tasks once at startup: after
+`on_startup`, and before the recorder, the registry, the UI server, the sinks
+and the sources start. The loops start after `on_ready`, before the sources
+take input.
 
 Startup also fails when the worker runs at least one cluster task and
 cannot elect:
@@ -343,7 +286,7 @@ are `election_failed` until it answers.
 ## Definition hash
 
 Every worker computes a hash of the cluster tasks it runs: the enabled user
-cluster tasks after the overrides, and `history.archive` when the worker
+cluster tasks, and `history.archive` when the worker
 runs it (never with `ui.recorder.persistence: none`). Two workers of one cluster with different hashes run different
 schedules or leases for their cluster tasks, which usually means a rolling
 change that is not finished, or a config that differs by mistake.
@@ -371,7 +314,7 @@ comes back with the same hash, the line is logged again. The gauge
 `drakkar_periodic_cluster_mismatch_peers` counts the online peers with
 another hash. The worker keeps running either way.
 
-Without a [worker registry](fleet.md) (provider `none`, the UI off, or the
+Without a [worker registry](fleet.md) (the UI off, or the
 `filesystem` provider with no folder for the cards) there is nothing to
 compare. A worker with at least one cluster task then logs
 `periodic_cluster_check_off` (info; fields `cluster_tasks`, the count of its

@@ -20,17 +20,11 @@ from drakkar.config.connections import (
 from drakkar.config.fleet import (
     CONNECTION_PROVIDERS,
     CacheExchangeConfig,
-    ConsulRegistryConfig,
-    FilesystemRegistryConfig,
     FleetConfig,
     FleetRegistryConfig,
-    PostgresRegistryConfig,
-    RedisRegistryConfig,
-    StaticPeerConfig,
-    StaticRegistryConfig,
 )
 from drakkar.config.kafka import KafkaConfig
-from drakkar.config.periodic import ElectionConfig, PeriodicConfig, PeriodicTaskOverride
+from drakkar.config.periodic import ElectionConfig, PeriodicConfig
 from drakkar.config.resilience import BreakerConfig, ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _deep_merge, _parse_env_overrides, load_config
 from drakkar.config.runtime import (
@@ -102,7 +96,6 @@ __all__ = [
     'CircuitBreakerConfig',
     'ConnectionsConfig',
     'ConsulConnectionConfig',
-    'ConsulRegistryConfig',
     'DLQConfig',
     'DocsAnchor',
     'DocsAnchorMatch',
@@ -110,7 +103,6 @@ __all__ = [
     'ElectionConfig',
     'ExecutorConfig',
     'FileSinkConfig',
-    'FilesystemRegistryConfig',
     'FleetConfig',
     'FleetRegistryConfig',
     'HistoryArchiveConfig',
@@ -126,12 +118,9 @@ __all__ = [
     'MongoStatementConfig',
     'OffloadConfig',
     'PeriodicConfig',
-    'PeriodicTaskOverride',
     'PostgresConnectionConfig',
-    'PostgresRegistryConfig',
     'PostgresSinkConfig',
     'RedisConnectionConfig',
-    'RedisRegistryConfig',
     'RedisSinkConfig',
     'ResilienceConfig',
     'RuntimeHealthConfig',
@@ -140,8 +129,6 @@ __all__ = [
     'SinkPolicy',
     'SinksConfig',
     'SourcesConfig',
-    'StaticPeerConfig',
-    'StaticRegistryConfig',
     'StorageConfig',
     'TimelineColorRule',
     'TimelineEventType',

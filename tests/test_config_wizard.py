@@ -31,7 +31,7 @@ TABLE_PATH = DOCS / 'data' / 'config-wizard.json'
 PAGE_PATH = DOCS / 'calculator.md'
 URL_CASES_PATH = Path(__file__).parent / 'fixtures' / 'config_wizard_url_cases.json'
 
-KNOWN_REGISTRY_PROVIDERS = {'filesystem', 'static', 'none', 'postgres', 'redis', 'consul'}
+KNOWN_REGISTRY_PROVIDERS = {'filesystem', 'postgres', 'redis', 'consul'}
 KNOWN_ELECTION_PROVIDERS = {'filesystem', 'postgres', 'redis', 'consul'}
 STEPS = ('workload', 'disk', 'history', 'hosts', 'services', 'choose', 'result')
 ENV_PLACEHOLDERS = {
@@ -709,7 +709,8 @@ def test_every_combination_prints_a_config_that_loads(answers, tmp_path, clean_e
     assert config.fleet.registry.provider == answers.reg
     assert config.periodic.election.provider == answers.elect
     summary = config.config_summary()
-    assert re.search(r' fleet=(\S+)', summary).group(1) == answers.reg
+    registry_has_no_folder = answers.reg == 'filesystem' and not config.resolved_registry_dir
+    assert re.search(r' fleet=(\S+)', summary).group(1) == ('off' if registry_has_no_folder else answers.reg)
     election_token = re.search(r' election=(\S+)', summary)
     if answers.elect == 'filesystem':
         assert election_token is None, summary
@@ -760,7 +761,7 @@ def test_a_postgres_combination_without_its_dsn_fails_the_load(tmp_path, clean_e
 
 def test_merging_the_same_leaf_twice_is_an_error():
     target: dict[str, Any] = {}
-    merge_fragment(target, {'fleet': {'registry': {'provider': 'none'}}})
+    merge_fragment(target, {'fleet': {'registry': {'provider': 'filesystem'}}})
 
     with pytest.raises(ValueError, match=r'^two fragments set fleet\.registry\.provider$'):
         merge_fragment(target, {'fleet': {'registry': {'provider': 'redis'}}})
@@ -810,7 +811,7 @@ def test_there_are_golden_examples_for_the_main_cases():
         'one host',
         'several hosts with a folder',
         'several hosts with every service',
-        'several hosts with none',
+        'several hosts with no service',
         'several hosts without a folder',
         'no local disk',
         'history in postgres',
@@ -864,11 +865,12 @@ def test_wizard_disk_yes_prints_no_storage_fragment():
 
 
 @pytest.mark.parametrize('query', ['v=1&disk=no', 'v=1&disk=no&workers=3', 'v=1&disk=no&workers=3&hosts=many'])
-def test_wizard_disk_no_with_no_shared_folder_turns_the_registry_off(query):
+def test_wizard_disk_no_with_no_shared_folder_offers_only_the_filesystem_registry_and_says_it_stays_off(query):
     resolution = resolve(TABLE, parse_query(TABLE, query)[0])
 
-    assert resolution.registry_allowed == ['none']
-    assert resolution.fleet['fleet'] == {'registry': {'provider': 'none'}}
+    assert resolution.registry_allowed == ['filesystem']
+    assert resolution.fleet['fleet'] == {'registry': {'provider': 'filesystem'}}
+    assert 'registry_no_folder' in [note['id'] for note in resolution.notes]
 
 
 def test_wizard_disk_no_with_a_shared_folder_keeps_the_filesystem_registry():
@@ -901,7 +903,7 @@ def test_wizard_golden_disk_no():
     assert example['query'] == 'v=1&disk=no'
     assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'fleet', 'periodic']
     assert loaded['storage'] == {'dir': ''}
-    assert loaded['fleet'] == {'registry': {'provider': 'none'}}
+    assert loaded['fleet'] == {'registry': {'provider': 'filesystem'}}
 
 
 def test_history_choice_defaults_to_files_with_no_fragment():

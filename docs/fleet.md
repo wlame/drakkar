@@ -45,21 +45,17 @@ The rest of this page is about the registry.
 | Provider | Where the cards are | Liveness |
 |---|---|---|
 | `filesystem` (default) | one JSON file per worker in a shared folder | from the file times on the file server |
-| `static` | nowhere: a fixed peer list in the config | unknown |
 | `postgres` | one row per worker in the table `fleet_workers` of a Postgres schema | from the database server's clock (`heartbeat_at` against `now()`) |
 | `redis` | one key per worker plus an index of workers, under the key prefix of a Redis connection | from the Redis server's clock (the time of the last publish against `TIME`) |
 | `consul` | one key per worker under the key prefix of a Consul connection, held by a session of the worker | the session's time to live (online while the key has a session; no age) |
-| `none` | nowhere: no peers | — |
 
-With `none` the workers list shows only the current worker, and the cache
-exchange pulls nothing. `static` cards come from the config and carry no
-`features` object, so the cache exchange pulls every `static` peer each
-cycle, without the mark check.
+With the UI off, or with `filesystem` and no card folder, the registry is
+off: the workers list shows only the current worker, and the cache exchange
+pulls nothing.
 
 `postgres`, `redis` and `consul` are built in; see [`postgres`](#postgres),
 [`redis`](#redis) and [`consul`](#consul). Each keeps its data in a service
-reached through a [named connection](#connections). The block
-`fleet.registry.consul` has the keys `mode` and `service_name`.
+reached through a [named connection](#connections).
 
 A name that uses a connection (`consul`, `redis` and `postgres`) is checked
 when the config loads: the connection it uses must be declared. Without
@@ -69,7 +65,7 @@ when the config loads: the connection it uses must be declared. Without
 A worker starts with the name only when a provider of that name exists. For a
 name that is not built in, startup fails (with the UI on, which the registry needs) with a message that lists the providers that
 exist, for example
-`fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, none, postgres, redis, static`.
+`fleet.registry.provider 'etcd' is not known; known providers: consul, filesystem, postgres, redis`.
 
 ### `filesystem`
 
@@ -81,12 +77,9 @@ shared:
 fleet:
   registry:
     provider: filesystem         # the default
-    # filesystem:
-    #   dir: /mnt/fleet-registry # optional; default <shared.dir>/fleet
 ```
 
-The folder is `fleet.registry.filesystem.dir` when you set it, else
-`<shared.dir>/fleet`, else `<storage.dir>/fleet`. When none of these
+The folder is `<shared.dir>/fleet`, else `<storage.dir>/fleet`. When neither
 resolves (memory-only `storage.dir: ''` and no `shared.dir`), the registry
 is off and the worker logs `fleet_registry_disabled_no_dir` once. An empty
 `storage.dir` also makes the recorder derive `persistence: none` (see
@@ -94,15 +87,10 @@ is off and the worker logs `fleet_registry_disabled_no_dir` once. An empty
 worker still keeps its card there and reads the sealed history of its
 cluster.
 
-The two ways of getting a folder fail differently:
-
-- A folder you **set explicitly** must work: if the worker cannot create
-  `<dir>/workers/` or cannot write it, **startup fails** with a message that
-  names `fleet.registry.filesystem.dir`.
-- A **derived** folder is best effort: if it cannot be written, the worker
-  runs anyway, counts each failed publish in
-  `drakkar_fleet_registry_errors_total{op="publish"}` and retries at the
-  next heartbeat.
+The folder is best effort: if it cannot be written, the worker runs anyway,
+counts each failed publish in
+`drakkar_fleet_registry_errors_total{op="publish"}` and retries at the next
+heartbeat.
 
 Layout and rules:
 
@@ -134,28 +122,6 @@ Layout and rules:
 - At a clean stop the worker deletes its own card, but only while the card
   still holds this process's instance: if another process with the same
   worker name has written it since, the card stays.
-
-### `static`
-
-A fixed peer list, for deployments without a shared folder:
-
-```yaml
-fleet:
-  registry:
-    provider: static
-    static:
-      peers:
-        - name: search-worker-1
-          cluster: search
-          url: http://10.0.3.17:8080/
-        - name: search-worker-2
-          cluster: search
-          url: http://10.0.3.18:8080/
-```
-
-The worker publishes nothing. Its peers are always listed, and their
-liveness is **unknown**: the workers list shows them as neither online nor
-offline.
 
 ### `postgres`
 
@@ -219,7 +185,7 @@ What it keeps and does:
 The schema and the pool come from the connection, which is
 `connections.postgres.<connection>` (`schema`, `manage_schema`, `pool_min`,
 `pool_max`; see [Configuration](configuration.md#connections)).
-`fleet.registry.postgres` exists and has no keys. The pool is opened once,
+The pool is opened once,
 at the first provider start, and the registry and the election share
 it when they name the same connection. The worker closes it at shutdown,
 after both providers have stopped (see [Connections](#connections)).
@@ -387,8 +353,7 @@ What it keeps and does:
 The address, the database number and the credentials come from the `url` of
 the connection, and the key prefix from its `key_prefix`:
 `connections.redis.<connection>` (see
-[Configuration](configuration.md#connections)). `fleet.registry.redis` exists
-and has no keys. The client is created once, at the first provider start, and
+[Configuration](configuration.md#connections)). The client is created once, at the first provider start, and
 the registry and the election share it when they name the same
 connection. The worker closes it at shutdown, after both providers have
 stopped (see [Connections](#connections)).
@@ -581,10 +546,7 @@ What it keeps and does:
 
 The address, the token, the datacenter and the key prefix come from the
 connection: `connections.consul.<connection>` (see
-[Configuration](configuration.md#connections)). `fleet.registry.consul` has two
-keys. `mode` is `publish`, which this section describes; `catalog` is reserved
-for a later release, and the load refuses it with `provider: consul`.
-`service_name` belongs to catalog mode and is not used. The client is created
+[Configuration](configuration.md#connections)). The client is created
 once, at the first provider start, and the registry and the election
 share it when they name the same connection. The worker closes it at shutdown,
 after both providers have stopped (see [Connections](#connections)).
@@ -834,7 +796,7 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
   `postgres`. You choose the names. A feature that names none uses `main`.
 - `fleet.registry.connection` and `periodic.election.connection` name
   an entry. The `postgres`, `redis` and `consul` providers read it.
-  `filesystem`, `static` and `none` ignore it. The config load checks the key by
+  `filesystem` ignores it. The config load checks the key by
   provider name, so a provider named `consul`, `redis` or `postgres` needs its
   connection declared; otherwise the load fails with
   `fleet.registry.connection 'main' is not defined under connections.consul`.
@@ -917,7 +879,7 @@ An operation that made no attempt (`skipped_open`, `not_started`, or a
 `drakkar_fleet_registry_errors_total`.
 
 **Start.** The registry starts its provider from the publish loop. A
-`start` that fails or times out does not replace the provider with `none`.
+`start` that fails or times out does not switch the registry off.
 It is tried again at the next heartbeat, and at once when the worker's
 state changes. While the breaker is open, the start is skipped until the
 cooldown has passed, and then one start is the probe. Until a start has
@@ -1037,22 +999,17 @@ also counted by the three provider metrics:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fleet.registry.provider` | `filesystem` | `filesystem`, `static`, `none`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul). |
+| `fleet.registry.provider` | `filesystem` | `filesystem`, [`postgres`](#postgres), [`redis`](#redis), [`consul`](#consul). |
 | `fleet.registry.connection` | `main` | The entry of `connections.<provider>` that the `postgres`, `redis` and `consul` providers use. |
 | `fleet.registry.heartbeat_seconds` | `10` | Seconds between card publishes. |
 | `fleet.registry.refresh_seconds` | `15` | Seconds between reads of the peer cards. |
 | `fleet.registry.offline_after_seconds` | `60` | A card older than this is offline. At least `2 * heartbeat_seconds` and at least `10`. With `consul` it sets the time to live of the worker's session (half of it, at least 10 seconds) and is at most `86400`. |
 | `fleet.registry.prune_after_seconds` | `86400` | Cards older than this are deleted. At least `offline_after_seconds`. The `consul` provider does not use it: Consul deletes a card when its session ends. |
 | `fleet.registry.resilience.*` | see [Resilience](#resilience) | Time limit, retries, backoff and breaker for the registry's provider operations. |
-| `fleet.registry.filesystem.dir` | `""` | Card folder; empty means `<shared.dir>/fleet`. |
-| `fleet.registry.static.peers` | `[]` | The `static` peer list: `name`, `cluster`, `url`. |
-| `fleet.registry.consul.mode`, `fleet.registry.consul.service_name` | `publish`, `drakkar` | Settings of the `consul` provider. `mode` is `publish`; `catalog` is reserved for a later release, and the load refuses it with `provider: consul`. `service_name` belongs to catalog mode and is not used. |
-| `fleet.registry.postgres` | `{}` | Block of the `postgres` provider. It has no keys: the schema and the pool come from `connections.postgres.<connection>`. |
-| `fleet.registry.redis` | `{}` | Block of the `redis` provider. It has no keys: the address, the credentials and the key prefix come from `connections.redis.<connection>`. |
 | `connections.*` | none declared | Named connections to Consul, Redis and Postgres; the `consul` providers read `connections.consul.*`, the `postgres` providers read `connections.postgres.*` and the `redis` providers read `connections.redis.*`. See [Connections](#connections). |
 
 Every key has a `DK_` environment override, for example
-`DK_FLEET__REGISTRY__PROVIDER=static`. The full table with constraints is in
+`DK_FLEET__REGISTRY__PROVIDER=redis`. The full table with constraints is in
 [Configuration](configuration.md#fleet-registry).
 
 ## What the registry does not do

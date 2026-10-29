@@ -36,7 +36,7 @@ After `on_startup`, the framework builds all components in this order:
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
 
-4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`, applies the `periodic.tasks` overrides, and checks the merged tasks again. An override that names no declared task or breaks a rule fails startup here, before the recorder, the registry, the UI server, the sinks and the sources start. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `periodic.election`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
+4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `periodic.election`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
 
 5. **If `ui.enabled`** (default: `True`):
    - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
@@ -45,7 +45,7 @@ After `on_startup`, the framework builds all components in this order:
      Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
    - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
    - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
-   - Starts the [fleet registry](fleet.md) service (when `ui.enabled` and a provider other than `none`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. Without a registry, a worker with cluster tasks logs `periodic_cluster_check_off` once. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
+   - Starts the [fleet registry](fleet.md) service (when `ui.enabled`, and with the `filesystem` provider when a card folder resolves): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. Without a registry, a worker with cluster tasks logs `periodic_cluster_check_off` once. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the UI server stops.
 
 6. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
@@ -949,7 +949,7 @@ Each sink type is a dict mapping instance names to their config:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `static`, `none`, `postgres`, `redis`, `consul` |
+| `fleet.registry.provider` | str | `'filesystem'` | `filesystem`, `postgres`, `redis`, `consul` |
 | `fleet.registry.offline_after_seconds` | int | `60` | A peer card older than this is offline |
 | `fleet.cache_exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
 | `fleet.cache_exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |

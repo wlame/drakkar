@@ -239,9 +239,7 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def resolved_registry_dir(self) -> str:
-        """Card folder of the filesystem registry; ``''`` when no folder resolves."""
-        if self.fleet.registry.filesystem.dir:
-            return self.fleet.registry.filesystem.dir
+        """Card folder of the filesystem registry: ``<shared folder>/fleet``; ``''`` when no folder resolves."""
         shared_dir = self.resolved_shared_dir
         # normpath so the derived folder is the same clean path on every
         # backend ('./data/' -> 'data/fleet').
@@ -251,9 +249,8 @@ class DrakkarConfig(BaseSettings):
     def fleet_summary(self) -> str:
         """The registry the worker will run: the provider name, or ``off``.
 
-        ``off`` when the registry is forced to ``none``: the registry needs
-        the UI server (peers reach a worker through it), and the filesystem
-        provider needs a folder.
+        ``off`` when the registry cannot run: it needs the UI server (peers
+        reach a worker through it), and the filesystem provider needs a folder.
         """
         provider = self.fleet.registry.provider
         if not self.ui.enabled or (provider == 'filesystem' and not self.resolved_registry_dir):
@@ -264,8 +261,7 @@ class DrakkarConfig(BaseSettings):
     def election_summary(self) -> str:
         """The summary token of the periodic election provider, with its leading space.
 
-        Empty for ``filesystem``, so a worker on the default provider prints
-        the same summary line as before the election was configurable.
+        Empty for ``filesystem``, the default provider.
         """
         provider = self.periodic.election.provider
         return '' if provider == 'filesystem' else f' election={provider}'

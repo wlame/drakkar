@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import gc
-import inspect
 import json
 import os
 import sqlite3
@@ -2418,28 +2417,44 @@ async def test_sync_state_writes_row(tmp_path):
     await rec.stop()
 
 
-async def test_recorded_task_completed_has_no_cost_or_speed(recorder):
-    """The completion row carries no cost or speed: the writer takes no such arguments."""
-    parameters = inspect.signature(recorder.record_task_completed).parameters
+async def test_recorded_task_completed_metadata_has_only_the_listed_keys(recorder):
+    """The completion row's metadata holds the precomputed flag and the spawn share, and nothing else."""
     queue = recorder.subscribe()
 
-    recorder.record_task_completed(make_result('t-plain'), partition=0)
+    recorder.record_task_completed(make_result('t-plain'), partition=0, precomputed=True)
 
     event = queue.get_nowait()
-    meta = json.loads(event['metadata']) if event.get('metadata') else {}
-    assert 'cost' not in parameters and 'speed' not in parameters
-    assert 'cost' not in meta and 'speed' not in meta
+    meta = json.loads(event['metadata'])
+    assert set(meta) <= {'precomputed', 'spawn_ms'}
+    assert meta['precomputed'] is True
     recorder.unsubscribe(queue)
 
 
-def test_worker_state_ddl_has_no_throughput_column():
+def test_worker_state_ddl_columns_match_the_schema_list():
     db = sqlite3.connect(':memory:')
     db.executescript(SCHEMA_WORKER_STATE)
 
     columns = [row[1] for row in db.execute('PRAGMA table_info(worker_state)')]
 
-    assert 'throughput' not in columns
-    assert 'loop_lag_ms' in columns
+    assert columns == [
+        'id',
+        'uptime_seconds',
+        'assigned_partitions',
+        'partition_count',
+        'pool_active',
+        'pool_max',
+        'total_queued',
+        'consumed_count',
+        'completed_count',
+        'failed_count',
+        'produced_count',
+        'committed_count',
+        'paused',
+        'health_state',
+        'loop_lag_ms',
+        'updated_at',
+        'updated_at_dt',
+    ]
     db.close()
 
 

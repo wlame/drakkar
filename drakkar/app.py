@@ -294,7 +294,7 @@ class DrakkarApp:
         # published in the registry card and shown in the workers list.
         self._lifecycle_state = 'starting'
         # Registry service, started by the lifecycle after the UI server
-        # listens; None while the registry is off (UI off, provider none, or
+        # listens; None while the registry is off (UI off, or
         # no folder for the filesystem provider).
         self._fleet: FleetRegistry | None = None
         # Named shared connections, made by the lifecycle before the first

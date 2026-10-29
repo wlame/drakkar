@@ -29,7 +29,6 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
         'ui': {'enabled': True, 'port': 8123, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
-        'fleet': {'registry': {'provider': 'none'}},
         'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': DRAIN_TIMEOUT_SECONDS},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
         'sources': {'kafka': {'enabled': True, 'startup_align_enabled': False}},
@@ -104,7 +103,8 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
 
 def _runnable_app(tmp_path, monkeypatch) -> tuple[DrakkarApp, MagicMock, list[str]]:
     """A worker with a stub source and a stand-in recorder that logs what the lifecycle asks of it."""
-    app = _app(tmp_path)
+    # The UI is off: the registry needs the UI server, and the recorder is a stand-in here.
+    app = _app(tmp_path, ui={'enabled': False, 'release': {'enabled': False}})
     source = StubSource('kafka')
     app.sources = [source]
     order: list[str] = []

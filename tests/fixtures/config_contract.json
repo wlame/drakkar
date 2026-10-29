@@ -256,32 +256,6 @@
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "static_provider",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "static"
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=static cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "none_provider",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "none"
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=none cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
       "name": "election_consul",
       "yaml": {
         "periodic": {
@@ -411,24 +385,6 @@
       "worker": "w-1",
       "cluster": "search",
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
-    },
-    {
-      "name": "memory_only_with_explicit_registry_dir",
-      "yaml": {
-        "storage": {
-          "dir": ""
-        },
-        "fleet": {
-          "registry": {
-            "filesystem": {
-              "dir": "/mnt/reg"
-            }
-          }
-        }
-      },
-      "worker": "w-1",
-      "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_off",
@@ -844,76 +800,6 @@
       "path": "fleet.registry.provider"
     },
     {
-      "name": "static_peer_without_url",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "static": {
-              "peers": [
-                {
-                  "name": "peer-a"
-                }
-              ]
-            }
-          }
-        }
-      },
-      "path": "fleet.registry.static.peers"
-    },
-    {
-      "name": "static_peer_empty_name",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "static": {
-              "peers": [
-                {
-                  "name": "",
-                  "url": "http://10.0.0.5:8080/"
-                }
-              ]
-            }
-          }
-        }
-      },
-      "path": "fleet.registry.static.peers"
-    },
-    {
-      "name": "static_peer_empty_url",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "static": {
-              "peers": [
-                {
-                  "name": "peer-a",
-                  "url": ""
-                }
-              ]
-            }
-          }
-        }
-      },
-      "path": "fleet.registry.static.peers"
-    },
-    {
-      "name": "static_peer_without_name",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "static": {
-              "peers": [
-                {
-                  "url": "http://10.0.0.5:8080/"
-                }
-              ]
-            }
-          }
-        }
-      },
-      "path": "fleet.registry.static.peers"
-    },
-    {
       "name": "offline_below_floor",
       "yaml": {
         "fleet": {
@@ -946,25 +832,6 @@
         }
       },
       "message": "periodic.election.connection 'main' is not defined under connections.redis"
-    },
-    {
-      "name": "consul_catalog_mode_reserved",
-      "yaml": {
-        "fleet": {
-          "registry": {
-            "provider": "consul",
-            "consul": {
-              "mode": "catalog"
-            }
-          }
-        },
-        "connections": {
-          "consul": {
-            "main": {}
-          }
-        }
-      },
-      "message": "fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only"
     },
     {
       "name": "consul_offline_after_too_long",
@@ -1181,70 +1048,6 @@
         }
       },
       "message": "history.archive: sweep_after_seconds must be at least 60"
-    },
-    {
-      "name": "override_interval_and_cron",
-      "yaml": {
-        "periodic": {
-          "tasks": {
-            "refresh_rates": {
-              "interval": 60,
-              "cron": "*/5 * * * *"
-            }
-          }
-        }
-      },
-      "message": "periodic.tasks.refresh_rates: give at most one of interval and cron"
-    },
-    {
-      "name": "override_bad_cron",
-      "yaml": {
-        "periodic": {
-          "tasks": {
-            "refresh_rates": {
-              "cron": "*/0 * * * *"
-            }
-          }
-        }
-      },
-      "message": "periodic.tasks.refresh_rates: cron '*/0 * * * *': minute step '0' must be from 1 to 59"
-    },
-    {
-      "name": "override_lease_too_short",
-      "yaml": {
-        "periodic": {
-          "tasks": {
-            "refresh_rates": {
-              "lease_seconds": 39
-            }
-          }
-        }
-      },
-      "message": "periodic.tasks.refresh_rates: lease_seconds must be a whole number from 40 to 86400"
-    },
-    {
-      "name": "override_dot_name",
-      "yaml": {
-        "periodic": {
-          "tasks": {
-            "cache.flush": {
-              "interval": 60
-            }
-          }
-        }
-      },
-      "message": "periodic.tasks.cache.flush: a name with a dot is a system task; configure it in its own section (cache.*, history.archive)"
-    },
-    {
-      "name": "override_null",
-      "yaml": {
-        "periodic": {
-          "tasks": {
-            "refresh_rates": null
-          }
-        }
-      },
-      "message": "periodic.tasks.refresh_rates has no value; write {} to keep the declared settings"
     },
     {
       "name": "persistence_sqlite_without_storage_dir",

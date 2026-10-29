@@ -38,18 +38,12 @@ disk holds only the file loop and its connection. A memory read stops after
 list open a short-lived connection to the store by name on a thread of the
 UI server loop's `to_thread` pool; a snapshot runs for at most 30 seconds.
 
-Two other kinds of work read such a folder from a `to_thread` pool:
-
-- At startup, the check that the folder named by
-  `fleet.registry.filesystem.dir` can be created and written runs in the
-  blocking-I/O pool, limited to `fleet.registry.resilience.timeout_seconds`.
-  A check that does not end in time fails the startup. Its thread stays
-  held until the mount answers.
-- The debug UI routes that work on `shared.dir` (the databases list, the
-  history trace, the merge, the downloads and the archive list) run on the
-  UI server's own event loop. Their file calls use the thread pools of that
-  loop, not the pool that `io.max_threads` sizes. A hung mount holds those
-  threads and slows the debug pages, not the pipeline.
+The debug UI routes that work on `shared.dir` (the databases list, the
+history trace, the merge, the downloads and the archive list) read such a
+folder from a `to_thread` pool. They run on the UI server's own event loop,
+and their file calls use the thread pools of that loop, not the pool that
+`io.max_threads` sizes. A hung mount holds those threads and slows the debug
+pages, not the pipeline.
 
 ## Choosing the mechanism
 

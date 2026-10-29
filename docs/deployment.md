@@ -322,9 +322,10 @@ periodic:
 Points to check:
 
 - The `filesystem` registry and election need a folder. With no
-  `storage.dir` and no `shared.dir`, use a service provider as above, or
-  `fleet.registry.provider: none`. A `filesystem` election with no folder
-  stops the start of a worker that declares a cluster task.
+  `storage.dir` and no `shared.dir`, use a service provider as above. The
+  `filesystem` registry then stays off, and the workers list shows only the
+  current worker. A `filesystem` election with no folder stops the start of
+  a worker that declares a cluster task.
 - With a `shared.dir` mounted, the worker still reads the sealed history of
   its cluster, but it publishes nothing into it.
 - Plan RAM for the memory store: up to about 600 MiB per worker with the

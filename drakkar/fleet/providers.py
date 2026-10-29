@@ -1,4 +1,4 @@
-"""The built-in registry providers: ``filesystem``, ``static``, ``none``, ``postgres``, ``redis`` and ``consul``.
+"""The built-in registry providers: ``filesystem``, ``postgres``, ``redis`` and ``consul``.
 
 ``BUILTIN_PROVIDERS`` maps each name to its factory ``(options) -> provider``.
 """
@@ -6,15 +6,14 @@
 import errno
 import os
 import stat
-import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
 
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE
-from drakkar.fleet.card import CARD_SCHEMA, MAX_CARD_BYTES, decode_card, sanitize_worker_name, serialize_card
+from drakkar.fleet.card import MAX_CARD_BYTES, decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext, RegistryFactory
 from drakkar.fleet.providers_consul import consul_registry_factory
 from drakkar.fleet.providers_postgres import postgres_registry_factory
@@ -37,10 +36,6 @@ _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
 FileRejects = list[tuple[str, str]]
 
 
-class FleetRegistryFolderError(RuntimeError):
-    """An explicitly configured card folder cannot be created or written."""
-
-
 def _workers_folder_exists(workers_dir: str) -> bool:
     """True for a real folder, False when it is missing; ``OSError`` for a symlink or a file.
 
@@ -56,68 +51,6 @@ def _workers_folder_exists(workers_dir: str) -> bool:
             f'{workers_dir} is not a folder (a symlink or a file); the registry does not follow it'
         )
     return True
-
-
-def prepare_registry_folder(directory: str) -> None:
-    """Create ``<directory>/workers`` (mode 0700) and check this process can write it.
-
-    The check writes and deletes a probe file, because a permission check
-    without a write can disagree with the file server (root squashing,
-    ACLs). Raises ``OSError`` when the folder cannot be used. Used at startup
-    for a folder the operator set explicitly; a derived folder is left to
-    the publish loop, whose failures are counted and retried.
-    """
-    workers_dir = os.path.join(directory, WORKERS_FOLDER)
-    if not _workers_folder_exists(workers_dir):
-        os.makedirs(workers_dir, mode=DB_DIR_MODE, exist_ok=True)
-    fd, probe = tempfile.mkstemp(prefix='.write-probe-', suffix=TEMP_SUFFIX, dir=workers_dir)
-    os.close(fd)
-    os.unlink(probe)
-
-
-class NoneRegistry:
-    """No peers: ``list`` is empty and the writes do nothing."""
-
-    async def start(self, ctx: RegistryContext) -> None:
-        return None
-
-    async def publish(self, card: dict[str, Any]) -> None:
-        return None
-
-    async def list(self) -> PeerCardList:
-        return []
-
-    async def withdraw(self, worker: str, instance: str) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-
-class StaticRegistry:
-    """A fixed peer list from config. The ages are unknown, so liveness is unknown."""
-
-    def __init__(self, peers: Iterable[Mapping[str, Any]]) -> None:
-        self._cards = tuple(
-            {'schema': CARD_SCHEMA, 'worker': peer['name'], 'cluster': peer.get('cluster', ''), 'url': peer['url']}
-            for peer in peers
-        )
-
-    async def start(self, ctx: RegistryContext) -> None:
-        return None
-
-    async def publish(self, card: dict[str, Any]) -> None:
-        return None
-
-    async def list(self) -> PeerCardList:
-        # Copies, so a caller that edits a card cannot change the next listing.
-        return [PeerCard(card=dict(card), age_seconds=None) for card in self._cards]
-
-    async def withdraw(self, worker: str, instance: str) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
 
 
 class _SkippedFile(Exception):
@@ -333,18 +266,8 @@ def _filesystem_factory(options: Mapping[str, Any]) -> FilesystemRegistry:
     return FilesystemRegistry(directory=options.get('dir', ''), prune_after_seconds=options['prune_after_seconds'])
 
 
-def _static_factory(options: Mapping[str, Any]) -> StaticRegistry:
-    return StaticRegistry(options.get('peers', []))
-
-
-def _none_factory(options: Mapping[str, Any]) -> NoneRegistry:
-    return NoneRegistry()
-
-
 BUILTIN_PROVIDERS: dict[str, RegistryFactory] = {
     'filesystem': _filesystem_factory,
-    'static': _static_factory,
-    'none': _none_factory,
     'postgres': postgres_registry_factory,
     'redis': redis_registry_factory,
     'consul': consul_registry_factory,

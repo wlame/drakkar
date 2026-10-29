@@ -1,19 +1,18 @@
 """The ``periodic`` config section and the schedule keys of ``history.archive``.
 
 The shared cases live in ``tests/fixtures/config_contract.json``; these tests
-cover what the fixture cannot pin: the order of several bad override entries,
-the environment form of an override, and the effective archive schedule.
+cover what the fixture cannot pin: the fields of the section and the
+effective archive schedule.
 """
 
 import json
-import os
 import re
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from drakkar.config import DrakkarConfig, HistoryArchiveConfig, PeriodicTaskOverride, load_config
+from drakkar.config import DrakkarConfig, HistoryArchiveConfig, PeriodicConfig
 
 MESSAGES = json.loads((Path(__file__).parent / 'fixtures' / 'periodic_contract.json').read_text(encoding='utf-8'))[
     'messages'
@@ -28,62 +27,8 @@ def _config(**sections) -> DrakkarConfig:
     return DrakkarConfig(**sections)
 
 
-def _override_message(name: str, rule_id: str) -> str:
-    return MESSAGES['prefix_override'].format(name=name) + MESSAGES[rule_id]
-
-
-def test_override_entries_are_checked_in_sorted_name_order():
-    bad = {'interval': 60, 'cron': '* * * * *'}
-
-    with pytest.raises(ValidationError) as excinfo:
-        _config(periodic={'tasks': {'b_task': bad, 'a_task': bad}})
-
-    text = str(excinfo.value)
-    assert _override_message('a_task', 'rule_at_most_one') in text
-    assert 'b_task' not in text
-
-
-def test_override_null_entries_are_named_in_sorted_order():
-    with pytest.raises(ValidationError) as excinfo:
-        _config(periodic={'tasks': {'b_task': None, 'a_task': None}})
-
-    text = str(excinfo.value)
-    assert MESSAGES['override_null'].replace('{name}', 'a_task') in text
-    assert 'b_task' not in text
-
-
-def test_override_by_env_sets_a_cron(monkeypatch):
-    for name in list(os.environ):
-        if name.startswith('DK_'):
-            monkeypatch.delenv(name)
-    monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
-    monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
-    monkeypatch.setenv('DK_PERIODIC__TASKS__REFRESH_RATES__CRON', '*/10 * * * *')
-
-    config = load_config(None)
-
-    assert config.periodic.tasks == {'refresh_rates': PeriodicTaskOverride(cron='*/10 * * * *')}
-
-
-def test_override_enabled_false_loads():
-    config = _config(periodic={'tasks': {'refresh_rates': {'enabled': False}}})
-
-    override = config.periodic.tasks['refresh_rates']
-    assert override.enabled is False
-    assert (override.interval, override.cron, override.lease_seconds) == (None, None, None)
-
-
-def test_override_empty_entry_keeps_every_declared_setting():
-    config = _config(periodic={'tasks': {'refresh_rates': {}}})
-
-    assert config.periodic.tasks['refresh_rates'] == PeriodicTaskOverride()
-
-
-def test_override_with_a_trailing_newline_in_its_cron_fails_the_load():
-    with pytest.raises(ValidationError) as excinfo:
-        _config(periodic={'tasks': {'refresh_rates': {'cron': '* * * * *\n'}}})
-
-    assert MESSAGES['prefix_override'].format(name='refresh_rates') in str(excinfo.value)
+def test_periodic_section_holds_only_the_election():
+    assert set(PeriodicConfig.model_fields) == {'election'}
 
 
 def test_archive_effective_interval_defaults_to_3600_and_is_none_with_cron():

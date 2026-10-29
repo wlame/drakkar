@@ -22,9 +22,6 @@ from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import (
     BUILTIN_PROVIDERS,
     FilesystemRegistry,
-    NoneRegistry,
-    StaticRegistry,
-    prepare_registry_folder,
 )
 from tests import fleet_testkit as testkit
 from tests.fleet_fakes import MemoryRegistry, MemoryStore
@@ -62,18 +59,6 @@ def make_filesystem(registry_dir):
 
 
 # --- The kit against every provider ---
-
-
-async def test_kit_shape_and_age_checks_pass_for_none():
-    await testkit.check_list_shape(NoneRegistry(), _context())
-    await testkit.check_age_is_none_or_non_negative(NoneRegistry(), _context())
-
-
-async def test_kit_shape_and_age_checks_pass_for_static():
-    peers = [{'name': 'w-2', 'cluster': 'c', 'url': 'http://10.0.0.6:8080/'}]
-
-    await testkit.check_list_shape(StaticRegistry(peers), _context())
-    await testkit.check_age_is_none_or_non_negative(StaticRegistry(peers), _context())
 
 
 @pytest.mark.parametrize('check', testkit.PUBLISHING_CHECKS, ids=lambda check: check.__name__)
@@ -117,59 +102,33 @@ async def test_kit_reports_a_provider_that_keeps_a_silent_card_online():
 async def test_kit_reports_a_provider_that_does_not_list_its_own_card():
     """A kit check fails loudly; it does not pass a provider that ignores publish."""
     with pytest.raises(AssertionError, match='own card'):
-        await testkit.check_list_includes_own_card(NoneRegistry, lambda _seconds: None, PRUNE_AFTER)
+        await testkit.check_list_includes_own_card(_ForgetfulRegistry, lambda _seconds: None, PRUNE_AFTER)
 
 
-# --- none and static ---
+class _ForgetfulRegistry:
+    """A registry that ignores every write and lists nothing; the kit must reject it."""
 
+    async def start(self, ctx: RegistryContext) -> None:
+        return None
 
-async def test_none_registry_lists_nothing_and_ignores_writes():
-    registry = NoneRegistry()
-    await registry.start(_context())
-    await registry.publish(_card('w-1'))
-    await registry.withdraw('w-1', 'a' * 16)
+    async def publish(self, card: dict) -> None:
+        return None
 
-    assert await registry.list() == []
-    await registry.stop()
+    async def list(self) -> PeerCardList:
+        return []
 
+    async def withdraw(self, worker: str, instance: str) -> None:
+        return None
 
-async def test_static_registry_lists_the_configured_peers_with_unknown_age():
-    registry = StaticRegistry(
-        [
-            {'name': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.6:8080/'},
-            {'name': 'w-3', 'cluster': '', 'url': 'http://10.0.0.7:8080/'},
-        ]
-    )
-    await registry.start(_context())
-    await registry.publish(_card('w-1'))
-
-    listed = await registry.list()
-
-    assert listed == [
-        PeerCard(
-            card={'schema': 1, 'worker': 'w-2', 'cluster': 'search', 'url': 'http://10.0.0.6:8080/'}, age_seconds=None
-        ),
-        PeerCard(card={'schema': 1, 'worker': 'w-3', 'cluster': '', 'url': 'http://10.0.0.7:8080/'}, age_seconds=None),
-    ]
-
-
-async def test_static_registry_hands_out_copies():
-    registry = StaticRegistry([{'name': 'w-2', 'cluster': '', 'url': 'http://10.0.0.6:8080/'}])
-    (first,) = await registry.list()
-    first.card['worker'] = 'changed'
-
-    (second,) = await registry.list()
-
-    assert second.card['worker'] == 'w-2'
+    async def stop(self) -> None:
+        return None
 
 
 def test_builtin_provider_table_names():
-    assert sorted(BUILTIN_PROVIDERS) == ['consul', 'filesystem', 'none', 'postgres', 'redis', 'static']
+    assert sorted(BUILTIN_PROVIDERS) == ['consul', 'filesystem', 'postgres', 'redis']
 
 
 def test_builtin_factories_build_their_providers(tmp_path):
-    assert isinstance(BUILTIN_PROVIDERS['none']({}), NoneRegistry)
-    assert isinstance(BUILTIN_PROVIDERS['static']({'peers': []}), StaticRegistry)
     filesystem = BUILTIN_PROVIDERS['filesystem']({'dir': str(tmp_path), 'prune_after_seconds': 60})
     assert isinstance(filesystem, FilesystemRegistry)
 
@@ -649,21 +608,3 @@ async def test_filesystem_refuses_a_symlinked_workers_folder(make_filesystem, re
 
     assert old_file.exists()
     assert sorted(path.name for path in elsewhere.iterdir()) == ['precious.json']
-
-
-@needs_non_root
-def test_prepare_registry_folder_fails_on_a_folder_this_process_cannot_write(tmp_path):
-    workers = tmp_path / 'fleet' / 'workers'
-    workers.mkdir(parents=True)
-    workers.chmod(0o500)
-    try:
-        with pytest.raises(OSError):
-            prepare_registry_folder(str(tmp_path / 'fleet'))
-    finally:
-        workers.chmod(0o700)
-
-
-def test_prepare_registry_folder_leaves_no_probe_file(tmp_path):
-    prepare_registry_folder(str(tmp_path / 'fleet'))
-
-    assert list((tmp_path / 'fleet' / 'workers').iterdir()) == []

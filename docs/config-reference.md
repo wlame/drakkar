@@ -727,10 +727,6 @@ periodic:
       breaker:
         failure_threshold: 5       # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__FAILURE_THRESHOLD
         cooldown_seconds: 30.0     # env: DK_PERIODIC__ELECTION__RESILIENCE__BREAKER__COOLDOWN_SECONDS
-  tasks: {}                        # overrides of declared @periodic tasks, keyed by method name:
-                                   #   refresh_rates: {enabled: true, interval: 600, cron: null, lease_seconds: null}
-                                   # give at most one of interval and cron; a name the handler does not declare
-                                   # fails startup. env: DK_PERIODIC__TASKS__<NAME>__<KEY>
 ```
 
 ---
@@ -746,7 +742,7 @@ How workers find each other and exchange cache rows. Peers pull `cluster`/`globa
 ```yaml
 fleet:
   registry:
-    provider: filesystem           # filesystem | static | none | postgres | redis | consul;
+    provider: filesystem           # filesystem | postgres | redis | consul;
                                    # postgres keeps the cards in the table fleet_workers of connections.postgres.<connection>;
                                    # redis keeps them in keys of connections.redis.<connection>, with an index of the workers;
                                    # consul keeps them in keys of connections.consul.<connection>, each held by a session of its worker.
@@ -771,16 +767,6 @@ fleet:
                                    # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__FAILURE_THRESHOLD
         cooldown_seconds: 30.0     # open time before one probe operation.
                                    # env: DK_FLEET__REGISTRY__RESILIENCE__BREAKER__COOLDOWN_SECONDS
-    filesystem:
-      dir: ''                      # '' = <shared.dir>/fleet. env: DK_FLEET__REGISTRY__FILESYSTEM__DIR
-    static:
-      peers: []                    # [{name, cluster, url}]. YAML only.
-    consul:                        # settings of the consul provider
-      mode: publish                # publish | catalog. catalog is reserved for a later release and fails the load with provider consul.
-                                   # env: DK_FLEET__REGISTRY__CONSUL__MODE
-      service_name: drakkar        # for the catalog mode of a later release; not used now. env: DK_FLEET__REGISTRY__CONSUL__SERVICE_NAME
-    redis: {}                      # block of the redis provider; no keys (address, credentials and key prefix come from the connection)
-    postgres: {}                   # block of the postgres provider; no keys (schema and pool come from the connection)
   cache_exchange:
     enabled: true                  # pull cluster/global cache rows from peers. env: DK_FLEET__CACHE_EXCHANGE__ENABLED
     interval_seconds: 30           # cycle period. env: DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS

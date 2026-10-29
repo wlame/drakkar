@@ -9,14 +9,12 @@ from drakkar.config import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     CacheExchangeConfig,
     ConnectionsConfig,
-    ConsulRegistryConfig,
     DrakkarConfig,
     FleetRegistryConfig,
     HistoryArchiveConfig,
     HistoryConfig,
     PeriodicConfig,
     SharedConfig,
-    StaticPeerConfig,
     StorageConfig,
     UITraceConfig,
     load_config,
@@ -69,10 +67,18 @@ def test_fleet_registry_defaults():
     assert registry.offline_after_seconds == 60
     assert registry.prune_after_seconds == 86400
     assert registry.resilience.timeout_seconds == 5.0
-    assert registry.filesystem.dir == ''
-    assert registry.static.peers == []
-    assert registry.consul.mode == 'publish'
-    assert registry.consul.service_name == 'drakkar'
+
+
+def test_fleet_registry_fields_are_the_provider_choice_the_timings_and_the_resilience_block():
+    assert set(FleetRegistryConfig.model_fields) == {
+        'provider',
+        'connection',
+        'heartbeat_seconds',
+        'refresh_seconds',
+        'offline_after_seconds',
+        'prune_after_seconds',
+        'resilience',
+    }
 
 
 def test_the_old_offline_default_still_loads_with_the_default_heartbeat():
@@ -86,11 +92,6 @@ def test_timeout_seconds_is_no_longer_a_registry_field():
 def test_offline_after_seconds_of_zero_fails_at_the_field():
     with pytest.raises(ValueError, match='offline_after_seconds'):
         FleetRegistryConfig(offline_after_seconds=0)
-
-
-def test_consul_registry_service_name_must_not_be_empty():
-    with pytest.raises(ValueError, match='service_name'):
-        ConsulRegistryConfig(service_name='')
 
 
 def test_election_defaults():
@@ -115,12 +116,6 @@ def test_ui_trace_defaults():
 
     assert trace.history_max_files == 256
     assert trace.history_max_seconds == 10.0
-
-
-def test_static_peer_cluster_defaults_to_empty():
-    peer = StaticPeerConfig(name='peer-a', url='http://10.0.0.5:8080/')
-
-    assert peer.cluster == ''
 
 
 # --- moved-key table -----------------------------------------------------
@@ -196,19 +191,17 @@ def test_resolved_shared_dir_falls_back_to_storage_dir(storage_dir, shared_dir, 
 
 
 @pytest.mark.parametrize(
-    ('storage_dir', 'registry_dir', 'expected'),
+    ('storage_dir', 'expected'),
     [
-        ('/var/lib/drakkar', '', '/var/lib/drakkar/fleet'),
-        # The derived folder is a clean path, the same on every backend.
-        ('./data/', '', 'data/fleet'),
-        ('/var/lib//drakkar/', '', '/var/lib/drakkar/fleet'),
-        ('/var/lib/drakkar', '/mnt/registry', '/mnt/registry'),
-        ('', '/mnt/registry', '/mnt/registry'),
-        ('', '', ''),
+        ('/var/lib/drakkar', '/var/lib/drakkar/fleet'),
+        # The folder is a clean path, the same on every backend.
+        ('./data/', 'data/fleet'),
+        ('/var/lib//drakkar/', '/var/lib/drakkar/fleet'),
+        ('', ''),
     ],
 )
-def test_resolved_registry_dir(storage_dir, registry_dir, expected):
-    config = _config(storage={'dir': storage_dir}, fleet={'registry': {'filesystem': {'dir': registry_dir}}})
+def test_resolved_registry_dir(storage_dir, expected):
+    config = _config(storage={'dir': storage_dir})
 
     assert config.resolved_registry_dir == expected
 
@@ -219,10 +212,15 @@ def test_resolved_registry_dir(storage_dir, registry_dir, expected):
         ({}, 'filesystem'),
         ({'ui': {'enabled': False}}, 'off'),
         ({'storage': {'dir': ''}}, 'off'),
-        ({'storage': {'dir': ''}, 'fleet': {'registry': {'provider': 'static'}}}, 'static'),
-        ({'fleet': {'registry': {'provider': 'none'}}}, 'none'),
         ({'fleet': {'registry': {'provider': 'consul'}}, 'connections': {'consul': {'main': {}}}}, 'consul'),
-        ({'ui': {'enabled': False}, 'fleet': {'registry': {'provider': 'static'}}}, 'off'),
+        (
+            {
+                'ui': {'enabled': False},
+                'fleet': {'registry': {'provider': 'redis'}},
+                'connections': {'redis': {'main': {}}},
+            },
+            'off',
+        ),
     ],
 )
 def test_fleet_summary(sections, expected):
@@ -262,9 +260,8 @@ def test_registry_and_election_load_when_the_named_connection_is_declared(provid
     assert config.fleet.registry.connection == 'cluster-a'
 
 
-@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none'])
-def test_providers_that_use_no_connection_ignore_the_connection_name(provider):
-    config = _config(fleet={'registry': {'provider': provider, 'connection': 'not-declared'}})
+def test_the_filesystem_provider_ignores_the_connection_name():
+    config = _config(fleet={'registry': {'provider': 'filesystem', 'connection': 'not-declared'}})
 
     assert config.fleet.registry.connection == 'not-declared'
 
@@ -281,40 +278,12 @@ def test_registry_names_a_connection_of_its_own_kind_only():
         _config(fleet={'registry': {'provider': 'consul'}}, connections={'redis': {'main': {}}})
 
 
-CATALOG_MODE_MESSAGE = (
-    'fleet.registry.consul.mode catalog is reserved for a later release; this release ships publish only'
-)
-
-
 def _consul_registry(**registry) -> DrakkarConfig:
     """A config whose registry is the consul provider, with ``registry`` merged over it."""
     return _config(
         fleet={'registry': {'provider': 'consul', **registry}},
         connections={'consul': {'main': {}}},
     )
-
-
-def test_consul_registry_in_catalog_mode_fails_the_load():
-    with pytest.raises(ValueError) as excinfo:
-        _consul_registry(consul={'mode': 'catalog'})
-
-    assert CATALOG_MODE_MESSAGE in str(excinfo.value)
-
-
-def test_consul_registry_in_publish_mode_loads():
-    config = _consul_registry(consul={'mode': 'publish'})
-
-    assert config.fleet.registry.consul.mode == 'publish'
-
-
-@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'redis', 'postgres'])
-def test_catalog_mode_loads_when_the_provider_is_not_consul(provider):
-    config = _config(
-        fleet={'registry': {'provider': provider, 'consul': {'mode': 'catalog'}}},
-        connections={'redis': {'main': {}}, 'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
-    )
-
-    assert config.fleet.registry.consul.mode == 'catalog'
 
 
 def test_consul_offline_after_seconds_at_the_cap_loads():
@@ -333,7 +302,7 @@ def test_consul_offline_after_seconds_over_the_cap_fails_the_load():
     )
 
 
-@pytest.mark.parametrize('provider', ['filesystem', 'static', 'none', 'redis', 'postgres'])
+@pytest.mark.parametrize('provider', ['filesystem', 'redis', 'postgres'])
 def test_offline_after_seconds_over_the_consul_cap_loads_for_other_providers(provider):
     config = _config(
         fleet={'registry': {'provider': provider, 'offline_after_seconds': 86_401, 'prune_after_seconds': 86_401}},
@@ -344,21 +313,12 @@ def test_offline_after_seconds_over_the_consul_cap_loads_for_other_providers(pro
 
 
 def test_consul_registry_checks_the_prune_limit_before_the_offline_cap():
-    # The prune check is the older timing check and keeps its place ahead of the consul cap.
+    # The prune check runs before the consul cap.
     with pytest.raises(ValueError) as excinfo:
         _consul_registry(offline_after_seconds=86_401)
 
     text = str(excinfo.value)
     assert 'fleet.registry.prune_after_seconds (86400) must be >= fleet.registry.offline_after_seconds (86401)' in text
-    assert 'must be <= 86400' not in text
-
-
-def test_consul_registry_in_catalog_mode_reports_the_mode_before_the_offline_cap():
-    with pytest.raises(ValueError) as excinfo:
-        _consul_registry(offline_after_seconds=86_401, prune_after_seconds=86_401, consul={'mode': 'catalog'})
-
-    text = str(excinfo.value)
-    assert CATALOG_MODE_MESSAGE in text
     assert 'must be <= 86400' not in text
 
 
@@ -400,7 +360,7 @@ def test_env_names_load_into_the_new_sections(monkeypatch):
     monkeypatch.setenv('DK_SHARED__DIR', '/mnt/fleet')
     monkeypatch.setenv('DK_HISTORY__ARCHIVE__DUE_AFTER_HOURS', '72')
     monkeypatch.setenv('DK_HISTORY__MERGED_RETENTION_DAYS', '0')
-    monkeypatch.setenv('DK_FLEET__REGISTRY__PROVIDER', 'static')
+    monkeypatch.setenv('DK_FLEET__REGISTRY__PROVIDER', 'filesystem')
     monkeypatch.setenv('DK_FLEET__CACHE_EXCHANGE__INTERVAL_SECONDS', '12.5')
     monkeypatch.setenv('DK_UI__TRACE__HISTORY_MAX_FILES', '64')
     monkeypatch.delenv('DK_CONFIG', raising=False)
@@ -411,7 +371,7 @@ def test_env_names_load_into_the_new_sections(monkeypatch):
     assert config.shared.dir == '/mnt/fleet'
     assert config.history.archive.due_after_hours == 72
     assert config.history.merged_retention_days == 0
-    assert config.fleet.registry.provider == 'static'
+    assert config.fleet.registry.provider == 'filesystem'
     assert config.fleet.cache_exchange.interval_seconds == 12.5
     assert config.ui.trace.history_max_files == 64
 
