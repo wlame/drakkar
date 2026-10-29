@@ -33,7 +33,7 @@ from stepping on each other:
   ``KafkaSource.on_assign`` (same hole-plugging backpressure does), so a
   rebalance cannot leak messages past an active pause.
 
-Every method runs on the app's main event loop — the UI server dispatches
+Every method runs on the app's main event loop — the API server dispatches
 through ``dispatch_to_loop`` — so the state needs no locking.
 """
 
@@ -51,11 +51,6 @@ if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
 logger = structlog.get_logger()
-
-# The API-level bound on one pause, independent of the configured presets.
-# One hour is far beyond any debugging session and far below "forgot about
-# it forever" — the feature is explicitly a bounded pause.
-MAX_PAUSE_SECONDS = 3600
 
 
 class ConsumerNotReadyError(Exception):
@@ -82,7 +77,7 @@ class ConsumePauseController:
         cfg = self._app.config.ui.consume_pause
         return {
             'enabled': cfg.enabled,
-            'durations_seconds': list(cfg.durations_seconds),
+            'durations_seconds': list(cfg.durations),
             'active': self.active,
             'resume_at_ms': self._resume_at_ms,
             'requested_seconds': self._requested_seconds,

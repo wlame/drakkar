@@ -19,7 +19,7 @@ from drakkar.config import (
 def test_timeline_defaults():
     timeline = UITimelineConfig()
     assert timeline.history_factor == 100
-    assert timeline.max_age_minutes == 60
+    assert timeline.max_age == 60
     assert timeline.color_rules == []
     assert timeline.labels == TimelineLabels()
     assert timeline.labels.tag == ''
@@ -153,6 +153,6 @@ def test_timeline_history_factor_zero_fails():
         UITimelineConfig(history_factor=0)
 
 
-def test_timeline_max_age_minutes_over_cap_fails():
+def test_timeline_max_age_over_cap_fails():
     with pytest.raises(ValidationError):
-        UITimelineConfig(max_age_minutes=1441)
+        UITimelineConfig(max_age='1d1m')

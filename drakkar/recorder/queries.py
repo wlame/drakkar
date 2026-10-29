@@ -2,7 +2,7 @@
 
 The recorder writes; this module reads. Split out of
 :mod:`drakkar.recorder.core` so the queries can be exercised against a
-plain SQLite file with no recorder, no event loop wiring and no UI server,
+plain SQLite file with no recorder, no event loop wiring and no API server,
 rather than hunting them through a 3,000-line class.
 
 Two families live here:
@@ -507,7 +507,7 @@ class EventQueries:
 # the UI reads run through ``deps.recorder_select``: the source rule, a
 # flush of the stages that source needs, then a SELECT on the memory store
 # or the live file, dispatched to the main loop with a timeout. That
-# execution path belongs to the UI server; the query text does not.
+# execution path belongs to the API server; the query text does not.
 # ---------------------------------------------------------------------------
 
 # Events that describe one execution attempt. Every timeline and task-state

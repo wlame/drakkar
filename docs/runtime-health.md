@@ -28,14 +28,14 @@ It answers four questions:
 Two cooperating parts, because a blocked event loop cannot observe
 itself — only a thread can:
 
-- A **heartbeat task** sleeps `tick_seconds` (default 250 ms) and
+- A **heartbeat task** sleeps `tick` (default 250 ms) and
   measures how late it wakes. That lateness *is* the event-loop lag —
   the time between "this coroutine became runnable" and "it actually
   ran", which is what every other coroutine in the worker experiences
   too. Each tick costs one clock read, one comparison, and one
   ring-buffer write.
 - A **sampler thread** wakes at the same interval and compares the
-  heartbeat's age against `stall_seconds` (default 1 s). While the
+  heartbeat's age against `stall` (default 1 s). While the
   heartbeat is silent — the loop is stuck *right now* — it captures the
   loop thread's current stack via `sys._current_frames()`. Repeated
   samples of the same location collapse into one entry with a count;
@@ -48,16 +48,16 @@ the debug UI with its stacks expandable.
 !!! note "Overhead when healthy"
     Nothing beyond the two ticks: no task scans, no stack walks, no
     database writes except one small `runtime_health` sample event every
-    `sample_interval_seconds` (default 10 s). Stack capture and the task
+    `sample_interval` (default 10 s). Stack capture and the task
     census only run during a stall or on an explicit request.
 
 ## States
 
 | State | Meaning | Trigger |
 |---|---|---|
-| `healthy` | lag below `warn_lag_seconds` | — |
-| `degraded` | the loop runs but late | lag ≥ `warn_lag_seconds` (default 100 ms) |
-| `stalled` | the loop is not running | heartbeat silent ≥ `stall_seconds` (default 1 s) |
+| `healthy` | lag below `warn_lag` | — |
+| `degraded` | the loop runs but late | lag ≥ `warn_lag` (default 100 ms) |
+| `stalled` | the loop is not running | heartbeat silent ≥ `stall` (default 1 s) |
 
 Recovery back to `healthy` needs several consecutive clean ticks
 (hysteresis), so a loop hovering around the threshold emits one
@@ -75,7 +75,7 @@ is the problem (CPU starvation, cgroup throttling, a struggling NFS
 server slowing every syscall).
 
 An **episode** covers that shape. It opens when the monitor leaves
-`healthy` and closes when it returns (or after `episode_max_seconds`,
+`healthy` and closes when it returns (or after `max_episode`,
 default 300 — a longer incident flushes and continues in a fresh
 episode, so evidence exists even if the process dies mid-incident).
 While an episode is open:
@@ -106,9 +106,9 @@ database path is degraded.
 
 ## Stack probes (opt-in profiler)
 
-Set `runtime_health.probe_interval_seconds` above 0 and the sampler
+Set `runtime_health.stack_probe_enabled: true` and the sampler
 thread records a `runtime_probe` event with the loop thread's stack every
-interval, healthy or not — a low-rate flight-recorder profiler. Useful to
+`stack_probe_interval`, healthy or not — a low-rate flight-recorder profiler. Useful to
 answer "where does the loop actually spend its time" while tuning a
 production workload, and to have baseline stacks on disk from *before* an
 incident. Off by default (`0`): it writes events for as long as the
@@ -117,7 +117,7 @@ worker runs.
 ## What you see
 
 **Debug UI → Live → Runtime tab**: state badge, current lag, a lag
-sparkline (in-memory ring buffer, `history_window_seconds` long), the
+sparkline (in-memory ring buffer, `history_window` long), the
 recent-stall list with expandable stack traces, and a *Sample now*
 button that runs the task census.
 
@@ -152,14 +152,15 @@ worker was degraded when" with one query.
 ```yaml
 runtime_health:
   enabled: true
-  tick_seconds: 0.25               # heartbeat + sampler interval
-  warn_lag_seconds: 0.1            # degraded threshold
-  stall_seconds: 1.0               # stalled threshold + stack capture trigger
+  tick: 250ms                      # heartbeat + sampler interval
+  warn_lag: 100ms                  # degraded threshold
+  stall: 1s                        # stalled threshold + stack capture trigger
   max_stall_stacks: 10             # distinct stacks kept per stall
-  sample_interval_seconds: 10.0    # recorder history sample cadence
-  history_window_seconds: 900      # in-memory sparkline window
-  episode_max_seconds: 300.0       # flush cap for one lag episode
-  probe_interval_seconds: 0.0      # opt-in stack probes; 0 = off
+  sample_interval: 10s             # recorder history sample cadence
+  history_window: 15m              # in-memory sparkline window
+  max_episode: 5m                  # flush cap for one lag episode
+  stack_probe_enabled: false       # opt-in stack probes
+  stack_probe_interval: 1s         # time between probes
 ```
 
 Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
@@ -185,7 +186,7 @@ Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
 
 ## Limits
 
-- A block shorter than `stall_seconds`, outside any episode, shows up in
+- A block shorter than `stall`, outside any episode, shows up in
   the lag histogram but carries no stack — the sampler never saw it in
   the act. (Inside an episode, every sampler wakeup captures.)
 - The census counts and locates coroutines; it does not measure their

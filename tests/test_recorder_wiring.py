@@ -2,15 +2,17 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
 from drakkar.metrics import provider_calls
+from drakkar.models import ExecutorResult, ExecutorTask
 from drakkar.providers import postgres as postgres_providers
 from drakkar.providers.connections import Connections
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.election import BUILTIN_ELECTIONS, ThreadFence
+from drakkar.recorder.writer import logger as writer_logger
 from tests.archive_helpers import idle_archive_task, run_won_slot
 from tests.conftest import kafka_connections, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection
@@ -25,12 +27,12 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
     values = {
         'autodiscover': {'enabled': True, 'provider': 'filesystem'},
         'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
-        'cluster_name': 'search',
+        'cluster': {'name': 'search'},
         'api': {'port': 8123},
         'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
-        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': DRAIN_TIMEOUT_SECONDS},
+        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout': f'{DRAIN_TIMEOUT_SECONDS}s'},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
         'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
     }
@@ -230,6 +232,28 @@ async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkey
         assert app._recorder._memory_window_seconds == 60
         assert app._recorder._memory_max_rows == 800
         assert app._recorder._memory_max_bytes == 16777216
+    finally:
+        await app._recorder.stop()
+
+
+def _result_of(task_id: str, duration_seconds: float) -> ExecutorResult:
+    task = ExecutorTask(task_id=task_id, args=[], source_offsets=[0])
+    return ExecutorResult(exit_code=0, stdout='', stderr='', duration_seconds=duration_seconds, task=task)
+
+
+async def test_logging_min_task_duration_gates_the_slow_task_line(tmp_path, monkeypatch):
+    app = _app(tmp_path, logging={'min_task_duration': '2s'}, ui={'enabled': False})
+    (tmp_path / 'storage').mkdir()
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._start_recorder_and_api()
+    try:
+        with patch.object(writer_logger, 'info') as log:
+            app._recorder.record_task_completed(_result_of('fast', 1.999), partition=0)
+            app._recorder.record_task_completed(_result_of('slow', 2.0), partition=0)
+
+        slow_lines = [call for call in log.call_args_list if call.args[0] == 'slow_task_completed']
+        assert [call.kwargs['task_id'] for call in slow_lines] == ['slow']
     finally:
         await app._recorder.stop()
 

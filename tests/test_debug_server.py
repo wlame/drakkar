@@ -762,7 +762,7 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
 # --- /api/live/arrange-tasks (Arrange tab state lookup) ---
 #
 # The endpoint queries the recorder's SQLite for a specific set of
-# task_ids, ignoring the ws_min_duration_ms filter and the 10-minute
+# task_ids, ignoring the ui.ws_min_duration filter and the 10-minute
 # timeline window that /api/recent-tasks applies. The Arrange tab uses
 # it to keep the sidebar fresh for batches outside the timeline window.
 
@@ -2103,7 +2103,7 @@ class TestApiTimelineEvents:
         assert events[1]['partition'] == 0
         await db.close()
 
-    async def test_minutes_clamped_to_timeline_max_age_minutes(self, tmp_path, mock_recorder, mock_app):
+    async def test_minutes_clamped_to_timeline_max_age(self, tmp_path, mock_recorder, mock_app):
         now = time.time()
         old_row = self._timeline_event_metadata_json(text='ancient')
         recent_row = self._timeline_event_metadata_json(text='fresh')
@@ -2112,12 +2112,12 @@ class TestApiTimelineEvents:
             mock_recorder,
             mock_app,
             rows=[
-                (now - 90 * 60, 0, old_row),  # older than the 60-minute default max_age_minutes
+                (now - 90 * 60, 0, old_row),  # older than the 60-minute default max_age
                 (now - 5 * 60, 0, recent_row),
             ],
         )
         async with client as c:
-            # A huge minutes value must clamp down to ui.timeline.max_age_minutes (60 by default).
+            # A huge minutes value must clamp down to ui.timeline.max_age (60 by default).
             resp = await c.get('/api/v1/timeline/events?minutes=99999')
         texts = [e['data']['text'] for e in resp.json()['events']]
         assert texts == ['fresh']
@@ -2260,7 +2260,7 @@ class TestApiRecentTasksDepthAndWindow:
         await db.close()
 
     async def test_minutes_clamped_to_configured_max_age(self, tmp_path, mock_recorder, mock_app):
-        timeline = UITimelineConfig(max_age_minutes=60)
+        timeline = UITimelineConfig(max_age='1h')
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline)
         now = time.time()
         # Inside the 60-minute clamp.
@@ -3691,7 +3691,7 @@ def _probe_mock_app(mock_app):
         task_timeout_seconds=5,
     )
     # Replace the MagicMock-based config with a real one so the endpoint
-    # can read ``executor.task_timeout_seconds`` without TypeError.
+    # can read ``executor.task_timeout`` without TypeError.
     mock_app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     return mock_app
 
@@ -3988,7 +3988,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
 ):
     """Handler on_task_complete sleeps past the wall-clock timeout → 200 + truncated=True.
 
-    Set ``task_timeout_seconds=1`` (the minimum ExecutorConfig allows)
+    Set ``executor.task_timeout`` to 1s (the minimum ExecutorConfig allows)
     and monkey-patch ``PROBE_TIMEOUT_HEADROOM_SECONDS`` to ``-1.9`` so
     the total wait_for timeout is ``2*1 + (-1.9) = 0.1s``. The
     handler's on_task_complete then sleeps 1s, guaranteeing wait_for
@@ -4018,7 +4018,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     _probe_mock_app._config = DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
-        executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
+        executor=ExecutorConfig(task_timeout='1s', binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 
@@ -4065,7 +4065,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     _probe_mock_app._config = DrakkarConfig(
         connections=kafka_connections(),
         sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
-        executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
+        executor=ExecutorConfig(task_timeout='1s', binary_path='/nonexistent'),
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 

@@ -6,7 +6,7 @@ Covers the contract promised by ``BaseDrakkarHandler.offload``:
   exception propagate to the awaiting side unchanged;
 - the hook context (``drakkar.hookctx``) is copied into the pool thread,
   so ``self.annotate(...)`` keeps anchoring correctly;
-- the pool is bounded (``offload.max_threads``) with FIFO queueing, and
+- the pool is bounded (``threads.offload``) with FIFO queueing, and
   its running/queued counters + Prometheus gauges stay coherent through
   completion, failure, and cancellation;
 - one ``offload`` flight-recorder event is emitted per call, anchored
@@ -24,7 +24,6 @@ import threading
 import pytest
 
 from drakkar import metrics
-from drakkar.config import OffloadConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context, current_hook_context
 from drakkar.offload import InlineOffloader, OffloaderLike, OffloadPool, resolve_max_threads
@@ -49,7 +48,7 @@ def _gauge(metric) -> float:
 def pool():
     """A 2-thread pool with a fake recorder; shut down after the test."""
     recorder = FakeRecorder()
-    p = OffloadPool(OffloadConfig(max_threads=2), recorder=recorder)
+    p = OffloadPool(2, recorder=recorder)
     p.recorder = recorder  # test-side back-reference for assertions
     yield p
     p.shutdown()
@@ -209,7 +208,7 @@ def test_offload_event_outside_hooks_is_unanchored(pool):
 
 
 def test_pool_without_recorder_still_runs():
-    pool = OffloadPool(OffloadConfig(max_threads=1), recorder=None)
+    pool = OffloadPool(1, recorder=None)
     try:
 
         async def scenario():
@@ -225,7 +224,7 @@ def test_pool_without_recorder_still_runs():
 
 def test_pool_bounds_concurrency_and_reports_queue():
     """With max_threads=1, a second offload queues; snapshot shows it."""
-    pool = OffloadPool(OffloadConfig(max_threads=1), recorder=None)
+    pool = OffloadPool(1, recorder=None)
     release = threading.Event()
     started = threading.Event()
 
@@ -262,7 +261,7 @@ def test_pool_bounds_concurrency_and_reports_queue():
 
 def test_cancelling_a_queued_offload_pays_back_the_counter():
     """Cancel the queued (never-started) call: counters return to baseline."""
-    pool = OffloadPool(OffloadConfig(max_threads=1), recorder=None)
+    pool = OffloadPool(1, recorder=None)
     release = threading.Event()
     started = threading.Event()
 
@@ -293,7 +292,7 @@ def test_cancelling_a_queued_offload_pays_back_the_counter():
 
 
 def test_offload_after_shutdown_raises_and_leaks_no_counter():
-    pool = OffloadPool(OffloadConfig(max_threads=1), recorder=None)
+    pool = OffloadPool(1, recorder=None)
     pool.shutdown()
 
     async def scenario():
@@ -320,21 +319,21 @@ class TestResolveMaxThreads:
         ],
     )
     def test_auto_scales_with_the_executor_pool(self, pool_max, expected):
-        assert resolve_max_threads(0, pool_max) == expected
+        assert resolve_max_threads(None, pool_max) == expected
 
     def test_explicit_value_wins_untouched(self):
         assert resolve_max_threads(7, 40) == 7
         assert resolve_max_threads(1, 40) == 1
 
     def test_pool_uses_the_resolved_auto_size(self):
-        pool = OffloadPool(OffloadConfig(), recorder=None, executor_pool_max=13)
+        pool = OffloadPool(None, recorder=None, executor_pool_max=13)
         try:
             assert pool.max_threads == 4
         finally:
             pool.shutdown()
 
     def test_default_config_without_executor_hint_floors_at_two(self):
-        pool = OffloadPool(OffloadConfig(), recorder=None)
+        pool = OffloadPool(None, recorder=None)
         try:
             assert pool.max_threads == 2
         finally:
@@ -342,7 +341,7 @@ class TestResolveMaxThreads:
 
 
 async def test_lifecycle_wires_auto_sized_pool_from_the_executor_config():
-    """The wiring path resolves max_threads=0 against executor.max_executors
+    """The wiring path resolves a null threads.offload against executor.max_executors
     — pinned end to end because the executor field name is easy to get
     wrong (the similarly named pool_max belongs to the Postgres sink)."""
     from types import SimpleNamespace

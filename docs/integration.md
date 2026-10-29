@@ -120,8 +120,8 @@ exactly the HTTP-only readiness rule: the worker turns ready once its socket
 is bound and every sink is connected, because it has no partitions to wait
 for. Its
 `dlq.topic` is empty and its Kafka source is off, so it also exercises
-the `dlq=off` path — its startup summary line reads
-`sources=[http:8092] ... dlq=off`.
+the path with no DLQ topic — its startup summary line reads
+`sources=[http:8092] ... dlq=unconfigured`.
 
 ---
 
@@ -784,12 +784,14 @@ To see ALL tasks in the UI (including fast ones):
 
 ```yaml
 # integration/worker/drakkar.yaml or fast-worker/drakkar.yaml
+logging:
+  min_task_duration: 0
 ui:
-  ws_min_duration_ms: 0
-  log_min_duration_ms: 0
-  recorder:
-    event_min_duration_ms: 0
-    output_min_duration_ms: 0
+  ws_min_duration: 0
+recorder:
+  capture:
+    min_event_duration: 0
+    min_output_duration: 0
 ```
 
 ### Add auth to the UI

@@ -560,7 +560,7 @@ class EventRecorder(EventWriter):
 
     @property
     def config(self) -> RecorderConfig:
-        """Read-only access to the recorder config, for the UI server."""
+        """Read-only access to the recorder config, for the API server."""
         return self._config
 
     @property
@@ -1125,7 +1125,7 @@ class EventRecorder(EventWriter):
             consumer_group,
             drakkar_config.executor.binary_path,
             drakkar_config.executor.max_executors,
-            drakkar_config.executor.task_timeout_seconds,
+            drakkar_config.executor.task_timeout,
             drakkar_config.executor.max_retries,
             drakkar_config.executor.window_size,
             encode_json_str(sinks),

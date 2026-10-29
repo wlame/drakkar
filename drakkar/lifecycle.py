@@ -502,7 +502,7 @@ class AppLifecycle:
         app._executor_pool = ExecutorPool(
             binary_path=app._config.executor.binary_path,
             max_executors=app._config.executor.max_executors,
-            task_timeout_seconds=app._config.executor.task_timeout_seconds,
+            task_timeout_seconds=app._config.executor.task_timeout,
             env=app._config.executor.env,
             inherit_parent_env=app._config.executor.env_inherit_parent,
             inherit_deny_patterns=app._config.executor.env_inherit_deny,
@@ -512,8 +512,8 @@ class AppLifecycle:
             # drain first). See ``BaseDrakkarHandler.task_priority`` for
             # the override contract.
             priority_fn=app._handler.task_priority,
-            max_stdout_bytes=app._config.executor.max_stdout_bytes,
-            max_stderr_bytes=app._config.executor.max_stderr_bytes,
+            max_stdout_bytes=app._config.executor.max_stdout,
+            max_stderr_bytes=app._config.executor.max_stderr,
         )
 
     async def _start_observability(self) -> None:
@@ -635,8 +635,8 @@ class AppLifecycle:
             api_public_url=config.api.public_url,
             # With the UI off no /ws route exists, so nothing can subscribe: a
             # zero threshold defers no ``task_started`` for a stream nobody reads.
-            ws_min_duration_ms=config.ui.ws_min_duration_ms if config.ui.enabled else 0,
-            log_min_duration_ms=config.ui.log_min_duration_ms,
+            ws_min_duration_ms=round(config.ui.ws_min_duration * 1000) if config.ui.enabled else 0,
+            log_min_duration_ms=round(config.logging.min_task_duration * 1000),
             storage_dir=config.storage.dir,
             shared_dir=config.resolved_shared_dir,
             instance=app._instance,
@@ -834,7 +834,7 @@ class AppLifecycle:
             app._handler._timeline_events = TimelineEventEmitter(annotator, {t.name: t for t in event_types})
 
     def _wire_io_executor(self) -> None:
-        """Resize asyncio's default to_thread executor when io.max_threads is set.
+        """Resize asyncio's default to_thread executor when threads.io is set.
 
         Every ``asyncio.to_thread`` call on the main loop — handler blocking
         I/O plus the framework's own short file work — shares this one pool,
@@ -843,12 +843,12 @@ class AppLifecycle:
         replacement via ``loop.set_default_executor`` lifts that cap;
         ``asyncio.run``'s cleanup (``shutdown_default_executor``) then owns
         its shutdown exactly as it owns the stock pool's, so lifecycle
-        teardown needs no extra step. 0 (the default) leaves Python's own
+        teardown needs no extra step. Null (the default) leaves Python's own
         sizing untouched.
         """
         app = self._app
-        max_threads = app._config.io.max_threads
-        if max_threads <= 0:
+        max_threads = app._config.threads.io
+        if max_threads is None:
             return
         from concurrent.futures import ThreadPoolExecutor
 
@@ -875,7 +875,7 @@ class AppLifecycle:
         from drakkar.offload import OffloadPool
 
         app._offload_pool = OffloadPool(
-            app._config.offload,
+            app._config.threads.offload,
             recorder=app._recorder,
             executor_pool_max=app._config.executor.max_executors,
         )
@@ -903,9 +903,10 @@ class AppLifecycle:
             )
             # The handler-facing Cache: origin_worker_id is this worker's
             # id so LWW tiebreaks during peer-sync can identify our writes.
+            # The config's 0 (no cap) is the cache's None.
             handler_cache = Cache(
                 origin_worker_id=app._worker_id,
-                max_memory_entries=app._config.cache.max_memory_entries,
+                max_memory_entries=app._config.cache.max_memory_entries or None,
             )
             # Wire the Cache to the engine BEFORE start() so the engine's
             # reader connection is attached atomically as part of start().
@@ -1249,7 +1250,7 @@ class AppLifecycle:
         # so there is nothing to drain or stop.
         sources = app.sources if app._sources_bound else []
 
-        drain_timeout = app._config.executor.drain_timeout_seconds
+        drain_timeout = app._config.executor.drain_timeout
         deadline = time.monotonic() + drain_timeout
 
         # Everything from the watchdog mark to ``drakkar_stopped`` is teardown

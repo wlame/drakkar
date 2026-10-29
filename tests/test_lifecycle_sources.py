@@ -94,7 +94,7 @@ def _app(monkeypatch, *sources, handler=None, **config_overrides) -> DrakkarApp:
         ui={'enabled': False, 'release': {'enabled': False}},
         metrics={'enabled': False},
         runtime_health={'enabled': False},
-        executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
+        executor={'binary_path': '/usr/bin/echo', 'drain_timeout': '1s'},
         sinks={'kafka': {'output_results': {'topic': 'output-results'}}},
         **config_overrides,
     )

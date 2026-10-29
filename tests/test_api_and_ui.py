@@ -199,6 +199,15 @@ async def test_the_ui_without_a_recorder_refuses_to_start():
         await server.start()
 
 
+async def test_a_ui_section_that_is_off_builds_the_api_app_only():
+    config = _config(ui={'enabled': False})
+    server = APIServer(config.api, _drakkar_app(config), ui=config.ui, recorder=None)
+
+    app = await server._build_app()
+
+    assert _app_routes(app) == {('GET', '/healthz'), ('GET', '/readyz'), ('GET', PEER_ROUTE)}
+
+
 async def test_api_off_starts_no_server(monkeypatch):
     server = MagicMock(return_value=AsyncMock())
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', server)
@@ -298,8 +307,9 @@ async def test_api_section_loads_from_yaml_and_env(tmp_path, monkeypatch):
 
 
 def test_config_summary_reads_the_api_port():
-    assert ' ui=on:8123 ' in _config(api={'port': 8123}).config_summary('w-1')
-    assert ' ui=off ' in _config(api={'port': 8123}, ui={'enabled': False}).config_summary('w-1')
+    assert ' api=8123 ui=on ' in _config(api={'port': 8123}).config_summary('w-1')
+    assert ' api=8123 ui=off ' in _config(api={'port': 8123}, ui={'enabled': False}).config_summary('w-1')
+    assert ' api=off ui=off ' in _config(api={'enabled': False}, ui={'enabled': False}).config_summary('w-1')
 
 
 @pytest.mark.parametrize('port', [0, 65536])

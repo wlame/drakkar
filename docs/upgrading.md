@@ -23,7 +23,10 @@ This page has two guides, one for each move:
   DLQ now holds the original messages, and every sink declares a failure
   policy; see [The DLQ record](#dlq-record). The HTTP server has its own
   section, `api`, and the UI may be off; see
-  [The API server and the UI](#api-and-ui).
+  [The API server and the UI](#api-and-ui). The worker and cluster names,
+  the executor, the thread pools, the cache, logging, runtime health and the
+  rest of `ui` have their final keys; see
+  [Names, executor, threads, cache and the rest](#remaining-sections).
 
 Coming from 2.4.0, read only the second guide. Coming from an older release,
 do the first guide, then the second.
@@ -955,3 +958,87 @@ row answer 404. To run with no listener at all, set `api.enabled: false` and
 **In handler or test code:** `drakkar.uiserver.UIServer` is `APIServer`, and
 `DrakkarApp.ui_url` is `api_url`. `SideEffectingEndpoint.config_key` of the probe is
 `ui.probe.enabled`.
+
+## Names, executor, threads, cache and the rest {#remaining-sections}
+
+The worker and cluster names are sections of their own, the thread pools are one
+section, and every duration and size takes a unit. Change each old path to the new
+path. A value in seconds, milliseconds, minutes or bytes gets a unit: `120` becomes
+`2m`, `500` (ms) becomes `500ms`, `1048576` (bytes) becomes `1MiB`.
+
+| Old path | New path |
+|---|---|
+| `worker_name_env` | `worker.name_env` |
+| (none) | `worker.name`, a literal worker name |
+| `cluster_name` | `cluster.name` |
+| `cluster_name_env` | `cluster.name_env` |
+| `executor.task_timeout_seconds` | `executor.task_timeout`, whole seconds: `2m` |
+| `executor.max_stdout_bytes` | `executor.max_stdout`, a size: `1MiB`, or `0` |
+| `executor.max_stderr_bytes` | `executor.max_stderr`, a size |
+| `executor.drain_timeout_seconds` | `executor.drain_timeout`, whole seconds: `30s` |
+| `io.max_threads` | `threads.io`; `null` keeps Python's sizing |
+| `offload.max_threads` | `threads.offload`; `null` sizes it from the executor pool |
+| `cache.flush_interval_seconds` | `cache.flush_interval`: `3s` |
+| `cache.cleanup_interval_seconds` | `cache.cleanup_interval`: `1m` |
+| `cache.max_memory_entries: null` | `cache.max_memory_entries: 0` |
+| `cache.exchange.interval_seconds` | `cache.exchange.interval`: `30s` |
+| `cache.exchange.timeout_seconds` | `cache.exchange.timeout`: `5s` |
+| `cache.exchange.cycle_deadline_seconds` | `cache.exchange.cycle_deadline` |
+| `ui.log_min_duration_ms` | `logging.min_task_duration`: `500ms` |
+| `ui.ws_min_duration_ms` | `ui.ws_min_duration`: `500ms` |
+| `ui.consume_pause.durations_seconds` | `ui.consume_pause.durations`: `[15s, 1m, 5m, 15m]` |
+| `ui.timeline.max_age_minutes` | `ui.timeline.max_age`, whole minutes: `1h` |
+| `runtime_health.tick_seconds` | `runtime_health.tick`: `250ms` |
+| `runtime_health.warn_lag_seconds` | `runtime_health.warn_lag`: `100ms` |
+| `runtime_health.stall_seconds` | `runtime_health.stall`: `1s` |
+| `runtime_health.sample_interval_seconds` | `runtime_health.sample_interval`: `10s` |
+| `runtime_health.history_window_seconds` | `runtime_health.history_window`, whole seconds: `15m` |
+| `runtime_health.episode_max_seconds` | `runtime_health.max_episode`: `5m` |
+| `runtime_health.probe_interval_seconds` | `runtime_health.stack_probe_enabled: true` and `runtime_health.stack_probe_interval` |
+
+The environment variables follow the paths: `DK_WORKER_NAME_ENV` is
+`DK_WORKER__NAME_ENV`, `DK_CLUSTER_NAME` is `DK_CLUSTER__NAME`, `DK_IO__MAX_THREADS` is
+`DK_THREADS__IO`, `DK_UI__LOG_MIN_DURATION_MS` is `DK_LOGGING__MIN_TASK_DURATION`, and so
+on. An environment value takes the same text as the YAML value: `DK_EXECUTOR__TASK_TIMEOUT=5m`.
+
+**What changed in the behaviour:**
+
+- `worker.name` is new. The worker name is the value of the variable that
+  `worker.name_env` names when that variable is set and not empty, else `worker.name`,
+  else a generated `drakkar-<hex>`. A worker with `worker.name` set has a stable name,
+  so the own archive scope does not log `archive_own_scope_unstable_worker_name` for it.
+- `cluster.name_env` wins over `cluster.name` when its variable is set and not empty, as
+  before.
+- `threads.io: 0` and `threads.offload: 0` fail the load with
+  `threads.io must be null or from 1 to 512` and `threads.offload must be null or from 1 to 32`.
+  Write `null`, or leave the key out, to keep the derived size.
+- `cache.max_memory_entries: 0` means no cap and logs
+  `cache_max_memory_entries_unbounded` at load; `null` fails the load.
+- `runtime_health.stack_probe_enabled` turns the stack probe on. A positive interval
+  alone does nothing.
+- `ui.timeline.max_age` takes whole minutes from `1m` to `24h`; `90s` fails with
+  `must be a whole number of minutes, got '90s'`.
+- The slow-task log line (`slow_task_completed`, `slow_task_failed`) follows
+  `logging.min_task_duration`.
+
+**The summary line** at startup has a new form:
+
+```
+[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO
+```
+
+- `ui=on:<port>` is now two tokens: `api=<port>` (or `api=off`) and `ui=on` or `ui=off`.
+- `recorder=` is always present: `sqlite`, `postgres` or `off`.
+- `fleet=<provider>` and `election=<provider>` are one token, `autodiscover=<provider>`
+  or `autodiscover=off`.
+- The cache token shows `/max=<n>` only for a bounded memory cache.
+- `dlq=` follows `dlq.enabled`: `off`, the configured topic, `on` for the topic
+  derived from the Kafka source, or `unconfigured` when the DLQ is on but has no topic
+  (an HTTP-only worker with no `dlq.topic`).
+
+Update any log query or alert that parses the summary line.
+
+**In handler or test code:** `drakkar.config.IOConfig` and `OffloadConfig` are one
+`ThreadsConfig`, and `OffloadPool` takes the pool size (`threads.offload`, or `None`)
+instead of a config model. `DrakkarConfig.fleet_summary` and `election_summary` are gone.
+`WorkerConfig` and `ClusterConfig` hold the names.

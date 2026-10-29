@@ -28,8 +28,8 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Worker registry | `autodiscover.provider` | `filesystem` | [Workers find each other](fleet.md): the workers list, and the peers (URL, cluster, card marks) of the cache exchange; needs `api.enabled` |
 | Cross-worker fleet view | a `shared.dir` every worker mounts (or one shared `storage.dir`) | — | History trace over the cluster's sealed files, cluster-wide database view |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
-| Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
-| Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
+| Offload pool | `threads.offload` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
+| Blocking-I/O pool size | `threads.io` | `null` (Python's sizing) | Size of asyncio's default `to_thread` executor; `null` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
 | Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
 | Cache exchange | `cache.exchange.enabled` | **on** (when cache on) | Cross-worker cache convergence: each worker pulls the `cluster`/`global` rows of its registry peers over HTTP |
 | Kafka input source | `sources.kafka.enabled` | **off** | Consumer group, poll loop, `arrange()`, offset commits |

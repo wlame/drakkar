@@ -15,11 +15,11 @@ Configuration is loaded from a YAML file (path via `config_path` argument or `DK
 When `DrakkarApp.run()` is called, the framework:
 
 1. Resolves the **worker identity**:
-   - Reads the environment variable named by `worker_name_env` (default: `'WORKER_ID'`).
-   - If empty, falls back to a hex-encoded Python `id()` like `drakkar-7f3a2b`.
+   - Reads the environment variable named by `worker.name_env` (default: `'WORKER_ID'`).
+   - If it is unset or empty, uses `worker.name`; if that is empty too, a hex-encoded Python `id()` like `drakkar-7f3a2b`.
 2. Resolves the **cluster name**:
-   - If `cluster_name_env` is set and the corresponding env var is non-empty, uses that.
-   - Otherwise falls back to `cluster_name` (default: `''`).
+   - If `cluster.name_env` is set and the corresponding env var is non-empty, uses that.
+   - Otherwise falls back to `cluster.name` (default: `''`).
 3. Configures **structured logging** via structlog using `logging.level` (default: `'INFO'`) and `logging.format` (default: `'json'`, also accepts `'console'`). The worker_id, consumer_group, and framework version are bound as context variables to every log line.
 4. Calls the handler's `on_startup(config)` hook, which receives the full `DrakkarConfig` and may return a modified copy. This is the only point where the user can mutate configuration before the framework wires everything up. A few settings are consumed earlier, while `DrakkarApp` is constructed (the `app:` section and the worker/cluster name resolution above), so changing those here has no effect and the worker logs one `on_startup_config_change_ignored` warning naming them -- see [Handler](handler.md#on_startup).
 
@@ -32,7 +32,7 @@ After `on_startup`, the framework builds all components in this order:
 2. **Creates the ExecutorPool** with:
    - `executor.binary_path` (default: `None` -- each task must then provide its own `binary_path`)
    - `executor.max_executors` (default: `4`, min: `1`) -- controls the `asyncio.Semaphore` size
-   - `executor.task_timeout_seconds` (default: `120`, min: `1`) -- per-subprocess wall-clock timeout
+   - `executor.task_timeout` (default: `120`, min: `1`) -- per-subprocess wall-clock timeout
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
 
@@ -207,7 +207,7 @@ same messages, duplicating everything between the last commit and the drain
 end.
 
 The wait is bounded, not open-ended: each stop sequence runs against one
-`executor.drain_timeout_seconds` deadline covering the drain, the final commit
+`executor.drain_timeout` deadline covering the drain, the final commit
 and the processor stop, and it suppresses deliveries when the drain expires,
 so the callback always returns within roughly that budget. That bound
 matters — `run_coroutine_threadsafe(...).result()` has no timeout of its own,
@@ -221,10 +221,10 @@ cost one drain timeout, not N.
    - Removes the processor from `_processors`.
    - Runs the stop sequence:
      1. Sets `processor._running = False`.
-     2. Waits up to `executor.drain_timeout_seconds` (default: `30`, min: `1`) for in-flight work to complete.
+     2. Waits up to `executor.drain_timeout` (default: `30`, min: `1`) for in-flight work to complete.
      3. **Only if drain completed cleanly**, commits the offset watermark. If drain timed out, in-flight tasks may still be running and committing their offsets would silently skip them on reassign — safer to let at-least-once replay recover them.
      4. **On drain timeout**, the still-running tasks are marked as *zombies*: their late results are suppressed (no sink deliveries, no offset commits) because the new partition owner replays their messages from the last committed offset — delivering here would be a guaranteed double-write, and a late commit could clobber the new owner's progress. Suppressions are counted in `drakkar_suppressed_zombie_deliveries_total` and logged as `zombie_delivery_suppressed`. The same suppression applies to tasks that outlive the shutdown drain timeout.
-     5. **On drain timeout**, the zombies are then cancelled, which kills each subprocess' process group and returns its executor slot immediately. Left running they would hold a slot until `executor.task_timeout_seconds`, queuing work from the partitions this worker still owns behind them. The cancellation is logged as `zombie_tasks_cancelled`. Their offsets stay uncommitted, exactly as in step 3.
+     5. **On drain timeout**, the zombies are then cancelled, which kills each subprocess' process group and returns its executor slot immediately. Left running they would hold a slot until `executor.task_timeout`, queuing work from the partitions this worker still owns behind them. The cancellation is logged as `zombie_tasks_cancelled`. Their offsets stay uncommitted, exactly as in step 3.
      6. Calls `processor.stop()` with what is left of the deadline.
 3. Updates the `assigned_partitions` gauge.
 4. Calls the handler's `on_revoke(partition_ids)` hook on a background task. The hook is a user notification, not part of the commit contract, so a slow hook does not eat into the rebalance budget.
@@ -319,9 +319,9 @@ The `ExecutorPool` uses an `asyncio.Semaphore(max_executors)` to limit concurren
    - `stdout`: `asyncio.subprocess.PIPE` (always captured)
    - `stderr`: `asyncio.subprocess.PIPE` (always captured)
 
-3. **Communication**: `proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit, capturing all stdout and stderr. When `executor.max_stdout_bytes` / `max_stderr_bytes` are set, the pipes are streamed instead: up to the cap is retained per stream, the rest is read and discarded, and the result's `stdout_truncated` / `stderr_truncated` flags are set.
+3. **Communication**: `proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit, capturing all stdout and stderr. When `executor.max_stdout` / `max_stderr` are set, the pipes are streamed instead: up to the cap is retained per stream, the rest is read and discarded, and the result's `stdout_truncated` / `stderr_truncated` flags are set.
 
-4. **Timeout enforcement**: the entire capture call is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: `120` seconds).
+4. **Timeout enforcement**: the entire capture call is wrapped in `asyncio.wait_for(timeout=executor.task_timeout)` (default: `120` seconds).
 
 ### 4.3 Possible Outcomes
 
@@ -428,7 +428,7 @@ When a task fails (`ExecutorTaskError` raised):
 The framework calls `handler.on_error(task, error)`:
 - `task`: the failed `ExecutorTask`
 - `error`: an `ExecutorError` with:
-  - `kind` (`'nonzero_exit' | 'timeout' | 'launch_failure' | 'internal'`): structured failure classification — non-zero exit code (default), exceeded `executor.task_timeout_seconds`, process could not be started, or synthesized by the framework with no subprocess outcome behind it
+  - `kind` (`'nonzero_exit' | 'timeout' | 'launch_failure' | 'internal'`): structured failure classification — non-zero exit code (default), exceeded `executor.task_timeout`, process could not be started, or synthesized by the framework with no subprocess outcome behind it
   - `exit_code` (int | None): the process exit code, or None if it never started / timed out
   - `stderr` (str): process stderr or error description
   - `exception` (str | None): exception message for timeout/launch failures, None for normal non-zero exits
@@ -691,7 +691,7 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 **Shutdown is driven per source.** The worker first marks itself not ready,
 then calls `signal_stop` on every enabled source and logs `sources_draining`.
 Every source then drains **concurrently against one shared deadline**,
-`executor.drain_timeout_seconds` — the Kafka source waits for its partition
+`executor.drain_timeout` — the Kafka source waits for its partition
 processors to empty their queues and settle their in-flight tasks, the HTTP
 source waits for its in-flight requests. The step ends with `sources_drained`,
 or with the deadline expiring, which is what decides whether final offset
@@ -710,7 +710,7 @@ follow describe what the **Kafka** source does inside its share of it.
 - `processor._running = False` for all processors. This causes each processor's main loop to exit after its current window collection.
 
 ### Step 3: Drain All Processors
-- Waits up to `executor.drain_timeout_seconds` (default: `30`) for all processors with:
+- Waits up to `executor.drain_timeout` (default: `30`) for all processors with:
   - Non-empty queues, OR
   - Pending offset commits, OR
   - In-flight tasks
@@ -734,11 +734,11 @@ follow describe what the **Kafka** source does inside its share of it.
 - Clears the processors dict.
 
 ### Step 6: Await Rebalance Background Tasks
-- Any revoke-triggered `_stop_processor`, `on_assign`/`on_revoke` handler hook invocations, and backpressure `pause` calls scheduled as `asyncio.ensure_future` are awaited here (bounded by `drain_timeout_seconds`).
+- Any revoke-triggered `_stop_processor`, `on_assign`/`on_revoke` handler hook invocations, and backpressure `pause` calls scheduled as `asyncio.ensure_future` are awaited here (bounded by `executor.drain_timeout`).
 - This runs **before** the consumer is closed so those tasks can still use `self._consumer` safely. Skipping this step caused use-after-close errors and missed final commits under revoke-then-shutdown sequences.
 
 ### Step 7: Stop the Flight Recorder
-- If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout_seconds` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
+- If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
 - An archive pass still running is asked to stop after its current window; the recorder waits for it until only `autodiscover.resilience.timeout_seconds` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
 - Then the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
 
@@ -815,10 +815,10 @@ follow describe what the **Kafka** source does inside its share of it.
 |-------|------|---------|-----|-------------|
 | `binary_path` | str or None | `None` | 1 char | Default subprocess binary; None requires per-task override |
 | `max_executors` | int | `4` | 1 | Concurrent subprocess limit (semaphore size) |
-| `task_timeout_seconds` | int | `120` | 1 | Per-subprocess wall-clock timeout |
+| `executor.task_timeout` | int | `120` | 1 | Per-subprocess wall-clock timeout |
 | `window_size` | int | `100` | 1 | Max messages per arrange() window |
 | `max_retries` | int | `3` | 0 | Max retries per failed task (0 = no retries) |
-| `drain_timeout_seconds` | int | `30` | 1 | Max wait for in-flight tasks during shutdown or partition revocation. On timeout, final commits are skipped (at-least-once replay). |
+| `executor.drain_timeout` | int | `30` | 1 | Max wait for in-flight tasks during shutdown or partition revocation. On timeout, final commits are skipped (at-least-once replay). |
 | `backpressure_high_multiplier` | int | `32` | 1 | Pause threshold = max_executors x this |
 | `backpressure_low_multiplier` | int | `4` | 1 | Resume threshold = max(1, max_executors x this) |
 
@@ -913,8 +913,8 @@ Each sink type is a dict mapping instance names to their config:
 |-------|------|---------|-------------|
 | `enabled` | bool | `True` | Enable/disable the entire UI feature |
 | `max_rows` | int | `5000` | Max rows returned to UI queries |
-| `log_min_duration_ms` | int | `500` | Min duration to log slow tasks |
-| `ws_min_duration_ms` | int | `500` | Min duration to broadcast via WebSocket |
+| `logging.min_task_duration` | int | `500` | Min duration to log slow tasks |
+| `ui.ws_min_duration` | int | `500` | Min duration to broadcast via WebSocket |
 | `prometheus.url` | str | `''` | Prometheus server URL for dashboard links |
 | `prometheus.rate_interval` | str | `'5m'` | Rate interval for Prometheus queries |
 | `prometheus.worker_label` | str | `''` | Worker label name in Prometheus |
@@ -959,12 +959,13 @@ Each sink type is a dict mapping instance names to their config:
 | `autodiscover.provider` | str | `'filesystem'` | `filesystem`, `postgres`, `redis`, `consul` |
 | `autodiscover.offline_after` | int | `60` | A peer card older than this is offline |
 | `cache.exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
-| `cache.exchange.interval_seconds` | float | `30.0` | Seconds between exchange cycles |
+| `cache.exchange.interval` | duration | `30s` | Time between exchange cycles |
 
-### Root-Level Settings
+### Worker and Cluster Names
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `worker_name_env` | str | `'WORKER_ID'` | Env var holding worker name |
-| `cluster_name` | str | `''` | Logical cluster name |
-| `cluster_name_env` | str | `''` | Env var overriding cluster_name |
+| `worker.name` | str | `''` | Literal worker name |
+| `worker.name_env` | str | `'WORKER_ID'` | Env var holding the worker name; set and not empty, it wins over `worker.name` |
+| `cluster.name` | str | `''` | Logical cluster name |
+| `cluster.name_env` | str | `''` | Env var holding the cluster name; set and not empty, it wins over `cluster.name` |

@@ -29,7 +29,7 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
         'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
-        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
+        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout': '1s'},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
         'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
     }
@@ -249,7 +249,7 @@ async def test_both_callers_take_their_settings_from_the_one_block(tmp_path):
 
 
 async def test_the_cards_and_the_locks_go_under_the_shared_folder(tmp_path):
-    app = _app(tmp_path, cluster_name='search', **_filesystem_on(tmp_path))
+    app = _app(tmp_path, cluster={'name': 'search'}, **_filesystem_on(tmp_path))
 
     app._lifecycle._create_connections()
     await app._lifecycle._start_fleet()
@@ -314,7 +314,7 @@ def _cache_engine(tmp_path, *, peer_views=None, exchange: bool = True) -> CacheE
 async def test_cache_exchange_with_autodiscover_off_logs_once_and_pulls_nothing(tmp_path):
     app = _app(
         tmp_path,
-        cache={'enabled': True, 'exchange': {'interval_seconds': 0.01}},
+        cache={'enabled': True, 'exchange': {'interval': '10ms'}},
     )
 
     with capture_logs() as logs:
@@ -370,7 +370,7 @@ async def test_a_cache_exchange_switched_off_says_nothing_about_autodiscover(tmp
 )
 def test_empty_cluster_name_warns_only_with_autodiscover_on(tmp_path, autodiscover_on, cluster_name, warns):
     sections = _filesystem_on(tmp_path) if autodiscover_on else {}
-    app = _app(tmp_path, cluster_name=cluster_name, **sections)
+    app = _app(tmp_path, cluster={'name': cluster_name}, **sections)
 
     with capture_logs() as logs:
         app._lifecycle._check_config_after_startup()

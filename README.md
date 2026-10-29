@@ -113,7 +113,7 @@ sources:
 executor:
   binary_path: "/usr/local/bin/my-tool"
   max_executors: 8
-  task_timeout_seconds: 60
+  task_timeout: 1m
 
 sinks:
   kafka:

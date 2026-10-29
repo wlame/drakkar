@@ -104,23 +104,23 @@ class TestShape:
         )
         group_keys = [g['key'] for g in body['groups']]
         assert group_keys == [
-            'root',
+            'worker',
+            'cluster',
+            'connections',
             'sources',
             'executor',
+            'threads',
             'sinks',
             'dlq',
-            'metrics',
-            'runtime_health',
-            'io',
-            'offload',
-            'logging',
-            'api',
-            'ui',
-            'cache',
             'storage',
             'recorder',
+            'cache',
             'autodiscover',
-            'connections',
+            'metrics',
+            'logging',
+            'runtime_health',
+            'api',
+            'ui',
         ]
 
     async def test_group_has_title_and_doc_anchor(self):

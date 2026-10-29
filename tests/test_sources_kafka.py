@@ -15,7 +15,7 @@ def _config() -> DrakkarConfig:
     return DrakkarConfig(
         connections=kafka_connections(),
         ui={'release': {'enabled': False}},
-        executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
+        executor={'binary_path': '/usr/bin/echo', 'drain_timeout': '1s'},
         sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         sinks={'kafka': {'out': {'topic': 't'}}},
     )

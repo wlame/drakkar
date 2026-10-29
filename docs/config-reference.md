@@ -10,24 +10,38 @@ A copy-paste-ready annotated `drakkar.yaml` showing **every** configurable field
 
 ---
 
-## Worker identity
+## Worker (`worker:`)
 
 📚 [Deep details](configuration.md#root-config-drakkarconfig)
 
-Top-level fields that identify this worker in logs, metrics, and the operator UI.
+The name that identifies this worker in logs, metrics, the registry card and the operator UI.
 
 ```yaml
-# Name of the env var that holds this worker's display name.
-# Empty / unset env var → falls back to "drakkar-<hex>".
-worker_name_env: WORKER_ID         # env: DK_WORKER_NAME_ENV  · reasonable: WORKER_ID, HOSTNAME, K8S_POD_NAME
+worker:
+  name: ''                         # literal worker name; '' and no value from name_env = the generated drakkar-<hex>.
+                                   # env: DK_WORKER__NAME
+  name_env: WORKER_ID              # env var that holds the name; set and not empty, it wins over name.
+                                   # env: DK_WORKER__NAME_ENV  · reasonable: WORKER_ID, HOSTNAME, K8S_POD_NAME
+```
 
-# Logical cluster name. Workers sharing this name are grouped in the operator UI
-# and can cross-trace messages.
-cluster_name: ''                   # env: DK_CLUSTER_NAME  · reasonable: search-cluster, prod-east, ''
+A generated name changes at every start. Give a stable name (`name`, or a variable in
+`name_env`) to a worker that keeps files in `storage.dir`.
 
-# Env var that holds the cluster name. If set and non-empty, overrides `cluster_name`.
-# Useful when the cluster name comes from the deployment platform (k8s, ECS).
-cluster_name_env: ''               # env: DK_CLUSTER_NAME_ENV  · reasonable: K8S_NAMESPACE, DEPLOY_ENV, ''
+---
+
+## Cluster (`cluster:`)
+
+📚 [Deep details](configuration.md#root-config-drakkarconfig)
+
+The cluster this worker belongs to. Workers with one cluster name are grouped in the operator UI,
+share the lock scope of cluster tasks and the history folder, and can cross-trace messages.
+
+```yaml
+cluster:
+  name: ''                         # literal cluster name. '' with autodiscover on logs one startup warning
+                                   # naming the scope default. env: DK_CLUSTER__NAME  · reasonable: search-cluster, prod-east
+  name_env: ''                     # env var that holds the cluster name; set and not empty, it wins over name.
+                                   # env: DK_CLUSTER__NAME_ENV  · reasonable: K8S_NAMESPACE, DEPLOY_ENV
 ```
 
 ---
@@ -94,20 +108,20 @@ When `sources.http.enabled=true`, the handler must declare `HttpRequestT` / `Htt
 
 📚 [Deep details](configuration.md#executor-pool-executor) · [Backpressure formula](configuration.md#backpressure-formula)
 
-Subprocess pool that runs user binaries. Tune `max_executors` and `task_timeout_seconds` first; everything else has good defaults.
+Subprocess pool that runs user binaries. Tune `max_executors` and `task_timeout` first; everything else has good defaults.
 
 ```yaml
 executor:
   binary_path: null                # default binary for tasks. env: DK_EXECUTOR__BINARY_PATH  · null = ExecutorTask must set its own
   max_executors: 4                 # concurrent subprocesses. env: DK_EXECUTOR__MAX_EXECUTORS  · reasonable: 2–32
-  task_timeout_seconds: 120        # wall-clock cap per task. env: DK_EXECUTOR__TASK_TIMEOUT_SECONDS  · reasonable: 30–600
-  max_stdout_bytes: 0              # stdout bytes retained per task (0 = unlimited). env: DK_EXECUTOR__MAX_STDOUT_BYTES
-  max_stderr_bytes: 0              # stderr bytes retained per task (0 = unlimited). env: DK_EXECUTOR__MAX_STDERR_BYTES
+  task_timeout: 2m                 # wall-clock cap per task, whole seconds. env: DK_EXECUTOR__TASK_TIMEOUT  · reasonable: 30s–10m
+  max_stdout: 0                    # stdout kept per task, a size (0 = no limit). env: DK_EXECUTOR__MAX_STDOUT
+  max_stderr: 0                    # stderr kept per task, a size (0 = no limit). env: DK_EXECUTOR__MAX_STDERR
   window_size: 100                 # max messages collected per arrange() window. env: DK_EXECUTOR__WINDOW_SIZE
   max_retries: 3                   # retries per failed task (0 = no retries). env: DK_EXECUTOR__MAX_RETRIES
   on_failure: skip                 # what the default on_error returns: skip | dlq (dlq = the source
                                    #   messages of a failed task go to the DLQ). env: DK_EXECUTOR__ON_FAILURE
-  drain_timeout_seconds: 30        # graceful-shutdown wait for in-flight tasks. env: DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS
+  drain_timeout: 30s               # graceful-shutdown wait for in-flight tasks, whole seconds. env: DK_EXECUTOR__DRAIN_TIMEOUT
 
   # Backpressure: pause Kafka consumption when in-flight messages reach
   # max_executors * high_multiplier; resume when down to max_executors * low_multiplier.
@@ -118,7 +132,7 @@ executor:
   env: {}                          # env vars passed to all subprocesses. env: DK_EXECUTOR__ENV (JSON)
   env_inherit_parent: true         # pass parent process env (filtered). env: DK_EXECUTOR__ENV_INHERIT_PARENT
   env_inherit_deny:                # fnmatch patterns NOT inherited (case-insensitive). env: DK_EXECUTOR__ENV_INHERIT_DENY (JSON list)
-    - 'DK_*'                       # framework internals
+    - 'DK_*'                       # the worker's own config overrides
     - '*PASSWORD*'
     - '*PASSWD*'
     - '*SECRET*'
@@ -336,50 +350,42 @@ Event-loop lag monitoring and stall introspection.
 ```yaml
 runtime_health:
   enabled: true                    # env: DK_RUNTIME_HEALTH__ENABLED
-  tick_seconds: 0.25               # heartbeat interval. env: DK_RUNTIME_HEALTH__TICK_SECONDS
-  warn_lag_seconds: 0.1            # lag above this = degraded. env: DK_RUNTIME_HEALTH__WARN_LAG_SECONDS
-  stall_seconds: 1.0               # heartbeat silence above this = stalled + stack capture.
-                                   # env: DK_RUNTIME_HEALTH__STALL_SECONDS
+  tick: 250ms                      # heartbeat interval. env: DK_RUNTIME_HEALTH__TICK
+  warn_lag: 100ms                  # lag above this = degraded. env: DK_RUNTIME_HEALTH__WARN_LAG
+  stall: 1s                        # heartbeat silence above this = stalled + stack capture.
+                                   # env: DK_RUNTIME_HEALTH__STALL
   max_stall_stacks: 10             # distinct stacks kept per stall. env: DK_RUNTIME_HEALTH__MAX_STALL_STACKS
-  sample_interval_seconds: 10.0    # recorder history sample cadence. env: DK_RUNTIME_HEALTH__SAMPLE_INTERVAL_SECONDS
-  history_window_seconds: 900      # in-memory sparkline window. env: DK_RUNTIME_HEALTH__HISTORY_WINDOW_SECONDS
-  episode_max_seconds: 300.0       # max length of one lag episode before it flushes.
-                                   # env: DK_RUNTIME_HEALTH__EPISODE_MAX_SECONDS
-  probe_interval_seconds: 0.0      # opt-in stack probe cadence; 0 disables.
-                                   # env: DK_RUNTIME_HEALTH__PROBE_INTERVAL_SECONDS
+  sample_interval: 10s             # recorder history sample cadence. env: DK_RUNTIME_HEALTH__SAMPLE_INTERVAL
+  history_window: 15m              # in-memory sparkline window, whole seconds, at least 1m. env: DK_RUNTIME_HEALTH__HISTORY_WINDOW
+  max_episode: 5m                  # max length of one lag episode before it flushes, at least 10s.
+                                   # env: DK_RUNTIME_HEALTH__MAX_EPISODE
+  stack_probe_enabled: false       # opt-in stack probe: one runtime_probe event per stack_probe_interval.
+                                   # env: DK_RUNTIME_HEALTH__STACK_PROBE_ENABLED
+  stack_probe_interval: 1s         # stack probe cadence. env: DK_RUNTIME_HEALTH__STACK_PROBE_INTERVAL
 ```
 
 ---
 
-## Blocking I/O pool (`io:`)
+## Thread pools (`threads:`)
 
-📚 [Threads & Pools](threads.md) · [Offloading CPU-bound hook work](offload.md)
+📚 [Threads & Pools](threads.md) · [Offloading CPU-bound hook work](offload.md) · [Runtime health](runtime-health.md)
 
-asyncio's default `to_thread` executor: every blocking call the handler (or the framework) sends
-through `asyncio.to_thread` shares this one process-wide pool.
-
-```yaml
-io:
-  max_threads: 0     # 0 = keep Python's default, min(32, cpu_count + 4).
-                     # Set explicitly when blocking-I/O fan-out is capped by
-                     # the pool (e.g. many-core hosts reading slow storage).
-                     # env: DK_IO__MAX_THREADS
-```
-
----
-
-## Offload pool (`offload:`)
-
-📚 [Offloading CPU-bound hook work](offload.md) · [Runtime health](runtime-health.md)
-
-Thread pool behind `handler.offload()` — CPU-bound hook computations moved off the event loop so the worker stays responsive.
+`io` is asyncio's default `to_thread` executor: every blocking call the handler (or the framework) sends
+through `asyncio.to_thread` shares this one process-wide pool. `offload` is the pool behind
+`handler.offload()` — CPU-bound hook computations moved off the event loop so the worker stays responsive.
 
 ```yaml
-offload:
-  max_threads: 0                   # concurrent offloaded computations before queueing.
-                                   # 0 = auto: ceil(executor.max_executors / 4), min 2.
-                                   # env: DK_OFFLOAD__MAX_THREADS
+threads:
+  io: null                         # null = keep Python's default, min(32, cpu_count + 4); otherwise 1 to 512.
+                                   # Set explicitly when blocking-I/O fan-out is capped by
+                                   # the pool (e.g. many-core hosts reading slow storage).
+                                   # env: DK_THREADS__IO
+  offload: null                    # concurrent offloaded computations before queueing.
+                                   # null = auto: ceil(executor.max_executors / 4), min 2; otherwise 1 to 32.
+                                   # env: DK_THREADS__OFFLOAD
 ```
+
+`0` is refused: `threads.io must be null or from 1 to 512`, `threads.offload must be null or from 1 to 32`.
 
 ---
 
@@ -396,6 +402,8 @@ logging:
   output: stderr                   # stderr | stdout | file path. env: DK_LOGGING__OUTPUT
                                    # File paths support {worker_id}, {cluster_name} templating
                                    # e.g. /var/log/drakkar/{worker_id}.log
+  min_task_duration: 500ms         # shortest task that logs slow_task_completed/failed; 0 logs all.
+                                   # env: DK_LOGGING__MIN_TASK_DURATION
 ```
 
 ---
@@ -428,7 +436,8 @@ The largest section. Provides the operator web UI, drakkar-ui bundle fetching (`
 ```yaml
 ui:
   enabled: true                    # the pages, the bundle fetch, the debug and data routes, /ws, the docs.
-                                   # Needs api.enabled. The recorder does not depend on it. env: DK_UI__ENABLED
+                                   # Needs api.enabled. The durable recorder does not depend on it; the memory store does.
+                                   # env: DK_UI__ENABLED
 
   # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
@@ -448,15 +457,14 @@ ui:
   # --- Timed consume pause (Live page; OPT-IN — pausing stops message intake) ---
   consume_pause:
     enabled: false                 # serve the pause API + Live-page control. env: DK_UI__CONSUME_PAUSE__ENABLED
-    durations_seconds: [15, 60, 300, 900]  # preset buttons; API accepts any 1..3600s.
-                                   # env: DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS (JSON list)
+    durations: [15s, 1m, 5m, 15m]  # preset buttons, whole seconds from 1s to 1h; the API accepts any value in it.
+                                   # env: DK_UI__CONSUME_PAUSE__DURATIONS (JSON list)
 
   # --- Presentation ---
   max_rows: 5000                   # max rows returned by UI list endpoints. env: DK_UI__MAX_ROWS
 
-  # --- Duration thresholds (noise filters) ---
-  log_min_duration_ms: 500         # min ms to log slow_task_completed/failed. env: DK_UI__LOG_MIN_DURATION_MS
-  ws_min_duration_ms: 500          # min ms to broadcast over WebSocket. env: DK_UI__WS_MIN_DURATION_MS
+  # --- Duration threshold (noise filter); the slow-task log line has logging.min_task_duration ---
+  ws_min_duration: 500ms           # shortest task broadcast over WebSocket. env: DK_UI__WS_MIN_DURATION
 
   # --- Prometheus deep-links in the UI ---
   prometheus:
@@ -504,7 +512,7 @@ ui:
   # --- Live timeline tuning: history depth, bar color rules, label roles (see ui-timeline.md) ---
   timeline:
     history_factor: 100              # depth = history_factor x executor.max_executors (x8 if no pool), capped at 100000. env: DK_UI__TIMELINE__HISTORY_FACTOR
-    max_age_minutes: 60              # 1-1440; oldest task age the timeline shows. env: DK_UI__TIMELINE__MAX_AGE_MINUTES
+    max_age: 1h                      # whole minutes from 1m to 24h; oldest task age the timeline shows. env: DK_UI__TIMELINE__MAX_AGE
     color_rules: []                  # first-match-wins bar-coloring rules; max 50. env: DK_UI__TIMELINE__COLOR_RULES (JSON list)
                                      # e.g. [{name: failed, when: {field: status, op: eq, value: failed}, color: red}]
     labels:                          # which task label fills each special role; '' = unbound
@@ -539,17 +547,17 @@ Optional handler-accessible key/value cache. **Disabled by default**.
 ```yaml
 cache:
   enabled: false                   # master switch; false = no-op stub. The cache file lives in storage.dir. env: DK_CACHE__ENABLED
-  flush_interval_seconds: 3.0      # write-behind flush cadence. env: DK_CACHE__FLUSH_INTERVAL_SECONDS
-  cleanup_interval_seconds: 60.0   # expired-row cleanup cadence. env: DK_CACHE__CLEANUP_INTERVAL_SECONDS
-  max_memory_entries: 10000        # in-memory LRU cap; null = unbounded (warns). env: DK_CACHE__MAX_MEMORY_ENTRIES
+  flush_interval: 3s               # write-behind flush cadence. env: DK_CACHE__FLUSH_INTERVAL
+  cleanup_interval: 1m             # expired-row cleanup cadence. env: DK_CACHE__CLEANUP_INTERVAL
+  max_memory_entries: 10000        # in-memory LRU cap; 0 = unbounded (warns). env: DK_CACHE__MAX_MEMORY_ENTRIES
   exchange:                        # cluster/global rows pulled from peers over HTTP; the peers come from autodiscover,
                                    # so with autodiscover off this does nothing and logs one info line at startup.
     enabled: true                  # env: DK_CACHE__EXCHANGE__ENABLED
-    interval_seconds: 30           # cycle period. env: DK_CACHE__EXCHANGE__INTERVAL_SECONDS
+    interval: 30s                  # cycle period. env: DK_CACHE__EXCHANGE__INTERVAL
     page_size: 500                 # 1-1000 rows per page; pages until the peer says more=false. env: DK_CACHE__EXCHANGE__PAGE_SIZE
-    timeout_seconds: 5             # time limit for one request to a peer (connect: 2 s). env: DK_CACHE__EXCHANGE__TIMEOUT_SECONDS
-    cycle_deadline_seconds: null   # hard cap on one cycle; null = interval x 0.9; must be < interval_seconds.
-                                   # env: DK_CACHE__EXCHANGE__CYCLE_DEADLINE_SECONDS
+    timeout: 5s                    # time limit for one request to a peer (connect: 2s). env: DK_CACHE__EXCHANGE__TIMEOUT
+    cycle_deadline: null           # hard cap on one cycle, at least 100ms; null = interval x 0.9; must be < interval.
+                                   # env: DK_CACHE__EXCHANGE__CYCLE_DEADLINE
     max_concurrent_peers: 4        # peers pulled from in parallel. env: DK_CACHE__EXCHANGE__MAX_CONCURRENT_PEERS
 ```
 
@@ -800,10 +808,9 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 
 | Where | Path → env var |
 |-------|---------------|
-| Top-level | `cluster_name` → `DK_CLUSTER_NAME` |
-| One level deep | `metrics.port` → `DK_METRICS__PORT` |
+| One level deep | `cluster.name` → `DK_CLUSTER__NAME`, `metrics.port` → `DK_METRICS__PORT` |
 | Section, sub-section, field | `sources.kafka.topic` → `DK_SOURCES__KAFKA__TOPIC` |
-| Two levels deep | `cache.exchange.interval_seconds` → `DK_CACHE__EXCHANGE__INTERVAL_SECONDS` |
+| Two levels deep | `cache.exchange.interval` → `DK_CACHE__EXCHANGE__INTERVAL` |
 | Map key (sink instance) | `sinks.postgres.main-db.pool_max` → `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` |
 | Map key (connection) | `connections.kafka.main.brokers` → `DK_CONNECTIONS__KAFKA__MAIN__BROKERS` |
 | List element by index | `sources.http.clients[0].rpm` → `DK_SOURCES__HTTP__CLIENTS__0__RPM` |

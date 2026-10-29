@@ -1,8 +1,10 @@
 # Drakkar integration test configuration
 # All values can be overridden with env vars: DK_CONNECTIONS__KAFKA__MAIN__BROKERS, etc.
 
-worker_name_env: "WORKER_ID"
-cluster_name: "main cluster"
+worker:
+  name_env: "WORKER_ID"
+cluster:
+  name: "main cluster"
 
 sources:
   kafka:
@@ -53,24 +55,24 @@ executor:
     RG_COLORS: "never"              # config-level env var: passed to all ripgrep tasks
     SEARCH_CORPUS: "/tmp/search-corpus"
   max_executors: 4
-  task_timeout_seconds: 120
+  task_timeout: 2m
   window_size: 10
   max_retries: 3
-  drain_timeout_seconds: 5
+  drain_timeout: 5s
   backpressure_high_multiplier: 32
   backpressure_low_multiplier: 4
 
-# --- Offload pool ---
+# --- Thread pools ---
 #
-# Sizes the thread pool behind handler.offload(). This worker's arrange()
+# threads.offload sizes the thread pool behind handler.offload(). This worker's arrange()
 # runs its whole window-planning pass there (_build_scan_plan in
 # handler.py: nested pattern x file loops, per-file stat/read syscalls,
 # memory-tier cache probes), so that work occupies a pool thread instead
 # of stalling the event loop. 2 is the framework default; stated
 # explicitly so the integration environment demonstrates the knob.
 # See docs/offload.md.
-offload:
-  max_threads: 2
+threads:
+  offload: 2
 
 # --- User-defined app config (docs/app-config.md) ---
 #
@@ -262,7 +264,7 @@ ui:
   # boundary (see handler.py's arrange()).
   timeline:
     history_factor: 100
-    max_age_minutes: 60
+    max_age: 1h
     color_rules:
       - name: empty output
         when: {field: stdout_size, op: eq, value: 0}
@@ -363,15 +365,15 @@ cache:
   # Memory → SQLite flush cadence. Shorter = less data lost on a crash;
   # longer = fewer SQLite transactions per worker. 3s matches the
   # recorder's own flush interval for operational consistency.
-  flush_interval_seconds: 3.0
+  flush_interval: 3s
   # Expired-row removal cadence. 60s is fine — TTLs are checked inline
   # on every read, so expired rows are invisible to handlers even
   # between cleanup cycles; this loop only reclaims disk space.
-  cleanup_interval_seconds: 60.0
+  cleanup_interval: 1m
   # Bound the in-memory dict with LRU eviction. The SQLite file is the
   # source of truth, so evictions don't lose data — a subsequent get()
-  # on an evicted key falls through to the DB. Leave unset for
-  # unbounded growth (fine for small workers; set a cap in production).
+  # on an evicted key falls through to the DB. 0 means unbounded growth
+  # (fine for small workers; set a cap in production).
   max_memory_entries: 10000
   # Cache exchange: pulls new cluster/global rows from the other workers
   # over HTTP, at the URL on their registry card (api.host 0.0.0.0 above
@@ -380,9 +382,9 @@ cache:
   # the newer value.
   exchange:
     enabled: true
-    interval_seconds: 30.0
+    interval: 30s
     page_size: 500
-    timeout_seconds: 5.0
+    timeout: 5s
 
 # This worker's own files (recorder, cache, crash marker). The harness
 # mounts one host folder at /shared in every container, so it doubles as

@@ -26,12 +26,13 @@ _MAX_TEXT_LENGTH = 64
 _CUT_MARK = '...'
 
 _MS_PER_SECOND = 1000
+_MS_PER_MINUTE = 60_000
 _MS_PER_HOUR = 3_600_000
 _MS_PER_DAY = 86_400_000
 _DURATION_UNITS: tuple[tuple[str, int], ...] = (
     ('d', _MS_PER_DAY),
     ('h', _MS_PER_HOUR),
-    ('m', 60_000),
+    ('m', _MS_PER_MINUTE),
     ('s', _MS_PER_SECOND),
     ('ms', 1),
 )
@@ -229,6 +230,9 @@ Duration = Annotated[
 
 WholeSeconds = _whole_duration_type('seconds', _MS_PER_SECOND)
 """A duration held as a whole number of seconds."""
+
+WholeMinutes = _whole_duration_type('minutes', _MS_PER_MINUTE)
+"""A duration held as a whole number of minutes."""
 
 WholeHours = _whole_duration_type('hours', _MS_PER_HOUR)
 """A duration held as a whole number of hours."""

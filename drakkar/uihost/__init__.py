@@ -227,7 +227,7 @@ def resolve(
             return ResolvedBundle(root=root / newest, source='cache', version=newest)
 
     # Nothing resolvable and nothing cached. Not fatal: the worker serves
-    # its API, probes and WebSocket, and the UI server answers page
+    # its API, probes and WebSocket, and the API server answers page
     # requests with a 503 naming the ways to supply a bundle.
     logger.warning(
         'ui_bundle_unavailable',
@@ -242,7 +242,7 @@ def resolve(
 # ---------------------------------------------------------------------------
 # Introspection + fetch API the drakkar-ui CLI is a thin projection of (the
 # headless-first command surface).
-# ``resolve`` stays the single function the UI server calls at startup; these
+# ``resolve`` stays the single function the API server calls at startup; these
 # expose the individual steps — inspect the cache, fetch a pinned version,
 # fetch the latest — so the CLI's where / fetch / update subcommands never
 # reimplement the engine.

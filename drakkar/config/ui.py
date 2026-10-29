@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
-from drakkar.config.units import ByteSize
+from drakkar.config.units import ByteSize, Duration, WholeMinutes, WholeSeconds, seconds_text
 
 
 class UIReleaseConfig(ConfigModel):
@@ -318,11 +318,11 @@ class UITimelineConfig(ConfigModel):
         ge=1,
         description='Timeline keeps the newest history_factor x executor.max_executors tasks.',
     )
-    max_age_minutes: int = Field(
+    max_age: WholeMinutes = Field(
         default=60,
         ge=1,
         le=1440,
-        description='Oldest task age the timeline shows, in minutes.',
+        description='Oldest task age the timeline shows, a whole number of minutes from 1m to 24h.',
     )
     color_rules: list[TimelineColorRule] = Field(
         default_factory=list,
@@ -350,6 +350,14 @@ class UITimelineConfig(ConfigModel):
         return value
 
 
+# The bound of one pause, through the API and for each preset. One hour is far
+# beyond any debugging session and far below "forgot about it forever" — the
+# feature is explicitly a bounded pause.
+MIN_PAUSE_SECONDS = 1
+MAX_PAUSE_SECONDS = 3600
+MAX_PAUSE_PRESETS = 10
+
+
 class UIConsumePauseConfig(ConfigModel):
     """Timed debug pause of the pipeline consumer, driven from the Live page.
 
@@ -372,31 +380,31 @@ class UIConsumePauseConfig(ConfigModel):
             'debug-friendly deployments.'
         ),
     )
-    durations_seconds: list[int] = Field(
+    durations: list[WholeSeconds] = Field(
         default_factory=lambda: [15, 60, 300, 900],
         description=(
-            'Preset pause durations (seconds) offered as one-click buttons on '
-            'the Live page. The API itself accepts any duration between 1 and '
-            '3600 seconds regardless of the presets.'
+            'Preset pause durations offered as one-click buttons on the Live '
+            'page, each a whole number of seconds from 1s to 1h. The API itself '
+            'accepts any duration in that range regardless of the presets.'
         ),
     )
 
-    @field_validator('durations_seconds')
+    @field_validator('durations')
     @classmethod
     def _validate_durations(cls, v: list[int]) -> list[int]:
         """Reject preset lists the UI cannot sensibly render.
 
-        Each preset must sit in the same [1, 3600] range the API enforces —
+        Each preset must sit in the same 1s to 1h range the API enforces —
         a preset button that the API would reject with 422 is a config
         mistake better caught at startup.
         """
         if not v:
-            raise ValueError('durations_seconds must not be empty')
-        if len(v) > 10:
-            raise ValueError('durations_seconds supports at most 10 presets')
+            raise ValueError('ui.consume_pause.durations must not be empty')
+        if len(v) > MAX_PAUSE_PRESETS:
+            raise ValueError(f'ui.consume_pause.durations supports at most {MAX_PAUSE_PRESETS} presets')
         for d in v:
-            if not (1 <= d <= 3600):
-                raise ValueError(f'durations_seconds entries must be in [1, 3600], got {d}')
+            if not (MIN_PAUSE_SECONDS <= d <= MAX_PAUSE_SECONDS):
+                raise ValueError(f'ui.consume_pause.durations entries must be from 1s to 1h, got {seconds_text(d)}')
         return v
 
 
@@ -584,6 +592,32 @@ class UIConfig(ConfigModel):
             'browser cannot omit it.'
         ),
     )
+    max_rows: int = Field(
+        default=5000,
+        ge=100,
+        description='Maximum rows returned to the web UI in list views.',
+    )
+    ws_min_duration: Duration = Field(
+        default=0.5,
+        ge=0,
+        description=(
+            'Shortest task duration broadcast to the live UI over WebSocket. Failed '
+            'tasks always appear. 0 shows all tasks.'
+        ),
+    )
+    custom_renderers_path: str = Field(
+        default='',
+        description=(
+            'Path to a deployment-provided JS module of custom cell '
+            'renderers, served as-is at ``GET /api/v1/ui/renderers.js``. '
+            'Empty (the default) disables the feature — the route then '
+            '404s and identity reports ``custom_renderers: false``. When '
+            'set, the file must exist at startup or the worker fails to '
+            'boot; its content is trusted the same as any other backend '
+            'config (it runs same-origin in the operator UI).'
+        ),
+    )
+    probe: UIProbeConfig = Field(default_factory=UIProbeConfig)
     merge_enabled: bool = Field(
         default=True,
         description=(
@@ -610,43 +644,8 @@ class UIConfig(ConfigModel):
             'with ``auth_token`` or close it here).'
         ),
     )
-
-    @field_validator('auth_token', mode='before')
-    @classmethod
-    def _strip_auth_token(cls, v: object) -> object:
-        """Strip leading/trailing whitespace from ``auth_token`` on load.
-
-        Operators sometimes write ``auth_token: " secret "`` in YAML (quoted
-        to preserve a trailing space, by accident). With the raw value kept,
-        ``secrets.compare_digest`` would require clients to send the literal
-        space-padded string — a footgun. We strip once here so the stored
-        value is the canonical token; the startup security gate and the
-        ``_token_matches`` helper both see the same post-strip value.
-        """
-        if isinstance(v, str):
-            return v.strip()
-        return v
-
-    max_rows: int = Field(
-        default=5000,
-        ge=100,
-        description='Maximum rows returned to the web UI in list views.',
-    )
-    log_min_duration_ms: int = Field(
-        default=500,
-        ge=0,
-        description=(
-            'Minimum task duration (ms) to emit a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
-        ),
-    )
-    ws_min_duration_ms: int = Field(
-        default=500,
-        ge=0,
-        description=(
-            'Minimum task duration (ms) to broadcast to the live UI over WebSocket. Failed '
-            'tasks always appear. 0 shows all tasks.'
-        ),
-    )
+    consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
+    prometheus: UIPrometheusConfig = Field(default_factory=UIPrometheusConfig)
     custom_links: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
@@ -666,24 +665,25 @@ class UIConfig(ConfigModel):
             'logs one startup warning and the UI renders plain text for it.'
         ),
     )
-    custom_renderers_path: str = Field(
-        default='',
-        description=(
-            'Path to a deployment-provided JS module of custom cell '
-            'renderers, served as-is at ``GET /api/v1/ui/renderers.js``. '
-            'Empty (the default) disables the feature — the route then '
-            '404s and identity reports ``custom_renderers: false``. When '
-            'set, the file must exist at startup or the worker fails to '
-            'boot; its content is trusted the same as any other backend '
-            'config (it runs same-origin in the operator UI).'
-        ),
-    )
-    consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
-    prometheus: UIPrometheusConfig = Field(default_factory=UIPrometheusConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
-    probe: UIProbeConfig = Field(default_factory=UIProbeConfig)
-    timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
     docs: UIDocsConfig = Field(default_factory=UIDocsConfig)
+    timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
+
+    @field_validator('auth_token', mode='before')
+    @classmethod
+    def _strip_auth_token(cls, v: object) -> object:
+        """Strip leading/trailing whitespace from ``auth_token`` on load.
+
+        Operators sometimes write ``auth_token: " secret "`` in YAML (quoted
+        to preserve a trailing space, by accident). With the raw value kept,
+        ``secrets.compare_digest`` would require clients to send the literal
+        space-padded string — a footgun. We strip once here so the stored
+        value is the canonical token; the startup security gate and the
+        ``_token_matches`` helper both see the same post-strip value.
+        """
+        if isinstance(v, str):
+            return v.strip()
+        return v
 
     @field_validator('link_bases')
     @classmethod

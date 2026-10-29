@@ -455,8 +455,8 @@ def test_a_json_text_for_a_section_is_not_decoded(tmp_path, monkeypatch):
 
 
 def test_a_scalar_field_keeps_a_text_that_looks_like_json():
-    assert decode_env_json({'worker_name_env': '[1]'}, {'worker_name_env': '[1]'}, DrakkarConfig) == {
-        'worker_name_env': '[1]'
+    assert decode_env_json({'logging': {'output': '[1]'}}, {'logging': {'output': '[1]'}}, DrakkarConfig) == {
+        'logging': {'output': '[1]'}
     }
 
 

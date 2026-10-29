@@ -81,7 +81,7 @@ def app_config() -> DrakkarConfig:
     return DrakkarConfig(
         connections=kafka_connections(brokers='localhost:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
-        executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10, window_size=5),
+        executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout='10s', window_size=5),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),

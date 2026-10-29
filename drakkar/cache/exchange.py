@@ -1,6 +1,6 @@
 """The client side of the cache exchange: which peers to pull, how, and what to keep.
 
-Every ``cache.exchange.interval_seconds`` the engine pulls the
+Every ``cache.exchange.interval`` the engine pulls the
 ``cluster`` and ``global`` rows other workers originated, over
 ``GET /api/v1/peer/cache/changes``. This module holds the parts that do
 not need the engine's database:

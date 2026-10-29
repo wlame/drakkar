@@ -24,7 +24,7 @@
   var BARE_STRING = /^[A-Za-z_\/][A-Za-z0-9_.\/:-]*$/;
   var BARE_DURATION = /^([0-9]+(d|h|m|s|ms))+$/;
   var RESERVED_WORDS = ['true', 'false', 'yes', 'no', 'on', 'off', 'null', '~'];
-  var CALCULATOR_SECTIONS = ['sources', 'executor', 'ui'];
+  var CALCULATOR_SECTIONS = ['sources', 'executor', 'logging', 'ui'];
   var TABLE_URL = '../data/config-wizard.json';
   // A table that has not arrived by then counts as not loaded, so the calculator still appears.
   var TABLE_TIMEOUT_MS = 5000;
@@ -84,7 +84,7 @@
     c.worstWindowSec = c.windowSize * c.taskTimeout;
     c.maxPollInterval = Math.max(300000, Math.min(900000, c.worstWindowSec * 1000 * 2));
 
-    // UI duration thresholds. ws_min_duration_ms has a floor of 30ms: below
+    // Duration thresholds. ui.ws_min_duration has a floor of 30ms: below
     // that, fast task WS events cause buggy timeline rendering and browser
     // performance issues.
     if (p80 < 50) {
@@ -140,15 +140,17 @@
       executor: {
         max_executors: c.maxWorkers,
         window_size: c.windowSize,
-        task_timeout_seconds: c.taskTimeout,
+        task_timeout: durationText(c.taskTimeout * 1000),
         max_retries: c.maxRetries,
-        drain_timeout_seconds: c.drainTimeout,
+        drain_timeout: durationText(c.drainTimeout * 1000),
         backpressure_high_multiplier: c.highMult,
         backpressure_low_multiplier: c.lowMult
       },
+      logging: {
+        min_task_duration: minDuration(c.logMin)
+      },
       ui: {
-        ws_min_duration_ms: c.wsMin,
-        log_min_duration_ms: c.logMin
+        ws_min_duration: minDuration(c.wsMin)
       },
       recorder: {
         capture: {
@@ -170,15 +172,15 @@
       ? c.cpu + ' cores would allow more, but the event-loop ceiling binds first: ~' + LOOP_CEILING_TASKS_PER_SEC + ' tasks/sec * p80 ' + p80 + 'ms = ' + c.loopCapSlots + ' slots. More slots would complete tasks faster than the single Python event loop can orchestrate. To use the remaining cores, run more workers per host instead. CPU-bound work in arrange()/hooks lowers the real ceiling further.'
       : c.cpu + ' cores - ' + c.reservedCores + ' reserved (20%) = ' + (c.cpu - c.reservedCores) + ' available. Capped at ' + c.partPerWorker + ' partitions/worker * 4 = ' + (c.partPerWorker * 4) + '. Each slot runs one subprocess. More slots than cores causes context-switch overhead without throughput gain.');
     add('window_size: ' + c.windowSize, 'Target ' + c.windowTargetSec + 's of work per window. At p80=' + p80 + 'ms, that is ' + c.windowTargetSec + '/' + p80s.toFixed(3) + ' = ' + c.windowSize + ' messages. Larger windows reduce arrange() call overhead and enable batching. Smaller windows reduce commit latency — offsets commit only when the slowest task in the window finishes.');
-    add('task_timeout_seconds: ' + c.taskTimeout, '10x p80 = ' + Math.round(p80s * 10) + 's (floor 30s, cap 600s). Tasks exceeding this are killed. Set above p99 to avoid killing valid tasks, but low enough to detect stuck processes.');
+    add('task_timeout: ' + durationText(c.taskTimeout * 1000), '10x p80 = ' + Math.round(p80s * 10) + 's (floor 30s, cap 600s). Tasks exceeding this are killed. Set above p99 to avoid killing valid tasks, but low enough to detect stuck processes.');
     add('max_poll_records: ' + c.pollRecords, 'window_size * min(partitions/worker, 10) = ' + c.windowSize + ' * ' + Math.min(c.partPerWorker, 10) + '. Enough messages per poll to keep partition queues fed for one window cycle. Too low starves the pipeline; too high wastes memory.');
     var bpText = p80s < 0.1 ? 'Fast tasks drain quickly — small buffer sufficient.' : p80s < 10 ? 'Moderate tasks need room to queue while in-flight work completes.' : 'Long tasks: small buffer prevents over-fetching messages that sit for minutes.';
     add('backpressure high/low: ' + c.highMult + '/' + c.lowMult, 'High watermark = max_executors * ' + c.highMult + ' = ' + (maxWorkers * c.highMult) + '. Low = max_executors * ' + c.lowMult + ' = ' + Math.max(1, maxWorkers * c.lowMult) + '. ' + bpText + ' The gap prevents pause/resume flapping.');
-    add('drain_timeout_seconds: ' + c.drainTimeout, '2x p80 = ' + c.drainTimeout + 's. On shutdown, in-flight tasks get this long to finish. If exceeded, their offsets remain uncommitted and Kafka redelivers after restart.');
+    add('drain_timeout: ' + durationText(c.drainTimeout * 1000), '2x p80 = ' + c.drainTimeout + 's. On shutdown, in-flight tasks get this long to finish. If exceeded, their offsets remain uncommitted and Kafka redelivers after restart.');
     var stText = p80s < 1 ? 'Fast tasks: 10s for quick dead-worker detection.' : p80s < 10 ? 'Moderate: 45s balances detection speed vs false positives.' : 'Slow tasks: 60s prevents spurious rebalances.';
     add('session_timeout: ' + durationText(c.sessionTimeout), stText + ' Heartbeat every ' + durationText(c.heartbeatInterval) + ' (session/5). Kafka declares consumer dead if no heartbeat for this duration.');
     add('max_poll_interval: ' + durationText(c.maxPollInterval), 'Worst-case window: ' + c.windowSize + ' tasks * ' + c.taskTimeout + 's = ' + c.worstWindowSec + 's. 2x margin = ' + (c.worstWindowSec * 2) + 's. Kafka kicks the consumer if no poll() within this interval.');
-    add('ws_min_duration_ms: ' + c.wsMin, c.wsMin > 0 ? 'Tasks faster than ' + c.wsMin + 'ms hidden from live UI. Floor is 30ms — below that, fast task WebSocket events cause buggy timeline rendering and browser performance issues. Failed tasks always shown regardless.' : '0 = show all tasks. With p80=' + p80 + 'ms, task throughput is low enough for the UI to handle.');
+    add('ws_min_duration: ' + minDuration(c.wsMin), c.wsMin > 0 ? 'Tasks faster than ' + c.wsMin + 'ms hidden from live UI. Floor is 30ms — below that, fast task WebSocket events cause buggy timeline rendering and browser performance issues. Failed tasks always shown regardless.' : '0 = show all tasks. With p80=' + p80 + 'ms, task throughput is low enough for the UI to handle.');
     add('min_event_duration: ' + minDuration(c.eventMin), c.eventMin > 0 ? 'Tasks faster than ' + c.eventMin + 'ms skip SQLite storage. At ~' + Math.round(c.tasksPerSec) + ' tasks/sec, filtering prevents DB bottleneck.' : '0 = store all events. SQLite handles ~' + Math.round(c.tasksPerSec) + ' tasks/sec comfortably.');
     add('capture.output: ' + c.storeOutput, !c.storeOutput ? 'Disabled — fast task stdout is small and uninteresting. Saves ~' + Math.round(c.stdoutKb * c.tasksPerSec) + ' KB/sec of writes.' : 'Enabled — stdout/stderr valuable for debugging. Storage cost manageable at ' + Math.round(c.tasksPerSec) + ' tasks/sec.');
 

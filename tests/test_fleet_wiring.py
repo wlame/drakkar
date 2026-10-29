@@ -51,7 +51,7 @@ def _config(tmp_path, **overrides) -> DrakkarConfig:
         'ui': {'enabled': True, 'release': {'enabled': False}},
         'metrics': {'enabled': False},
         'runtime_health': {'enabled': False},
-        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': 1},
+        'executor': {'binary_path': '/usr/bin/echo', 'drain_timeout': '1s'},
         'sinks': {'kafka': {'output_results': {'topic': 'output-results'}}},
         'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
     }
@@ -121,7 +121,7 @@ async def test_the_filesystem_provider_keeps_the_cards_under_the_shared_folder(t
 async def test_the_card_carries_the_worker_identity(tmp_path):
     app = _app(
         tmp_path,
-        cluster_name='search',
+        cluster={'name': 'search'},
         api={'port': 8123, 'public_url': 'http://w-1.internal:8123/'},
     )
 
@@ -253,7 +253,7 @@ def test_the_cluster_election_gives_the_filesystem_factory_no_options(tmp_path):
 def test_the_cluster_election_carries_the_worker_context_and_a_periodic_caller(tmp_path):
     app = _app(
         tmp_path,
-        cluster_name=CLUSTER,
+        cluster={'name': CLUSTER},
         autodiscover={
             'enabled': True,
             'provider': 'filesystem',
@@ -457,14 +457,14 @@ async def test_the_registry_gets_the_shared_connections_and_they_close_after_it_
 
     assert isinstance(app._connections, Connections)
     assert received['ctx'].connections is app._connections
-    drain_timeout = app._config.executor.drain_timeout_seconds
+    drain_timeout = app._config.executor.drain_timeout
     assert 0 < received['deadline_seconds'] <= drain_timeout
     assert order.index('fleet.stop') < order.index('connections.close_all') < order.index('ui_server.stop')
 
 
 async def test_a_connection_close_that_outlasts_the_drain_time_is_cut_off_and_logged(tmp_path, monkeypatch):
     app, _source, order = _runnable_app(tmp_path, monkeypatch, lambda _options: _RecordingRegistry())
-    app._config.executor.drain_timeout_seconds = 0.2
+    app._config.executor.drain_timeout = 0.2
 
     async def hanging_close_all(_connections) -> None:
         await asyncio.Event().wait()
@@ -643,7 +643,7 @@ def _pipeline_app(tmp_path, monkeypatch, **overrides) -> tuple[DrakkarApp, list[
     """A worker with its real recorder and Kafka source, on a fake consumer; no UI server, sinks or subprocesses."""
     values = {
         'storage': {'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')},
-        'cluster_name': CLUSTER,
+        'cluster': {'name': CLUSTER},
     }
     values.update(overrides)
     app = _app(tmp_path, **values)
@@ -797,7 +797,7 @@ async def test_shutdown_waits_for_the_pass_then_stops_the_election_then_the_regi
     app, _consumers = _pipeline_app(
         tmp_path,
         monkeypatch,
-        executor={'binary_path': '/usr/bin/echo', 'drain_timeout_seconds': WAIT_FOR_TIMEOUT_SECONDS},
+        executor={'binary_path': '/usr/bin/echo', 'drain_timeout': f'{WAIT_FOR_TIMEOUT_SECONDS:g}s'},
         autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': {'timeout': '500ms'}},
     )
     in_window = threading.Event()

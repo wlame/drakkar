@@ -1,7 +1,7 @@
 """Tests for the CacheEngine cleanup loop.
 
 The cleanup loop reclaims space from expired entries. It runs on its own
-periodic cadence (``cache.cleanup_interval_seconds``, default 60s) and
+periodic cadence (``cache.cleanup_interval``, default 60s) and
 performs three jobs:
 
 1. **DB-side purge** — ``DELETE FROM cache_entries WHERE expires_at_ms <
@@ -460,7 +460,7 @@ async def test_start_registers_cleanup_task_as_system_periodic(tmp_path, monkeyp
         kwargs = cleanup_calls[0]
         assert kwargs.get('system') is True
         assert kwargs.get('on_error') == 'continue'
-        assert kwargs.get('interval') == engine._config.cleanup_interval_seconds  # type: ignore[reportPrivateUsage]
+        assert kwargs.get('interval') == engine._config.cleanup_interval  # type: ignore[reportPrivateUsage]
         assert kwargs.get('coro_fn') == engine._cleanup_once  # type: ignore[reportPrivateUsage]
     finally:
         await engine.stop()

@@ -4,7 +4,7 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
 The models are split per domain across this package — ``sinks``,
-``sources``, ``runtime``, ``api``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
+``identity``, ``sources``, ``runtime``, ``api``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
@@ -23,6 +23,7 @@ from drakkar.config.connections import (
     PostgresConnectionConfig,
     RedisConnectionConfig,
 )
+from drakkar.config.identity import ClusterConfig, WorkerConfig
 from drakkar.config.recorder import (
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     RecorderAnnotationsConfig,
@@ -38,11 +39,10 @@ from drakkar.config.resilience import ResilienceConfig, validate_resilience
 from drakkar.config.root import DrakkarConfig, _parse_env_overrides, load_config, load_yaml_document
 from drakkar.config.runtime import (
     ExecutorConfig,
-    IOConfig,
     LoggingConfig,
     MetricsConfig,
-    OffloadConfig,
     RuntimeHealthConfig,
+    ThreadsConfig,
 )
 from drakkar.config.sinks import (
     DLQConfig,
@@ -86,6 +86,7 @@ from drakkar.config.units import (
     Duration,
     WholeDays,
     WholeHours,
+    WholeMinutes,
     WholeSeconds,
     format_duration,
     format_size,
@@ -108,6 +109,7 @@ __all__ = [
     'ByteSize',
     'CacheConfig',
     'CacheExchangeConfig',
+    'ClusterConfig',
     'ConfigModel',
     'ConnectionsConfig',
     'ConsulConnectionConfig',
@@ -119,7 +121,6 @@ __all__ = [
     'ExecutorConfig',
     'FileSinkConfig',
     'HttpSinkConfig',
-    'IOConfig',
     'KafkaConnectionConfig',
     'KafkaSinkConfig',
     'KafkaSourceConfig',
@@ -128,7 +129,6 @@ __all__ = [
     'MongoConnectionConfig',
     'MongoSinkConfig',
     'MongoStatementConfig',
-    'OffloadConfig',
     'PostgresConnectionConfig',
     'PostgresSinkConfig',
     'RecorderAnnotationsConfig',
@@ -150,6 +150,7 @@ __all__ = [
     'SourcesConfig',
     'StartupAlignConfig',
     'StorageConfig',
+    'ThreadsConfig',
     'TimelineColorRule',
     'TimelineEventType',
     'TimelineLabels',
@@ -166,7 +167,9 @@ __all__ = [
     'WebClientConfig',
     'WholeDays',
     'WholeHours',
+    'WholeMinutes',
     'WholeSeconds',
+    'WorkerConfig',
     '_parse_env_overrides',
     'deep_merge',
     'find_unknown_keys',

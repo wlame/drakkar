@@ -103,7 +103,7 @@ def make_config(**overrides) -> DrakkarConfig:
     defaults = {
         'connections': kafka_connections(brokers='localhost:9092'),
         'sources': {'kafka': {'enabled': True, 'topic': 'test-in'}},
-        'executor': ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
+        'executor': ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout='10s'),
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
@@ -691,7 +691,7 @@ class TestCombinedModes:
             executor=ExecutorConfig(
                 binary_path='/bin/echo',
                 max_executors=2,
-                task_timeout_seconds=10,
+                task_timeout='10s',
                 window_size=1,
                 max_retries=0,
             ),
@@ -727,7 +727,7 @@ class TestCombinedModes:
             executor=ExecutorConfig(
                 binary_path=sys.executable,
                 max_executors=2,
-                task_timeout_seconds=10,
+                task_timeout='10s',
                 max_retries=0,
             ),
             ui=UIConfig(enabled=False),
@@ -870,7 +870,7 @@ class TestConfigSummary:
     def test_summary_debug_on(self):
         cfg = make_config(ui=UIConfig(enabled=True))
         summary = cfg.config_summary(worker_id='w')
-        assert 'ui=on:8080' in summary
+        assert 'api=8080 ui=on' in summary
 
     def test_summary_webapp_on(self):
         cfg = make_config(sources={'http': {'enabled': True, 'port': 8090}})
@@ -944,7 +944,7 @@ class TestConfigSummary:
                 max_executors=8,
                 window_size=200,
                 max_retries=5,
-                task_timeout_seconds=300,
+                task_timeout='5m',
             ),
         )
         summary = cfg.config_summary(worker_id='w')
@@ -973,7 +973,7 @@ class TestConfigSummary:
         """Fractional intervals render with decimal via :g format — e.g. 0.5 → '0.5s'."""
         from drakkar.config import CacheConfig
 
-        cfg = make_config(cache=CacheConfig(enabled=True, flush_interval_seconds=0.5))
+        cfg = make_config(cache=CacheConfig(enabled=True, flush_interval='500ms'))
         summary = cfg.config_summary(worker_id='w')
         assert 'cache=on:f=0.5s/s=30s/c=60s' in summary
 
@@ -986,8 +986,8 @@ class TestConfigSummary:
         assert 'cache=on:f=3s/s=off/c=60s' in summary
 
     def test_summary_cache_on_with_max_memory_entries(self):
-        """max_memory_entries renders as 'max=N' when set, absent only when
-        explicitly None. The default 10_000 cap is included in the summary so
+        """max_memory_entries renders as 'max=N' above 0, and is absent at 0
+        (no cap). The default 10_000 cap is included in the summary so
         operators can verify the effective limit at a glance."""
         from drakkar.config import CacheConfig
 
@@ -995,12 +995,12 @@ class TestConfigSummary:
         summary_with = cfg_with.config_summary(worker_id='w')
         assert 'max=5000' in summary_with
 
-        # Default config now carries max_memory_entries=10_000 — render it.
+        # The default max_memory_entries=10_000 is rendered.
         cfg_default = make_config(cache=CacheConfig(enabled=True))
         summary_default = cfg_default.config_summary(worker_id='w')
         assert 'max=10000' in summary_default
 
-        # Explicit None (unbounded) is the only case where 'max=' is absent.
-        cfg_unbounded = make_config(cache=CacheConfig(enabled=True, max_memory_entries=None))
+        # 0 (unbounded) is the only case where 'max=' is absent.
+        cfg_unbounded = make_config(cache=CacheConfig(enabled=True, max_memory_entries=0))
         summary_unbounded = cfg_unbounded.config_summary(worker_id='w')
         assert 'max=' not in summary_unbounded

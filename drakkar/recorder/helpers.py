@@ -121,7 +121,7 @@ def encode_json_str(obj: Any) -> str:
 # output is stored so the task-detail page can show it on demand; pushing it
 # to every connected browser instead costs ``len(output) x clients`` bytes for
 # data no live view reads — the timeline shows ``stdout_size``, not the text.
-# With ``executor.max_stdout_bytes`` defaulting to unlimited, one chatty task
+# With ``executor.max_stdout`` defaulting to unlimited, one chatty task
 # could otherwise saturate every open dashboard.
 WS_OMITTED_FIELDS = frozenset({'stdout', 'stderr'})
 

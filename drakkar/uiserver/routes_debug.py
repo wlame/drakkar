@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
+# Extra headroom (in seconds) on top of ``2 * executor.task_timeout`` for
 # the probe's wall-clock timeout. Covers arrange + two round-trips of
 # hook work + serialization overhead. Exposed at module scope so tests
 # can monkeypatch it to a small value without plumbing a timeout arg
@@ -524,7 +524,7 @@ def _databases_answer(
     """The ``/debug/databases`` answer: the memory row, own files measured now, then the shared history. Blocking.
 
     The parts are independent. ``coverage`` is the memory coverage, read by
-    the route handler on the UI server's loop (four values; at worst the
+    the route handler on the API server's loop (four values; at worst the
     row count is one chunk behind); with it, the memory row comes first, read on a by-name
     connection through the open guard (no row once the store is closed).
     The file rows follow when the recorder writes a file, and the shared
@@ -1083,7 +1083,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         requests serialize on the runner's internal ``asyncio.Lock``.
 
         Returns 200 with a ``DebugReport``. If the wall-clock timeout
-        fires (``2 * task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS``),
+        fires (``2 * executor.task_timeout + PROBE_TIMEOUT_HEADROOM_SECONDS``),
         also returns 200 but with ``truncated=true`` and whatever partial
         state the runner had captured up to the cancellation point.
 
@@ -1124,7 +1124,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # Read the constant via this module's globals so tests can
         # monkeypatch ``PROBE_TIMEOUT_HEADROOM_SECONDS`` and have the
         # patched value observed at request time without a lazy import.
-        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
+        timeout = 2 * drakkar_app._config.executor.task_timeout + PROBE_TIMEOUT_HEADROOM_SECONDS
         # Build the per-run state here so we own a reference for the
         # truncated-partial-report path even when the actual probe
         # coroutine runs on a different event loop (and thus an

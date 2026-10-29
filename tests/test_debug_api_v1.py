@@ -940,7 +940,7 @@ class TestApiV1Identity:
     async def test_identity_reports_configured_timeline(self, tmp_path, mock_recorder, mock_app):
         timeline_cfg = UITimelineConfig(
             history_factor=3,
-            max_age_minutes=45,
+            max_age='45m',
             color_rules=[
                 # A single-condition rule constructed from a bare dict, to
                 # pin that ``when`` always serializes as a list even though

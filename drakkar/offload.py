@@ -70,7 +70,6 @@ from drakkar.hookctx import current_hook_context
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from drakkar.config import OffloadConfig
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
@@ -109,15 +108,15 @@ class InlineOffloader:
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
 
-def resolve_max_threads(configured: int, executor_pool_max: int) -> int:
-    """The effective offload pool size for ``offload.max_threads``.
+def resolve_max_threads(configured: int | None, executor_pool_max: int) -> int:
+    """The effective offload pool size for ``threads.offload``.
 
-    An explicit positive value wins untouched. 0 (the config default) sizes
+    An explicit value wins untouched. ``None`` (the config default) sizes
     the pool from the executor pool — ``ceil(executor.max_executors / 4)`` with a
     floor of 2 — so a bigger subprocess fleet gets proportionally more
     offload headroom without every deployment tuning a second knob.
     """
-    if configured > 0:
+    if configured is not None:
         return configured
     return max(2, -(-executor_pool_max // 4))
 
@@ -129,12 +128,12 @@ class OffloadPool:
     on purpose: a cap gives queueing (visible in
     ``drakkar_offload_queued``) instead of unbounded GIL thrash when many
     partitions offload at once, and the queue depth is the operator's
-    tuning signal for ``offload.max_threads``.
+    tuning signal for ``threads.offload``.
     """
 
     def __init__(
         self,
-        config: OffloadConfig,
+        threads: int | None,
         *,
         recorder: EventRecorder | None = None,
         executor_pool_max: int = 0,
@@ -142,15 +141,15 @@ class OffloadPool:
         """Create the pool.
 
         Args:
-            config: sizing settings (``max_threads``; 0 = auto).
+            threads: ``threads.offload``, the pool size; ``None`` = auto.
             recorder: flight recorder for per-call ``offload`` events, or
                 ``None`` when the UI/recorder is disabled — the pool then
                 feeds Prometheus only.
             executor_pool_max: the executor pool size the auto default
                 scales from (see :func:`resolve_max_threads`); ignored
-                when ``max_threads`` is explicit.
+                when ``threads`` is explicit.
         """
-        resolved = resolve_max_threads(config.max_threads, executor_pool_max)
+        resolved = resolve_max_threads(threads, executor_pool_max)
         self._executor = ThreadPoolExecutor(
             max_workers=resolved,
             thread_name_prefix='drakkar-offload',
@@ -169,7 +168,7 @@ class OffloadPool:
 
     @property
     def max_threads(self) -> int:
-        """Effective pool size (``offload.max_threads``, auto-resolved when 0)."""
+        """Effective pool size (``threads.offload``, auto-resolved when null)."""
         return self._max_threads
 
     def snapshot(self) -> dict[str, int]:

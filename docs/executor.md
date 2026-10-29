@@ -89,11 +89,11 @@ The framework calls `asyncio.create_subprocess_exec` with:
 
 ### 4. Communicate
 
-`proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit. All stdout and stderr are captured in memory. With `executor.max_stdout_bytes` / `max_stderr_bytes` set, the framework streams the pipes instead, retaining up to the cap per stream and discarding the rest — see [Output Caps](#output-caps).
+`proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit. All stdout and stderr are captured in memory. With `executor.max_stdout` / `max_stderr` set, the framework streams the pipes instead, retaining up to the cap per stream and discarding the rest — see [Output Caps](#output-caps).
 
 ### 5. Enforce Timeout
 
-The entire capture call (`communicate()`, or the capped streaming reader when output caps are set) is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: 120 seconds).
+The entire capture call (`communicate()`, or the capped streaming reader when output caps are set) is wrapped in `asyncio.wait_for(timeout=executor.task_timeout)` (default: 120 seconds).
 
 ### 6. Handle Outcome
 
@@ -126,8 +126,8 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 | `spawn_seconds` | `float \| None` | Wall-clock time creating the subprocess took (fork/exec plus any event-loop scheduling delay around it) — the parent-side share of `duration_seconds`. Single-digit milliseconds on a healthy host; grows when the worker process itself is the bottleneck. `None` for precomputed results. |
 | `task` | `ExecutorTask` | The original task that produced this result. Carries `metadata` and `labels` through the pipeline. |
 | `pid` | `int \| None` | OS process ID. `None` if the process never started. |
-| `stdout_truncated` | `bool` | `True` when stdout retention stopped at `executor.max_stdout_bytes` and the remainder was discarded. Always `False` with unlimited caps and for precomputed results. |
-| `stderr_truncated` | `bool` | Same for stderr, governed by `executor.max_stderr_bytes`. |
+| `stdout_truncated` | `bool` | `True` when stdout retention stopped at `executor.max_stdout` and the remainder was discarded. Always `False` with unlimited caps and for precomputed results. |
+| `stderr_truncated` | `bool` | Same for stderr, governed by `executor.max_stderr`. |
 
 ---
 
@@ -138,7 +138,7 @@ When a task fails, the framework calls your [on_error()](handler.md#on_error) ho
 | Field | Type | Description |
 |-------|------|-------------|
 | `task` | `ExecutorTask` | The task that failed. |
-| `kind` | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- the subprocess or precomputed result finished with a non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout_seconds`. `'launch_failure'` -- the process could not be started (missing binary or spawn error). `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract). |
+| `kind` | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- the subprocess or precomputed result finished with a non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout`. `'launch_failure'` -- the process could not be started (missing binary or spawn error). `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract). |
 | `exit_code` | `int \| None` | Process exit code. `None` if the process failed to start or timed out. |
 | `stderr` | `str` | Process stderr or a short error description (e.g., `'task timed out'`). |
 | `exception` | `str \| None` | Exception message for timeout/launch failures. `None` for normal non-zero exits. |
@@ -317,8 +317,8 @@ By default the executor retains everything a task writes to stdout and stderr. P
 
 ```yaml
 executor:
-  max_stdout_bytes: 1048576   # keep at most 1 MiB of stdout per task
-  max_stderr_bytes: 65536     # keep at most 64 KiB of stderr per task
+  max_stdout: 1MiB            # keep at most 1 MiB of stdout per task
+  max_stderr: 64KiB           # keep at most 64 KiB of stderr per task
 ```
 
 - `0` (the default) means unlimited — behavior is unchanged.
@@ -509,13 +509,13 @@ All executor settings live under the `executor` key in your YAML config:
 executor:
   binary_path: /usr/local/bin/my-worker    # default binary (optional)
   max_executors: 4                           # concurrent subprocess limit
-  task_timeout_seconds: 120                # per-task wall-clock timeout
-  max_stdout_bytes: 0                       # stdout bytes retained (0 = unlimited)
-  max_stderr_bytes: 0                       # stderr bytes retained (0 = unlimited)
+  task_timeout: 2m                         # per-task wall-clock timeout
+  max_stdout: 0                             # stdout bytes retained (0 = unlimited)
+  max_stderr: 0                             # stderr bytes retained (0 = unlimited)
   window_size: 100                         # max messages per arrange() call
   max_retries: 3                           # retry limit per failed task
   on_failure: skip                         # skip | dlq: what the default on_error returns
-  drain_timeout_seconds: 30                # max wait for in-flight tasks on shutdown
+  drain_timeout: 30s                       # max wait for in-flight tasks on shutdown
   backpressure_high_multiplier: 32         # pause consumer at max_executors * this
   backpressure_low_multiplier: 4           # resume consumer at max_executors * this
 ```
@@ -524,13 +524,13 @@ executor:
 |-------|------|---------|-----|-------------|
 | `binary_path` | `str \| None` | `None` | 1 char | Default subprocess binary. `None` requires per-task override via `ExecutorTask.binary_path`. |
 | `max_executors` | `int` | `4` | 1 | Concurrent subprocess limit (`PriorityGate` size). |
-| `task_timeout_seconds` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
-| `max_stdout_bytes` | `int` | `0` | 0 | Maximum bytes of stdout retained per task. `0` = unlimited. Excess output is still read and discarded (the process never blocks on a full pipe); the retained prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
-| `max_stderr_bytes` | `int` | `0` | 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
+| `executor.task_timeout` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
+| `max_stdout` | `int` | `0` | 0 | Maximum bytes of stdout retained per task. `0` = unlimited. Excess output is still read and discarded (the process never blocks on a full pipe); the retained prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
+| `max_stderr` | `int` | `0` | 0 | Same as `max_stdout`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
 | `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns, and what a spent retry budget and a raising `on_error` become. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
-| `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
+| `executor.drain_timeout` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
 | `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
 | `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
 

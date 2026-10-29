@@ -90,10 +90,10 @@ def test_cache_exchange_defaults():
     exchange = CacheExchangeConfig()
 
     assert exchange.enabled is True
-    assert exchange.interval_seconds == 30.0
+    assert exchange.interval == 30.0
     assert exchange.page_size == 500
-    assert exchange.timeout_seconds == 5.0
-    assert exchange.cycle_deadline_seconds is None
+    assert exchange.timeout == 5.0
+    assert exchange.cycle_deadline is None
     assert exchange.max_concurrent_peers == 4
 
 
@@ -136,39 +136,6 @@ def test_resolved_registry_dir(shared_dir, expected):
 
 
 _CONSUL_ON = {'enabled': True, 'provider': 'consul'}
-
-
-@pytest.mark.parametrize(
-    ('sections', 'expected'),
-    [
-        ({}, 'off'),
-        ({'autodiscover': {'provider': 'consul'}}, 'off'),
-        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}}, 'consul'),
-        ({'autodiscover': _CONSUL_ON, 'connections': {'consul': {'main': {}}}, 'ui': {'enabled': False}}, 'consul'),
-    ],
-    ids=['default', 'off-with-provider', 'on', 'ui-off'],
-)
-def test_fleet_summary(sections, expected):
-    assert _config(**sections).fleet_summary == expected
-
-
-@pytest.mark.parametrize(
-    ('enabled', 'provider', 'expected'),
-    [
-        (True, 'filesystem', ''),
-        (True, 'consul', ' election=consul'),
-        (False, 'consul', ''),
-    ],
-    ids=['filesystem', 'consul', 'off'],
-)
-def test_election_summary_names_a_provider_other_than_filesystem_when_on(enabled, provider, expected):
-    config = _config(
-        autodiscover={'enabled': enabled, 'provider': provider},
-        storage={'shared_dir': '/mnt/shared'},
-        connections={'consul': {'main': {}}},
-    )
-
-    assert config.election_summary == expected
 
 
 # --- connections named by the features --------------------------------------
@@ -296,7 +263,7 @@ def test_env_names_load_into_their_sections(monkeypatch):
     monkeypatch.setenv('DK_RECORDER__ARCHIVE__MERGED_RETENTION', '0')
     monkeypatch.setenv('DK_AUTODISCOVER__ENABLED', 'true')
     monkeypatch.setenv('DK_AUTODISCOVER__PROVIDER', 'filesystem')
-    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL_SECONDS', '12.5')
+    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL', '12.5s')
     monkeypatch.setenv('DK_RECORDER__SEARCH__MAX_FILES', '64')
     monkeypatch.delenv('DK_CONFIG', raising=False)
 
@@ -308,7 +275,7 @@ def test_env_names_load_into_their_sections(monkeypatch):
     assert config.recorder.archive.merged_retention == 0
     assert config.autodiscover.enabled is True
     assert config.autodiscover.provider == 'filesystem'
-    assert config.cache.exchange.interval_seconds == 12.5
+    assert config.cache.exchange.interval == 12.5
     assert config.recorder.search.max_files == 64
 
 

@@ -104,7 +104,7 @@ def _build_config(*, http_enabled: bool, kafka_enabled: bool = True) -> DrakkarC
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
-            task_timeout_seconds=10,
+            task_timeout='10s',
             window_size=5,
         ),
         sinks=SinksConfig(
@@ -209,7 +209,7 @@ def shutdown_app(monkeypatch) -> DrakkarApp:
     app._lifecycle._bind_sources()
 
     # Tight drain timeout so the test does not hang.
-    app._config.executor.drain_timeout_seconds = 0.05
+    app._config.executor.drain_timeout = 0.05
     return app
 
 

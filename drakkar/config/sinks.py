@@ -639,8 +639,8 @@ class SinksConfig(ConfigModel):
     kafka: dict[str, KafkaSinkConfig] = Field(default_factory=dict)
     postgres: dict[str, PostgresSinkConfig] = Field(default_factory=dict)
     mongo: dict[str, MongoSinkConfig] = Field(default_factory=dict)
-    http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
+    http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
 
     @model_validator(mode='wrap')

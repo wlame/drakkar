@@ -114,7 +114,7 @@ The config summary line shows ` recorder=postgres` after ` storage=...` and
 the optional ` shared=...`, with or without a `storage.dir`:
 
 ```
-... storage=mem recorder=postgres fleet=...
+... storage=mem recorder=postgres autodiscover=...
 ```
 
 ## The table
@@ -483,8 +483,10 @@ A worker with no disk, its history in Postgres, the busy cluster on its own
 prefix with 3 hours of history:
 
 ```yaml
-worker_name: worker-1
-cluster_name: payments
+worker:
+  name: worker-1
+cluster:
+  name: payments
 
 sources:
   kafka:

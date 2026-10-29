@@ -2127,7 +2127,7 @@ def _make_drakkar_config():
         executor={
             'binary_path': '/usr/bin/test',
             'max_executors': 4,
-            'task_timeout_seconds': 60,
+            'task_timeout': '1m',
             'max_retries': 2,
             'window_size': 5,
         },

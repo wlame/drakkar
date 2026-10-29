@@ -771,6 +771,15 @@ async def test_own_scope_is_silent_about_a_worker_name_from_the_environment(tmp_
     assert await _events_of_start_recorder(app) == []
 
 
+async def test_own_scope_is_silent_about_a_literal_worker_name(tmp_path, monkeypatch):
+    app = _app_with_generated_name(
+        monkeypatch, worker={'name': 'node-a'}, autodiscover={'enabled': False}, storage={'dir': str(tmp_path)}
+    )
+
+    assert app._worker_id == 'node-a'
+    assert await _events_of_start_recorder(app) == []
+
+
 async def test_own_scope_is_silent_about_a_worker_name_from_the_caller(tmp_path):
     app = DrakkarApp(
         handler=KafkaOnlyHandler(),

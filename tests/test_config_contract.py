@@ -54,7 +54,7 @@ def test_fixture_case_names_are_unique():
 
 
 @pytest.mark.parametrize('case', FIXTURE['summary'], ids=_case_ids(FIXTURE['summary']))
-def test_summary_case_matches_the_contract_line(case, tmp_path, monkeypatch):
+def test_summary_line_matches_the_fixture(case, tmp_path, monkeypatch):
     config = _load(case, tmp_path, monkeypatch)
 
     assert config.config_summary(worker_id=case['worker'], cluster_name=case['cluster']) == case['line']

@@ -792,7 +792,7 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
   feature that needs it opens it; nothing opens at startup.
 - At shutdown the worker closes the clients after the last provider has
   stopped, the newest first, inside what is left of
-  `executor.drain_timeout_seconds`. A client
+  `executor.drain_timeout`. A client
   that fails to close is logged (`connection_close_failed`) and the others
   are still closed. When the time runs out first, the worker logs
   `connections_close_timed_out` and the rest go with the process.
@@ -881,7 +881,7 @@ nothing behind that a second call would trip over.
 
 **Shutdown.** The `withdraw` and the provider's `stop` run once each, with
 one attempt, both inside the time that is left of
-`executor.drain_timeout_seconds`. Each attempt is cut to the time left. A
+`executor.drain_timeout`. Each attempt is cut to the time left. A
 provider that never started gets neither call (both count as `not_started`);
 with the breaker open both are skipped at once. A stuck provider cannot hold
 the shutdown longer than that budget. A card that was not withdrawn stays
@@ -936,7 +936,7 @@ card. When a worker lists a card with its own name, another instance, and
 that is live by the [liveness rule](#liveness), it logs `fleet_duplicate_worker_name`
 (with the other instance and URL) once for that instance and counts it in
 `drakkar_fleet_duplicate_worker_name_total`. Give every worker a unique
-name, for example from the pod name through `worker_name_env`.
+name, for example from the pod name through `worker.name_env`.
 
 ## Metrics
 

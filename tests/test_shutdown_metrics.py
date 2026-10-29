@@ -78,7 +78,7 @@ def shutdown_config() -> DrakkarConfig:
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
-            task_timeout_seconds=10,
+            task_timeout='10s',
             window_size=5,
         ),
         sinks=SinksConfig(
@@ -119,7 +119,7 @@ async def test_shutdown_sets_uncommitted_offsets_gauge(shutdown_config):
 
     # Tight drain timeout so the test does not hang waiting on offsets
     # that will never be marked complete.
-    shutdown_config.executor.drain_timeout_seconds = 0.05
+    shutdown_config.executor.drain_timeout = 0.05
 
     await app._lifecycle._shutdown()
 
@@ -171,7 +171,7 @@ async def test_shutdown_sets_inflight_gauge(shutdown_config):
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    shutdown_config.executor.drain_timeout_seconds = 0.05
+    shutdown_config.executor.drain_timeout = 0.05
 
     await app._lifecycle._shutdown()
 
@@ -208,7 +208,7 @@ async def test_drain_timeout_increments_counter(shutdown_config):
     """
     before = drain_timeout_hit._value.get()
 
-    shutdown_config.executor.drain_timeout_seconds = 0.05
+    shutdown_config.executor.drain_timeout = 0.05
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
     app._executor_pool = ExecutorPool(
@@ -267,7 +267,7 @@ async def test_shutdown_stops_processors_concurrently(shutdown_config):
     the SIGKILL is recorded as a clean exit and the sink/DLQ/recorder/consumer
     closes never run.
     """
-    shutdown_config.executor.drain_timeout_seconds = 0.05
+    shutdown_config.executor.drain_timeout = 0.05
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
     app._executor_pool = ExecutorPool(
@@ -305,7 +305,7 @@ async def test_shutdown_drain_timeout_cancels_the_zombie_tasks(shutdown_config):
     loop from exiting, so every ``processor.stop()`` in the teardown waits out
     its full timeout inside the pod's grace period.
     """
-    shutdown_config.executor.drain_timeout_seconds = 0.05
+    shutdown_config.executor.drain_timeout = 0.05
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
     app._executor_pool = ExecutorPool(
@@ -345,7 +345,7 @@ async def test_revoke_teardown_stays_within_the_drain_budget(shutdown_config):
     callback overrun ``max.poll.interval.ms`` and the member is evicted, which
     triggers the next rebalance.
     """
-    shutdown_config.executor.drain_timeout_seconds = 0.2
+    shutdown_config.executor.drain_timeout = 0.2
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
     app._executor_pool = ExecutorPool(
@@ -377,7 +377,7 @@ async def test_stop_processor_bounds_the_final_commit(shutdown_config):
     consumer's thread pool. Unbounded, a coordinator that stopped answering
     holds the rebalance callback open for as long as it stays silent.
     """
-    shutdown_config.executor.drain_timeout_seconds = 0.2
+    shutdown_config.executor.drain_timeout = 0.2
 
     app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
     app._executor_pool = ExecutorPool(

@@ -36,7 +36,7 @@ def _mock_recorder() -> AsyncMock:
 def _mock_app(*, enabled: bool = True, consumer: AsyncMock | None = None) -> MagicMock:
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     cfg.ui.release.enabled = False
-    cfg.ui.consume_pause = UIConsumePauseConfig(enabled=enabled, durations_seconds=[15, 60, 300])
+    cfg.ui.consume_pause = UIConsumePauseConfig(enabled=enabled, durations=['15s', '1m', '5m'])
 
     app = MagicMock()
     app._worker_id = 'test-worker'

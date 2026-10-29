@@ -128,8 +128,8 @@ point where config can be changed at runtime.
     | setting | what already consumed it |
     |---|---|
     | `app` | the handler's app-config model (see [Application config](app-config.md)) |
-    | `cluster_name`, `cluster_name_env` | the worker's resolved cluster name |
-    | `worker_name_env` | the worker's resolved id |
+    | `cluster.name`, `cluster.name_env` | the worker's resolved cluster name |
+    | `worker.name`, `worker.name_env` | the worker's resolved id |
     | `sources.kafka.enabled` | handler validation and source construction |
     | `sources.http.enabled` | handler validation and source construction |
     | `storage.dir` | the worker creates its own-files folder before `on_startup` runs |
@@ -601,7 +601,7 @@ The `ExecutorError` fields:
 | Field       | Type         | Description                                       |
 |-------------|--------------|---------------------------------------------------|
 | `task`      | ExecutorTask | The task that failed                               |
-| `kind`      | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout_seconds`. `'launch_failure'` -- process could not be started. `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract) |
+| `kind`      | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout`. `'launch_failure'` -- process could not be started. `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract) |
 | `exit_code` | int or None  | Process exit code; `None` if never started/timeout |
 | `stderr`    | str          | Process stderr or error description                |
 | `exception` | str or None  | Exception message for timeout/launch failures      |
@@ -821,7 +821,7 @@ Commits are attempted at three points:
    advanced by 300 offsets, otherwise 0.5 s after the first advance that
    was not yet committed. A message does not wait for the rest of its window.
 2. **On partition revocation** — pending offsets are drained (up to
-   `executor.drain_timeout_seconds`). **Only if drain completes
+   `executor.drain_timeout`). **Only if drain completes
    cleanly** is the highest committable offset committed before the
    partition is released. If drain times out, the final commit is
    skipped — in-flight tasks may still be running, and committing past

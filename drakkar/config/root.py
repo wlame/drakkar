@@ -17,6 +17,7 @@ from drakkar.config.api import APIConfig
 from drakkar.config.autodiscover import CONNECTION_PROVIDERS, FILESYSTEM_PROVIDER, AutodiscoverConfig
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
+from drakkar.config.identity import ClusterConfig, WorkerConfig
 from drakkar.config.recorder import (
     PERSISTENCE_NONE,
     PERSISTENCE_POSTGRES,
@@ -28,11 +29,10 @@ from drakkar.config.recorder import (
 from drakkar.config.resilience import validate_resilience
 from drakkar.config.runtime import (
     ExecutorConfig,
-    IOConfig,
     LoggingConfig,
     MetricsConfig,
-    OffloadConfig,
     RuntimeHealthConfig,
+    ThreadsConfig,
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
@@ -121,34 +121,23 @@ class DrakkarConfig(BaseSettings):
             )
         return values
 
-    worker_name_env: str = Field(
-        default='WORKER_ID',
-        description='Environment variable that holds the worker name for logs, metrics, and UI',
-    )
-    cluster_name: str = Field(
-        default='',
-        description='Logical cluster name for grouping workers in the debug UI',
-    )
-    cluster_name_env: str = Field(
-        default='',
-        description='Environment variable that holds the cluster name (overrides cluster_name if set)',
-    )
-    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
-    sinks: SinksConfig = Field(default_factory=SinksConfig)
-    dlq: DLQConfig = Field(default_factory=DLQConfig)
-    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
-    runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
-    io: IOConfig = Field(default_factory=IOConfig)
-    offload: OffloadConfig = Field(default_factory=OffloadConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    api: APIConfig = Field(default_factory=APIConfig)
-    ui: UIConfig = Field(default_factory=UIConfig)
-    cache: CacheConfig = Field(default_factory=CacheConfig)
-    storage: StorageConfig = Field(default_factory=StorageConfig)
-    recorder: RecorderConfig = Field(default_factory=RecorderConfig)
-    autodiscover: AutodiscoverConfig = Field(default_factory=AutodiscoverConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
+    cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
+    threads: ThreadsConfig = Field(default_factory=ThreadsConfig)
+    sinks: SinksConfig = Field(default_factory=SinksConfig)
+    dlq: DLQConfig = Field(default_factory=DLQConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    recorder: RecorderConfig = Field(default_factory=RecorderConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
+    autodiscover: AutodiscoverConfig = Field(default_factory=AutodiscoverConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
     app: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -283,22 +272,6 @@ class DrakkarConfig(BaseSettings):
         return self.recorder.memory.rows_per_executor * self.executor.max_executors
 
     @property
-    def fleet_summary(self) -> str:
-        """The registry the worker will run: the provider name, or ``off`` with ``autodiscover`` off."""
-        return self.autodiscover.provider if self.autodiscover.enabled else 'off'
-
-    @property
-    def election_summary(self) -> str:
-        """The summary token of the election provider, with its leading space.
-
-        Empty with ``autodiscover`` off and for the ``filesystem`` provider.
-        """
-        autodiscover = self.autodiscover
-        if not autodiscover.enabled or autodiscover.provider == FILESYSTEM_PROVIDER:
-            return ''
-        return f' election={autodiscover.provider}'
-
-    @property
     def dlq_enabled(self) -> bool:
         """Whether a DLQ producer is built: with ``dlq.enabled``, when the Kafka source or ``dlq.topic`` gives it a topic."""
         return bool(self.resolved_dlq_topic)
@@ -400,18 +373,21 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul election=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
-        (kafka, then http). The ``ui`` token reports the UI state and the port
-        of the server it runs on; the ``ui.release`` bundle-fetch settings are deliberately excluded
-        (they never affect pipeline behavior). ``storage`` is the own-files
-        folder (``mem`` for memory-only), ``shared`` appears only when the
-        shared folder differs from it, and ``fleet`` names the registry the
-        worker runs (see :attr:`fleet_summary`). ``election`` follows it
-        only when ``autodiscover`` is on with a provider other than
-        ``filesystem`` (see :attr:`election_summary`). The exact bytes are
-        contractual.
+        (kafka, then http). ``api`` is the port of the API server, or ``off``;
+        ``ui`` says whether its UI routes are served (the ``ui.release``
+        bundle-fetch settings are left out: they never affect pipeline
+        behavior). ``storage`` is the own-files folder (``mem`` with none),
+        and ``shared`` appears only when the shared folder differs from it.
+        ``recorder`` is the durable store, or ``off``; ``autodiscover`` the
+        provider, or ``off``. The cache token reads ``cache.exchange`` for
+        ``s=`` and shows ``/max=<n>`` only for a bounded memory cache. ``dlq``
+        follows ``dlq.enabled``: ``off``, the configured topic, ``on`` for the
+        topic derived from the Kafka source, or ``unconfigured`` when the DLQ
+        is on and has no topic to write to. Durations print in seconds. The
+        exact bytes are contractual.
         """
         identity = worker_id or '?'
         if cluster_name:
@@ -426,45 +402,18 @@ class DrakkarConfig(BaseSettings):
 
         ex = self.executor
         exec_part = f'{ex.max_executors}w/{ex.window_size}win'
-        retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
+        retries_part = f'{ex.max_retries}/{ex.task_timeout}s'
 
-        ui_part = f'on:{self.api.port}' if self.ui.enabled else 'off'
-
-        # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
-        # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping
-        # the common case compact while still rendering fractional intervals readably.
-        if not self.cache.enabled:
-            cache_part = 'off'
-        else:
-            flush = f'{self.cache.flush_interval_seconds:g}s'
-            exchange = self.cache.exchange
-            sync = f'{exchange.interval_seconds:g}s' if exchange.enabled else 'off'
-            cleanup = f'{self.cache.cleanup_interval_seconds:g}s'
-            cache_tokens = [f'f={flush}', f's={sync}', f'c={cleanup}']
-            if self.cache.max_memory_entries is not None:
-                cache_tokens.append(f'max={self.cache.max_memory_entries}')
-            cache_part = 'on:' + '/'.join(cache_tokens)
+        api_part = str(self.api.port) if self.api.enabled else 'off'
+        ui_part = 'on' if self.ui.enabled else 'off'
 
         storage_part = self.storage.dir or 'mem'
         shared_dir = self.storage.shared_dir
         shared_token = f' shared={shared_dir}' if shared_dir and shared_dir != self.storage.dir else ''
 
-        mode = self.resolved_persistence
-        if mode == PERSISTENCE_POSTGRES:
-            recorder_token = f' recorder={PERSISTENCE_POSTGRES}'
-        elif mode == PERSISTENCE_NONE and self.storage.dir:
-            recorder_token = f' recorder={PERSISTENCE_NONE}'
-        else:
-            recorder_token = ''
-
+        recorder_part = 'off' if self.resolved_persistence == PERSISTENCE_NONE else self.resolved_persistence
+        autodiscover_part = self.autodiscover.provider if self.autodiscover.enabled else 'off'
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
-
-        if not self.dlq_enabled:
-            dlq_part = 'off'
-        elif self.dlq.topic:
-            dlq_part = self.dlq.topic
-        else:
-            dlq_part = 'on'
 
         sink_parts: list[str] = []
         abbrevs = {
@@ -485,18 +434,45 @@ class DrakkarConfig(BaseSettings):
             f' sources=[{" ".join(source_tokens)}]'
             f' exec={exec_part}'
             f' retries={retries_part}'
+            f' api={api_part}'
             f' ui={ui_part}'
             f' storage={storage_part}'
             f'{shared_token}'
-            f'{recorder_token}'
-            f' fleet={self.fleet_summary}'
-            f'{self.election_summary}'
-            f' cache={cache_part}'
+            f' recorder={recorder_part}'
+            f' autodiscover={autodiscover_part}'
+            f' cache={self._cache_summary()}'
             f' metrics={metrics_part}'
-            f' dlq={dlq_part}'
+            f' dlq={self._dlq_summary()}'
             f' sinks=[{sinks_str}]'
             f' log={self.logging.level}'
         )
+
+    def _cache_summary(self) -> str:
+        """The cache token: ``off``, or ``on:f=<flush>/s=<exchange interval|off>/c=<cleanup>[/max=<n>]``.
+
+        The ``:g`` format prints whole seconds without a fraction (``3s``) and
+        keeps a fraction where there is one (``12.5s``).
+        """
+        cache = self.cache
+        if not cache.enabled:
+            return 'off'
+        exchange = cache.exchange
+        tokens = [
+            f'f={cache.flush_interval:g}s',
+            f's={exchange.interval:g}s' if exchange.enabled else 's=off',
+            f'c={cache.cleanup_interval:g}s',
+        ]
+        if cache.max_memory_entries > 0:
+            tokens.append(f'max={cache.max_memory_entries}')
+        return 'on:' + '/'.join(tokens)
+
+    def _dlq_summary(self) -> str:
+        """The DLQ token; see :meth:`config_summary`."""
+        if not self.dlq.enabled:
+            return 'off'
+        if self.dlq_unconfigured:
+            return 'unconfigured'
+        return self.dlq.topic or 'on'
 
 
 def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> Any:

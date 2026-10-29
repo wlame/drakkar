@@ -58,7 +58,8 @@ result in the response. The same handler code builds the tasks, and results
 can still go to sinks.
 
 ```yaml
-cluster_name: "http cluster"
+cluster:
+  name: "http cluster"
 
 kafka:
   brokers: "kafka:9092"          # still needed: the sink below is Kafka
@@ -131,7 +132,7 @@ of leaving a half-dead worker running.
 **Shutdown runs against one deadline.** On `SIGINT` or `SIGTERM` the worker
 marks itself not ready, calls `signal_stop` on every source, and then drains
 all sources concurrently against a single
-`executor.drain_timeout_seconds` budget. Whatever remains of that budget is
+`executor.drain_timeout` budget. Whatever remains of that budget is
 what `stop` gets. One shared deadline means the total shutdown time does not
 grow with the number of sources.
 
@@ -151,7 +152,7 @@ source there is nothing to derive it from, so the DLQ needs an explicit
 | on | empty | DLQ built, topic `{sources.kafka.topic}_dlq` |
 | on | set | DLQ built with that topic |
 | off | set | DLQ built with that topic; brokers from `dlq.brokers`, else `kafka.brokers` |
-| off | empty | **No DLQ producer.** The summary line reports `dlq=off`. |
+| off | empty | **No DLQ producer.** The summary line reports `dlq=unconfigured`; with `dlq.enabled: false` it reports `dlq=off`. |
 
 In the last row a DLQ send is dropped. The worker logs
 `dlq_send_dropped_unconfigured` once per run (then at debug level) and
@@ -182,7 +183,7 @@ with `dk-` headers that say where and why it failed.
 The config-summary line names the enabled sources:
 
 ```
-[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s ui=on:8081 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s api=8081 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 ```
 
 The `sources=[...]` token lists the enabled sources in a fixed order, Kafka

@@ -1,4 +1,4 @@
-"""Runtime configuration: executor, metrics, health, IO, offload, logging.
+"""Runtime configuration: executor, thread pools, metrics, health, logging.
 
 Everything that tunes how a worker runs, as opposed to where its data
 comes from (``sources``) or goes (``sinks``).
@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import Field, field_validator
 
 from drakkar.config.base import ConfigModel
+from drakkar.config.units import ByteSize, Duration, WholeSeconds
 
 EXECUTOR_ON_FAILURE_CHOICES = ('skip', 'dlq')
 
@@ -48,7 +49,7 @@ class ExecutorConfig(ConfigModel):
     )
     env_inherit_deny: list[str] = Field(
         default_factory=lambda: [
-            'DK_*',  # framework internals (SINKS__, KAFKA__, DEBUG__, ...)
+            'DK_*',  # the worker's own config overrides
             '*PASSWORD*',
             '*PASSWD*',
             '*SECRET*',
@@ -73,32 +74,33 @@ class ExecutorConfig(ConfigModel):
         ge=1,
         description='Maximum concurrent subprocesses. Tasks beyond this limit wait in a queue.',
     )
-    task_timeout_seconds: int = Field(
+    task_timeout: WholeSeconds = Field(
         default=120,
         ge=1,
         description=(
-            'Wall-clock timeout (seconds) per subprocess. A process exceeding it is killed and treated as a failure.'
+            'Wall-clock time limit per subprocess, a whole number of seconds. A process exceeding it is '
+            'killed and treated as a failure.'
         ),
     )
-    max_stdout_bytes: int = Field(
+    max_stdout: ByteSize = Field(
         default=0,
         ge=0,
         description=(
-            'Maximum bytes of stdout retained per task. 0 (the default) = '
-            'unlimited. When a process writes more, the retained prefix is '
-            'cut at a UTF-8 character boundary, the rest is read and '
-            'discarded (the process is never blocked on a full pipe), and '
+            'Most stdout kept per task. 0 (the default) = no limit. When a '
+            'process writes more, the kept prefix is cut at a UTF-8 '
+            'character boundary, the rest is read and discarded (the '
+            'process is never blocked on a full pipe), and '
             'ExecutorResult.stdout_truncated is set. Useful when '
             'subprocesses can emit very large output.'
         ),
     )
-    max_stderr_bytes: int = Field(
+    max_stderr: ByteSize = Field(
         default=0,
         ge=0,
         description=(
-            'Maximum bytes of stderr retained per task. 0 (the default) = '
-            'unlimited. Same semantics as max_stdout_bytes, applied to the '
-            'stderr stream; sets ExecutorResult.stderr_truncated on cut.'
+            'Most stderr kept per task. 0 (the default) = no limit. Same '
+            'semantics as max_stdout, applied to the stderr stream; sets '
+            'ExecutorResult.stderr_truncated on cut.'
         ),
     )
     window_size: int = Field(
@@ -123,14 +125,15 @@ class ExecutorConfig(ConfigModel):
             "task; 'dlq' writes its source message to the DLQ and ends the message."
         ),
     )
-    drain_timeout_seconds: int = Field(
+    drain_timeout: WholeSeconds = Field(
         default=30,
         ge=1,
         description=(
-            'Maximum seconds to wait for in-flight executor tasks to finish '
-            'during graceful shutdown or partition revocation. Set lower to '
-            'speed up shutdown; set at least as high as task_timeout_seconds '
-            'if you rely on clean final commits for every in-flight task. '
+            'Longest wait for in-flight executor tasks to finish during '
+            'graceful shutdown or partition revocation, a whole number of '
+            'seconds. Set lower to speed up shutdown; set at least as high '
+            'as task_timeout if you rely on clean final commits for every '
+            'in-flight task. '
             'When drain times out, the still-running tasks are cancelled — '
             'their subprocess process group is killed so the executor slot '
             'is freed at once — and their offsets are NOT committed (those '
@@ -193,7 +196,7 @@ class RuntimeHealthConfig(ConfigModel):
     A heartbeat task measures how late the runtime wakes it (event-loop
     lag on this backend); a sampler thread captures stack traces of the
     code blocking the loop whenever the heartbeat goes silent for longer
-    than ``stall_seconds``. Current state and lag history surface on the
+    than ``stall``. Current state and lag history surface on the
     debug UI's Runtime tab, as Prometheus metrics, and as flight-recorder
     events (``runtime_health`` transitions/samples, ``runtime_stall``
     with captured stacks).
@@ -210,7 +213,7 @@ class RuntimeHealthConfig(ConfigModel):
             "and the data behind the debug UI's Runtime tab."
         ),
     )
-    tick_seconds: float = Field(
+    tick: Duration = Field(
         default=0.25,
         gt=0.01,
         description=(
@@ -220,7 +223,7 @@ class RuntimeHealthConfig(ConfigModel):
             'for short blocks at slightly more (still negligible) wakeups.'
         ),
     )
-    warn_lag_seconds: float = Field(
+    warn_lag: Duration = Field(
         default=0.1,
         gt=0,
         description=(
@@ -229,7 +232,7 @@ class RuntimeHealthConfig(ConfigModel):
             'so a flapping loop does not spam state transitions.'
         ),
     )
-    stall_seconds: float = Field(
+    stall: Duration = Field(
         default=1.0,
         gt=0,
         description=(
@@ -248,7 +251,7 @@ class RuntimeHealthConfig(ConfigModel):
             'count; further distinct stacks past the cap are dropped.'
         ),
     )
-    sample_interval_seconds: float = Field(
+    sample_interval: Duration = Field(
         default=10.0,
         gt=0,
         description=(
@@ -258,93 +261,88 @@ class RuntimeHealthConfig(ConfigModel):
             'costs no database writes.'
         ),
     )
-    history_window_seconds: int = Field(
+    history_window: WholeSeconds = Field(
         default=900,
         ge=60,
         description=(
             'Length of the in-memory lag history ring buffer (one max/avg '
-            'aggregate per second) served to the debug UI sparkline.'
+            'aggregate per second) served to the debug UI sparkline, a '
+            'whole number of seconds and at least 1m.'
         ),
     )
-    episode_max_seconds: float = Field(
+    max_episode: Duration = Field(
         default=300.0,
         ge=10,
         description=(
-            'Maximum length of one lag episode. An episode spans the time '
+            'Maximum length of one lag episode, at least 10s. An episode spans the time '
             'the runtime is degraded or stalled; on recovery (or at this '
             'cap, for incidents that outlive it) the monitor writes one '
             'runtime_lag_episode event with aggregated stacks and a '
             'verdict — blocked, cpu_bound, starved, or inconclusive.'
         ),
     )
-    probe_interval_seconds: float = Field(
-        default=0.0,
-        ge=0,
+    stack_probe_enabled: bool = Field(
+        default=False,
         description=(
-            'Opt-in flight-recorder profiler: when above 0, the sampler '
-            'thread records a runtime_probe event with the runtime '
-            "thread's stack every interval, regardless of health state. "
-            'Useful for tuning production workloads and post-incident '
-            'analysis; 0 (the default) disables it because it writes '
-            'events for as long as the worker runs.'
+            'Opt-in flight-recorder profiler: the sampler thread records a '
+            "runtime_probe event with the runtime thread's stack every "
+            'stack_probe_interval, regardless of health state. Useful for '
+            'tuning production workloads and post-incident analysis; off by '
+            'default because it writes events for as long as the worker runs.'
         ),
+    )
+    stack_probe_interval: Duration = Field(
+        default=1.0,
+        gt=0,
+        description='Time between runtime_probe events while stack_probe_enabled is on.',
     )
 
 
-class IOConfig(ConfigModel):
-    """Blocking-I/O thread pool: asyncio's default ``to_thread`` executor.
+IO_THREADS_MAX = 512
+OFFLOAD_THREADS_MAX = 32
+IO_THREADS_MESSAGE = f'threads.io must be null or from 1 to {IO_THREADS_MAX}'
+OFFLOAD_THREADS_MESSAGE = f'threads.offload must be null or from 1 to {OFFLOAD_THREADS_MAX}'
 
-    Every ``asyncio.to_thread(...)`` / ``loop.run_in_executor(None, ...)``
-    call — handler filesystem reads, plus the framework's own background
-    file work (archive passes, database-stats scans) — shares ONE
-    process-wide pool: asyncio's default executor. Python sizes it
-    ``min(32, cpu_count + 4)``, so a many-core host is capped at 32
-    concurrent blocking operations no matter what; under slow storage each
-    blocked call holds a thread for its full wall time and later calls
-    queue invisibly behind it.
 
-    This section makes that pool's size a first-class knob. Distinct from
-    ``offload.max_threads``, which sizes the separate dedicated pool
-    behind ``handler.offload()`` (CPU-bound work) — see the Threads docs
-    page for the full map.
+class ThreadsConfig(ConfigModel):
+    """The two thread pools of the worker: blocking I/O and offloaded CPU work.
+
+    ``io`` is asyncio's default ``to_thread`` executor. Every
+    ``asyncio.to_thread(...)`` / ``loop.run_in_executor(None, ...)`` call —
+    handler filesystem reads, plus the framework's own background file work
+    (archive passes, database-stats scans) — shares this one process-wide
+    pool. Python sizes it ``min(32, cpu_count + 4)``, so a many-core host is
+    capped at 32 concurrent blocking operations; under slow storage each
+    blocked call holds a thread for its full wall time and later calls queue
+    behind it.
+
+    ``offload`` backs ``BaseDrakkarHandler.offload()``: a handler hook that
+    needs to run a heavy synchronous computation (deeply nested loops
+    deriving task parameters in ``arrange()``, result crunching in
+    ``on_message_complete``) awaits ``self.offload(fn, ...)`` and the
+    function runs on this pool instead of the event loop. The pool exists to
+    keep the loop responsive, not to add CPU throughput — under the GIL,
+    pure-Python work is serialized regardless of thread count. See the
+    Threads docs page for the full map.
     """
 
-    max_threads: int = Field(
-        default=0,
-        ge=0,
-        le=512,
+    io: int | None = Field(
+        default=None,
         description=(
-            "Worker threads in asyncio's default to_thread executor. 0 "
-            "(the default) keeps Python's own sizing, min(32, cpu_count "
-            '+ 4). Set an explicit value when handler I/O concurrency is '
-            'capped by the pool — e.g. many-core hosts doing wide '
-            'blocking filesystem fan-out. Blocking I/O releases the GIL, '
-            'so large values are legitimate here (unlike '
-            'offload.max_threads); the trade-off is pressure on the '
-            'storage behind the calls.'
+            "Worker threads in asyncio's default to_thread executor, from 1 to "
+            f"{IO_THREADS_MAX}. Null (the default) keeps Python's own sizing, "
+            'min(32, cpu_count + 4). Set an explicit value when handler I/O '
+            'concurrency is capped by the pool — e.g. many-core hosts doing '
+            'wide blocking filesystem fan-out. Blocking I/O releases the GIL, '
+            'so large values are legitimate here (unlike threads.offload); '
+            'the trade-off is pressure on the storage behind the calls.'
         ),
     )
-
-
-class OffloadConfig(ConfigModel):
-    """Thread pool for CPU-bound work handlers move off the event loop.
-
-    Backs ``BaseDrakkarHandler.offload()``: a handler hook that needs to
-    run a heavy synchronous computation (deeply nested loops deriving task
-    parameters in ``arrange()``, result crunching in ``on_message_complete``)
-    awaits ``self.offload(fn, ...)`` and the function runs on this pool
-    instead of the event loop. The pool exists to keep the loop responsive,
-    not to add CPU throughput — under the GIL, pure-Python work is
-    serialized regardless of thread count.
-    """
-
-    max_threads: int = Field(
-        default=0,
-        ge=0,
-        le=32,
+    offload: int | None = Field(
+        default=None,
         description=(
-            'Worker threads in the shared offload pool. 0 (the default) '
-            'sizes the pool automatically from the executor pool: '
+            f'Worker threads in the shared offload pool, from 1 to {OFFLOAD_THREADS_MAX}. '
+            'Null (the default) sizes the pool from the executor pool: '
             'ceil(executor.max_executors / 4), with a minimum of 2 — e.g. pool '
             '8 -> 2 threads, 9 -> 3, 13 -> 4. Calls beyond this many '
             'concurrent offloaded computations queue (FIFO) and show up '
@@ -355,6 +353,22 @@ class OffloadConfig(ConfigModel):
             'the GIL (numpy, compiled extensions).'
         ),
     )
+
+    @field_validator('io')
+    @classmethod
+    def _check_io(cls, value: int | None) -> int | None:
+        """Refuse a size outside 1 to 512 with the pinned message; null derives it."""
+        if value is not None and not 1 <= value <= IO_THREADS_MAX:
+            raise ValueError(IO_THREADS_MESSAGE)
+        return value
+
+    @field_validator('offload')
+    @classmethod
+    def _check_offload(cls, value: int | None) -> int | None:
+        """Refuse a size outside 1 to 32 with the pinned message; null derives it."""
+        if value is not None and not 1 <= value <= OFFLOAD_THREADS_MAX:
+            raise ValueError(OFFLOAD_THREADS_MESSAGE)
+        return value
 
 
 class LoggingConfig(ConfigModel):
@@ -378,5 +392,12 @@ class LoggingConfig(ConfigModel):
             'Log output destination. "stderr" (default) or "stdout" for standard streams, '
             'or a file path for file output. File paths support template variables: '
             '{worker_id}, {cluster_name}. Example: "/var/log/drakkar/{worker_id}.log"'
+        ),
+    )
+    min_task_duration: Duration = Field(
+        default=0.5,
+        ge=0,
+        description=(
+            'Shortest task duration that emits a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
         ),
     )

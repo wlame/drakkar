@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Names, executor, threads, cache and the rest take their final keys.**
+  `worker_name_env`, `cluster_name` and `cluster_name_env` are `worker.name_env`,
+  `cluster.name` and `cluster.name_env`; `worker.name` is new, a literal worker name.
+  `executor.task_timeout`, `drain_timeout` (whole seconds), `max_stdout` and `max_stderr`
+  (sizes) drop their unit suffixes. `io.max_threads` and `offload.max_threads` are
+  `threads.io` and `threads.offload`: `null` derives the size and `0` fails the load. The
+  cache, `cache.exchange` and `runtime_health` durations take units;
+  `runtime_health.probe_interval_seconds` is `stack_probe_enabled` and
+  `stack_probe_interval`. `cache.max_memory_entries: 0` means no cap. `ui.log_min_duration_ms`
+  is `logging.min_task_duration`; `ui.ws_min_duration`, `ui.consume_pause.durations` and
+  `ui.timeline.max_age` (whole minutes) take units. See the upgrade guide.
+- **The summary line has a new form.** `api=<port|off> ui=<on|off>` replaces `ui=on:<port>`,
+  `recorder=` is always printed, `autodiscover=<provider|off>` replaces `fleet=` and
+  `election=`, and `dlq=unconfigured` marks a DLQ that is on with no topic.
+
 - **The HTTP server is its own section, `api`.** `ui.host`, `ui.port` and `ui.public_url` are
   `api.host`, `api.port` and `api.public_url`. With `ui.enabled: false` the worker still
   serves `/healthz`, `/readyz` and `/api/v1/peer/cache/changes`; every other route answers

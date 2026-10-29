@@ -250,8 +250,9 @@ def test_env_var_names_for_known_scalar_paths():
     by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
 
     assert by_path['storage.dir'].env == 'DK_STORAGE__DIR'
-    assert by_path['cache.exchange.interval_seconds'].env == 'DK_CACHE__EXCHANGE__INTERVAL_SECONDS'
-    assert by_path['cluster_name'].env == 'DK_CLUSTER_NAME'
+    assert by_path['cache.exchange.interval'].env == 'DK_CACHE__EXCHANGE__INTERVAL'
+    assert by_path['cluster.name'].env == 'DK_CLUSTER__NAME'
+    assert by_path['threads.io'].env == 'DK_THREADS__IO'
 
 
 def test_env_is_none_for_dynamic_instance_paths():

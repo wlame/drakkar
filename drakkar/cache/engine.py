@@ -452,7 +452,7 @@ class CacheEngine:
             run_periodic_task(
                 name='cache.flush',
                 coro_fn=self._flush_once,
-                interval=self._config.flush_interval_seconds,
+                interval=self._config.flush_interval,
                 on_error='continue',
                 recorder=self._recorder,
                 system=True,
@@ -468,7 +468,7 @@ class CacheEngine:
             run_periodic_task(
                 name='cache.cleanup',
                 coro_fn=self._cleanup_once,
-                interval=self._config.cleanup_interval_seconds,
+                interval=self._config.cleanup_interval,
                 on_error='continue',
                 recorder=self._recorder,
                 system=True,
@@ -485,7 +485,7 @@ class CacheEngine:
                 run_periodic_task(
                     name='cache.sync',
                     coro_fn=self._sync_once,
-                    interval=self._exchange.interval_seconds,
+                    interval=self._exchange.interval,
                     on_error='continue',
                     recorder=self._recorder,
                     system=True,
@@ -558,7 +558,7 @@ class CacheEngine:
         # A peer-commit task orphaned by a cancelled sync cycle may still
         # be running — await it (bounded) before the final drain and the
         # writer close, so we never close ``_writer_db`` mid-executemany.
-        await self._await_pending_peer_commits(timeout=self._exchange.timeout_seconds)
+        await self._await_pending_peer_commits(timeout=self._exchange.timeout)
 
         # Step 3: final drain — catches any dirty ops that accumulated
         # after the last scheduled flush fired, so shutdown isn't a
@@ -890,14 +890,14 @@ class CacheEngine:
     def _http_client(self) -> httpx.AsyncClient:
         """The client for peer requests, made on first use.
 
-        Connect timeout 2 s, request timeout ``timeout_seconds``. Proxy
+        Connect timeout 2 s, request timeout ``cache.exchange.timeout``. Proxy
         environment variables are ignored: peers are workers of the same
         fleet, reached at the URL on their card.
         """
         if self._http is None:
             self._http = httpx.AsyncClient(
                 transport=self._peer_transport,
-                timeout=httpx.Timeout(self._exchange.timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS),
+                timeout=httpx.Timeout(self._exchange.timeout, connect=CONNECT_TIMEOUT_SECONDS),
                 follow_redirects=False,
                 trust_env=False,
             )
@@ -922,7 +922,7 @@ class CacheEngine:
             while more:
                 cursor = self._peer_cursors.get(target.name)
                 params = page_params(target.scopes, cursor, self._exchange.page_size)
-                rows, more = await fetch_page(client, url, params, timeout=self._exchange.timeout_seconds, after=cursor)
+                rows, more = await fetch_page(client, url, params, timeout=self._exchange.timeout, after=cursor)
                 kept, dropped = keep_rows(rows, target)
                 for reason, count in dropped.items():
                     rejected[reason] = rejected.get(reason, 0) + count
@@ -1021,8 +1021,8 @@ class CacheEngine:
         task.
 
         Deadline resolution:
-        - ``cache.exchange.cycle_deadline_seconds`` when set explicitly.
-        - Otherwise ``interval_seconds * 0.9`` — strictly less than the
+        - ``cache.exchange.cycle_deadline`` when set explicitly.
+        - Otherwise ``cache.exchange.interval * 0.9`` — strictly less than the
           gap between invocations so the periodic loop always has slack
           to schedule the next cycle even if this one hit the cap.
 
@@ -1033,17 +1033,17 @@ class CacheEngine:
         # A commit orphaned by the PREVIOUS cycle's deadline must finish
         # before this cycle touches the writer — otherwise the two could
         # interleave transactions on the shared connection.
-        await self._await_pending_peer_commits(timeout=self._exchange.timeout_seconds)
+        await self._await_pending_peer_commits(timeout=self._exchange.timeout)
 
-        cycle_deadline = self._exchange.cycle_deadline_seconds
+        cycle_deadline = self._exchange.cycle_deadline
         # ``None`` is the default: derive from the interval so operators
         # who never tune the deadline still get a reasonable bound. The
         # 0.9 factor gives the periodic loop headroom to schedule the
         # next cycle without overlapping. The 0.1s clamp is a local floor
-        # — ``interval_seconds`` is only constrained by ``gt=0``, so a tiny
-        # value (e.g. a pathological test config with interval_seconds=0.05)
+        # — ``interval`` is only constrained by ``gt=0``, so a tiny value
+        # (e.g. a pathological test config with an interval of 50ms)
         # could otherwise yield a deadline too small to be usable.
-        deadline = cycle_deadline if cycle_deadline is not None else max(0.1, self._exchange.interval_seconds * 0.9)
+        deadline = cycle_deadline if cycle_deadline is not None else max(0.1, self._exchange.interval * 0.9)
         try:
             return await asyncio.wait_for(self._sync_inner(), timeout=deadline)
         except TimeoutError:

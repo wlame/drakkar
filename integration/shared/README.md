@@ -89,7 +89,7 @@ across restarts**.
   removes the sealed files it merged. Archives appear in the Debug →
   Databases tab for download.
 - **Cache**: does not rotate. Entries are pruned inline by the cache's
-  periodic cleanup loop (expired rows removed every `cleanup_interval_seconds`,
+  periodic cleanup loop (expired rows removed every `cache.cleanup_interval`,
   default 60s). A full reset is a manual `rm` (see Cleanup below).
 
 ## Example contents

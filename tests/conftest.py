@@ -168,10 +168,10 @@ def full_config_dict() -> dict:
         'executor': {
             'binary_path': '/usr/local/bin/processor',
             'max_executors': 40,
-            'task_timeout_seconds': 300,
+            'task_timeout': '5m',
             'window_size': 100,
             'max_retries': 5,
-            'drain_timeout_seconds': 10,
+            'drain_timeout': '10s',
             'backpressure_high_multiplier': 16,
             'backpressure_low_multiplier': 2,
         },

@@ -168,7 +168,7 @@ understand how well the worker is performing and where to tune further.
 |--------|------|-----|--------|
 | `histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket[5m]))` | Close to expected p95 | Much higher than expected | Binary performance degraded, or resource contention |
 | `rate(drakkar_executor_tasks_total{status="failed"}[5m])` | Near zero or matching expected failure rate | Spiking | Check `on_error()` logic, binary health, input data |
-| `rate(drakkar_executor_timeouts_total[5m])` | Zero | Non-zero | Increase `task_timeout_seconds` or investigate stuck processes |
+| `rate(drakkar_executor_timeouts_total[5m])` | Zero | Non-zero | Increase `executor.task_timeout` or investigate stuck processes |
 | `rate(drakkar_task_retries_total[5m])` | Low | High | Transient failures are frequent — check error patterns |
 
 ### Are sinks healthy?

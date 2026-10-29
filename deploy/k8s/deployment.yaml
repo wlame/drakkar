@@ -36,7 +36,7 @@ spec:
     spec:
       # 60s gives the worker time to drain in-flight executor tasks and
       # commit Kafka offsets before SIGKILL. Tune in tandem with
-      # executor.drain_timeout_seconds in your DrakkarConfig.
+      # executor.drain_timeout in your DrakkarConfig.
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
@@ -124,7 +124,7 @@ spec:
                 - ALL
           env:
             # WORKER_ID is read by Drakkar at startup (config field
-            # worker_name_env, default "WORKER_ID"). Pulling it from
+            # worker.name_env, default "WORKER_ID"). Pulling it from
             # the pod metadata gives every replica a unique, stable
             # identity that matches kubectl's pod listing.
             - name: WORKER_ID

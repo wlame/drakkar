@@ -30,20 +30,21 @@ from drakkar.config import (
     APIConfig,
     AutodiscoverConfig,
     CacheConfig,
+    ClusterConfig,
     ConnectionsConfig,
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
-    IOConfig,
     LoggingConfig,
     MetricsConfig,
-    OffloadConfig,
     RecorderConfig,
     RuntimeHealthConfig,
     SinksConfig,
     SourcesConfig,
     StorageConfig,
+    ThreadsConfig,
     UIConfig,
+    WorkerConfig,
 )
 from drakkar.config.strict import yaml_key
 from drakkar.config.units import UnitKind
@@ -101,7 +102,7 @@ class ConfigFieldMeta(BaseModel):
     carry a credential and a UI should mask or omit its value."""
 
     group: str
-    """Top-level section key (``root``, ``connections``, ``executor``, ``sinks``, …)."""
+    """Top-level section key (``worker``, ``connections``, ``executor``, ``sinks``, …)."""
 
 
 class ConfigGroupMeta(BaseModel):
@@ -123,8 +124,8 @@ class ConfigMetadata(BaseModel):
 
 # --- group -> docs anchor -----------------------------------------------
 #
-# (group key, human title, docs anchor, model class or None for the root
-# scalars). The anchor is the mkdocs-generated id of the matching `##`
+# (group key, human title, docs anchor, model class), in the order of the
+# root sections. The anchor is the mkdocs-generated id of the matching `##`
 # heading in docs/config-reference.md, verified against the live site
 # (https://wlame.github.io/drakkar/config-reference/) rather than assumed:
 # mkdocs' slugifier lowercases the heading, drops markdown code-span
@@ -133,24 +134,24 @@ class ConfigMetadata(BaseModel):
 # below implements exactly that and is exercised by the anchor-parity test
 # against the doc's actual `##` headings, so this table cannot silently
 # drift from the page it points into.
-_GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
-    ('root', 'Worker identity', 'worker-identity', None),
+_GROUP_DEFS: list[tuple[str, str, str, type[BaseModel]]] = [
+    ('worker', 'Worker (worker:)', 'worker-worker', WorkerConfig),
+    ('cluster', 'Cluster (cluster:)', 'cluster-cluster', ClusterConfig),
+    ('connections', 'Connections (connections:)', 'connections-connections', ConnectionsConfig),
     ('sources', 'Input sources (sources:)', 'input-sources-sources', SourcesConfig),
     ('executor', 'Executor pool (executor:)', 'executor-pool-executor', ExecutorConfig),
+    ('threads', 'Thread pools (threads:)', 'thread-pools-threads', ThreadsConfig),
     ('sinks', 'Sinks (sinks:)', 'sinks-sinks', SinksConfig),
     ('dlq', 'Dead letter queue (dlq:)', 'dead-letter-queue-dlq', DLQConfig),
-    ('metrics', 'Metrics (metrics:)', 'metrics-metrics', MetricsConfig),
-    ('runtime_health', 'Runtime health (runtime_health:)', 'runtime-health-runtime-health', RuntimeHealthConfig),
-    ('io', 'Blocking I/O pool (io:)', 'blocking-i-o-pool-io', IOConfig),
-    ('offload', 'Offload pool (offload:)', 'offload-pool-offload', OffloadConfig),
-    ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),
-    ('api', 'API (api:)', 'api-api', APIConfig),
-    ('ui', 'UI (ui:)', 'ui-ui', UIConfig),
-    ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
     ('storage', 'Own storage (storage:)', 'own-storage-storage', StorageConfig),
     ('recorder', 'Flight recorder (recorder:)', 'flight-recorder-recorder', RecorderConfig),
+    ('cache', 'Cache (cache:)', 'cache-cache', CacheConfig),
     ('autodiscover', 'Autodiscover (autodiscover:)', 'autodiscover-autodiscover', AutodiscoverConfig),
-    ('connections', 'Connections (connections:)', 'connections-connections', ConnectionsConfig),
+    ('metrics', 'Metrics (metrics:)', 'metrics-metrics', MetricsConfig),
+    ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),
+    ('runtime_health', 'Runtime health (runtime_health:)', 'runtime-health-runtime-health', RuntimeHealthConfig),
+    ('api', 'API (api:)', 'api-api', APIConfig),
+    ('ui', 'UI (ui:)', 'ui-ui', UIConfig),
 ]
 
 
@@ -502,14 +503,9 @@ def build_config_metadata() -> ConfigMetadata:
             # The user-owned app: pass-through section — see the constant's
             # comment for why the static walk cannot describe it.
             continue
-        annotation = field_info.annotation
-        if _is_basemodel(annotation):
-            # Every nested-model field on DrakkarConfig shares its name with
-            # its group key (kafka/sources/executor/sinks/dlq/metrics/
-            # logging/api/ui/cache) — see _GROUP_DEFS.
-            _walk(annotation, [field_name], field_name, entries_by_group[field_name])
-        else:
-            entries_by_group['root'].append(_build_leaf(field_info, [field_name], 'root'))
+        # Every other root field is a section model that shares its name
+        # with its group key — see _GROUP_DEFS.
+        _walk(field_info.annotation, [field_name], field_name, entries_by_group[field_name])
 
     groups = [
         ConfigGroupMeta(key=key, title=title, doc_anchor=anchor, entries=entries_by_group[key])

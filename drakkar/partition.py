@@ -483,7 +483,7 @@ class PartitionProcessor:
         Cancellation propagates into ``ExecutorPool.execute``, whose
         ``finally`` kills the subprocess' process group and releases the
         priority-gate slot — which is the point. Without it a zombie holds
-        its slot until ``task_timeout_seconds`` (two minutes by default)
+        its slot until ``executor.task_timeout`` (two minutes by default)
         while the partitions this worker still owns queue behind it.
 
         ``_execute_and_track``'s ``finally`` decrements the in-flight count
@@ -506,7 +506,7 @@ class PartitionProcessor:
             cancelled=len(tasks),
             hint='tasks outlived the drain timeout; their executor slots and '
             'subprocesses are released and their offsets stay uncommitted — '
-            'raise executor.drain_timeout_seconds if this happens routinely',
+            'raise executor.drain_timeout if this happens routinely',
         )
         return len(tasks)
 
@@ -519,7 +519,7 @@ class PartitionProcessor:
             hook=hook,
             hint='task finished after the revoke/shutdown drain timed out; '
             'the new partition owner re-processes the message — raise '
-            'executor.drain_timeout_seconds if this happens routinely',
+            'executor.drain_timeout if this happens routinely',
         )
 
     def _has_drainable_pending(self) -> bool:

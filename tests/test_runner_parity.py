@@ -116,7 +116,7 @@ async def run_in_probe(handler, *, max_retries: int):
             sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
             executor=ExecutorConfig(
                 binary_path=BOGUS_BINARY,
-                task_timeout_seconds=5,
+                task_timeout='5s',
                 max_retries=max_retries,
             ),
         ),

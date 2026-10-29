@@ -17,7 +17,7 @@
 #       DK_EXECUTOR__MAX_EXECUTORS=16
 #
 # All fields below match the real DrakkarConfig schema (see
-# drakkar/config.py). Tune for your workload before applying.
+# drakkar/config/). Tune for your workload before applying.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -28,10 +28,12 @@ metadata:
 data:
   drakkar.yaml: |
     # Worker name comes from the WORKER_ID env var, set by the
-    # Deployment from metadata.name. Override `worker_name_env` if
+    # Deployment from metadata.name. Override `worker.name_env` if
     # your platform uses a different env var convention.
-    worker_name_env: "WORKER_ID"
-    cluster_name: "<cluster_name>"  # <-- e.g. "prod-eu-west-1"
+    worker:
+      name_env: "WORKER_ID"
+    cluster:
+      name: "<cluster_name>"  # <-- e.g. "prod-eu-west-1"
 
     connections:
       kafka:
@@ -53,13 +55,13 @@ data:
     executor:
       binary_path: "<binary_path>"  # <-- e.g. "/usr/local/bin/my-handler"
       max_executors: 4
-      task_timeout_seconds: 120
+      task_timeout: 2m
       window_size: 100
       max_retries: 3
-      # drain_timeout_seconds should be <= the Deployment's
+      # drain_timeout should be <= the Deployment's
       # terminationGracePeriodSeconds (60s) minus the preStop sleep
       # (10s) so the worker has time to drain before SIGKILL.
-      drain_timeout_seconds: 30
+      drain_timeout: 30s
 
     sinks:
       kafka:
@@ -105,16 +107,16 @@ data:
       # Off by default — flip to true if your handler uses
       # `self.cache`. The cache file lives in storage.dir below.
       enabled: false
-      flush_interval_seconds: 3.0
-      cleanup_interval_seconds: 60.0
+      flush_interval: 3s
+      cleanup_interval: 1m
       max_memory_entries: 10000
       exchange:
         # The peers come from autodiscover, so with autodiscover off
         # (the default) the exchange does nothing.
         enabled: true
-        interval_seconds: 30.0
+        interval: 30s
         page_size: 500
-        timeout_seconds: 5.0
+        timeout: 5s
 
     storage:
       # This worker's own files (recorder, cache, crash marker). Matches

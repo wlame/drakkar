@@ -670,7 +670,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
                 ...heavy nested loops...
 
         The function runs on a small shared thread pool
-        (``offload.max_threads`` in config; the default 0 sizes it as
+        (``threads.offload`` in config; the default null sizes it as
         ``ceil(executor.max_executors / 4)``, minimum 2). This does NOT make
         the computation faster — under the GIL pure-Python work is
         serialized regardless of the thread it runs on — but the event

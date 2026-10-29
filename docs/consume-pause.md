@@ -14,7 +14,7 @@ default and must be enabled deliberately:
 ui:
   consume_pause:
     enabled: true                        # default: false
-    durations_seconds: [15, 60, 300, 900]  # Live-page preset buttons
+    durations: [15s, 1m, 5m, 15m]        # Live-page preset buttons
 ```
 
 ---

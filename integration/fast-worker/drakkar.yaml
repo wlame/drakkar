@@ -1,8 +1,10 @@
 # Fast worker config — symbol counting pipeline
 # Same source topic, different consumer group
 
-worker_name_env: "WORKER_ID"
-cluster_name: "fast cluster"
+worker:
+  name_env: "WORKER_ID"
+cluster:
+  name: "fast cluster"
 
 connections:
   kafka:
@@ -29,10 +31,10 @@ sources:
 executor:
   binary_path: "/usr/local/bin/count-symbols"
   max_executors: 2
-  task_timeout_seconds: 30
+  task_timeout: 30s
   window_size: 10
   max_retries: 1
-  drain_timeout_seconds: 5
+  drain_timeout: 5s
   backpressure_high_multiplier: 32
   backpressure_low_multiplier: 4
 
@@ -76,6 +78,7 @@ metrics:
 logging:
   level: "INFO"
   format: "json"
+  min_task_duration: 100ms       # log slow tasks above 100ms
 
 api:
   host: "0.0.0.0"
@@ -84,9 +87,8 @@ api:
 ui:
   enabled: true
   max_rows: 5000
-  # Duration thresholds — tuned down for fast tasks (most finish in <100ms)
-  log_min_duration_ms: 100       # log slow tasks above 100ms
-  ws_min_duration_ms: 100        # stream all but the fastest to live UI
+  # Duration threshold — tuned down for fast tasks (most finish in <100ms)
+  ws_min_duration: 100ms         # stream all but the fastest to live UI
   prometheus:
     url: "http://localhost:9099"
     rate_interval: "30s"

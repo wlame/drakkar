@@ -390,9 +390,9 @@ moving the sealed file into the history folder is a background job.
 Rotation itself deletes nothing — the [archive pass](#archiving) is the only
 thing that ever removes a sealed recorder file.
 
-**Cache**: dirty entries flush every `cache.flush_interval_seconds`
+**Cache**: dirty entries flush every `cache.flush_interval`
 (atomic dirty-map swap, single transaction, restore-on-failure); expired
-rows are deleted every `cache.cleanup_interval_seconds`. The cache file
+rows are deleted every `cache.cleanup_interval`. The cache file
 never rotates.
 
 ## Sealing and the history folder
@@ -409,7 +409,7 @@ check for files still in use.
   file.
 - **At a clean stop.** The live file is sealed after the final flush. The
   seal always runs. The move into the history folder runs only while
-  shutdown time remains: the rest of `executor.drain_timeout_seconds` after
+  shutdown time remains: the rest of `executor.drain_timeout` after
   draining. When no time remains, the sealed file stays in `storage.dir`,
   and the next start with the same worker name moves it as a
   [leftover](#leftovers).
@@ -574,7 +574,8 @@ file of the folder, those of an own-scope worker beside it too.
 **The own scope needs a stable worker name.** It finds its files by the name, so
 a pass never takes or expires the files of an earlier name. Sealed files and
 archives of a retired name stay until an operator deletes them, and they fall
-out of the gauges. A worker with no `worker_name_env` value gets a generated name
+out of the gauges. A worker with no `worker.name` and no value in the variable of
+`worker.name_env` gets a generated name
 that changes at each start, and logs `archive_own_scope_unstable_worker_name`
 (warning, category `recorder`, field `worker`) at startup in this scope.
 

@@ -48,11 +48,11 @@ def pause_config() -> DrakkarConfig:
     cfg = DrakkarConfig(
         connections=kafka_connections(brokers='localhost:9092'),
         sources={'kafka': {'enabled': True, 'topic': 'test-in', 'startup_align': {'enabled': False}}},
-        executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
+        executor=ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout='10s'),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-    cfg.ui.consume_pause = UIConsumePauseConfig(enabled=True, durations_seconds=[15, 60])
+    cfg.ui.consume_pause = UIConsumePauseConfig(enabled=True, durations=['15s', '1m'])
     return cfg
 
 
@@ -202,7 +202,7 @@ async def test_partitions_assigned_during_debug_pause_arrive_paused(app):
 def test_consume_pause_config_defaults_disabled_with_presets():
     cfg = UIConsumePauseConfig()
     assert cfg.enabled is False
-    assert cfg.durations_seconds == [15, 60, 300, 900]
+    assert cfg.durations == [15, 60, 300, 900]
 
 
 @pytest.mark.parametrize('durations', [[], [0], [3601], list(range(1, 12))])
@@ -210,4 +210,4 @@ def test_consume_pause_config_rejects_bad_duration_presets(durations):
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        UIConsumePauseConfig(durations_seconds=durations)
+        UIConsumePauseConfig(durations=durations)

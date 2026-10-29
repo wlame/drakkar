@@ -1,5 +1,5 @@
 {
-  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. A text longer than 64 characters is refused as not a duration or not a size, whatever it holds, and is quoted as its first 64 characters plus three dots. The rules are on decoded values. A YAML integer with the value 0 is 0, whatever its spelling. As text, only exactly 0 is zero. A YAML float 0.0 needs a unit. Integer values in this file may exceed 2^53 and must be decoded as integers, not floats. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_yaml: [text of one YAML scalar, value]. durations_refused and sizes_refused: [input, key of messages], or [input, key of messages, {v}]; {v} in a message is the decoded value, as text, and with no third element it is the input as written (true for a boolean). durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar. Other unusual YAML numeric spellings are not part of the contract for the quoted text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the unit that divides it and gives the smallest whole number; on a tie the binary unit wins.",
+  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. A text longer than 64 characters is refused as not a duration or not a size, whatever it holds, and is quoted as its first 64 characters plus three dots. The rules are on decoded values. A YAML integer with the value 0 is 0, whatever its spelling. As text, only exactly 0 is zero. A YAML float 0.0 needs a unit. Integer values in this file may exceed 2^53 and must be decoded as integers, not floats. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_yaml: [text of one YAML scalar, value]. durations_refused and sizes_refused: [input, key of messages], or [input, key of messages, {v}]; {v} in a message is the decoded value, as text, and with no third element it is the input as written (true for a boolean). durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar. Other unusual YAML numeric spellings are not part of the contract for the quoted text. whole_seconds, whole_minutes, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the unit that divides it and gives the smallest whole number; on a tie the binary unit wins.",
   "durations": [
     ["2h45m", 9900000],
     ["1.5h", 5400000],
@@ -144,6 +144,19 @@
       ["soon", "duration_invalid"]
     ]
   },
+  "whole_minutes": {
+    "accepted": [
+      ["1h", 60],
+      ["90m", 90],
+      ["120s", 2],
+      ["0", 0]
+    ],
+    "refused": [
+      ["90s", "whole_minutes"],
+      ["1.5m", "whole_minutes"],
+      [60, "duration_needs_unit"]
+    ]
+  },
   "whole_hours": {
     "accepted": [
       ["24h", 24],
@@ -204,6 +217,7 @@
     "size_list": "is not a size, got a list",
     "size_mapping": "is not a size, got a mapping",
     "whole_seconds": "must be a whole number of seconds, got '{v}'",
+    "whole_minutes": "must be a whole number of minutes, got '{v}'",
     "whole_hours": "must be a whole number of hours, got '{v}'",
     "whole_days": "must be a whole number of days, got '{v}'"
   }

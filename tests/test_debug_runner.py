@@ -994,7 +994,7 @@ def _make_config(*, max_retries: int = 1) -> DrakkarConfig:
         sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
         executor=ExecutorConfig(
             binary_path='/nonexistent/binary/should-never-run',
-            task_timeout_seconds=5,
+            task_timeout='5s',
             max_retries=max_retries,
         ),
     )

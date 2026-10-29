@@ -104,7 +104,7 @@ def test_config(tmp_path) -> DrakkarConfig:
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
-            task_timeout_seconds=10,
+            task_timeout='10s',
             window_size=5,
         ),
         sinks=SinksConfig(
@@ -194,7 +194,7 @@ def test_app_worker_id_custom_env_var(monkeypatch):
         connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
-        worker_name_env='MY_SVC_NAME',
+        worker={'name_env': 'MY_SVC_NAME'},
     )
     app = DrakkarApp(handler=SimpleHandler(), config=config)
     assert app._worker_id == 'svc-alpha'
@@ -637,9 +637,9 @@ async def test_stop_processor_handles_arrange_error(test_config):
 
     # A failed arrange leaves the window's offsets pending for the life of the
     # processor, so the revoke below always drains to its timeout. One second
-    # is the floor the config allows (drain_timeout_seconds is an int) and
-    # thirty times cheaper than the default this test used to wait out.
-    test_config.executor.drain_timeout_seconds = 1
+    # is the floor the config allows (executor.drain_timeout is whole seconds)
+    # and thirty times cheaper than the default.
+    test_config.executor.drain_timeout = 1
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 
@@ -684,61 +684,64 @@ async def test_safe_call_catches_handler_errors(test_config):
         await proc.stop()
 
 
-# --- cluster_name resolution ---
+# --- worker and cluster names ---
 
 
-def test_app_cluster_name_from_env(monkeypatch):
-    """cluster_name_env takes precedence over config.cluster_name."""
-    monkeypatch.setenv('MY_CLUSTER', 'env-cluster')
+def _named_app(monkeypatch, *, env: dict[str, str], **sections) -> DrakkarApp:
+    """A worker whose ``worker`` and ``cluster`` sections are ``sections``, with only ``env`` set."""
+    for name in ('WORKER_ID', 'MY_WORKER', 'MY_CLUSTER'):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     config = DrakkarConfig(
         connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
-        cluster_name='config-cluster',
-        cluster_name_env='MY_CLUSTER',
+        **sections,
     )
-    app = DrakkarApp(handler=SimpleHandler(), config=config)
-    assert app._cluster_name == 'env-cluster'
+    return DrakkarApp(handler=SimpleHandler(), config=config)
 
 
-def test_app_cluster_name_falls_back_to_config(monkeypatch):
-    """When cluster_name_env is not set, config.cluster_name is used."""
-    monkeypatch.delenv('MY_CLUSTER', raising=False)
-    config = DrakkarConfig(
-        connections=kafka_connections(),
-        executor=ExecutorConfig(binary_path='/bin/true'),
-        sources={'kafka': {'enabled': True}},
-        cluster_name='fallback-cluster',
-        cluster_name_env='MY_CLUSTER',
-    )
-    app = DrakkarApp(handler=SimpleHandler(), config=config)
-    assert app._cluster_name == 'fallback-cluster'
+@pytest.mark.parametrize(
+    ('worker', 'env', 'expected'),
+    [
+        ({'name': 'node-a'}, {}, 'node-a'),
+        ({'name': 'node-a'}, {'WORKER_ID': 'from-env'}, 'from-env'),
+        ({'name': 'node-a'}, {'WORKER_ID': ''}, 'node-a'),
+        ({'name': 'node-a', 'name_env': 'MY_WORKER'}, {'WORKER_ID': 'ignored', 'MY_WORKER': 'custom'}, 'custom'),
+        ({'name': 'node-a', 'name_env': ''}, {'WORKER_ID': 'ignored'}, 'node-a'),
+    ],
+    ids=['literal', 'env-wins', 'empty-env-falls-back', 'custom-env-name', 'no-env-name'],
+)
+def test_worker_name_literal_and_env_precedence(monkeypatch, worker, env, expected):
+    app = _named_app(monkeypatch, env=env, worker=worker)
+
+    assert app._worker_id == expected
+    assert app._worker_id_is_generated is False
 
 
-def test_app_cluster_name_falls_back_to_config_when_env_var_is_empty(monkeypatch):
-    """An empty value counts as unset: config.cluster_name is used."""
-    monkeypatch.setenv('MY_CLUSTER', '')
-    config = DrakkarConfig(
-        connections=kafka_connections(),
-        executor=ExecutorConfig(binary_path='/bin/true'),
-        sources={'kafka': {'enabled': True}},
-        cluster_name='fallback-cluster',
-        cluster_name_env='MY_CLUSTER',
-    )
-    app = DrakkarApp(handler=SimpleHandler(), config=config)
-    assert app._cluster_name == 'fallback-cluster'
+def test_worker_name_is_generated_with_no_name_and_no_env(monkeypatch):
+    app = _named_app(monkeypatch, env={})
+
+    assert app._worker_id.startswith('drakkar-')
+    assert app._worker_id_is_generated is True
 
 
-def test_app_cluster_name_no_env_var_configured():
-    """When cluster_name_env is empty, config.cluster_name is used directly."""
-    config = DrakkarConfig(
-        connections=kafka_connections(),
-        executor=ExecutorConfig(binary_path='/bin/true'),
-        sources={'kafka': {'enabled': True}},
-        cluster_name='direct-cluster',
-    )
-    app = DrakkarApp(handler=SimpleHandler(), config=config)
-    assert app._cluster_name == 'direct-cluster'
+@pytest.mark.parametrize(
+    ('cluster', 'env', 'expected'),
+    [
+        ({'name': 'config-cluster'}, {}, 'config-cluster'),
+        ({'name': 'config-cluster', 'name_env': 'MY_CLUSTER'}, {'MY_CLUSTER': 'env-cluster'}, 'env-cluster'),
+        ({'name': 'config-cluster', 'name_env': 'MY_CLUSTER'}, {'MY_CLUSTER': ''}, 'config-cluster'),
+        ({'name': 'config-cluster', 'name_env': 'MY_CLUSTER'}, {}, 'config-cluster'),
+        ({}, {}, ''),
+    ],
+    ids=['literal', 'env-wins', 'empty-env-falls-back', 'unset-env-falls-back', 'empty'],
+)
+def test_cluster_name_literal_and_env_precedence(monkeypatch, cluster, env, expected):
+    app = _named_app(monkeypatch, env=env, cluster=cluster)
+
+    assert app._cluster_name == expected
 
 
 # --- _get_worker_state ---
@@ -955,7 +958,7 @@ async def test_stop_processor_skips_commit_on_drain_timeout(test_config):
     from drakkar.partition import PartitionProcessor
 
     # tiny drain timeout to force the TimeoutError path
-    test_config.executor.drain_timeout_seconds = 0.05
+    test_config.executor.drain_timeout = 0.05
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
@@ -985,7 +988,7 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
     """Same invariant as _stop_processor but for the main _shutdown path."""
     from drakkar.executor import ExecutorPool
 
-    test_config.executor.drain_timeout_seconds = 0.05
+    test_config.executor.drain_timeout = 0.05
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
@@ -1409,7 +1412,7 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
     down cleanly.
 
     Timing setup: 3 messages each backed by a subprocess that sleeps
-    well beyond the drain window. ``drain_timeout_seconds = 1`` (the
+    well beyond the drain window. ``executor.drain_timeout = 1`` (the
     config minimum) forces ``_stop_processor`` onto the timeout path
     where it SKIPS the final watermark commit to avoid silent data
     loss. The test then asserts the critical invariants irrespective
@@ -1421,12 +1424,12 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
     # drain_timeout minimum is 1s (ge=1 on the Pydantic field). Subprocess
     # sleeps long enough that drain() is guaranteed to hit the timeout
     # path with at least one task still in flight.
-    test_config.executor.drain_timeout_seconds = 1
+    test_config.executor.drain_timeout = 1
     test_config.executor.window_size = 10
 
     sleep_seconds = 2.0
     app = DrakkarApp(handler=_SleepingArrangeHandler(sleep_seconds=sleep_seconds), config=test_config)
-    # task_timeout_seconds must be > drain_timeout + sleep to ensure the
+    # The task timeout must be > drain_timeout + sleep to ensure the
     # subprocesses do not time out themselves (isolates the variable).
     app._executor_pool = ExecutorPool(
         binary_path=sys.executable,
@@ -1527,7 +1530,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
     from drakkar.executor import ExecutorPool
 
     # Generous drain timeout — subprocesses (0.15s each) finish well within it.
-    test_config.executor.drain_timeout_seconds = 5
+    test_config.executor.drain_timeout = 5
     test_config.executor.window_size = 10
 
     app = DrakkarApp(handler=_SleepingArrangeHandler(sleep_seconds=0.15), config=test_config)
@@ -1602,7 +1605,7 @@ async def test_revoke_while_arrange_running(test_config):
 
     handler = SlowArrangeHandler()
 
-    test_config.executor.drain_timeout_seconds = 5  # plenty of headroom
+    test_config.executor.drain_timeout = 5  # plenty of headroom
     app = DrakkarApp(handler=handler, config=test_config)
     app._executor_pool = ExecutorPool(
         binary_path=sys.executable,
@@ -1795,7 +1798,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
 
     test_config.storage.dir = str(tmp_path)
     # Tighten the drain timeout so the test runs quickly.
-    test_config.executor.drain_timeout_seconds = 1
+    test_config.executor.drain_timeout = 1
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     wire_kafka_source(app, AsyncMock())
@@ -1807,7 +1810,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
     # Force the Kafka source's drain to time out. Patch on the instance so
     # other tests are unaffected.
     async def _slow_drain(_processors) -> None:
-        await asyncio.sleep(10)  # well past drain_timeout_seconds
+        await asyncio.sleep(10)  # well past executor.drain_timeout
 
     monkeypatch.setattr(app.kafka_source, '_drain_all_processors', _slow_drain)
 
@@ -2323,6 +2326,23 @@ async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tm
         assert app._cache_engine is not None
         app._handler.cache.set('k', 'v')
         assert app._handler.cache.peek('k') == 'v'
+    finally:
+        await app._cache_engine.stop()
+
+
+@pytest.mark.parametrize(('configured', 'cap'), [(0, None), (250, 250)], ids=['zero-is-unbounded', 'bounded'])
+async def test_start_cache_hands_the_memory_cap_to_the_handler_cache(test_config, tmp_path, configured, cap):
+    """``cache.max_memory_entries: 0`` means no cap: the handler cache gets ``None``."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.cache.enabled = True
+    cfg.cache.max_memory_entries = configured
+    cfg.storage.dir = str(tmp_path)
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._start_cache()
+
+    try:
+        assert app._handler.cache._max_memory_entries == cap  # type: ignore[reportPrivateUsage]
     finally:
         await app._cache_engine.stop()
 

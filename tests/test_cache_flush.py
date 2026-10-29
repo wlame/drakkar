@@ -732,8 +732,8 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
         assert flush_calls, 'run_periodic_task was not invoked with name=cache.flush'
         flush_kwargs = flush_calls[0]
         assert flush_kwargs.get('system') is True
-        # The interval comes from config (default flush_interval_seconds=3.0)
-        assert flush_kwargs.get('interval') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
+        # The interval comes from config (default flush_interval 3s)
+        assert flush_kwargs.get('interval') == engine._config.flush_interval  # type: ignore[reportPrivateUsage]
         # Error policy: flush errors should not stop the whole engine.
         assert flush_kwargs.get('on_error') == 'continue'
         # The wrapped callable must be the engine's bound _flush_once.
@@ -780,7 +780,7 @@ async def test_stop_performs_final_drain(tmp_path):
     window. We eliminate it by calling ``_flush_once`` one last time
     from ``stop()`` before ``close()``.
     """
-    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval='1h')
     await engine.start()
     cache = engine._cache  # type: ignore[reportPrivateUsage]
     # Populate dirty right before shutdown; with a 1-hour flush interval,
@@ -801,7 +801,7 @@ async def test_stop_performs_final_drain(tmp_path):
 async def test_stop_final_drain_safe_when_dirty_empty(tmp_path):
     """If the dirty map is empty at shutdown, the final drain must still
     run cleanly as a no-op — not raise, not deadlock."""
-    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval='1h')
     await engine.start()
     assert engine._cache._dirty == {}  # type: ignore[reportPrivateUsage]
     await engine.stop()
@@ -820,7 +820,7 @@ async def test_stop_final_drain_runs_before_writer_close(tmp_path):
     final DB row would not appear. The presence of the row proves the
     drain ran first.
     """
-    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval='1h')
     await engine.start()
     engine._cache.set('proof', 'present')  # type: ignore[reportPrivateUsage]
     await engine.stop()
@@ -1033,7 +1033,7 @@ async def test_stop_final_drain_persists_ops_after_mid_flush_cancel(tmp_path):
     the FIRST call (the scheduled flush) and let the SECOND call (the
     final drain from stop()) run normally. The row must reach the DB.
     """
-    engine = await _make_engine(tmp_path, flush_interval_seconds=3600.0)
+    engine = await _make_engine(tmp_path, flush_interval='1h')
     await engine.start()
     try:
         cache = engine._cache  # type: ignore[reportPrivateUsage]
@@ -1081,7 +1081,7 @@ async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, m
       - the reader connection is closed (``_reader_db is None``)
       - the event was routed through ``aexception`` (captured via a spy)
     """
-    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval='1h')
     await engine.start()
 
     # Replace _flush_once with a raising version AFTER start() so the

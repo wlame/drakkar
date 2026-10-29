@@ -687,7 +687,7 @@ class EventWriter:
     def record_runtime_probe(self, *, lag_ms: float, unit_count: int, stacks: list[dict]) -> None:
         """One opt-in runtime stack probe (contract v1.15).
 
-        Enabled by ``runtime_health.probe_interval_seconds > 0``: a
+        Enabled by ``runtime_health.stack_probe_enabled``: a
         flight-recorder profiler sample of what the runtime thread was
         executing, taken regardless of health state.
         """
@@ -905,7 +905,7 @@ class EventWriter:
 
         ``queued`` is the seconds the call waited for a free offload-pool
         thread; sustained non-zero values are the signal that
-        ``offload.max_threads`` is undersized for the deployment.
+        ``threads.offload`` is undersized for the deployment.
         """
         metadata: dict[str, Any] = {
             'hook': hook,

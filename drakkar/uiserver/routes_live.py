@@ -54,9 +54,9 @@ class _SinkBreakdownRequest(BaseModel):
 
 
 # Ceiling on the ``/api/v1/recent-tasks?minutes=`` query parameter — kept in
-# sync with ``UITimelineConfig.max_age_minutes``'s own ceiling (24h) so a
+# sync with ``UITimelineConfig.max_age``'s own ceiling (24h) so a
 # caller sees FastAPI's validation error rather than a silent downstream
-# clamp. The handler clamps further down to ``config.timeline.max_age_minutes``
+# clamp. The handler clamps further down to ``config.timeline.max_age``
 # (a per-worker override, tighter by default at 60 minutes), and the row
 # and event caps derived from ``config.timeline.history_factor`` keep the
 # query viable on a high-fan-out worker even at the full window.
@@ -156,7 +156,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
             'partition_count': len(drakkar_app.processors),
             'max_ui_rows': config.max_rows,
-            'ws_min_duration_ms': config.ws_min_duration_ms,
+            'ws_min_duration_ms': round(config.ws_min_duration * 1000),
             'hook_flags': hook_flags(drakkar_app.handler)
             if drakkar_app.handler
             else {
@@ -264,14 +264,14 @@ def create_live_router(deps: UIDeps) -> APIRouter:
           the descending inner query) and re-sorting ascending for the retry
           grouping below, which depends on chronological order;
         * a ceiling on ``minutes``, clamped further down to
-          ``ui.timeline.max_age_minutes``.
+          ``ui.timeline.max_age``.
 
         Without these the query could not finish inside the main-loop
         dispatch timeout, and the endpoint returned an empty timeline with
         no indication that anything had gone wrong.
         """
         timeline_cfg = config.timeline
-        minutes = min(minutes, timeline_cfg.max_age_minutes)
+        minutes = min(minutes, timeline_cfg.max_age)
         pool = drakkar_app._executor_pool
         max_lanes = pool.max_executors if pool else DEFAULT_LANE_COUNT
         if limit is None:
@@ -306,7 +306,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
 
         tasks_result, trimmed = queries.group_timeline_tasks(
             events,
-            ws_min_duration_seconds=config.ws_min_duration_ms / 1000.0,
+            ws_min_duration_seconds=config.ws_min_duration,
             limit=limit,
         )
 
@@ -323,13 +323,13 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         """Handler-emitted timeline event instances (markers/ranges/flags) for the live timeline.
 
         Unlike ``/api/v1/recent-tasks`` this has no operator-facing default
-        window: ``minutes=0`` (unset) uses the full ``ui.timeline.max_age_minutes``
+        window: ``minutes=0`` (unset) uses the full ``ui.timeline.max_age``
         horizon, and any larger value is clamped down to it — same ceiling,
         same rationale (a high-fan-out worker's window can hold far more
         rows than the query should scan in one main-loop dispatch).
         """
         timeline_cfg = config.timeline
-        cap = timeline_cfg.max_age_minutes
+        cap = timeline_cfg.max_age
         minutes_clamped = min(minutes, cap) if minutes > 0 else cap
         since = time.time() - minutes_clamped * 60
         query, params = queries.timeline_events_query(since=since, limit=config.max_rows)
@@ -355,7 +355,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
 
     # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/v1/recent-tasks
     # this does NOT filter by ``minutes`` and does NOT apply the
-    # ``ws_min_duration_ms`` threshold — callers pass exactly the task_ids
+    # ``ui.ws_min_duration`` threshold — callers pass exactly the task_ids
     # they want state for, and we return whatever the recorder has within
     # its retention window (default 24h). This fills the gap where batches
     # in the Arrange tab are older than the 10-min timeline window but

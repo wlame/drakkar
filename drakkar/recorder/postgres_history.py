@@ -2,7 +2,7 @@
 
 ``GET /api/v1/debug/trace?history=1`` on a worker whose recorder keeps its
 history in Postgres reads the rows of the worker's own cluster from the
-events table, never the sealed files. The search runs on the UI server's
+events table, never the sealed files. The search runs on the API server's
 loop with a connection of its own (no pool), makes one attempt, and is
 bounded as a whole by ``recorder.search.timeout``: the client side by
 ``asyncio.timeout``, the server side by ``statement_timeout``.

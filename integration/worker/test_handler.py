@@ -263,24 +263,24 @@ async def test_ripgrep_handler_writes_a_search_results_row_for_every_request_a_m
 
 
 @pytest.mark.parametrize(
-    ('relative_path', 'expected_prefix', 'expect_dlq_off'),
+    ('relative_path', 'expected_prefix', 'expected_dlq'),
     [
         pytest.param(
             'integration/worker/drakkar.yaml',
             'sources=[kafka:search-requests/drakkar-integration/50poll]',
-            False,
+            'dlq=on',
             id='worker',
         ),
         pytest.param(
             'integration/fast-worker/drakkar.yaml',
             'sources=[kafka:search-requests/drakkar-fast/50poll]',
-            False,
+            'dlq=on',
             id='fast-worker',
         ),
         pytest.param(
             'integration/http-worker/drakkar.yaml',
             'sources=[http:8092]',
-            True,
+            'dlq=unconfigured',
             id='http-worker',
         ),
     ],
@@ -288,7 +288,7 @@ async def test_ripgrep_handler_writes_a_search_results_row_for_every_request_a_m
 def test_load_config_integration_yaml_uses_sources_layout(
     relative_path: str,
     expected_prefix: str,
-    expect_dlq_off: bool,
+    expected_dlq: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The three worker fixtures load under the ``sources:`` layout and
@@ -304,8 +304,7 @@ def test_load_config_integration_yaml_uses_sources_layout(
     summary = config.config_summary('w', 'c')
 
     assert expected_prefix in summary
-    if expect_dlq_off:
-        assert 'dlq=off' in summary
+    assert f' {expected_dlq} ' in summary
 
 
 async def test_http_search_handler_numbers_synthetic_offsets_from_one() -> None:

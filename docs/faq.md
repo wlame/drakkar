@@ -72,7 +72,7 @@ For a typical worker (max_executors=80, cache enabled with defaults, recorder on
 
 ### Can I run multiple workers on one host?
 
-Yes. Each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`). Recorder and cache DBs are per-worker, so their paths must differ — typically achieved by including the worker_id in the directory path.
+Yes. Each worker needs a unique `worker_id` (set via `worker.name`, or the env var named in `worker.name_env`, default `WORKER_ID`). Recorder and cache DBs are per-worker, so their paths must differ — typically achieved by including the worker_id in the directory path.
 
 ### How do I scale horizontally?
 
@@ -146,7 +146,7 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval_seconds` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
 
-What happens with `autodiscover` off (the default): nothing is pulled and the cache operates single-worker. No error — it just behaves like a local cache, and the worker logs `cache_exchange_off_no_autodiscover` once at startup. If you *want* a cluster-wide cache, turn on `autodiscover` with a provider every worker can reach (for example `filesystem` with one `storage.shared_dir`) and make sure every worker can reach the UI port of the others at the URL on their cards.
+What happens with `autodiscover` off (the default): nothing is pulled and the cache operates single-worker. No error — it just behaves like a local cache, and the worker logs `cache_exchange_off_no_autodiscover` once at startup. If you *want* a cluster-wide cache, turn on `autodiscover` with a provider every worker can reach (for example `filesystem` with one `storage.shared_dir`) and make sure every worker can reach the API port of the others at the URL on their cards.
 
 Fallbacks when a peer is unreachable: each peer is pulled in its own task. A failed request (timeout, refused connection, a status other than 200, a malformed answer) increments `drakkar_cache_sync_errors_total{peer=...}`, logs `fleet_peer_request_failed` once, and backs that peer off for 1, 2, 4, 8, then 16 cycles; one success resets it. One bad peer cannot break the whole cycle. See [Cache — Peer unreachable](cache.md#peer-unreachable).
 
@@ -227,7 +227,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `shared.dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's UI port must be reachable from the others at the URL on its registry card (set `api.host: 0.0.0.0`, or `api.public_url`).
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via `worker.name`, or the env var named in `worker.name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `storage.shared_dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's API port must be reachable from the others at the URL on its registry card (set `api.host: 0.0.0.0`, or `api.public_url`).
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
@@ -331,7 +331,7 @@ For presentation none of those built-ins can express, [custom cell renderers](ui
 Yes, via `ui.timeline` config — no client-side code needed:
 
 - **History depth**: `history_factor` (times the executor pool size) governs how many
-  tasks are kept; `max_age_minutes` (up to 24h) caps how far back in time.
+  tasks are kept; `max_age` (up to 24h) caps how far back in time.
 - **Bar colors**: `color_rules`, a first-match-wins list of conditions on task labels or
   built-in fields (status, duration, exit code, ...), each mapped to a named color or a
   `#rrggbb` hex.
@@ -353,7 +353,7 @@ The exception is caught, logged, the task is marked failed, `on_error` fires on 
 
 ### What if a subprocess hangs?
 
-`executor.task_timeout_seconds` kills the subprocess when `asyncio.wait_for` raises `TimeoutError`; the executor's `finally` block calls `proc.kill()` + `proc.wait()` and the result is recorded with `exit_code=-1` and `stderr='task timed out'`. Then the normal `on_error` path handles it. See [Execution Flow — Enforce Timeout](executor.md#5-enforce-timeout).
+`executor.task_timeout` kills the subprocess when `asyncio.wait_for` raises `TimeoutError`; the executor's `finally` block calls `proc.kill()` + `proc.wait()` and the result is recorded with `exit_code=-1` and `stderr='task timed out'`. Then the normal `on_error` path handles it. See [Execution Flow — Enforce Timeout](executor.md#5-enforce-timeout).
 
 ### What if the Kafka broker goes down?
 
@@ -369,11 +369,11 @@ Drakkar does not run a built-in replay worker — replays are operator-driven. U
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
-Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the API server exposes `/api/v1/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
+Check the **Executors** tab on `/live` for stuck tasks; their `executor.task_timeout` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the API server exposes `/api/v1/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
 
 Rescue procedure when a task is truly wedged past the timeout:
 
-1. Open `/live` → **Executors** tab and look for tasks whose `oldest_running_sec` exceeds `task_timeout_seconds`.
+1. Open `/live` → **Executors** tab and look for tasks whose `oldest_running_sec` exceeds `executor.task_timeout`.
 2. Hit `/api/v1/debug/processors` to get the coroutine stack for each wedged task via the `stuck_tasks` field.
 3. Check worker logs for the task's `task_id` — you'll usually find the downstream call (sink, cache) that's blocked.
 4. If the stack shows the subprocess already exited and the coroutine is wedged in sink or recorder code, a worker restart is the safest recovery — Kafka's cooperative-sticky rebalance will reassign the partition to another worker, which will re-poll the un-committed offset range and retry the work.

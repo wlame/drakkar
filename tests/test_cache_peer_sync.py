@@ -111,8 +111,8 @@ async def test_peer_sync_cycle_deadline_fires_and_counter_increments(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=30.0,
-                cycle_deadline_seconds=0.5,
+                interval='30s',
+                cycle_deadline='500ms',
             ),
         },
     )
@@ -178,10 +178,10 @@ async def test_peer_sync_cycle_normal_does_not_increment_counter(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=30.0,
+                interval='30s',
                 # Generous deadline — a real on-disk sync should finish
                 # in tens of milliseconds.
-                cycle_deadline_seconds=5.0,
+                cycle_deadline='5s',
             ),
         },
     )
@@ -233,8 +233,8 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=30.0,
-                cycle_deadline_seconds=0.5,
+                interval='30s',
+                cycle_deadline='500ms',
             ),
         },
     )
@@ -287,7 +287,7 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
 
 
 async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
-    """When ``cycle_deadline_seconds`` is ``None``, the wrapper must derive
+    """When ``cycle_deadline`` is ``None``, the wrapper must derive
     the deadline from ``interval_seconds * 0.9``. Sanity check that the
     default path exercises the timeout wiring (not just that it compiles).
     """
@@ -300,8 +300,8 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=0.5,
-                # cycle_deadline_seconds left as None — must fall back to
+                interval='500ms',
+                # cycle_deadline left as None — must fall back to
                 # interval_seconds * 0.9 = 0.45s.
             ),
         },
@@ -387,10 +387,10 @@ async def test_concurrent_sync_once_smoke(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=30.0,
+                interval='30s',
                 # Generous deadline — we don't want the deadline wrapper
                 # to mask any actual race by preempting a slow cycle.
-                cycle_deadline_seconds=10.0,
+                cycle_deadline='10s',
             ),
         },
     )
@@ -483,8 +483,8 @@ async def test_concurrent_sync_across_cycles(tmp_path):
             'exchange': CacheExchangeConfig(
                 enabled=True,
                 page_size=2,
-                interval_seconds=30.0,
-                cycle_deadline_seconds=10.0,
+                interval='30s',
+                cycle_deadline='10s',
             ),
         },
     )
@@ -615,12 +615,12 @@ async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
         cache_overrides={
             'exchange': CacheExchangeConfig(
                 enabled=True,
-                interval_seconds=30.0,
+                interval='30s',
                 # Generous deadline — this test does not go through
                 # ``_sync_once``; it calls ``_apply_peer_rows`` directly
                 # with its own ``wait_for`` to pin down the cancellation
                 # timing deterministically.
-                cycle_deadline_seconds=10.0,
+                cycle_deadline='10s',
             ),
         },
     )
@@ -791,7 +791,7 @@ async def test_stop_awaits_orphaned_peer_commit(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0),
+            'exchange': CacheExchangeConfig(enabled=True, interval='30s'),
         },
     )
     _row, original_commit = await _orphan_peer_commit(engine, commit_sleep=0.3)
@@ -821,7 +821,7 @@ async def test_next_sync_cycle_awaits_orphaned_peer_commit(tmp_path):
         worker_id='me',
         cluster_name='prod',
         cache_overrides={
-            'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0),
+            'exchange': CacheExchangeConfig(enabled=True, interval='30s'),
         },
     )
     try:
@@ -848,7 +848,7 @@ async def test_every_commit_of_parallel_pulls_stays_tracked(tmp_path):
         tmp_path,
         worker_id='me',
         cluster_name='prod',
-        cache_overrides={'exchange': CacheExchangeConfig(enabled=True, interval_seconds=30.0)},
+        cache_overrides={'exchange': CacheExchangeConfig(enabled=True, interval='30s')},
     )
     try:
         assert engine._writer_db is not None

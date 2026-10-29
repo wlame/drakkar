@@ -26,7 +26,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.consume_pause import MAX_PAUSE_SECONDS, ConsumerNotReadyError
+from drakkar.config.ui import MAX_PAUSE_SECONDS
+from drakkar.consume_pause import ConsumerNotReadyError
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -78,7 +79,7 @@ def create_consume_pause_router(deps: UIDeps) -> APIRouter:
             return _disabled_response()
         try:
             # The controller mutates loop-bound state and calls the consumer;
-            # it must run on the app's main loop, not the UI server's.
+            # it must run on the app's main loop, not the API server's.
             return await dispatch_to_loop(
                 drakkar_app.consume_pause.pause(body.duration_seconds),
                 drakkar_app.main_loop,

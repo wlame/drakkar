@@ -246,8 +246,8 @@ async def _start_live_engine(tmp_path) -> CacheEngine:
     """
     cache_cfg = CacheConfig(
         enabled=True,
-        flush_interval_seconds=60.0,
-        cleanup_interval_seconds=60.0,
+        flush_interval='1m',
+        cleanup_interval='1m',
         exchange=CacheExchangeConfig(enabled=False),
     )
     engine = CacheEngine(

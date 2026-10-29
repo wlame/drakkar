@@ -112,10 +112,10 @@ parametrize).
 4. `_on_revoke` (`drakkar/sources/kafka.py`) blocks until the drain commits. librdkafka waits on the
    rebalance callback; returning early re-opens the duplicate-delivery window.
    The whole teardown — drain, final commit, `stop()` — runs against one
-   `executor.drain_timeout_seconds` deadline; a step that takes its own budget
+   `executor.drain_timeout` deadline; a step that takes its own budget
    lets the callback overrun `max.poll.interval.ms` and the member is evicted.
    A drain that expires cancels the tasks it waited for. Leaving them running
-   holds an executor slot and a subprocess until `task_timeout_seconds` and
+   holds an executor slot and a subprocess until `executor.task_timeout` and
    keeps `_run` from ever leaving its drain loop, because a cancelled task's
    offsets stay pending (invariant 3) and nothing settles them.
 5. Sink delivery order always equals payload order, and failed batches never

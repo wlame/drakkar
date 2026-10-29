@@ -145,17 +145,16 @@ def test_memory_window_by_env_with_a_unit(monkeypatch, tmp_path):
     assert load_config(path).recorder.memory.window == 120
 
 
-def test_summary_has_no_recorder_token_with_the_recorder_off_and_no_folder():
+def test_summary_says_recorder_off_with_the_recorder_off_and_no_folder():
     line = _config('', enabled=False).config_summary(worker_id='w-1', cluster_name='c')
 
-    assert 'storage=mem fleet=' in line
-    assert 'recorder=' not in line
+    assert ' storage=mem recorder=off autodiscover=' in line
 
 
-def test_summary_names_none_when_a_folder_is_set():
+def test_summary_says_recorder_off_when_a_folder_is_set():
     line = _config('/data', enabled=False).config_summary(worker_id='w-1', cluster_name='c')
 
-    assert ' storage=/data recorder=none fleet=' in line
+    assert ' storage=/data recorder=off autodiscover=' in line
 
 
 def test_summary_shows_a_shared_dir_that_differs():
@@ -165,7 +164,9 @@ def test_summary_shows_a_shared_dir_that_differs():
         storage={'dir': '/data', 'shared_dir': '/mnt/fleet'},
     )
 
-    assert ' storage=/data shared=/mnt/fleet fleet=' in config.config_summary(worker_id='w-1', cluster_name='c')
+    line = config.config_summary(worker_id='w-1', cluster_name='c')
+
+    assert ' storage=/data shared=/mnt/fleet recorder=sqlite autodiscover=' in line
 
 
 POSTGRES_DSN = 'postgresql://drakkar:secret@db:5432/drakkar'
@@ -311,7 +312,7 @@ def test_postgres_keys_by_environment(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     'storage_dir,expected',
-    [('', ' storage=mem recorder=postgres fleet='), ('/data', ' storage=/data recorder=postgres fleet=')],
+    [('', ' storage=mem recorder=postgres autodiscover='), ('/data', ' storage=/data recorder=postgres autodiscover=')],
 )
 def test_summary_has_recorder_postgres_token_with_and_without_storage_dir(storage_dir, expected):
     line = _postgres_config(storage_dir).config_summary(worker_id='w-1', cluster_name='search')

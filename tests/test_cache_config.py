@@ -20,24 +20,24 @@ from tests.conftest import kafka_connections
 
 
 def test_cache_exchange_config_rejects_invalid():
-    # interval_seconds must be > 0 (gt=0)
+    # interval must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CacheExchangeConfig(interval_seconds=0)
+        CacheExchangeConfig(interval='0')
     with pytest.raises(ValidationError):
-        CacheExchangeConfig(interval_seconds=-1.0)
+        CacheExchangeConfig(interval=-1.0)
     # page_size must be in 1..1000
     with pytest.raises(ValidationError):
         CacheExchangeConfig(page_size=0)
     with pytest.raises(ValidationError):
         CacheExchangeConfig(page_size=1001)
-    # timeout_seconds must be > 0 (gt=0)
+    # timeout must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CacheExchangeConfig(timeout_seconds=0)
+        CacheExchangeConfig(timeout='0')
 
 
 def test_cache_exchange_deadline_below_interval_is_accepted():
-    cfg = CacheExchangeConfig(interval_seconds=10, cycle_deadline_seconds=9.5)
-    assert cfg.cycle_deadline_seconds == 9.5
+    cfg = CacheExchangeConfig(interval='10s', cycle_deadline='9s500ms')
+    assert cfg.cycle_deadline == 9.5
 
 
 # --- CacheConfig defaults ---
@@ -46,37 +46,29 @@ def test_cache_exchange_deadline_below_interval_is_accepted():
 def test_cache_config_defaults():
     cfg = CacheConfig()
     assert cfg.enabled is False
-    assert cfg.flush_interval_seconds == 3.0
-    assert cfg.cleanup_interval_seconds == 60.0
+    assert cfg.flush_interval == 3.0
+    assert cfg.cleanup_interval == 60.0
     # Default cap prevents unbounded growth under write-heavy workloads;
-    # operators can opt into unbounded behavior by setting None explicitly.
+    # operators can opt into unbounded behavior by setting 0.
     assert cfg.max_memory_entries == 10_000
 
 
 def test_cache_config_rejects_invalid_intervals():
-    # flush_interval_seconds must be > 0 (gt=0)
+    # flush_interval must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CacheConfig(flush_interval_seconds=0)
+        CacheConfig(flush_interval='0')
     with pytest.raises(ValidationError):
-        CacheConfig(flush_interval_seconds=-1.0)
-    # cleanup_interval_seconds must be > 0 (gt=0)
+        CacheConfig(flush_interval=-1.0)
+    # cleanup_interval must be > 0 (gt=0)
     with pytest.raises(ValidationError):
-        CacheConfig(cleanup_interval_seconds=0)
+        CacheConfig(cleanup_interval='0')
 
 
-def test_cache_config_rejects_invalid_max_memory_entries():
-    # max_memory_entries must be >= 1 when set (ge=1); None is allowed
-    with pytest.raises(ValidationError):
-        CacheConfig(max_memory_entries=0)
+def test_cache_config_rejects_negative_or_null_max_memory_entries():
     with pytest.raises(ValidationError):
         CacheConfig(max_memory_entries=-1)
-
-
-def test_cache_config_max_memory_entries_none_is_valid():
-    # Explicit opt-in to unbounded cache is still a valid choice — the
-    # engine logs a warning at startup so operators see the decision.
-    cfg = CacheConfig(max_memory_entries=None)
-    assert cfg.max_memory_entries is None
+    with pytest.raises(ValidationError):
+        CacheConfig(max_memory_entries=None)
 
 
 # --- v1 scope enforcement — cut fields must NOT exist ---
@@ -125,16 +117,16 @@ def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_cache_exchange_env_override_nested_interval(monkeypatch: pytest.MonkeyPatch):
-    """DK_CACHE__EXCHANGE__INTERVAL_SECONDS=60 should set the nested
-    cache.exchange.interval_seconds field. Exercises the two-level
+    """DK_CACHE__EXCHANGE__INTERVAL=1m should set the nested
+    cache.exchange.interval field. Exercises the two-level
     nested delimiter.
     """
     monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
     monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
-    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL_SECONDS', '60')
+    monkeypatch.setenv('DK_CACHE__EXCHANGE__INTERVAL', '1m')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     assert cfg.cache.enabled is True
-    assert cfg.cache.exchange.interval_seconds == 60.0
+    assert cfg.cache.exchange.interval == 60.0
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):

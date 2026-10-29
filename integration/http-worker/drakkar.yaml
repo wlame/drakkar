@@ -2,11 +2,13 @@
 # No Kafka consumer group is joined. Results go to one Kafka topic so they
 # can be compared, by request id, with the Kafka path's search-results.
 
-worker_name_env: "WORKER_ID"
+worker:
+  name_env: "WORKER_ID"
 # A third cluster, distinct from "main cluster" (worker-1..3) and
 # "fast cluster" (fast-worker-1/2) — see the cache note near the bottom
 # for why this worker's cluster identity does not need to match theirs.
-cluster_name: "http cluster"
+cluster:
+  name: "http cluster"
 
 connections:
   kafka:
@@ -37,10 +39,10 @@ executor:
     RG_COLORS: "never"
     SEARCH_CORPUS: "/tmp/search-corpus"
   max_executors: 2
-  task_timeout_seconds: 120
+  task_timeout: 2m
   window_size: 10
   max_retries: 1
-  drain_timeout_seconds: 5
+  drain_timeout: 5s
 
 sinks:
   kafka:
@@ -49,7 +51,7 @@ sinks:
       ui_url: "http://localhost:8088"
 
 dlq:
-  topic: ""                      # Kafka source off + empty topic = DLQ off (dlq=off in the summary)
+  topic: ""                      # Kafka source off + empty topic = no DLQ topic (dlq=unconfigured in the summary)
 
 metrics:
   enabled: true
@@ -85,7 +87,7 @@ recorder:
 # arrange() still runs the inherited two-tier precomputed-cache lookup, but
 # that fast track can only ever hit on rows the cache exchange pulls in
 # over HTTP from the Kafka workers, which needs cache.enabled=true here AND
-# the same cluster_name on both sides (the Kafka workers write
+# the same cluster.name on both sides (the Kafka workers write
 # cluster-scoped rows) — neither holds here. This worker demonstrates the
 # Kafka-source-off / HTTP-only path, not cross-cluster cache sharing.
 

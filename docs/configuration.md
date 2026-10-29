@@ -104,19 +104,22 @@ value that is not a secret, such as a schema name.
 
 ## Root Config (`DrakkarConfig`)
 
-Top-level settings that control worker identity and cluster grouping.
+The `worker` and `cluster` sections name this worker and its cluster.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `worker_name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. Used in logs, metrics, and the operator UI. If the env var is empty or unset, falls back to `drakkar-{hex_id}`. |
-| `cluster_name` | `str` | `''` | Logical cluster name for grouping workers in the operator UI. Workers with the same cluster name are displayed together and can cross-trace messages. |
-| `cluster_name_env` | `str` | `''` | Name of an environment variable that holds the cluster name. If set and non-empty, overrides the static `cluster_name` value. |
+| `worker.name` | `str` | `''` | Literal worker name, used in logs, metrics, the registry card and the operator UI. |
+| `worker.name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. When the variable is set and not empty, it wins over `worker.name`. With neither, the worker uses a generated `drakkar-{hex_id}`, which changes at every start. |
+| `cluster.name` | `str` | `''` | Literal cluster name. Workers with the same cluster name are displayed together, share the lock scope of cluster tasks and the history folder, and can cross-trace messages. Empty with `autodiscover` on logs `cluster_name_empty` once at startup. |
+| `cluster.name_env` | `str` | `''` | Name of an environment variable that holds the cluster name. When the variable is set and not empty, it wins over `cluster.name`. |
 | `app` | `dict` | `{}` | Reserved section for **user-defined application config**: passed through unvalidated to the handler-declared model and exposed as `self.app_config`, with env overrides under the handler's own prefix (never `DK_APP__*`). See [App Config](app-config.md). |
 
 ```yaml
-worker_name_env: HOSTNAME
-cluster_name: search-cluster
-cluster_name_env: DK_CLUSTER
+worker:
+  name_env: HOSTNAME
+cluster:
+  name: search-cluster
+  name_env: DK_CLUSTER
 ```
 
 ---
@@ -414,13 +417,13 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | `env_inherit_parent` | `bool` | `true` | | When `true`, the parent process env is passed to subprocesses (with `env_inherit_deny` patterns applied). Set `false` to run subprocesses with only `executor.env` + `ExecutorTask.env` — fully isolated from the parent env. |
 | `env_inherit_deny` | `list[str]` | see below | | Case-insensitive `fnmatch` patterns matched against parent env var names. Matching vars are **not** inherited by subprocesses even when `env_inherit_parent` is `true`. Default excludes `DK_*` internals and common secret names so operator-configured secrets never leak to executor binaries. Deliberately narrower than the recorder's redaction patterns (see [observability.md](observability.md#worker_config-autodiscovery)) — a match here withholds the variable from your binary, so `*_KEY` stays suffix-anchored and names with common non-secret uses (`AUTH_SERVICE_URL`, `CERT_PATH`, `PRIVATE_SUBNET`) are excluded. Set to `[]` to trust the full parent env. Default patterns: `DK_*`, `*PASSWORD*`, `*PASSWD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*_DSN`, `*CREDENTIAL*`, `*SALT*`. |
 | `max_executors` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
-| `task_timeout_seconds` | `int` | `120` | >= 1 | Wall-clock timeout (seconds) per subprocess. If a process exceeds this, it is killed and treated as a failure. |
-| `max_stdout_bytes` | `int` | `0` | >= 0 | Maximum bytes of stdout retained per task. `0` = unlimited. Excess output is still read and discarded (the process never blocks on a full pipe); the retained prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
-| `max_stderr_bytes` | `int` | `0` | >= 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
+| `task_timeout` | duration | `2m` | whole seconds, >= `1s` | Wall-clock time limit per subprocess. If a process exceeds this, it is killed and treated as a failure. |
+| `max_stdout` | size | `0` | >= 0 | Most stdout kept per task. `0` = no limit. Excess output is still read and discarded (the process never blocks on a full pipe); the kept prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
+| `max_stderr` | size | `0` | >= 0 | Same as `max_stdout`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
 | `on_failure` | `'skip'` \| `'dlq'` | `'skip'` | | What the default [on_error()](handler.md#on_error) returns for a failed task. `dlq` writes the task's source messages to the DLQ (`dk-stage: execute`), and no later delivery of those messages starts. Any other value fails the load with `executor.on_failure must be skip or dlq, got '<v>'`. |
-| `drain_timeout_seconds` | `int` | `30` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. When drain times out, the still-running tasks are cancelled (their subprocess process group is killed) and their offsets are **not** committed — those messages replay on restart (at-least-once). Tune together with `task_timeout_seconds`. |
+| `drain_timeout` | duration | `30s` | whole seconds, >= `1s` | Longest wait for in-flight tasks during shutdown or partition revocation. When drain times out, the still-running tasks are cancelled (their subprocess process group is killed) and their offsets are **not** committed — those messages replay on restart (at-least-once). Tune together with `task_timeout`. |
 | `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
 | `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
 
@@ -444,10 +447,10 @@ The gap between high and low watermarks prevents rapid pause/resume oscillation 
 executor:
   binary_path: /usr/local/bin/my-processor
   max_executors: 8
-  task_timeout_seconds: 300
+  task_timeout: 5m
   window_size: 50
   max_retries: 5
-  drain_timeout_seconds: 10
+  drain_timeout: 10s
   backpressure_high_multiplier: 16
   backpressure_low_multiplier: 2
 ```
@@ -674,7 +677,7 @@ sinks:
   delivery_timeout_seconds: 30.0
 ```
 
-Keep it below `executor.drain_timeout_seconds`: a rebalance drain waits on
+Keep it below `executor.drain_timeout`: a rebalance drain waits on
 in-flight deliveries, so a delivery budget larger than the drain budget
 guarantees drain timeouts when a sink goes unresponsive.
 
@@ -718,7 +721,7 @@ Messages that fail to parse, to execute or to deliver can be written to a [DLQ](
 | on | empty | DLQ built, topic `{sources.kafka.topic}_dlq` |
 | on | set | DLQ built with that topic |
 | off | set | DLQ built with that topic; brokers from `dlq.brokers`, else `kafka.brokers` |
-| off | empty | **No DLQ producer.** The summary line reports `dlq=off`. A DLQ send is dropped, logged once per worker run as `dlq_send_dropped_unconfigured` (then at debug), and counted in `drakkar_dlq_unconfigured_drops_total`. |
+| off | empty | **No DLQ producer.** The summary line reports `dlq=unconfigured`. A DLQ send is dropped, logged once per worker run as `dlq_send_dropped_unconfigured` (then at debug), and counted in `drakkar_dlq_unconfigured_drops_total`. |
 
 The startup log `sinks_configured` reports `dlq_topic: ""` when the DLQ is off. `on_parse_error: dlq` is a Kafka-source setting, so it is only reachable when the Kafka source is on — the DLQ is always present for it.
 
@@ -769,44 +772,32 @@ how to read its output.
 ```yaml
 runtime_health:
   enabled: true
-  tick_seconds: 0.25
-  warn_lag_seconds: 0.1
-  stall_seconds: 1.0
+  tick: 250ms
+  warn_lag: 100ms
+  stall: 1s
   max_stall_stacks: 10
-  sample_interval_seconds: 10.0
-  history_window_seconds: 900
+  sample_interval: 10s
+  history_window: 15m
+  max_episode: 5m
+  stack_probe_enabled: false
+  stack_probe_interval: 1s
 ```
 
-## Blocking I/O pool (`io:`)
+## Thread pools (`threads:`)
 
-Sizing for asyncio's default `to_thread` executor — the single process-wide pool
-behind every `asyncio.to_thread(...)` call, handler filesystem reads included.
-Distinct from `offload.max_threads`, which sizes the separate pool behind
-`handler.offload()`. See [Threads & Pools](threads.md) for the full map.
+The two thread pools of the worker. See [Threads & Pools](threads.md) for the full map.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `max_threads` | `int` | `0` | 0--512 | Worker threads in asyncio's default `to_thread` executor. `0` (the default) keeps Python's own sizing, `min(32, cpu_count + 4)`. Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here; the trade-off is pressure on the storage behind the calls. |
+| `io` | `int \| null` | `null` | null or 1--512 | Worker threads in asyncio's default `to_thread` executor — the single process-wide pool behind every `asyncio.to_thread(...)` call, handler filesystem reads included. `null` (the default) keeps Python's own sizing, `min(32, cpu_count + 4)`. Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here; the trade-off is pressure on the storage behind the calls. |
+| `offload` | `int \| null` | `null` | null or 1--32 | Worker threads in the pool behind [`handler.offload()`](offload.md) — CPU-bound hook work moved off the event loop. `null` (the default) sizes the pool from the executor pool: `ceil(executor.max_executors / 4)`, minimum 2. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the `drakkar_offload_queued` gauge. More threads do not speed up pure-Python work (GIL); set an explicit value only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions). |
+
+`0` fails the load: `threads.io must be null or from 1 to 512`, `threads.offload must be null or from 1 to 32`.
 
 ```yaml
-io:
-  max_threads: 0
-```
-
----
-
-## Offload pool (`offload:`)
-
-Thread pool behind [`handler.offload()`](offload.md) — CPU-bound hook work moved
-off the event loop. See the dedicated [Offload](offload.md) page.
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `max_threads` | `int` | `0` | 0--32 | Worker threads in the shared offload pool. `0` (the default) sizes the pool automatically from the executor pool: `ceil(executor.max_executors / 4)`, minimum 2. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the `drakkar_offload_queued` gauge. More threads do not speed up pure-Python work (GIL); set an explicit value only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions). |
-
-```yaml
-offload:
-  max_threads: 0
+threads:
+  io: null
+  offload: null
 ```
 
 ---
@@ -820,12 +811,14 @@ Structured logging configuration via structlog.
 | `level` | `str` | `'INFO'` | | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 | `format` | `str` | `'json'` | `json` or `console` | Output format. `json` produces machine-readable structured logs. `console` produces colorized human-readable output for local development. |
 | `output` | `str` | `'stderr'` | | Log destination: `stderr`, `stdout`, or a file path. File paths support `{worker_id}` and `{cluster_name}` template variables. Parent directories are created automatically. |
+| `min_task_duration` | duration | `500ms` | >= 0 | Shortest task duration that emits a `slow_task_completed` or `slow_task_failed` log message. `0` logs all tasks. |
 
 ```yaml
 logging:
   level: INFO
   format: json
   output: stderr  # or stdout, or /var/log/drakkar/{worker_id}.log
+  min_task_duration: 500ms
 ```
 
 ---
@@ -878,12 +871,11 @@ The `api` section is the HTTP server itself. Top-level `ui.*` fields configure t
 
 ### Duration Thresholds
 
-These thresholds control which events are recorded, logged, and streamed. See [Duration Thresholds](observability.md#duration-thresholds) for detailed behavior and [Performance Tuning](performance.md) for recommendations. They help reduce noise in high-throughput systems where most tasks complete quickly. The log and WebSocket thresholds are top-level `ui.*` fields; the persistence thresholds live under `ui.recorder.*`.
+These thresholds control which events are recorded, logged, and streamed. See [Duration Thresholds](observability.md#duration-thresholds) for detailed behavior and [Performance Tuning](performance.md) for recommendations. They help reduce noise in high-throughput systems where most tasks complete quickly. The WebSocket threshold is `ui.ws_min_duration`, the log threshold is [`logging.min_task_duration`](#logging-logging); the persistence thresholds live under `recorder.capture`.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `log_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to emit a `slow_task_completed` or `slow_task_failed` log message. Set to `0` to log all tasks. |
-| `ws_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to broadcast via WebSocket to the live UI. Fast tasks that complete under this threshold are invisible in the live view (reduces UI noise). Failed tasks always appear regardless. Set to `0` to show all tasks. |
+| `ws_min_duration` | duration | `500ms` | >= 0 | Shortest task duration broadcast via WebSocket to the live UI. Fast tasks that complete under this threshold are invisible in the live view (reduces UI noise). Failed tasks always appear regardless. `0` shows all tasks. |
 | `recorder.event_min_duration_ms` | `int` | `0` | >= 0 | Minimum task duration (ms) to persist to the SQLite database. Set above `0` to skip storing fast tasks entirely. |
 | `recorder.output_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to include stdout/stderr in the persisted event record. Tasks under this threshold are recorded but without output data. |
 
@@ -936,7 +928,7 @@ Timed debug pause of message intake, driven from the Live page — see the dedic
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `false` | Serve the consume-pause API (`/api/v1/debug/consume-pause`) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments. |
-| `durations_seconds` | `list[int]` | `[15, 60, 300, 900]` | Preset pause durations (seconds) offered as one-click buttons on the Live page. Each preset must sit in the same 1--3600 range the API enforces; the API itself accepts any duration in that range regardless of the presets. |
+| `durations` | `list[duration]` | `[15s, 1m, 5m, 15m]` | Preset pause durations offered as one-click buttons on the Live page, each a whole number of seconds. Each preset must sit in the same `1s` to `1h` range the API enforces; the API itself accepts any duration in that range regardless of the presets. |
 
 ### Message Probe (`ui.probe:`)
 
@@ -994,7 +986,7 @@ With `postgres`, the load fails when `ui.recorder.postgres.connection` is not de
 ui.recorder.postgres.connection '<name>' is not defined under connections.postgres
 ```
 
-These checks run after the source check and before the history window check: first the `sqlite` folder check, then the `postgres` connection check. The config summary line shows ` recorder=postgres` in the same place whenever the mode is `postgres`, with or without a `storage.dir`. It shows ` recorder=none` after ` storage=...` (and the optional ` shared=...`) when the mode is `none` and `storage.dir` is not empty. With an empty `storage.dir` the line shows `storage=mem` and no token.
+These checks run after the source check and before the history window check: first the `sqlite` folder check, then the `postgres` connection check. The config summary line always shows a `recorder=` token after ` storage=...` and the optional ` shared=...`: `sqlite`, `postgres`, or `off` with the recorder off.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
@@ -1051,8 +1043,7 @@ ui:
     - DEPLOY_ENV
     - K8S_POD_NAME
   max_rows: 5000
-  log_min_duration_ms: 1000
-  ws_min_duration_ms: 500
+  ws_min_duration: 500ms
   prometheus:
     url: http://prometheus:9090
     rate_interval: 5m
@@ -1099,16 +1090,16 @@ See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and t
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in [`storage.dir`](#storage-and-shared) and is private to the worker; `storage.dir` does not need to be shared for the cache. With `storage.dir: ""` the engine warns (`cache_engine_disabled_no_storage_dir`) and continues without persistence -- in-memory only, and with no cache exchange. |
-| `flush_interval_seconds` | `float` | `3.0` | > 0 | Interval (seconds) for the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
-| `cleanup_interval_seconds` | `float` | `60.0` | > 0 | Interval (seconds) for the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
-| `max_memory_entries` | `int \| null` | `10000` | >= 1 or `null` | Cap for the in-memory LRU. `null` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
+| `flush_interval` | duration | `3s` | > 0 | Time between runs of the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
+| `cleanup_interval` | duration | `1m` | > 0 | Time between runs of the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
+| `max_memory_entries` | `int` | `10000` | >= 0 | Cap for the in-memory LRU. `0` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
 
 ```yaml
 cache:
   enabled: true
-  flush_interval_seconds: 3.0
-  cleanup_interval_seconds: 60.0
-  max_memory_entries: 10000           # null = unbounded (warns)
+  flush_interval: 3s
+  cleanup_interval: 1m
+  max_memory_entries: 10000           # 0 = unbounded (warns)
 ```
 
 ### Cache exchange (`cache.exchange:`) {#cache-exchange}
@@ -1123,20 +1114,20 @@ worker logs `cache_exchange_off_no_autodiscover` once at startup. See
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation: the worker pulls nothing, its card carries no `features.cache`, and its peer route answers `404`. Flush and cleanup loops still run. Needs `cache.enabled` and a non-empty `storage.dir`. |
-| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between exchange cycles. |
+| `interval` | duration | `30s` | > 0 | Time between exchange cycles. |
 | `page_size` | `int` | `500` | 1-1000 | Maximum rows in one page pulled from a peer. A pull asks for pages until the peer answers `more: false`. |
-| `timeout_seconds` | `float` | `5.0` | > 0 | Time limit for one request to a peer; the connect timeout is 2 seconds. One slow peer cannot block the rest. |
-| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. Peers still pulling or waiting when it fires are cut, and are not counted as failures. |
+| `timeout` | duration | `5s` | > 0 | Time limit for one request to a peer; the connect timeout is 2 seconds. One slow peer cannot block the rest. |
+| `cycle_deadline` | duration or `null` | `null` | >= `100ms` and `<` `interval` | Hard wall-clock cap on a single cycle. `null` derives `interval * 0.9`. Must be strictly less than `interval` -- config load fails otherwise so the misconfiguration surfaces at startup. Peers still pulling or waiting when it fires are cut, and are not counted as failures. |
 | `max_concurrent_peers` | `int` | `4` | >= 1 | Peers pulled from in parallel. The others wait for a free slot within the same cycle. |
 
 ```yaml
 cache:
   exchange:
     enabled: true
-    interval_seconds: 30.0
+    interval: 30s
     page_size: 500
-    timeout_seconds: 5.0
-    cycle_deadline_seconds: null      # null = interval_seconds * 0.9
+    timeout: 5s
+    cycle_deadline: null              # null = interval * 0.9
     max_concurrent_peers: 4
 ```
 

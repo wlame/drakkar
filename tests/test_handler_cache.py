@@ -150,7 +150,7 @@ def _make_config_with_cache(
         executor=ExecutorConfig(
             binary_path='/bin/echo',
             max_executors=2,
-            task_timeout_seconds=10,
+            task_timeout='10s',
             window_size=5,
         ),
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
@@ -164,8 +164,8 @@ def _make_config_with_cache(
         },
         cache=CacheConfig(
             enabled=cache_enabled,
-            flush_interval_seconds=60.0,  # slow — tests manually flush
-            cleanup_interval_seconds=60.0,
+            flush_interval='1m',  # slow — tests manually flush
+            cleanup_interval='1m',
             exchange={'enabled': False},
         ),
         storage={'dir': str(tmp_path)},

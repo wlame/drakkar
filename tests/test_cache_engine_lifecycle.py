@@ -333,12 +333,12 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
         await engine.stop()
 
 
-# --- max_memory_entries=None warning at config load ------------------------
+# --- max_memory_entries=0 warning at config load ---------------------------
 
 
-def test_cache_config_with_max_memory_entries_none_emits_warning():
-    """When the operator explicitly opts into an unbounded memory dict
-    (``max_memory_entries=None``), the config validator must emit a warning
+def test_cache_max_memory_entries_zero_is_unbounded_and_warns():
+    """When the operator opts into an unbounded memory dict
+    (``max_memory_entries: 0``), the config validator must emit a warning
     at load time so the intentional choice is visible in logs. The warning
     lives in the config layer (not the engine) so it fires once per process
     even if ``start()`` runs multiple times (tests, rotation, reinit)."""
@@ -346,9 +346,10 @@ def test_cache_config_with_max_memory_entries_none_emits_warning():
 
     with structlog.testing.capture_logs() as captured:
         # Construct the config directly — validators run on instantiation.
-        CacheConfig(enabled=True, max_memory_entries=None)
+        CacheConfig(enabled=True, max_memory_entries=0)
     unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
     assert len(unbounded_events) == 1
+    assert unbounded_events[0]['reason'].startswith('cache.max_memory_entries=0 configured')
     assert unbounded_events[0]['log_level'] == 'warning'
     # ``worker_id`` should NOT appear — the warning fires at config load,
     # which is worker-agnostic; including a worker id would be misleading.
@@ -357,7 +358,7 @@ def test_cache_config_with_max_memory_entries_none_emits_warning():
 
 def test_cache_config_with_default_max_memory_entries_does_not_warn():
     """With the default cap of 10_000, the unbounded-memory warning must
-    NOT fire — that warning is reserved for the explicit opt-in path."""
+    NOT fire — that warning is reserved for the explicit 0."""
     import structlog.testing
 
     with structlog.testing.capture_logs() as captured:
@@ -366,13 +367,13 @@ def test_cache_config_with_default_max_memory_entries_does_not_warn():
     assert unbounded_events == []
 
 
-def test_cache_config_disabled_with_none_does_not_warn():
+def test_cache_config_disabled_with_zero_does_not_warn():
     """When the cache is disabled the setting has no effect, so the warning
     should not fire — it would mislead operators into thinking the cache is
     using unbounded memory when in fact no cache exists."""
     import structlog.testing
 
     with structlog.testing.capture_logs() as captured:
-        CacheConfig(enabled=False, max_memory_entries=None)
+        CacheConfig(enabled=False, max_memory_entries=0)
     unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
     assert unbounded_events == []

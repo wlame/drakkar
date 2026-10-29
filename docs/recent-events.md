@@ -57,9 +57,8 @@ The rule does not depend on `ui.enabled`.
 `storage.dir` keeps one meaning: the folder of this worker's own files. With
 `persistence: none` and a folder set, the cache file and the crash marker stay
 in that folder, and the recorder writes no recorder file there. The config
-summary line then shows the token ` recorder=none` after ` storage=...` (and
-the optional ` shared=...`). With an empty folder the line already shows
-`storage=mem`, and no token is added.
+summary line then shows the token ` recorder=off` after ` storage=...` (and
+the optional ` shared=...`).
 
 The shared folder (`shared.dir`, else `storage.dir`) does not depend on the
 mode. A `none` worker with a shared folder still reads the sealed history of
@@ -160,7 +159,7 @@ merges the two:
 | Whole table | `/api/v1/partitions`, the event pages | the file, without a flush |
 | Label keys | `/api/v1/debug/label-keys` | always memory |
 
-The timeline reads up to `ui.timeline.max_age_minutes` (default 60 minutes).
+The timeline reads up to `ui.timeline.max_age` (default 60 minutes).
 With the default window of 120 seconds, the default timeline reads the file.
 
 A page with two queries reads both from the same source. A memory read has a

@@ -27,12 +27,12 @@ from tests.conftest import fake_peers, set_peer_cluster
 
 
 async def _engine(tmp_path: Path, *, worker_id: str = 'me', cluster: str = 'prod', **exchange: Any) -> CacheEngine:
-    settings: dict[str, Any] = {'interval_seconds': 3600, **exchange}
+    settings: dict[str, Any] = {'interval': '1h', **exchange}
     engine = CacheEngine(
         config=CacheConfig(
             enabled=True,
-            flush_interval_seconds=3600,
-            cleanup_interval_seconds=3600,
+            flush_interval='1h',
+            cleanup_interval='1h',
             exchange=CacheExchangeConfig(**settings),
         ),
         storage_dir=str(tmp_path),
@@ -252,7 +252,7 @@ async def test_one_failing_peer_does_not_stop_the_others(engine):
 
 
 async def test_the_cycle_ends_at_its_deadline_and_waiting_peers_do_not_back_off(tmp_path):
-    engine = await _engine(tmp_path, max_concurrent_peers=2, cycle_deadline_seconds=0.3, interval_seconds=3600)
+    engine = await _engine(tmp_path, max_concurrent_peers=2, cycle_deadline='300ms', interval='1h')
     try:
         peers = fake_peers(engine)
         set_peer_cluster(engine, 'a-fast', 'prod')
@@ -277,7 +277,7 @@ async def test_the_cycle_ends_at_its_deadline_and_waiting_peers_do_not_back_off(
 
 
 async def test_a_hung_pull_never_holds_up_a_flush(tmp_path):
-    engine = await _engine(tmp_path, cycle_deadline_seconds=30, interval_seconds=60)
+    engine = await _engine(tmp_path, cycle_deadline='30s', interval='1m')
     try:
         set_peer_cluster(engine, 'w-2', 'prod')
         peers = fake_peers(engine)

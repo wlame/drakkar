@@ -84,9 +84,9 @@ class TestChangeDetection:
         config = make_config()
         before = snapshot_consumed_settings(config)
 
-        config.cluster_name = 'renamed-in-on_startup'
+        config.cluster.name = 'renamed-in-on_startup'
 
-        assert changed_consumed_settings(before, config) == ['cluster_name']
+        assert changed_consumed_settings(before, config) == ['cluster.name']
 
     def test_a_change_the_framework_honours_is_not_reported(self):
         """`executor` is read long after the hook — changing it is the
@@ -111,12 +111,12 @@ class TestChangeDetection:
         config = make_config()
         before = snapshot_consumed_settings(config)
 
-        config.worker_name_env = 'OTHER_WORKER'
+        config.worker.name_env = 'OTHER_WORKER'
         config.app = {'priority_threshold': 1}
 
         # Table order, not alphabetical — deterministic so the warning text
         # is stable.
-        assert changed_consumed_settings(before, config) == ['app', 'worker_name_env']
+        assert changed_consumed_settings(before, config) == ['app', 'worker.name_env']
 
 
 class TestLifecycleWarning:
@@ -125,7 +125,7 @@ class TestLifecycleWarning:
     async def test_changing_a_consumed_setting_warns(self):
         class RenamesTheCluster(NoopHandler):
             async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
-                config.cluster_name = 'renamed-in-on_startup'
+                config.cluster.name = 'renamed-in-on_startup'
                 return config
 
         app = DrakkarApp(handler=RenamesTheCluster(), config=make_config())
@@ -134,11 +134,11 @@ class TestLifecycleWarning:
             await app._lifecycle._run_on_startup()
 
         (warning,) = [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
-        assert warning['settings'] == ['cluster_name']
+        assert warning['settings'] == ['cluster.name']
         assert warning['log_level'] == 'warning'
         # The operator needs to know what consumed it, not just that the
         # change was dropped.
-        assert warning['reasons'] == ['cluster_name — the worker resolves its cluster name in DrakkarApp.__init__']
+        assert warning['reasons'] == ['cluster.name — the worker resolves its cluster name in DrakkarApp.__init__']
         assert 'config file or environment' in warning['hint']
 
     async def test_a_quiet_hook_warns_about_nothing(self):

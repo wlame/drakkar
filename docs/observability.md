@@ -29,7 +29,7 @@ metrics:
 | `drakkar_messages_consumed_total` | Counter | `partition` | Total messages consumed from the source Kafka topic |
 | `drakkar_message_parse_failures_total` | Counter | `partition` | Source messages whose value failed `input_model` deserialization (handled per `sources.kafka.on_parse_error`) |
 | `drakkar_delivery_stalled_offsets_total` | Counter | `partition` | Offsets left uncommitted because sink delivery (including the DLQ fallback) could not be confirmed. The watermark is stalled; messages are redelivered after restart. **Alert on this.** |
-| `drakkar_suppressed_zombie_deliveries_total` | Counter | `partition` | Sink deliveries suppressed because the task finished after a revoke/shutdown drain timeout — the new partition owner re-processes those messages. A rising rate means `executor.drain_timeout_seconds` is too small for the workload. |
+| `drakkar_suppressed_zombie_deliveries_total` | Counter | `partition` | Sink deliveries suppressed because the task finished after a revoke/shutdown drain timeout — the new partition owner re-processes those messages. A rising rate means `executor.drain_timeout` is too small for the workload. |
 | `drakkar_messages_unassigned_dropped_total` | Counter | `partition` | Messages received from Kafka for a partition with no registered processor (a revoke raced the poll). The new owner redelivers them; this only signals the race happened. |
 
 #### Executor
@@ -44,8 +44,8 @@ metrics:
 | `drakkar_host_effective_cpus` | Gauge | -- | CPUs this worker process can actually use: the affinity mask capped by any cgroup CPU quota, read once at startup. `drakkar_executor_pool_max` above this value means concurrent tasks time-share cores; startup also logs an `executor_pool_exceeds_cpus` warning then. |
 | `drakkar_task_label_value` | Histogram | `label` | Numeric values of the task labels named in `metrics.task_label_histograms`, observed once per completed task. Log-spaced buckets from 0.001 to 1e9 (unitless — a label can hold bytes, line counts, ratios). Values that do not parse as finite numbers are skipped. |
 | `drakkar_executor_pool_active` | Gauge | -- | Number of tasks currently running in the executor pool |
-| `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `task_timeout_seconds` and were killed |
-| `drakkar_executor_output_truncated_total` | Counter | `stream` (`stdout`, `stderr`) | Output streams truncated to `executor.max_stdout_bytes` / `executor.max_stderr_bytes`. One increment per truncated stream per task. Divide by the `drakkar_executor_tasks_total` rate for the fraction of tasks being truncated. |
+| `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `executor.task_timeout` and were killed |
+| `drakkar_executor_output_truncated_total` | Counter | `stream` (`stdout`, `stderr`) | Output streams truncated to `executor.max_stdout` / `executor.max_stderr`. One increment per truncated stream per task. Divide by the `drakkar_executor_tasks_total` rate for the fraction of tasks being truncated. |
 | `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via [on_error](handler.md#on_error) returning RETRY) |
 
 Average and percentiles come from the histograms with standard PromQL —
@@ -169,7 +169,7 @@ CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.m
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_offload_running` | Gauge | -- | Offloaded computations currently executing on the offload thread pool |
-| `drakkar_offload_queued` | Gauge | -- | Offloaded calls waiting for a free pool thread. Sustained non-zero values mean `offload.max_threads` is undersized for how often hooks offload concurrently |
+| `drakkar_offload_queued` | Gauge | -- | Offloaded calls waiting for a free pool thread. Sustained non-zero values mean `threads.offload` is undersized for how often hooks offload concurrently |
 | `drakkar_offload_duration_seconds` | Histogram | `hook` | Execution time of offloaded computations, queue wait excluded. Buckets reach 120s — offloaded work is expected to be seconds-scale |
 
 #### Recorder
@@ -221,7 +221,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer over HTTP ([cache exchange](cache.md#cache-exchange)) and accepted, per peer. Counted after the page commits. Rows the worker rejected are not counted here; they go to `drakkar_cache_sync_errors_total`. |
 | `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows from a peer passed to the LWW upsert of the local DB, per peer. Counted with the same rows as `sync_entries_fetched_total`, so the two are equal; rows that LWW keeps unchanged are still counted. |
 | `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer exchange errors: one per failed request (timeout, refused connection, a status other than 200, an answer that is not the expected JSON), one per page that could not be applied locally, and one per rejected row (wrong scope or not the peer's own origin). The loop keeps running. |
-| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of exchange cycles that hit `cache.exchange.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline; the cut peers are not counted as failures. A sustained non-zero rate signals slow peers, or more peers than one interval can pull — raise the deadline and the interval, or raise `max_concurrent_peers`. |
+| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of exchange cycles that hit `cache.exchange.cycle_deadline` (or the derived `cache.exchange.interval * 0.9` default). One tick per cycle that was cut short by the deadline; the cut peers are not counted as failures. A sustained non-zero rate signals slow peers, or more peers than one interval can pull — raise the deadline and the interval, or raise `max_concurrent_peers`. |
 | `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
 | `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
 | `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |
@@ -287,7 +287,7 @@ Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client req
 |--------|------|--------|-------------|
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
-| `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout_seconds` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
+| `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
 | `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{storage.dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
 #### OOM / SIGKILL detection
@@ -466,7 +466,7 @@ Every log line includes these fields, bound once at startup:
 | `timestamp` | ISO 8601 timestamp | `2026-04-06T12:34:56.789Z` |
 | `level` | Log level | `info` |
 | `service_name` | Hardcoded | `drakkar` |
-| `worker_id` | `worker_name_env` env var | `worker-3` |
+| `worker_id` | `worker.name_env` env var, else `worker.name` | `worker-3` |
 | `consumer_group` | `sources.kafka.consumer_group` config; **omitted entirely** when the Kafka source is disabled | `drakkar-workers` |
 | `module` | Python module name | `drakkar.partition` |
 
@@ -571,7 +571,7 @@ the low watermark for `earliest` (the default), the high watermark for
 Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized in tabbed sections:
 
 - **Arrange** -- active [arrange()](handler.md#arrange-required) calls with partition, duration, and [message labels](handler.md#message_label).
-- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ws_min_duration_ms` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
+- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ui.ws_min_duration` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
 - **Collect** -- recently completed tasks with exit codes and durations.
 
 Pool utilization bar shows active, waiting, and available slot counts.
@@ -716,8 +716,8 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `partition_stalled` | Partition paused because an offset stalled (`dlq.on_send_failure=stall`) | `partition` |
 | `runtime_health` | Event-loop health transition or periodic sample — see [Runtime Health](runtime-health.md) | `metadata` (kind: transition/sample, state, lag_ms, unit_count) |
 | `runtime_stall` | Event loop resumed after a stall; carries the stack traces sampled while it lasted | `duration`, `metadata` (duration_ms, stacks: [{stack, location, count}], dropped_stacks, unit_count) |
-| `runtime_lag_episode` | A degraded/stalled span ended (or hit `runtime_health.episode_max_seconds`); carries stacks aggregated across the whole span and a verdict — see [Runtime Health](runtime-health.md#lag-episodes-and-verdicts) | `duration`, `metadata` (duration_ms, peak_lag_ms, lag_sum_ms, cpu_ms, cpu_ratio, verdict: blocked/cpu_bound/starved/inconclusive, stall_count, sample_count, stacks, dropped_stacks, unit_count, plus optional evidence: cpu_throttled_ms, psi_cpu_some_avg10, load1) |
-| `runtime_probe` | Opt-in stack probe (`runtime_health.probe_interval_seconds > 0`) — a flight-recorder profiler sample, recorded regardless of health state | `metadata` (lag_ms, unit_count, stacks: [{stack, location, count}]) |
+| `runtime_lag_episode` | A degraded/stalled span ended (or hit `runtime_health.max_episode`); carries stacks aggregated across the whole span and a verdict — see [Runtime Health](runtime-health.md#lag-episodes-and-verdicts) | `duration`, `metadata` (duration_ms, peak_lag_ms, lag_sum_ms, cpu_ms, cpu_ratio, verdict: blocked/cpu_bound/starved/inconclusive, stall_count, sample_count, stacks, dropped_stacks, unit_count, plus optional evidence: cpu_throttled_ms, psi_cpu_some_avg10, load1) |
+| `runtime_probe` | Opt-in stack probe (`runtime_health.stack_probe_enabled`) — a flight-recorder profiler sample, recorded regardless of health state | `metadata` (lag_ms, unit_count, stacks: [{stack, location, count}]) |
 | `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
 | `offload` | One `handler.offload()` call completed — CPU-bound hook work run on the offload thread pool; see [Offload](offload.md) | `partition` (NULL outside hooks), `offset` / `task_id` (annotation-style anchoring), `duration`, `metadata` (hook, function, queued, status: ok/error/cancelled, window_id, offsets, error) |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error; `system: true` for a framework task; `scope: "cluster"` and `slot` (the slot's epoch second) for a cluster run) |
@@ -755,7 +755,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
 
 #### `worker_config` -- Worker identity {#worker_config-autodiscovery}
 
-Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
+Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `executor.task_timeout`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
 
 This table names the worker and cluster that wrote each file, for history, merges and archives.
 
@@ -981,7 +981,7 @@ Stage M starts early on **size** as well as on count, once the buffered
 payload passes roughly 64 MiB. `max_buffer` bounds the buffer by event count,
 which says nothing about how much memory it holds: with `store_output` on,
 every task at or above `output_min_duration_ms` has its whole stdout and
-stderr buffered, and `executor.max_stdout_bytes` is unlimited by default. A
+stderr buffered, and `executor.max_stdout` is unlimited by default. A
 handler producing hundreds of kilobytes per task therefore reaches gigabytes
 of resident buffer long before it reaches 25,000 events. The size trigger is
 not configurable: it is a safety floor rather than a tuning knob, and writing
@@ -1097,33 +1097,35 @@ accepts only `.db` paths, so an archive path passed to it by hand answers
 Drakkar provides four independent duration thresholds that control what gets logged, broadcast, and stored. These are essential for high-throughput workers where fast tasks would otherwise flood every observability channel.
 
 ```yaml
+logging:
+  min_task_duration: 500ms
 ui:
-  log_min_duration_ms: 500
-  ws_min_duration_ms: 500
-  recorder:
-    event_min_duration_ms: 0
-    output_min_duration_ms: 500
+  ws_min_duration: 500ms
+recorder:
+  capture:
+    min_event_duration: 0
+    min_output_duration: 500ms
 ```
 
-### `log_min_duration_ms` (default: 500)
+### `logging.min_task_duration` (default: 500ms)
 
 Controls which completed/failed tasks produce a structlog entry. Tasks finishing faster than this threshold are silent in the log stream. Keeps logs focused on slow or problematic tasks.
 
-### `ws_min_duration_ms` (default: 500)
+### `ui.ws_min_duration` (default: 500ms)
 
 Controls which tasks appear in the live UI (`/live` page). When a task starts, its WebSocket broadcast is deferred. If the task completes before the threshold, neither the start nor the completion event is sent to connected browsers -- the task is invisible in the live view.
 
 **Exception**: failed tasks are always sent to WebSocket regardless of duration. This ensures failures are never hidden.
 
-### `event_min_duration_ms` (default: 0)
+### `recorder.capture.min_event_duration` (default: 0)
 
-Controls which tasks are persisted to the SQLite flight recorder. When set to a value greater than 0, tasks completing faster than the threshold are not written to the `events` table. Set to `0` to store all events (the default).
+Controls which tasks are persisted to the flight recorder. When set to a value greater than 0, tasks completing faster than the threshold are not written to the `events` table. Set to `0` to store all events (the default).
 
 This is useful for workers that process millions of fast tasks where full event recording would consume excessive disk space.
 
-### `output_min_duration_ms` (default: 500)
+### `recorder.capture.min_output_duration` (default: 500ms)
 
-Controls whether `args`, `stdout`, and `stderr` are stored for a task. Tasks completing faster than this threshold have their output omitted from the event record -- the event itself is still recorded (subject to `event_min_duration_ms`), but without the potentially large output fields.
+Controls whether `args`, `stdout`, and `stderr` are stored for a task. Tasks completing faster than this threshold have their output omitted from the event record -- the event itself is still recorded (subject to `min_event_duration`), but without the potentially large output fields.
 
 Reduces storage for fast tasks where the output is uninteresting.
 
@@ -1222,8 +1224,9 @@ The minimal config for worker discovery:
 # every worker mounts the same folder; the registry keeps its cards there
 shared:
   dir: "/shared"
-# optional: set cluster_name to group workers
-cluster_name: "my-cluster"
+# optional: set a cluster name to group workers
+cluster:
+  name: "my-cluster"
 ```
 
 

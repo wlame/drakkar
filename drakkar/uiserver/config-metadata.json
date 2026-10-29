@@ -1,39 +1,313 @@
 {
   "groups": [
     {
-      "key": "root",
-      "title": "Worker identity",
-      "doc_anchor": "worker-identity",
+      "key": "worker",
+      "title": "Worker (worker:)",
+      "doc_anchor": "worker-worker",
       "entries": [
         {
-          "path": "worker_name_env",
-          "env": "DK_WORKER_NAME_ENV",
-          "description": "Environment variable that holds the worker name for logs, metrics, and UI",
-          "full_description": "Environment variable that holds the worker name for logs, metrics, and UI",
+          "path": "worker.name",
+          "env": "DK_WORKER__NAME",
+          "description": "Literal worker name.",
+          "full_description": "Literal worker name. Empty, and no value from name_env: the generated drakkar-<hex>.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "worker"
+        },
+        {
+          "path": "worker.name_env",
+          "env": "DK_WORKER__NAME_ENV",
+          "description": "Environment variable that holds the worker name; set and not empty, it wins over name.",
+          "full_description": "Environment variable that holds the worker name; set and not empty, it wins over name.",
           "type": "string",
           "default": "WORKER_ID",
           "secret": false,
-          "group": "root"
-        },
+          "group": "worker"
+        }
+      ]
+    },
+    {
+      "key": "cluster",
+      "title": "Cluster (cluster:)",
+      "doc_anchor": "cluster-cluster",
+      "entries": [
         {
-          "path": "cluster_name",
-          "env": "DK_CLUSTER_NAME",
-          "description": "Logical cluster name for grouping workers in the debug UI",
-          "full_description": "Logical cluster name for grouping workers in the debug UI",
+          "path": "cluster.name",
+          "env": "DK_CLUSTER__NAME",
+          "description": "Literal cluster name.",
+          "full_description": "Literal cluster name. Empty with autodiscover on logs one startup warning naming the scope default.",
           "type": "string",
           "default": "",
           "secret": false,
-          "group": "root"
+          "group": "cluster"
         },
         {
-          "path": "cluster_name_env",
-          "env": "DK_CLUSTER_NAME_ENV",
-          "description": "Environment variable that holds the cluster name (overrides cluster_name if set)",
-          "full_description": "Environment variable that holds the cluster name (overrides cluster_name if set)",
+          "path": "cluster.name_env",
+          "env": "DK_CLUSTER__NAME_ENV",
+          "description": "Environment variable that holds the cluster name; set and not empty, it wins over name.",
+          "full_description": "Environment variable that holds the cluster name; set and not empty, it wins over name.",
           "type": "string",
           "default": "",
           "secret": false,
-          "group": "root"
+          "group": "cluster"
+        }
+      ]
+    },
+    {
+      "key": "connections",
+      "title": "Connections (connections:)",
+      "doc_anchor": "connections-connections",
+      "entries": [
+        {
+          "path": "connections.kafka.*.brokers",
+          "env": null,
+          "description": "Kafka bootstrap servers, comma-separated.",
+          "full_description": "Kafka bootstrap servers, comma-separated.",
+          "type": "string",
+          "default": "localhost:9092",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.protocol",
+          "env": null,
+          "description": "Wire protocol.",
+          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
+          "type": "string",
+          "default": "PLAINTEXT",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_mechanism",
+          "env": null,
+          "description": "SASL mechanism.",
+          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_username",
+          "env": null,
+          "description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.sasl_password",
+          "env": null,
+          "description": "SASL password.",
+          "full_description": "SASL password. Prefer the DK_CONNECTIONS__KAFKA__<NAME>__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_ca_location",
+          "env": null,
+          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
+          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_certificate_location",
+          "env": null,
+          "description": "Path to the client certificate (PEM) for mutual TLS.",
+          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_key_location",
+          "env": null,
+          "description": "Path to the client private key (PEM) for mutual TLS.",
+          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_key_password",
+          "env": null,
+          "description": "Passphrase for an encrypted client private key.",
+          "full_description": "Passphrase for an encrypted client private key.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.security.ssl_endpoint_identification_algorithm",
+          "env": null,
+          "description": "Broker hostname verification.",
+          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.client_config",
+          "env": null,
+          "description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection.",
+          "full_description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection. Reserved keys (bootstrap.servers, group.id, enable.auto.commit, partition.assignment.strategy) are rejected at config load.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.ui_url",
+          "env": null,
+          "description": "Base URL of a Kafka-UI instance for deep links.",
+          "full_description": "Base URL of a Kafka-UI instance for deep links. Together with ui_cluster_name, renders an icon next to every partition:offset of the source topic that opens Kafka-UI filtered on that message; empty disables the links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.kafka.*.ui_cluster_name",
+          "env": null,
+          "description": "Cluster name as configured in Kafka-UI, used in the deep links.",
+          "full_description": "Cluster name as configured in Kafka-UI, used in the deep links. Both this and ui_url must be set for the links to appear.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.dsn",
+          "env": null,
+          "description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "full_description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.schema",
+          "env": null,
+          "description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
+          "full_description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.manage_schema",
+          "env": null,
+          "description": "Create the schema and the tables Drakkar keeps when they are missing.",
+          "full_description": "Create the schema and the tables Drakkar keeps when they are missing. Off, they must already exist.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_min",
+          "env": null,
+          "description": "Minimum connections in the pool of the autodiscovery registry and election.",
+          "full_description": "Minimum connections in the pool of the autodiscovery registry and election.",
+          "type": "integer",
+          "default": 1,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.postgres.*.pool_max",
+          "env": null,
+          "description": "Maximum connections in the pool of the autodiscovery registry and election.",
+          "full_description": "Maximum connections in the pool of the autodiscovery registry and election. Must be >= pool_min.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.url",
+          "env": null,
+          "description": "Redis connection URL, typically embedding the password.",
+          "full_description": "Redis connection URL, typically embedding the password.",
+          "type": "string",
+          "default": "redis://localhost:6379/0",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.redis.*.state_prefix",
+          "env": null,
+          "description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\".",
+          "full_description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\". May be empty.",
+          "type": "string",
+          "default": "drakkar:",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.mongo.*.uri",
+          "env": null,
+          "description": "MongoDB connection string, typically embedding user and password.",
+          "full_description": "MongoDB connection string, typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.address",
+          "env": null,
+          "description": "Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional path; no user info, query or fragment.",
+          "full_description": "Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional path; no user info, query or fragment.",
+          "type": "string",
+          "default": "http://127.0.0.1:8500",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.token",
+          "env": null,
+          "description": "ACL token sent with every request.",
+          "full_description": "ACL token sent with every request. Empty means no token.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.datacenter",
+          "env": null,
+          "description": "Consul datacenter to address: letters, digits, \"_\", \".\" and \"-\".",
+          "full_description": "Consul datacenter to address: letters, digits, \"_\", \".\" and \"-\". Empty means the datacenter of the agent.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "connections"
+        },
+        {
+          "path": "connections.consul.*.state_prefix",
+          "env": null,
+          "description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
+          "full_description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "connections"
         }
       ]
     },
@@ -326,32 +600,32 @@
           "group": "executor"
         },
         {
-          "path": "executor.task_timeout_seconds",
-          "env": "DK_EXECUTOR__TASK_TIMEOUT_SECONDS",
-          "description": "Wall-clock timeout (seconds) per subprocess.",
-          "full_description": "Wall-clock timeout (seconds) per subprocess. A process exceeding it is killed and treated as a failure.",
-          "type": "integer",
-          "default": 120,
+          "path": "executor.task_timeout",
+          "env": "DK_EXECUTOR__TASK_TIMEOUT",
+          "description": "Wall-clock time limit per subprocess, a whole number of seconds.",
+          "full_description": "Wall-clock time limit per subprocess, a whole number of seconds. A process exceeding it is killed and treated as a failure.",
+          "type": "duration",
+          "default": "2m",
           "secret": false,
           "group": "executor"
         },
         {
-          "path": "executor.max_stdout_bytes",
-          "env": "DK_EXECUTOR__MAX_STDOUT_BYTES",
-          "description": "Maximum bytes of stdout retained per task.",
-          "full_description": "Maximum bytes of stdout retained per task. 0 (the default) = unlimited. When a process writes more, the retained prefix is cut at a UTF-8 character boundary, the rest is read and discarded (the process is never blocked on a full pipe), and ExecutorResult.stdout_truncated is set. Useful when subprocesses can emit very large output.",
-          "type": "integer",
-          "default": 0,
+          "path": "executor.max_stdout",
+          "env": "DK_EXECUTOR__MAX_STDOUT",
+          "description": "Most stdout kept per task.",
+          "full_description": "Most stdout kept per task. 0 (the default) = no limit. When a process writes more, the kept prefix is cut at a UTF-8 character boundary, the rest is read and discarded (the process is never blocked on a full pipe), and ExecutorResult.stdout_truncated is set. Useful when subprocesses can emit very large output.",
+          "type": "size",
+          "default": "0",
           "secret": false,
           "group": "executor"
         },
         {
-          "path": "executor.max_stderr_bytes",
-          "env": "DK_EXECUTOR__MAX_STDERR_BYTES",
-          "description": "Maximum bytes of stderr retained per task.",
-          "full_description": "Maximum bytes of stderr retained per task. 0 (the default) = unlimited. Same semantics as max_stdout_bytes, applied to the stderr stream; sets ExecutorResult.stderr_truncated on cut.",
-          "type": "integer",
-          "default": 0,
+          "path": "executor.max_stderr",
+          "env": "DK_EXECUTOR__MAX_STDERR",
+          "description": "Most stderr kept per task.",
+          "full_description": "Most stderr kept per task. 0 (the default) = no limit. Same semantics as max_stdout, applied to the stderr stream; sets ExecutorResult.stderr_truncated on cut.",
+          "type": "size",
+          "default": "0",
           "secret": false,
           "group": "executor"
         },
@@ -386,12 +660,12 @@
           "group": "executor"
         },
         {
-          "path": "executor.drain_timeout_seconds",
-          "env": "DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS",
-          "description": "Maximum seconds to wait for in-flight executor tasks to finish during graceful shutdown or partition revocation.",
-          "full_description": "Maximum seconds to wait for in-flight executor tasks to finish during graceful shutdown or partition revocation. Set lower to speed up shutdown; set at least as high as task_timeout_seconds if you rely on clean final commits for every in-flight task. When drain times out, the still-running tasks are cancelled — their subprocess process group is killed so the executor slot is freed at once — and their offsets are NOT committed (those messages will replay on restart — at-least-once).",
-          "type": "integer",
-          "default": 30,
+          "path": "executor.drain_timeout",
+          "env": "DK_EXECUTOR__DRAIN_TIMEOUT",
+          "description": "Longest wait for in-flight executor tasks to finish during graceful shutdown or partition revocation, a whole number of seconds.",
+          "full_description": "Longest wait for in-flight executor tasks to finish during graceful shutdown or partition revocation, a whole number of seconds. Set lower to speed up shutdown; set at least as high as task_timeout if you rely on clean final commits for every in-flight task. When drain times out, the still-running tasks are cancelled — their subprocess process group is killed so the executor slot is freed at once — and their offsets are NOT committed (those messages will replay on restart — at-least-once).",
+          "type": "duration",
+          "default": "30s",
           "secret": false,
           "group": "executor"
         },
@@ -414,6 +688,33 @@
           "default": 4,
           "secret": false,
           "group": "executor"
+        }
+      ]
+    },
+    {
+      "key": "threads",
+      "title": "Thread pools (threads:)",
+      "doc_anchor": "thread-pools-threads",
+      "entries": [
+        {
+          "path": "threads.io",
+          "env": "DK_THREADS__IO",
+          "description": "Worker threads in asyncio's default to_thread executor, from 1 to 512.",
+          "full_description": "Worker threads in asyncio's default to_thread executor, from 1 to 512. Null (the default) keeps Python's own sizing, min(32, cpu_count + 4). Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here (unlike threads.offload); the trade-off is pressure on the storage behind the calls.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "threads"
+        },
+        {
+          "path": "threads.offload",
+          "env": "DK_THREADS__OFFLOAD",
+          "description": "Worker threads in the shared offload pool, from 1 to 32.",
+          "full_description": "Worker threads in the shared offload pool, from 1 to 32. Null (the default) sizes the pool from the executor pool: ceil(executor.max_executors / 4), with a minimum of 2 — e.g. pool 8 -> 2 threads, 9 -> 3, 13 -> 4. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the drakkar_offload_queued gauge. More threads do not speed up pure-Python work (GIL); set an explicit value only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions).",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "threads"
         }
       ]
     },
@@ -823,6 +1124,106 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.redis.*.on_failure",
+          "env": null,
+          "description": "This sink's on_failure.",
+          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.max_retries",
+          "env": null,
+          "description": "This sink's max_retries, a whole number from 0 to 10.",
+          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.delivery_timeout",
+          "env": null,
+          "description": "This sink's delivery_timeout.",
+          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.breaker_failures",
+          "env": null,
+          "description": "This sink's breaker_failures.",
+          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
+          "type": "integer",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.breaker_cooldown",
+          "env": null,
+          "description": "This sink's breaker_cooldown.",
+          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.depends_on",
+          "env": null,
+          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'.",
+          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. Checked at load: every reference exists, no self-reference, no cycle.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.connection",
+          "env": null,
+          "description": "The server: a name under connections.redis.",
+          "full_description": "The server: a name under connections.redis.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.key_prefix",
+          "env": null,
+          "description": "Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
+          "full_description": "Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.scripts",
+          "env": null,
+          "description": "Operator-authored Lua keyed by name.",
+          "full_description": "Operator-authored Lua keyed by name. A RedisPayload with op='script' and a matching `script` name runs the entry with its `keys` and `args` passed as KEYS and ARGV. This is the escape hatch for multi-step or conditional logic, and the only way to get server-side atomicity — a pipeline is not a transaction. Parameters are never interpolated into the body, so message content cannot alter what runs.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.ui_url",
+          "env": null,
+          "description": "URL to a Redis management UI (e.g. RedisInsight), shown as a link in the operator UI.",
+          "full_description": "URL to a Redis management UI (e.g. RedisInsight), shown as a link in the operator UI.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.http.*.on_failure",
           "env": null,
           "description": "This sink's on_failure.",
@@ -937,106 +1338,6 @@
           "env": null,
           "description": "URL to a related web UI, shown as a link in the operator UI.",
           "full_description": "URL to a related web UI, shown as a link in the operator UI.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.on_failure",
-          "env": null,
-          "description": "This sink's on_failure.",
-          "full_description": "This sink's on_failure. Not given: sinks.defaults.on_failure.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.max_retries",
-          "env": null,
-          "description": "This sink's max_retries, a whole number from 0 to 10.",
-          "full_description": "This sink's max_retries, a whole number from 0 to 10. Not given: sinks.defaults.max_retries.",
-          "type": "integer",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.delivery_timeout",
-          "env": null,
-          "description": "This sink's delivery_timeout.",
-          "full_description": "This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
-          "type": "duration",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.breaker_failures",
-          "env": null,
-          "description": "This sink's breaker_failures.",
-          "full_description": "This sink's breaker_failures. Not given: sinks.defaults.breaker_failures.",
-          "type": "integer",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.breaker_cooldown",
-          "env": null,
-          "description": "This sink's breaker_cooldown.",
-          "full_description": "This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
-          "type": "duration",
-          "default": null,
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.depends_on",
-          "env": null,
-          "description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'.",
-          "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. Checked at load: every reference exists, no self-reference, no cycle.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.connection",
-          "env": null,
-          "description": "The server: a name under connections.redis.",
-          "full_description": "The server: a name under connections.redis.",
-          "type": "string",
-          "default": "main",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.key_prefix",
-          "env": null,
-          "description": "Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
-          "full_description": "Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.scripts",
-          "env": null,
-          "description": "Operator-authored Lua keyed by name.",
-          "full_description": "Operator-authored Lua keyed by name. A RedisPayload with op='script' and a matching `script` name runs the entry with its `keys` and `args` passed as KEYS and ARGV. This is the escape hatch for multi-step or conditional logic, and the only way to get server-side atomicity — a pipeline is not a transaction. Parameters are never interpolated into the body, so message content cannot alter what runs.",
-          "type": "object",
-          "default": {},
-          "secret": false,
-          "group": "sinks"
-        },
-        {
-          "path": "sinks.redis.*.ui_url",
-          "env": null,
-          "description": "URL to a Redis management UI (e.g. RedisInsight), shown as a link in the operator UI.",
-          "full_description": "URL to a Redis management UI (e.g. RedisInsight), shown as a link in the operator UI.",
           "type": "string",
           "default": "",
           "secret": false,
@@ -1198,747 +1499,6 @@
           "default": "drop",
           "secret": false,
           "group": "dlq"
-        }
-      ]
-    },
-    {
-      "key": "metrics",
-      "title": "Metrics (metrics:)",
-      "doc_anchor": "metrics-metrics",
-      "entries": [
-        {
-          "path": "metrics.enabled",
-          "env": "DK_METRICS__ENABLED",
-          "description": "Serve Prometheus metrics over HTTP.",
-          "full_description": "Serve Prometheus metrics over HTTP.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "metrics"
-        },
-        {
-          "path": "metrics.port",
-          "env": "DK_METRICS__PORT",
-          "description": "Port for the Prometheus metrics endpoint.",
-          "full_description": "Port for the Prometheus metrics endpoint.",
-          "type": "integer",
-          "default": 9090,
-          "secret": false,
-          "group": "metrics"
-        },
-        {
-          "path": "metrics.task_label_histograms",
-          "env": "DK_METRICS__TASK_LABEL_HISTOGRAMS",
-          "description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label).",
-          "full_description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label). Values that do not parse as finite numbers are skipped.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "metrics"
-        }
-      ]
-    },
-    {
-      "key": "runtime_health",
-      "title": "Runtime health (runtime_health:)",
-      "doc_anchor": "runtime-health-runtime-health",
-      "entries": [
-        {
-          "path": "runtime_health.enabled",
-          "env": "DK_RUNTIME_HEALTH__ENABLED",
-          "description": "Run the runtime health monitor: heartbeat lag tracking, stall stack sampling, and the data behind the debug UI's Runtime tab.",
-          "full_description": "Run the runtime health monitor: heartbeat lag tracking, stall stack sampling, and the data behind the debug UI's Runtime tab.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.tick_seconds",
-          "env": "DK_RUNTIME_HEALTH__TICK_SECONDS",
-          "description": "Heartbeat interval.",
-          "full_description": "Heartbeat interval. Lag is measured as how late each tick fires; the sampler thread also checks heartbeat age at this interval. Smaller values narrow the attribution blind spot for short blocks at slightly more (still negligible) wakeups.",
-          "type": "number",
-          "default": 0.25,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.warn_lag_seconds",
-          "env": "DK_RUNTIME_HEALTH__WARN_LAG_SECONDS",
-          "description": "Lag above this marks the runtime 'degraded'.",
-          "full_description": "Lag above this marks the runtime 'degraded'. Recovery to 'healthy' needs several consecutive clean ticks (hysteresis), so a flapping loop does not spam state transitions.",
-          "type": "number",
-          "default": 0.1,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.stall_seconds",
-          "env": "DK_RUNTIME_HEALTH__STALL_SECONDS",
-          "description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes.",
-          "full_description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes. Each stall becomes one runtime_stall recorder event with the stacks.",
-          "type": "number",
-          "default": 1.0,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.max_stall_stacks",
-          "env": "DK_RUNTIME_HEALTH__MAX_STALL_STACKS",
-          "description": "Maximum distinct stack traces captured per stall.",
-          "full_description": "Maximum distinct stack traces captured per stall. Repeated samples of the same location collapse into one entry with a count; further distinct stacks past the cap are dropped.",
-          "type": "integer",
-          "default": 10,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.sample_interval_seconds",
-          "env": "DK_RUNTIME_HEALTH__SAMPLE_INTERVAL_SECONDS",
-          "description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history.",
-          "full_description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history. The fine-grained lag sparkline comes from an in-memory ring buffer instead and costs no database writes.",
-          "type": "number",
-          "default": 10.0,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.history_window_seconds",
-          "env": "DK_RUNTIME_HEALTH__HISTORY_WINDOW_SECONDS",
-          "description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline.",
-          "full_description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline.",
-          "type": "integer",
-          "default": 900,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.episode_max_seconds",
-          "env": "DK_RUNTIME_HEALTH__EPISODE_MAX_SECONDS",
-          "description": "Maximum length of one lag episode.",
-          "full_description": "Maximum length of one lag episode. An episode spans the time the runtime is degraded or stalled; on recovery (or at this cap, for incidents that outlive it) the monitor writes one runtime_lag_episode event with aggregated stacks and a verdict — blocked, cpu_bound, starved, or inconclusive.",
-          "type": "number",
-          "default": 300.0,
-          "secret": false,
-          "group": "runtime_health"
-        },
-        {
-          "path": "runtime_health.probe_interval_seconds",
-          "env": "DK_RUNTIME_HEALTH__PROBE_INTERVAL_SECONDS",
-          "description": "Opt-in flight-recorder profiler: when above 0, the sampler thread records a runtime_probe event with the runtime thread's stack every interval, regardless of health state.",
-          "full_description": "Opt-in flight-recorder profiler: when above 0, the sampler thread records a runtime_probe event with the runtime thread's stack every interval, regardless of health state. Useful for tuning production workloads and post-incident analysis; 0 (the default) disables it because it writes events for as long as the worker runs.",
-          "type": "number",
-          "default": 0.0,
-          "secret": false,
-          "group": "runtime_health"
-        }
-      ]
-    },
-    {
-      "key": "io",
-      "title": "Blocking I/O pool (io:)",
-      "doc_anchor": "blocking-i-o-pool-io",
-      "entries": [
-        {
-          "path": "io.max_threads",
-          "env": "DK_IO__MAX_THREADS",
-          "description": "Worker threads in asyncio's default to_thread executor.",
-          "full_description": "Worker threads in asyncio's default to_thread executor. 0 (the default) keeps Python's own sizing, min(32, cpu_count + 4). Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here (unlike offload.max_threads); the trade-off is pressure on the storage behind the calls.",
-          "type": "integer",
-          "default": 0,
-          "secret": false,
-          "group": "io"
-        }
-      ]
-    },
-    {
-      "key": "offload",
-      "title": "Offload pool (offload:)",
-      "doc_anchor": "offload-pool-offload",
-      "entries": [
-        {
-          "path": "offload.max_threads",
-          "env": "DK_OFFLOAD__MAX_THREADS",
-          "description": "Worker threads in the shared offload pool.",
-          "full_description": "Worker threads in the shared offload pool. 0 (the default) sizes the pool automatically from the executor pool: ceil(executor.max_executors / 4), with a minimum of 2 — e.g. pool 8 -> 2 threads, 9 -> 3, 13 -> 4. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the drakkar_offload_queued gauge. More threads do not speed up pure-Python work (GIL); set an explicit value only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions).",
-          "type": "integer",
-          "default": 0,
-          "secret": false,
-          "group": "offload"
-        }
-      ]
-    },
-    {
-      "key": "logging",
-      "title": "Logging (logging:)",
-      "doc_anchor": "logging-logging",
-      "entries": [
-        {
-          "path": "logging.level",
-          "env": "DK_LOGGING__LEVEL",
-          "description": "Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL.",
-          "full_description": "Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL.",
-          "type": "string",
-          "default": "INFO",
-          "secret": false,
-          "group": "logging"
-        },
-        {
-          "path": "logging.format",
-          "env": "DK_LOGGING__FORMAT",
-          "description": "Output format.",
-          "full_description": "Output format. 'json' produces machine-readable structured logs; 'console' produces colorized human-readable output for local development.",
-          "type": "string",
-          "default": "json",
-          "secret": false,
-          "group": "logging"
-        },
-        {
-          "path": "logging.output",
-          "env": "DK_LOGGING__OUTPUT",
-          "description": "Log output destination.",
-          "full_description": "Log output destination. \"stderr\" (default) or \"stdout\" for standard streams, or a file path for file output. File paths support template variables: {worker_id}, {cluster_name}. Example: \"/var/log/drakkar/{worker_id}.log\"",
-          "type": "string",
-          "default": "stderr",
-          "secret": false,
-          "group": "logging"
-        }
-      ]
-    },
-    {
-      "key": "api",
-      "title": "API (api:)",
-      "doc_anchor": "api-api",
-      "entries": [
-        {
-          "path": "api.enabled",
-          "env": "DK_API__ENABLED",
-          "description": "Run the HTTP server: /healthz, /readyz and the peer route.",
-          "full_description": "Run the HTTP server: /healthz, /readyz and the peer route. Off means no listener at all, so nothing answers the Kubernetes probes, and ui.enabled and autodiscover.enabled must both be false.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "api"
-        },
-        {
-          "path": "api.host",
-          "env": "DK_API__HOST",
-          "description": "Bind address for the HTTP server.",
-          "full_description": "Bind address for the HTTP server. Use 0.0.0.0 to expose on all interfaces.",
-          "type": "string",
-          "default": "127.0.0.1",
-          "secret": false,
-          "group": "api"
-        },
-        {
-          "path": "api.port",
-          "env": "DK_API__PORT",
-          "description": "Port for the HTTP server.",
-          "full_description": "Port for the HTTP server.",
-          "type": "integer",
-          "default": 8080,
-          "secret": false,
-          "group": "api"
-        },
-        {
-          "path": "api.public_url",
-          "env": "DK_API__PUBLIC_URL",
-          "description": "Externally reachable URL of this worker's HTTP server.",
-          "full_description": "Externally reachable URL of this worker's HTTP server. Peers and browsers reach the worker through it, and the registry card carries it. Empty derives http://<outbound ip>:<port>/.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "api"
-        }
-      ]
-    },
-    {
-      "key": "ui",
-      "title": "UI (ui:)",
-      "doc_anchor": "ui-ui",
-      "entries": [
-        {
-          "path": "ui.enabled",
-          "env": "DK_UI__ENABLED",
-          "description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs.",
-          "full_description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs. It needs api.enabled. Off: those routes answer 404, no bundle is fetched, and the recorder keeps no memory store.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.auth_token",
-          "env": "DK_UI__AUTH_TOKEN",
-          "description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs).",
-          "full_description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs). This is a deliberate opt-in design: no endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended for deployment inside a private contour (VPC / internal cluster / operator-only ingress). Most endpoints are read-only, but the probe and merge routes are not — close those with ``probe.enabled`` / ``merge_enabled``, which act independently of this token. A startup warning fires whenever the UI is enabled without a token so the unauthenticated posture is visible in logs, naming whichever side-effecting endpoint is still enabled. When set to a non-empty value, protected HTTP endpoints require an ``Authorization: Bearer <token>`` header or ``?token=<token>`` query parameter; WebSocket connections without a valid token are closed with code 4401, and the Origin header is validated against ``allowed_origins`` (or the request Host header if that list is empty). /healthz, /readyz and the peer route stay public. Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. Trailing/leading whitespace is stripped on load to avoid silent mismatches when YAML accidentally quotes spaces.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "ui"
-        },
-        {
-          "path": "ui.allowed_origins",
-          "env": "DK_UI__ALLOWED_ORIGINS",
-          "description": "Explicit allowlist of browser origins for /ws and the fan-out reads.",
-          "full_description": "Explicit allowlist of browser origins for /ws and the fan-out reads. A non-empty list is strict: nothing outside it connects, token or not. Empty list with a token set means same-origin only. Empty list with no token allows the cross-origin handshakes the cluster view needs but rejects a page that is not itself on loopback asking for a worker that is — a peer worker is never at the browser own loopback address, only a web page reaching into the machine is. A missing Origin header (curl, websocat) is always accepted; a browser cannot omit it.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.merge_enabled",
-          "env": "DK_UI__MERGE_ENABLED",
-          "description": "Serve ``POST /api/v1/debug/merge``.",
-          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of the shared folder, kept for ``recorder.archive.merged_retention``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.kafka_read_enabled",
-          "env": "DK_UI__KAFKA_READ_ENABLED",
-          "description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic).",
-          "full_description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic). Reads use assign()-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``. When the resolved Kafka security of any readable topic is not PLAINTEXT while ``auth_token`` is empty, startup logs a warning naming the exposed aliases (the API stays available — gate it with ``auth_token`` or close it here).",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.max_rows",
-          "env": "DK_UI__MAX_ROWS",
-          "description": "Maximum rows returned to the web UI in list views.",
-          "full_description": "Maximum rows returned to the web UI in list views.",
-          "type": "integer",
-          "default": 5000,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.log_min_duration_ms",
-          "env": "DK_UI__LOG_MIN_DURATION_MS",
-          "description": "Minimum task duration (ms) to emit a slow_task_completed / slow_task_failed log line.",
-          "full_description": "Minimum task duration (ms) to emit a slow_task_completed / slow_task_failed log line. 0 logs all tasks.",
-          "type": "integer",
-          "default": 500,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.ws_min_duration_ms",
-          "env": "DK_UI__WS_MIN_DURATION_MS",
-          "description": "Minimum task duration (ms) to broadcast to the live UI over WebSocket.",
-          "full_description": "Minimum task duration (ms) to broadcast to the live UI over WebSocket. Failed tasks always appear. 0 shows all tasks.",
-          "type": "integer",
-          "default": 500,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.custom_links",
-          "env": "DK_UI__CUSTOM_LINKS",
-          "description": "Custom links shown in the dashboard navigation.",
-          "full_description": "Custom links shown in the dashboard navigation. Each entry is a dict with name and url keys; url supports the {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.link_bases",
-          "env": "DK_UI__LINK_BASES",
-          "description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``.",
-          "full_description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``. A template such as ``{jira}/browse/{value}`` resolves ``{jira}`` from this map, so code declares the link shape once and each environment supplies its own hosts. A base referenced by a registered layout but missing here logs one startup warning and the UI renders plain text for it.",
-          "type": "object",
-          "default": {},
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.custom_renderers_path",
-          "env": "DK_UI__CUSTOM_RENDERERS_PATH",
-          "description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``.",
-          "full_description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``. Empty (the default) disables the feature — the route then 404s and identity reports ``custom_renderers: false``. When set, the file must exist at startup or the worker fails to boot; its content is trusted the same as any other backend config (it runs same-origin in the operator UI).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.consume_pause.enabled",
-          "env": "DK_UI__CONSUME_PAUSE__ENABLED",
-          "description": "Serve the consume-pause API (``/api/v1/debug/consume-pause``) and show the pause control on the Live page.",
-          "full_description": "Serve the consume-pause API (``/api/v1/debug/consume-pause``) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments.",
-          "type": "boolean",
-          "default": false,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.consume_pause.durations_seconds",
-          "env": "DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS",
-          "description": "Preset pause durations (seconds) offered as one-click buttons on the Live page.",
-          "full_description": "Preset pause durations (seconds) offered as one-click buttons on the Live page. The API itself accepts any duration between 1 and 3600 seconds regardless of the presets.",
-          "type": "array",
-          "default": [
-            15,
-            60,
-            300,
-            900
-          ],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus.url",
-          "env": "DK_UI__PROMETHEUS__URL",
-          "description": "Base URL of the Prometheus server used for UI links.",
-          "full_description": "Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus.rate_interval",
-          "env": "DK_UI__PROMETHEUS__RATE_INTERVAL",
-          "description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
-          "full_description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
-          "type": "string",
-          "default": "5m",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus.worker_label",
-          "env": "DK_UI__PROMETHEUS__WORKER_LABEL",
-          "description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
-          "full_description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables. Empty defaults to instance=\"{hostname}:{metrics_port}\".",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.prometheus.cluster_label",
-          "env": "DK_UI__PROMETHEUS__CLUSTER_LABEL",
-          "description": "PromQL label filter for cluster-wide queries, same template variables as worker_label.",
-          "full_description": "PromQL label filter for cluster-wide queries, same template variables as worker_label. Empty hides cluster-wide links.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.release.enabled",
-          "env": "DK_UI__RELEASE__ENABLED",
-          "description": "Resolve and serve the drakkar-ui bundle.",
-          "full_description": "Resolve and serve the drakkar-ui bundle. Off means no UI at all (no fetch, no cache read): the JSON API, the health probes and the event WebSocket keep working, and page requests answer 503.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.release.repo",
-          "env": "DK_UI__RELEASE__REPO",
-          "description": "The \"owner/name\" GitHub repo that publishes UI bundles.",
-          "full_description": "The \"owner/name\" GitHub repo that publishes UI bundles. Empty disables fetching — only an already-cached bundle is served, which is how an air-gapped deployment pins itself to a bundle staged with the drakkar-ui CLI.",
-          "type": "string",
-          "default": "wlame/drakkar-ui",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.release.pinned_version",
-          "env": "DK_UI__RELEASE__PINNED_VERSION",
-          "description": "Known-good UI release tag this backend is built against (e.g. \"v1.2.0\"); the contract is API-major compatible.",
-          "full_description": "Known-good UI release tag this backend is built against (e.g. \"v1.2.0\"); the contract is API-major compatible. Empty means \"no pinned version\".",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.release.cache_dir",
-          "env": "DK_UI__RELEASE__CACHE_DIR",
-          "description": "Bundle cache root override.",
-          "full_description": "Bundle cache root override. Empty uses the per-user cache dir ($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui — the conventional per-user cache location, so co-located workers share one cache).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.release.check_update",
-          "env": "DK_UI__RELEASE__CHECK_UPDATE",
-          "description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle).",
-          "full_description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle). Already-cached versions are never re-downloaded — release tags are immutable.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.probe.enabled",
-          "env": "DK_UI__PROBE__ENABLED",
-          "description": "Serve ``POST /api/v1/debug/probe``.",
-          "full_description": "Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it is neither read-only nor free: it competes with production traffic for executor slots. Set to false to serve 403 instead, whatever ``auth_token`` says: a deployment that cannot set a token can still close the endpoint, and a deployment that has one can still close it as defence in depth. Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behaviour.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.probe.max_writes",
-          "env": "DK_UI__PROBE__MAX_WRITES",
-          "description": "Maximum probe.set/append/update calls recorded per probe run.",
-          "full_description": "Maximum probe.set/append/update calls recorded per probe run. The first write past the cap records one ProbeError; further writes are dropped silently.",
-          "type": "integer",
-          "default": 10000,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.probe.max_total_size",
-          "env": "DK_UI__PROBE__MAX_TOTAL_SIZE",
-          "description": "Maximum total serialized size of all probe-details writes per probe run.",
-          "full_description": "Maximum total serialized size of all probe-details writes per probe run. Past it, writes are dropped like the max_writes cap.",
-          "type": "size",
-          "default": "5MB",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.history_factor",
-          "env": "DK_UI__TIMELINE__HISTORY_FACTOR",
-          "description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
-          "full_description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
-          "type": "integer",
-          "default": 100,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.max_age_minutes",
-          "env": "DK_UI__TIMELINE__MAX_AGE_MINUTES",
-          "description": "Oldest task age the timeline shows, in minutes.",
-          "full_description": "Oldest task age the timeline shows, in minutes.",
-          "type": "integer",
-          "default": 60,
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.color_rules",
-          "env": "DK_UI__TIMELINE__COLOR_RULES",
-          "description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
-          "full_description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.labels.tag",
-          "env": "DK_UI__TIMELINE__LABELS__TAG",
-          "description": "Label whose value draws as a short chip at the task bar's right edge (truncated to 16 chars).",
-          "full_description": "Label whose value draws as a short chip at the task bar's right edge (truncated to 16 chars).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.labels.caption",
-          "env": "DK_UI__TIMELINE__LABELS__CAPTION",
-          "description": "Label whose value draws at the task bar's left edge, in the space the tag leaves over (truncated to 32 chars).",
-          "full_description": "Label whose value draws at the task bar's left edge, in the space the tag leaves over (truncated to 32 chars).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.labels.highlight",
-          "env": "DK_UI__TIMELINE__LABELS__HIGHLIGHT",
-          "description": "Numeric label bound to the toolbar threshold input: tasks at or above the typed value are emphasized, the rest dimmed.",
-          "full_description": "Numeric label bound to the toolbar threshold input: tasks at or above the typed value are emphasized, the rest dimmed.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.labels.filter",
-          "env": "DK_UI__TIMELINE__LABELS__FILTER",
-          "description": "String label bound to the toolbar text input: tasks whose value contains the typed text are emphasized, the rest dimmed.",
-          "full_description": "String label bound to the toolbar text input: tasks whose value contains the typed text are emphasized, the rest dimmed.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.labels.marker",
-          "env": "DK_UI__TIMELINE__LABELS__MARKER",
-          "description": "Label that draws one vertical pin above the strip per distinct value — e.g. a batch or request id.",
-          "full_description": "Label that draws one vertical pin above the strip per distinct value — e.g. a batch or request id.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.timeline.events",
-          "env": "DK_UI__TIMELINE__EVENTS",
-          "description": "Declared custom timeline event types drawn as markers, ranges, or flag pins on the live timeline.",
-          "full_description": "Declared custom timeline event types drawn as markers, ranges, or flag pins on the live timeline.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.docs.site_dir",
-          "env": "DK_UI__DOCS__SITE_DIR",
-          "description": "Directory of a prebuilt static docs site served at /docs/.",
-          "full_description": "Directory of a prebuilt static docs site served at /docs/. Empty disables the feature.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.docs.title",
-          "env": "DK_UI__DOCS__TITLE",
-          "description": "Nav-entry label and default drawer heading in the UI.",
-          "full_description": "Nav-entry label and default drawer heading in the UI.",
-          "type": "string",
-          "default": "Docs",
-          "secret": false,
-          "group": "ui"
-        },
-        {
-          "path": "ui.docs.anchors",
-          "env": "DK_UI__DOCS__ANCHORS",
-          "description": "Contextual anchors opening the named docs page from matching UI surfaces.",
-          "full_description": "Contextual anchors opening the named docs page from matching UI surfaces.",
-          "type": "array",
-          "default": [],
-          "secret": false,
-          "group": "ui"
-        }
-      ]
-    },
-    {
-      "key": "cache",
-      "title": "Cache (cache:)",
-      "doc_anchor": "cache-cache",
-      "entries": [
-        {
-          "path": "cache.enabled",
-          "env": "DK_CACHE__ENABLED",
-          "description": "Give every handler a self.cache key/value store, memory-backed with write-behind SQLite.",
-          "full_description": "Give every handler a self.cache key/value store, memory-backed with write-behind SQLite. Off, the handler cache API is absent.",
-          "type": "boolean",
-          "default": false,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.flush_interval_seconds",
-          "env": "DK_CACHE__FLUSH_INTERVAL_SECONDS",
-          "description": "Seconds between write-behind flushes of dirty entries to SQLite.",
-          "full_description": "Seconds between write-behind flushes of dirty entries to SQLite.",
-          "type": "number",
-          "default": 3.0,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.cleanup_interval_seconds",
-          "env": "DK_CACHE__CLEANUP_INTERVAL_SECONDS",
-          "description": "Seconds between cleanup passes deleting expired rows and refreshing DB-size gauges.",
-          "full_description": "Seconds between cleanup passes deleting expired rows and refreshing DB-size gauges.",
-          "type": "number",
-          "default": 60.0,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.max_memory_entries",
-          "env": "DK_CACHE__MAX_MEMORY_ENTRIES",
-          "description": "Cap for in-memory LRU entries.",
-          "full_description": "Cap for in-memory LRU entries. Default 10_000 prevents unbounded growth under write-heavy workloads. Set to None for explicitly unbounded cache.",
-          "type": "integer",
-          "default": 10000,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.enabled",
-          "env": "DK_CACHE__EXCHANGE__ENABLED",
-          "description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing.",
-          "full_description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing. Off, flush and cleanup still run but nothing propagates across workers.",
-          "type": "boolean",
-          "default": true,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.interval_seconds",
-          "env": "DK_CACHE__EXCHANGE__INTERVAL_SECONDS",
-          "description": "Seconds between exchange cycles.",
-          "full_description": "Seconds between exchange cycles.",
-          "type": "number",
-          "default": 30.0,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.page_size",
-          "env": "DK_CACHE__EXCHANGE__PAGE_SIZE",
-          "description": "Maximum rows in one page pulled from a peer.",
-          "full_description": "Maximum rows in one page pulled from a peer.",
-          "type": "integer",
-          "default": 500,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.timeout_seconds",
-          "env": "DK_CACHE__EXCHANGE__TIMEOUT_SECONDS",
-          "description": "Time limit for one request to a peer.",
-          "full_description": "Time limit for one request to a peer.",
-          "type": "number",
-          "default": 5.0,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.cycle_deadline_seconds",
-          "env": "DK_CACHE__EXCHANGE__CYCLE_DEADLINE_SECONDS",
-          "description": "Hard time limit for one exchange cycle.",
-          "full_description": "Hard time limit for one exchange cycle. Empty means 0.9 x interval_seconds.",
-          "type": "number",
-          "default": null,
-          "secret": false,
-          "group": "cache"
-        },
-        {
-          "path": "cache.exchange.max_concurrent_peers",
-          "env": "DK_CACHE__EXCHANGE__MAX_CONCURRENT_PEERS",
-          "description": "Peers pulled from in parallel.",
-          "full_description": "Peers pulled from in parallel.",
-          "type": "integer",
-          "default": 4,
-          "secret": false,
-          "group": "cache"
         }
       ]
     },
@@ -2457,6 +2017,113 @@
       ]
     },
     {
+      "key": "cache",
+      "title": "Cache (cache:)",
+      "doc_anchor": "cache-cache",
+      "entries": [
+        {
+          "path": "cache.enabled",
+          "env": "DK_CACHE__ENABLED",
+          "description": "Give every handler a self.cache key/value store, memory-backed with write-behind SQLite.",
+          "full_description": "Give every handler a self.cache key/value store, memory-backed with write-behind SQLite. Off, the handler cache API is absent.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.flush_interval",
+          "env": "DK_CACHE__FLUSH_INTERVAL",
+          "description": "Time between write-behind flushes of dirty entries to SQLite.",
+          "full_description": "Time between write-behind flushes of dirty entries to SQLite.",
+          "type": "duration",
+          "default": "3s",
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.cleanup_interval",
+          "env": "DK_CACHE__CLEANUP_INTERVAL",
+          "description": "Time between cleanup passes deleting expired rows and refreshing DB-size gauges.",
+          "full_description": "Time between cleanup passes deleting expired rows and refreshing DB-size gauges.",
+          "type": "duration",
+          "default": "1m",
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.max_memory_entries",
+          "env": "DK_CACHE__MAX_MEMORY_ENTRIES",
+          "description": "Cap for in-memory LRU entries.",
+          "full_description": "Cap for in-memory LRU entries. Default 10_000 prevents unbounded growth under write-heavy workloads. 0 = no cap, with a startup warning.",
+          "type": "integer",
+          "default": 10000,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.enabled",
+          "env": "DK_CACHE__EXCHANGE__ENABLED",
+          "description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing.",
+          "full_description": "Pull cluster and global cache rows from peers; the peers come from autodiscover, so with autodiscover off this does nothing. Off, flush and cleanup still run but nothing propagates across workers.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.interval",
+          "env": "DK_CACHE__EXCHANGE__INTERVAL",
+          "description": "Time between exchange cycles.",
+          "full_description": "Time between exchange cycles.",
+          "type": "duration",
+          "default": "30s",
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.page_size",
+          "env": "DK_CACHE__EXCHANGE__PAGE_SIZE",
+          "description": "Maximum rows in one page pulled from a peer.",
+          "full_description": "Maximum rows in one page pulled from a peer.",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.timeout",
+          "env": "DK_CACHE__EXCHANGE__TIMEOUT",
+          "description": "Time limit for one request to a peer.",
+          "full_description": "Time limit for one request to a peer.",
+          "type": "duration",
+          "default": "5s",
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.cycle_deadline",
+          "env": "DK_CACHE__EXCHANGE__CYCLE_DEADLINE",
+          "description": "Hard time limit for one exchange cycle, at least 100ms.",
+          "full_description": "Hard time limit for one exchange cycle, at least 100ms. Null means 0.9 x interval.",
+          "type": "duration",
+          "default": null,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.exchange.max_concurrent_peers",
+          "env": "DK_CACHE__EXCHANGE__MAX_CONCURRENT_PEERS",
+          "description": "Peers pulled from in parallel.",
+          "full_description": "Peers pulled from in parallel.",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "cache"
+        }
+      ]
+    },
+    {
       "key": "autodiscover",
       "title": "Autodiscover (autodiscover:)",
       "doc_anchor": "autodiscover-autodiscover",
@@ -2594,259 +2261,612 @@
       ]
     },
     {
-      "key": "connections",
-      "title": "Connections (connections:)",
-      "doc_anchor": "connections-connections",
+      "key": "metrics",
+      "title": "Metrics (metrics:)",
+      "doc_anchor": "metrics-metrics",
       "entries": [
         {
-          "path": "connections.kafka.*.brokers",
-          "env": null,
-          "description": "Kafka bootstrap servers, comma-separated.",
-          "full_description": "Kafka bootstrap servers, comma-separated.",
-          "type": "string",
-          "default": "localhost:9092",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.protocol",
-          "env": null,
-          "description": "Wire protocol.",
-          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
-          "type": "string",
-          "default": "PLAINTEXT",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.sasl_mechanism",
-          "env": null,
-          "description": "SASL mechanism.",
-          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.sasl_username",
-          "env": null,
-          "description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.sasl_password",
-          "env": null,
-          "description": "SASL password.",
-          "full_description": "SASL password. Prefer the DK_CONNECTIONS__KAFKA__<NAME>__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.ssl_ca_location",
-          "env": null,
-          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
-          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.ssl_certificate_location",
-          "env": null,
-          "description": "Path to the client certificate (PEM) for mutual TLS.",
-          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.ssl_key_location",
-          "env": null,
-          "description": "Path to the client private key (PEM) for mutual TLS.",
-          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.ssl_key_password",
-          "env": null,
-          "description": "Passphrase for an encrypted client private key.",
-          "full_description": "Passphrase for an encrypted client private key.",
-          "type": "string",
-          "default": "",
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.security.ssl_endpoint_identification_algorithm",
-          "env": null,
-          "description": "Broker hostname verification.",
-          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
-          "type": "string",
-          "default": null,
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.client_config",
-          "env": null,
-          "description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection.",
-          "full_description": "Raw librdkafka properties merged after the security block, for options the typed fields do not model, for every client of this connection. Reserved keys (bootstrap.servers, group.id, enable.auto.commit, partition.assignment.strategy) are rejected at config load.",
-          "type": "object",
-          "default": {},
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.ui_url",
-          "env": null,
-          "description": "Base URL of a Kafka-UI instance for deep links.",
-          "full_description": "Base URL of a Kafka-UI instance for deep links. Together with ui_cluster_name, renders an icon next to every partition:offset of the source topic that opens Kafka-UI filtered on that message; empty disables the links.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.kafka.*.ui_cluster_name",
-          "env": null,
-          "description": "Cluster name as configured in Kafka-UI, used in the deep links.",
-          "full_description": "Cluster name as configured in Kafka-UI, used in the deep links. Both this and ui_url must be set for the links to appear.",
-          "type": "string",
-          "default": "",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.dsn",
-          "env": null,
-          "description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
-          "full_description": "Postgres connection string (asyncpg-compatible), typically embedding user and password.",
-          "type": "string",
-          "default": null,
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.schema",
-          "env": null,
-          "description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
-          "full_description": "Schema of the tables Drakkar itself keeps: a lower-case identifier.",
-          "type": "string",
-          "default": "drakkar",
-          "secret": false,
-          "group": "connections"
-        },
-        {
-          "path": "connections.postgres.*.manage_schema",
-          "env": null,
-          "description": "Create the schema and the tables Drakkar keeps when they are missing.",
-          "full_description": "Create the schema and the tables Drakkar keeps when they are missing. Off, they must already exist.",
+          "path": "metrics.enabled",
+          "env": "DK_METRICS__ENABLED",
+          "description": "Serve Prometheus metrics over HTTP.",
+          "full_description": "Serve Prometheus metrics over HTTP.",
           "type": "boolean",
           "default": true,
           "secret": false,
-          "group": "connections"
+          "group": "metrics"
         },
         {
-          "path": "connections.postgres.*.pool_min",
-          "env": null,
-          "description": "Minimum connections in the pool of the autodiscovery registry and election.",
-          "full_description": "Minimum connections in the pool of the autodiscovery registry and election.",
+          "path": "metrics.port",
+          "env": "DK_METRICS__PORT",
+          "description": "Port for the Prometheus metrics endpoint.",
+          "full_description": "Port for the Prometheus metrics endpoint.",
           "type": "integer",
-          "default": 1,
+          "default": 9090,
           "secret": false,
-          "group": "connections"
+          "group": "metrics"
         },
         {
-          "path": "connections.postgres.*.pool_max",
-          "env": null,
-          "description": "Maximum connections in the pool of the autodiscovery registry and election.",
-          "full_description": "Maximum connections in the pool of the autodiscovery registry and election. Must be >= pool_min.",
+          "path": "metrics.task_label_histograms",
+          "env": "DK_METRICS__TASK_LABEL_HISTOGRAMS",
+          "description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label).",
+          "full_description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label). Values that do not parse as finite numbers are skipped.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "metrics"
+        }
+      ]
+    },
+    {
+      "key": "logging",
+      "title": "Logging (logging:)",
+      "doc_anchor": "logging-logging",
+      "entries": [
+        {
+          "path": "logging.level",
+          "env": "DK_LOGGING__LEVEL",
+          "description": "Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL.",
+          "full_description": "Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL.",
+          "type": "string",
+          "default": "INFO",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.format",
+          "env": "DK_LOGGING__FORMAT",
+          "description": "Output format.",
+          "full_description": "Output format. 'json' produces machine-readable structured logs; 'console' produces colorized human-readable output for local development.",
+          "type": "string",
+          "default": "json",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.output",
+          "env": "DK_LOGGING__OUTPUT",
+          "description": "Log output destination.",
+          "full_description": "Log output destination. \"stderr\" (default) or \"stdout\" for standard streams, or a file path for file output. File paths support template variables: {worker_id}, {cluster_name}. Example: \"/var/log/drakkar/{worker_id}.log\"",
+          "type": "string",
+          "default": "stderr",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.min_task_duration",
+          "env": "DK_LOGGING__MIN_TASK_DURATION",
+          "description": "Shortest task duration that emits a slow_task_completed / slow_task_failed log line.",
+          "full_description": "Shortest task duration that emits a slow_task_completed / slow_task_failed log line. 0 logs all tasks.",
+          "type": "duration",
+          "default": "500ms",
+          "secret": false,
+          "group": "logging"
+        }
+      ]
+    },
+    {
+      "key": "runtime_health",
+      "title": "Runtime health (runtime_health:)",
+      "doc_anchor": "runtime-health-runtime-health",
+      "entries": [
+        {
+          "path": "runtime_health.enabled",
+          "env": "DK_RUNTIME_HEALTH__ENABLED",
+          "description": "Run the runtime health monitor: heartbeat lag tracking, stall stack sampling, and the data behind the debug UI's Runtime tab.",
+          "full_description": "Run the runtime health monitor: heartbeat lag tracking, stall stack sampling, and the data behind the debug UI's Runtime tab.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.tick",
+          "env": "DK_RUNTIME_HEALTH__TICK",
+          "description": "Heartbeat interval.",
+          "full_description": "Heartbeat interval. Lag is measured as how late each tick fires; the sampler thread also checks heartbeat age at this interval. Smaller values narrow the attribution blind spot for short blocks at slightly more (still negligible) wakeups.",
+          "type": "duration",
+          "default": "250ms",
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.warn_lag",
+          "env": "DK_RUNTIME_HEALTH__WARN_LAG",
+          "description": "Lag above this marks the runtime 'degraded'.",
+          "full_description": "Lag above this marks the runtime 'degraded'. Recovery to 'healthy' needs several consecutive clean ticks (hysteresis), so a flapping loop does not spam state transitions.",
+          "type": "duration",
+          "default": "100ms",
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.stall",
+          "env": "DK_RUNTIME_HEALTH__STALL",
+          "description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes.",
+          "full_description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes. Each stall becomes one runtime_stall recorder event with the stacks.",
+          "type": "duration",
+          "default": "1s",
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.max_stall_stacks",
+          "env": "DK_RUNTIME_HEALTH__MAX_STALL_STACKS",
+          "description": "Maximum distinct stack traces captured per stall.",
+          "full_description": "Maximum distinct stack traces captured per stall. Repeated samples of the same location collapse into one entry with a count; further distinct stacks past the cap are dropped.",
           "type": "integer",
-          "default": 4,
+          "default": 10,
           "secret": false,
-          "group": "connections"
+          "group": "runtime_health"
         },
         {
-          "path": "connections.redis.*.url",
-          "env": null,
-          "description": "Redis connection URL, typically embedding the password.",
-          "full_description": "Redis connection URL, typically embedding the password.",
-          "type": "string",
-          "default": "redis://localhost:6379/0",
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.redis.*.state_prefix",
-          "env": null,
-          "description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\".",
-          "full_description": "Prefix of the keys Drakkar itself keeps in Redis: letters, digits, \"_\", \":\", \".\" and \"-\". May be empty.",
-          "type": "string",
-          "default": "drakkar:",
+          "path": "runtime_health.sample_interval",
+          "env": "DK_RUNTIME_HEALTH__SAMPLE_INTERVAL",
+          "description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history.",
+          "full_description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history. The fine-grained lag sparkline comes from an in-memory ring buffer instead and costs no database writes.",
+          "type": "duration",
+          "default": "10s",
           "secret": false,
-          "group": "connections"
+          "group": "runtime_health"
         },
         {
-          "path": "connections.mongo.*.uri",
-          "env": null,
-          "description": "MongoDB connection string, typically embedding user and password.",
-          "full_description": "MongoDB connection string, typically embedding user and password.",
-          "type": "string",
-          "default": null,
-          "secret": true,
-          "group": "connections"
-        },
-        {
-          "path": "connections.consul.*.address",
-          "env": null,
-          "description": "Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional path; no user info, query or fragment.",
-          "full_description": "Base URL of the Consul HTTP API: http:// or https://, a host, an optional port and an optional path; no user info, query or fragment.",
-          "type": "string",
-          "default": "http://127.0.0.1:8500",
+          "path": "runtime_health.history_window",
+          "env": "DK_RUNTIME_HEALTH__HISTORY_WINDOW",
+          "description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline, a whole number of seconds and at least 1m.",
+          "full_description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline, a whole number of seconds and at least 1m.",
+          "type": "duration",
+          "default": "15m",
           "secret": false,
-          "group": "connections"
+          "group": "runtime_health"
         },
         {
-          "path": "connections.consul.*.token",
-          "env": null,
-          "description": "ACL token sent with every request.",
-          "full_description": "ACL token sent with every request. Empty means no token.",
+          "path": "runtime_health.max_episode",
+          "env": "DK_RUNTIME_HEALTH__MAX_EPISODE",
+          "description": "Maximum length of one lag episode, at least 10s.",
+          "full_description": "Maximum length of one lag episode, at least 10s. An episode spans the time the runtime is degraded or stalled; on recovery (or at this cap, for incidents that outlive it) the monitor writes one runtime_lag_episode event with aggregated stacks and a verdict — blocked, cpu_bound, starved, or inconclusive.",
+          "type": "duration",
+          "default": "5m",
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.stack_probe_enabled",
+          "env": "DK_RUNTIME_HEALTH__STACK_PROBE_ENABLED",
+          "description": "Opt-in flight-recorder profiler: the sampler thread records a runtime_probe event with the runtime thread's stack every stack_probe_interval, regardless of health state.",
+          "full_description": "Opt-in flight-recorder profiler: the sampler thread records a runtime_probe event with the runtime thread's stack every stack_probe_interval, regardless of health state. Useful for tuning production workloads and post-incident analysis; off by default because it writes events for as long as the worker runs.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.stack_probe_interval",
+          "env": "DK_RUNTIME_HEALTH__STACK_PROBE_INTERVAL",
+          "description": "Time between runtime_probe events while stack_probe_enabled is on.",
+          "full_description": "Time between runtime_probe events while stack_probe_enabled is on.",
+          "type": "duration",
+          "default": "1s",
+          "secret": false,
+          "group": "runtime_health"
+        }
+      ]
+    },
+    {
+      "key": "api",
+      "title": "API (api:)",
+      "doc_anchor": "api-api",
+      "entries": [
+        {
+          "path": "api.enabled",
+          "env": "DK_API__ENABLED",
+          "description": "Run the HTTP server: /healthz, /readyz and the peer route.",
+          "full_description": "Run the HTTP server: /healthz, /readyz and the peer route. Off means no listener at all, so nothing answers the Kubernetes probes, and ui.enabled and autodiscover.enabled must both be false.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.host",
+          "env": "DK_API__HOST",
+          "description": "Bind address for the HTTP server.",
+          "full_description": "Bind address for the HTTP server. Use 0.0.0.0 to expose on all interfaces.",
+          "type": "string",
+          "default": "127.0.0.1",
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.port",
+          "env": "DK_API__PORT",
+          "description": "Port for the HTTP server.",
+          "full_description": "Port for the HTTP server.",
+          "type": "integer",
+          "default": 8080,
+          "secret": false,
+          "group": "api"
+        },
+        {
+          "path": "api.public_url",
+          "env": "DK_API__PUBLIC_URL",
+          "description": "Externally reachable URL of this worker's HTTP server.",
+          "full_description": "Externally reachable URL of this worker's HTTP server. Peers and browsers reach the worker through it, and the registry card carries it. Empty derives http://<outbound ip>:<port>/.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "api"
+        }
+      ]
+    },
+    {
+      "key": "ui",
+      "title": "UI (ui:)",
+      "doc_anchor": "ui-ui",
+      "entries": [
+        {
+          "path": "ui.enabled",
+          "env": "DK_UI__ENABLED",
+          "description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs.",
+          "full_description": "Serve the UI: the pages, the bundle fetch, the debug and data routes, /ws and the docs. It needs api.enabled. Off: those routes answer 404, no bundle is fetched, and the recorder keeps no memory store.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.auth_token",
+          "env": "DK_UI__AUTH_TOKEN",
+          "description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs).",
+          "full_description": "Bearer token for the UI routes. **Empty (the default) disables auth** entirely — every UI endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips the token check (the Origin check always runs). This is a deliberate opt-in design: no endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended for deployment inside a private contour (VPC / internal cluster / operator-only ingress). Most endpoints are read-only, but the probe and merge routes are not — close those with ``probe.enabled`` / ``merge_enabled``, which act independently of this token. A startup warning fires whenever the UI is enabled without a token so the unauthenticated posture is visible in logs, naming whichever side-effecting endpoint is still enabled. When set to a non-empty value, protected HTTP endpoints require an ``Authorization: Bearer <token>`` header or ``?token=<token>`` query parameter; WebSocket connections without a valid token are closed with code 4401, and the Origin header is validated against ``allowed_origins`` (or the request Host header if that list is empty). /healthz, /readyz and the peer route stay public. Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. Trailing/leading whitespace is stripped on load to avoid silent mismatches when YAML accidentally quotes spaces.",
           "type": "string",
           "default": "",
           "secret": true,
-          "group": "connections"
+          "group": "ui"
         },
         {
-          "path": "connections.consul.*.datacenter",
-          "env": null,
-          "description": "Consul datacenter to address: letters, digits, \"_\", \".\" and \"-\".",
-          "full_description": "Consul datacenter to address: letters, digits, \"_\", \".\" and \"-\". Empty means the datacenter of the agent.",
+          "path": "ui.allowed_origins",
+          "env": "DK_UI__ALLOWED_ORIGINS",
+          "description": "Explicit allowlist of browser origins for /ws and the fan-out reads.",
+          "full_description": "Explicit allowlist of browser origins for /ws and the fan-out reads. A non-empty list is strict: nothing outside it connects, token or not. Empty list with a token set means same-origin only. Empty list with no token allows the cross-origin handshakes the cluster view needs but rejects a page that is not itself on loopback asking for a worker that is — a peer worker is never at the browser own loopback address, only a web page reaching into the machine is. A missing Origin header (curl, websocat) is always accepted; a browser cannot omit it.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.max_rows",
+          "env": "DK_UI__MAX_ROWS",
+          "description": "Maximum rows returned to the web UI in list views.",
+          "full_description": "Maximum rows returned to the web UI in list views.",
+          "type": "integer",
+          "default": 5000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.ws_min_duration",
+          "env": "DK_UI__WS_MIN_DURATION",
+          "description": "Shortest task duration broadcast to the live UI over WebSocket.",
+          "full_description": "Shortest task duration broadcast to the live UI over WebSocket. Failed tasks always appear. 0 shows all tasks.",
+          "type": "duration",
+          "default": "500ms",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.custom_renderers_path",
+          "env": "DK_UI__CUSTOM_RENDERERS_PATH",
+          "description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``.",
+          "full_description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``. Empty (the default) disables the feature — the route then 404s and identity reports ``custom_renderers: false``. When set, the file must exist at startup or the worker fails to boot; its content is trusted the same as any other backend config (it runs same-origin in the operator UI).",
           "type": "string",
           "default": "",
           "secret": false,
-          "group": "connections"
+          "group": "ui"
         },
         {
-          "path": "connections.consul.*.state_prefix",
-          "env": null,
-          "description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
-          "full_description": "Prefix of the keys Drakkar itself keeps in Consul: segments of letters, digits, \"_\", \".\" and \"-\" joined by \"/\", with no leading or trailing \"/\", and no segment may be \".\" or \"..\".",
-          "type": "string",
-          "default": "drakkar",
+          "path": "ui.probe.enabled",
+          "env": "DK_UI__PROBE__ENABLED",
+          "description": "Serve ``POST /api/v1/debug/probe``.",
+          "full_description": "Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it is neither read-only nor free: it competes with production traffic for executor slots. Set to false to serve 403 instead, whatever ``auth_token`` says: a deployment that cannot set a token can still close the endpoint, and a deployment that has one can still close it as defence in depth. Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behaviour.",
+          "type": "boolean",
+          "default": true,
           "secret": false,
-          "group": "connections"
+          "group": "ui"
+        },
+        {
+          "path": "ui.probe.max_writes",
+          "env": "DK_UI__PROBE__MAX_WRITES",
+          "description": "Maximum probe.set/append/update calls recorded per probe run.",
+          "full_description": "Maximum probe.set/append/update calls recorded per probe run. The first write past the cap records one ProbeError; further writes are dropped silently.",
+          "type": "integer",
+          "default": 10000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.probe.max_total_size",
+          "env": "DK_UI__PROBE__MAX_TOTAL_SIZE",
+          "description": "Maximum total serialized size of all probe-details writes per probe run.",
+          "full_description": "Maximum total serialized size of all probe-details writes per probe run. Past it, writes are dropped like the max_writes cap.",
+          "type": "size",
+          "default": "5MB",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.merge_enabled",
+          "env": "DK_UI__MERGE_ENABLED",
+          "description": "Serve ``POST /api/v1/debug/merge``.",
+          "full_description": "Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>-<token>.db`` in the ``merged`` folder of the shared folder, kept for ``recorder.archive.merged_retention``. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.kafka_read_enabled",
+          "env": "DK_UI__KAFKA_READ_ENABLED",
+          "description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic).",
+          "full_description": "Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured topics (source, dlq, and each Kafka sink by instance name; never an arbitrary topic). Reads use assign()-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe.enabled``. When the resolved Kafka security of any readable topic is not PLAINTEXT while ``auth_token`` is empty, startup logs a warning naming the exposed aliases (the API stays available — gate it with ``auth_token`` or close it here).",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.consume_pause.enabled",
+          "env": "DK_UI__CONSUME_PAUSE__ENABLED",
+          "description": "Serve the consume-pause API (``/api/v1/debug/consume-pause``) and show the pause control on the Live page.",
+          "full_description": "Serve the consume-pause API (``/api/v1/debug/consume-pause``) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.consume_pause.durations",
+          "env": "DK_UI__CONSUME_PAUSE__DURATIONS",
+          "description": "Preset pause durations offered as one-click buttons on the Live page, each a whole number of seconds from 1s to 1h.",
+          "full_description": "Preset pause durations offered as one-click buttons on the Live page, each a whole number of seconds from 1s to 1h. The API itself accepts any duration in that range regardless of the presets.",
+          "type": "array",
+          "default": [
+            "15s",
+            "1m",
+            "5m",
+            "15m"
+          ],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.url",
+          "env": "DK_UI__PROMETHEUS__URL",
+          "description": "Base URL of the Prometheus server used for UI links.",
+          "full_description": "Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.rate_interval",
+          "env": "DK_UI__PROMETHEUS__RATE_INTERVAL",
+          "description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+          "full_description": "Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+          "type": "string",
+          "default": "5m",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.worker_label",
+          "env": "DK_UI__PROMETHEUS__WORKER_LABEL",
+          "description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
+          "full_description": "PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables. Empty defaults to instance=\"{hostname}:{metrics_port}\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus.cluster_label",
+          "env": "DK_UI__PROMETHEUS__CLUSTER_LABEL",
+          "description": "PromQL label filter for cluster-wide queries, same template variables as worker_label.",
+          "full_description": "PromQL label filter for cluster-wide queries, same template variables as worker_label. Empty hides cluster-wide links.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.custom_links",
+          "env": "DK_UI__CUSTOM_LINKS",
+          "description": "Custom links shown in the dashboard navigation.",
+          "full_description": "Custom links shown in the dashboard navigation. Each entry is a dict with name and url keys; url supports the {worker_id}, {cluster_name}, {metrics_port}, and {debug_port} template variables.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.link_bases",
+          "env": "DK_UI__LINK_BASES",
+          "description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``.",
+          "full_description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``. A template such as ``{jira}/browse/{value}`` resolves ``{jira}`` from this map, so code declares the link shape once and each environment supplies its own hosts. A base referenced by a registered layout but missing here logs one startup warning and the UI renders plain text for it.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.enabled",
+          "env": "DK_UI__RELEASE__ENABLED",
+          "description": "Resolve and serve the drakkar-ui bundle.",
+          "full_description": "Resolve and serve the drakkar-ui bundle. Off means no UI at all (no fetch, no cache read): the JSON API, the health probes and the event WebSocket keep working, and page requests answer 503.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.repo",
+          "env": "DK_UI__RELEASE__REPO",
+          "description": "The \"owner/name\" GitHub repo that publishes UI bundles.",
+          "full_description": "The \"owner/name\" GitHub repo that publishes UI bundles. Empty disables fetching — only an already-cached bundle is served, which is how an air-gapped deployment pins itself to a bundle staged with the drakkar-ui CLI.",
+          "type": "string",
+          "default": "wlame/drakkar-ui",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.pinned_version",
+          "env": "DK_UI__RELEASE__PINNED_VERSION",
+          "description": "Known-good UI release tag this backend is built against (e.g. \"v1.2.0\"); the contract is API-major compatible.",
+          "full_description": "Known-good UI release tag this backend is built against (e.g. \"v1.2.0\"); the contract is API-major compatible. Empty means \"no pinned version\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.cache_dir",
+          "env": "DK_UI__RELEASE__CACHE_DIR",
+          "description": "Bundle cache root override.",
+          "full_description": "Bundle cache root override. Empty uses the per-user cache dir ($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui — the conventional per-user cache location, so co-located workers share one cache).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.check_update",
+          "env": "DK_UI__RELEASE__CHECK_UPDATE",
+          "description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle).",
+          "full_description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle). Already-cached versions are never re-downloaded — release tags are immutable.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.docs.site_dir",
+          "env": "DK_UI__DOCS__SITE_DIR",
+          "description": "Directory of a prebuilt static docs site served at /docs/.",
+          "full_description": "Directory of a prebuilt static docs site served at /docs/. Empty disables the feature.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.docs.title",
+          "env": "DK_UI__DOCS__TITLE",
+          "description": "Nav-entry label and default drawer heading in the UI.",
+          "full_description": "Nav-entry label and default drawer heading in the UI.",
+          "type": "string",
+          "default": "Docs",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.docs.anchors",
+          "env": "DK_UI__DOCS__ANCHORS",
+          "description": "Contextual anchors opening the named docs page from matching UI surfaces.",
+          "full_description": "Contextual anchors opening the named docs page from matching UI surfaces.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.history_factor",
+          "env": "DK_UI__TIMELINE__HISTORY_FACTOR",
+          "description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
+          "full_description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
+          "type": "integer",
+          "default": 100,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.max_age",
+          "env": "DK_UI__TIMELINE__MAX_AGE",
+          "description": "Oldest task age the timeline shows, a whole number of minutes from 1m to 24h.",
+          "full_description": "Oldest task age the timeline shows, a whole number of minutes from 1m to 24h.",
+          "type": "duration",
+          "default": "1h",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.color_rules",
+          "env": "DK_UI__TIMELINE__COLOR_RULES",
+          "description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
+          "full_description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.tag",
+          "env": "DK_UI__TIMELINE__LABELS__TAG",
+          "description": "Label whose value draws as a short chip at the task bar's right edge (truncated to 16 chars).",
+          "full_description": "Label whose value draws as a short chip at the task bar's right edge (truncated to 16 chars).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.caption",
+          "env": "DK_UI__TIMELINE__LABELS__CAPTION",
+          "description": "Label whose value draws at the task bar's left edge, in the space the tag leaves over (truncated to 32 chars).",
+          "full_description": "Label whose value draws at the task bar's left edge, in the space the tag leaves over (truncated to 32 chars).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.highlight",
+          "env": "DK_UI__TIMELINE__LABELS__HIGHLIGHT",
+          "description": "Numeric label bound to the toolbar threshold input: tasks at or above the typed value are emphasized, the rest dimmed.",
+          "full_description": "Numeric label bound to the toolbar threshold input: tasks at or above the typed value are emphasized, the rest dimmed.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.filter",
+          "env": "DK_UI__TIMELINE__LABELS__FILTER",
+          "description": "String label bound to the toolbar text input: tasks whose value contains the typed text are emphasized, the rest dimmed.",
+          "full_description": "String label bound to the toolbar text input: tasks whose value contains the typed text are emphasized, the rest dimmed.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.marker",
+          "env": "DK_UI__TIMELINE__LABELS__MARKER",
+          "description": "Label that draws one vertical pin above the strip per distinct value — e.g. a batch or request id.",
+          "full_description": "Label that draws one vertical pin above the strip per distinct value — e.g. a batch or request id.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.events",
+          "env": "DK_UI__TIMELINE__EVENTS",
+          "description": "Declared custom timeline event types drawn as markers, ranges, or flag pins on the live timeline.",
+          "full_description": "Declared custom timeline event types drawn as markers, ranges, or flag pins on the live timeline.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
         }
       ]
     }

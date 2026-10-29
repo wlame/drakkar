@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the cross-field validation messages (api, autodiscover, cache exchange, recorder, connections and sinks), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (api, autodiscover, cache exchange, recorder, connections, sinks, threads, and the units of single keys), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -200,7 +200,7 @@
       "yaml": {},
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "memory_only_no_shared",
@@ -214,7 +214,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_differs",
@@ -226,7 +226,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar shared=/mnt/fleet fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_equal_to_storage",
@@ -238,7 +238,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_set_with_memory_only_storage",
@@ -253,7 +253,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem shared=/mnt/fleet fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem shared=/mnt/fleet recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "ui_off",
@@ -264,7 +264,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_off",
@@ -278,7 +278,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_fractional_interval",
@@ -286,20 +286,20 @@
         "cache": {
           "enabled": true,
           "exchange": {
-            "interval_seconds": 12.5
+            "interval": "12.5s"
           }
         }
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "no_cluster",
       "yaml": {},
       "worker": "w-1",
       "cluster": "",
-      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_with_storage_dir",
@@ -313,7 +313,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=none fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_memory_only",
@@ -327,7 +327,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_sqlite_explicit",
@@ -341,7 +341,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_postgres_memory_only",
@@ -362,7 +362,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=mem recorder=postgres fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_postgres_with_storage_dir",
@@ -383,7 +383,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/var/lib/drakkar recorder=postgres fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "dlq_switched_off",
@@ -394,7 +394,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_consul",
@@ -411,7 +411,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=consul election=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_postgres",
@@ -430,7 +430,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=postgres election=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_redis",
@@ -449,10 +449,10 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=redis election=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
-      "name": "autodiscover_filesystem_has_no_election_token",
+      "name": "autodiscover_filesystem",
       "yaml": {
         "autodiscover": {
           "enabled": true,
@@ -464,7 +464,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_off_with_a_provider_named",
@@ -475,7 +475,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8080 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "api_port",
@@ -486,7 +486,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=on:8123 storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8123 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "api_and_ui_off",
@@ -500,7 +500,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar fleet=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=off ui=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "ui_off_keeps_the_registry",
@@ -518,7 +518,202 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s ui=off storage=/tmp/drakkar shared=/mnt/fleet fleet=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "cache_on_defaults",
+      "yaml": {
+        "cache": {
+          "enabled": true
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "cache_unbounded_has_no_max_token",
+      "yaml": {
+        "cache": {
+          "enabled": true,
+          "max_memory_entries": 0
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "cache_durations_print_in_seconds",
+      "yaml": {
+        "cache": {
+          "enabled": true,
+          "flush_interval": "1500ms",
+          "cleanup_interval": "2m",
+          "max_memory_entries": 500,
+          "exchange": {
+            "interval": "1m"
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=1.5s/s=60s/c=120s/max=500 metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "recorder_off",
+      "yaml": {
+        "recorder": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "metrics_off",
+      "yaml": {
+        "metrics": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=off dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "dlq_topic",
+      "yaml": {
+        "dlq": {
+          "topic": "failed-events"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-events sinks=[none] log=INFO"
+    },
+    {
+      "name": "dlq_switched_off_with_a_topic",
+      "yaml": {
+        "dlq": {
+          "enabled": false,
+          "topic": "failed-events"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+    },
+    {
+      "name": "http_only_dlq_unconfigured",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "enabled": false
+          },
+          "http": {
+            "enabled": true
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=unconfigured sinks=[none] log=INFO"
+    },
+    {
+      "name": "http_only_dlq_switched_off",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "enabled": false
+          },
+          "http": {
+            "enabled": true
+          }
+        },
+        "dlq": {
+          "enabled": false
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+    },
+    {
+      "name": "http_only_dlq_topic",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "enabled": false
+          },
+          "http": {
+            "enabled": true,
+            "port": 9100
+          }
+        },
+        "dlq": {
+          "topic": "failed-requests"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[http:9100] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-requests sinks=[none] log=INFO"
+    },
+    {
+      "name": "both_sources",
+      "yaml": {
+        "sources": {
+          "http": {
+            "enabled": true
+          }
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "executor_task_timeout_prints_in_seconds",
+      "yaml": {
+        "executor": {
+          "max_executors": 8,
+          "window_size": 50,
+          "max_retries": 5,
+          "task_timeout": "5m"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=8w/50win retries=5/300s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "name": "sinks_and_log_level",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://u:p@h/d"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "output-results"
+            }
+          },
+          "postgres": {
+            "main_db": {}
+          }
+        },
+        "logging": {
+          "level": "DEBUG"
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:results pg:main_db] log=DEBUG"
     }
   ],
   "validation": [
@@ -675,24 +870,24 @@
       "yaml": {
         "cache": {
           "exchange": {
-            "interval_seconds": 10,
-            "cycle_deadline_seconds": 10
+            "interval": "10s",
+            "cycle_deadline": "10s"
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline_seconds (10) must be strictly less than cache.exchange.interval_seconds (10) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (10s) must be strictly less than cache.exchange.interval (10s) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "deadline_fractional_values",
       "yaml": {
         "cache": {
           "exchange": {
-            "interval_seconds": 2.5,
-            "cycle_deadline_seconds": 3.5
+            "interval": "2.5s",
+            "cycle_deadline": "3.5s"
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline_seconds (3.5) must be strictly less than cache.exchange.interval_seconds (2.5) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (3s500ms) must be strictly less than cache.exchange.interval (2s500ms) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "page_size_over_limit",
@@ -721,33 +916,33 @@
       "yaml": {
         "cache": {
           "exchange": {
-            "interval_seconds": 0
+            "interval": 0
           }
         }
       },
-      "path": "cache.exchange.interval_seconds"
+      "path": "cache.exchange.interval"
     },
     {
       "name": "exchange_timeout_zero",
       "yaml": {
         "cache": {
           "exchange": {
-            "timeout_seconds": 0
+            "timeout": 0
           }
         }
       },
-      "path": "cache.exchange.timeout_seconds"
+      "path": "cache.exchange.timeout"
     },
     {
       "name": "deadline_below_floor",
       "yaml": {
         "cache": {
           "exchange": {
-            "cycle_deadline_seconds": 0.05
+            "cycle_deadline": "50ms"
           }
         }
       },
-      "path": "cache.exchange.cycle_deadline_seconds"
+      "path": "cache.exchange.cycle_deadline"
     },
     {
       "name": "max_concurrent_peers_zero",
@@ -1937,6 +2132,162 @@
         }
       },
       "message": "needs a unit, for example 64KiB; got '1024'"
+    },
+    {
+      "name": "threads_io_zero",
+      "yaml": {
+        "threads": {
+          "io": 0
+        }
+      },
+      "message": "threads.io must be null or from 1 to 512"
+    },
+    {
+      "name": "threads_io_above_512",
+      "yaml": {
+        "threads": {
+          "io": 513
+        }
+      },
+      "message": "threads.io must be null or from 1 to 512"
+    },
+    {
+      "name": "threads_offload_zero",
+      "yaml": {
+        "threads": {
+          "offload": 0
+        }
+      },
+      "message": "threads.offload must be null or from 1 to 32"
+    },
+    {
+      "name": "threads_offload_above_32",
+      "yaml": {
+        "threads": {
+          "offload": 33
+        }
+      },
+      "message": "threads.offload must be null or from 1 to 32"
+    },
+    {
+      "name": "threads_offload_zero_by_env",
+      "yaml": {},
+      "env": {
+        "DK_THREADS__OFFLOAD": "0"
+      },
+      "message": "threads.offload must be null or from 1 to 32"
+    },
+    {
+      "name": "timeline_max_age_whole_minutes",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "max_age": "90s"
+          }
+        }
+      },
+      "message": "must be a whole number of minutes, got '90s'"
+    },
+    {
+      "name": "timeline_max_age_above_24h",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "max_age": "25h"
+          }
+        }
+      },
+      "path": "ui.timeline.max_age"
+    },
+    {
+      "name": "executor_task_timeout_whole_seconds",
+      "yaml": {
+        "executor": {
+          "task_timeout": "1500ms"
+        }
+      },
+      "message": "must be a whole number of seconds, got '1500ms'"
+    },
+    {
+      "name": "executor_task_timeout_needs_a_unit",
+      "yaml": {
+        "executor": {
+          "task_timeout": 120
+        }
+      },
+      "message": "needs a unit, for example 30s; got '120'"
+    },
+    {
+      "name": "executor_drain_timeout_whole_seconds",
+      "yaml": {
+        "executor": {
+          "drain_timeout": "2.5s"
+        }
+      },
+      "message": "must be a whole number of seconds, got '2.5s'"
+    },
+    {
+      "name": "executor_max_stdout_needs_a_unit",
+      "yaml": {
+        "executor": {
+          "max_stdout": 1024
+        }
+      },
+      "message": "needs a unit, for example 64KiB; got '1024'"
+    },
+    {
+      "name": "runtime_health_history_window_whole_seconds",
+      "yaml": {
+        "runtime_health": {
+          "history_window": "90500ms"
+        }
+      },
+      "message": "must be a whole number of seconds, got '90500ms'"
+    },
+    {
+      "name": "runtime_health_history_window_below_1m",
+      "yaml": {
+        "runtime_health": {
+          "history_window": "59s"
+        }
+      },
+      "path": "runtime_health.history_window"
+    },
+    {
+      "name": "consume_pause_durations_whole_seconds",
+      "yaml": {
+        "ui": {
+          "consume_pause": {
+            "durations": [
+              "1500ms"
+            ]
+          }
+        }
+      },
+      "message": "must be a whole number of seconds, got '1500ms'"
+    },
+    {
+      "name": "consume_pause_durations_above_1h",
+      "yaml": {
+        "ui": {
+          "consume_pause": {
+            "durations": [
+              "15s",
+              "2h"
+            ]
+          }
+        }
+      },
+      "message": "ui.consume_pause.durations entries must be from 1s to 1h, got 2h"
+    },
+    {
+      "name": "cache_max_memory_entries_negative",
+      "yaml": {
+        "cache": {
+          "max_memory_entries": -1
+        }
+      },
+      "path": "cache.max_memory_entries"
     }
   ],
   "load_values": [
@@ -2862,7 +3213,7 @@
     {
       "name": "cache_exchange_default_interval",
       "yaml": {},
-      "path": "cache.exchange.interval_seconds",
+      "path": "cache.exchange.interval",
       "value": 30.0
     },
     {
@@ -2956,6 +3307,297 @@
       },
       "path": "ui.prometheus.url",
       "value": "http://prom:9090"
+    },
+    {
+      "name": "worker_name_default_empty",
+      "yaml": {},
+      "path": "worker.name",
+      "value": ""
+    },
+    {
+      "name": "worker_name_variable_default",
+      "yaml": {},
+      "path": "worker.name_env",
+      "value": "WORKER_ID"
+    },
+    {
+      "name": "cluster_name_default_empty",
+      "yaml": {},
+      "path": "cluster.name",
+      "value": ""
+    },
+    {
+      "name": "cluster_name_variable_default_empty",
+      "yaml": {},
+      "path": "cluster.name_env",
+      "value": ""
+    },
+    {
+      "name": "worker_name_by_env",
+      "yaml": {},
+      "env": {
+        "DK_WORKER__NAME": "node-a"
+      },
+      "path": "worker.name",
+      "value": "node-a"
+    },
+    {
+      "name": "executor_task_timeout_default_2m",
+      "yaml": {},
+      "path": "executor.task_timeout",
+      "value": 120
+    },
+    {
+      "name": "executor_task_timeout_text",
+      "yaml": {
+        "executor": {
+          "task_timeout": "5m"
+        }
+      },
+      "path": "executor.task_timeout",
+      "value": 300
+    },
+    {
+      "name": "executor_drain_timeout_default_30s",
+      "yaml": {},
+      "path": "executor.drain_timeout",
+      "value": 30
+    },
+    {
+      "name": "executor_max_stdout_default_unlimited",
+      "yaml": {},
+      "path": "executor.max_stdout",
+      "value": 0
+    },
+    {
+      "name": "executor_max_stdout_zero_by_env",
+      "yaml": {
+        "executor": {
+          "max_stdout": "1MiB"
+        }
+      },
+      "env": {
+        "DK_EXECUTOR__MAX_STDOUT": "0"
+      },
+      "path": "executor.max_stdout",
+      "value": 0
+    },
+    {
+      "name": "executor_max_stderr_text",
+      "yaml": {
+        "executor": {
+          "max_stderr": "64KiB"
+        }
+      },
+      "path": "executor.max_stderr",
+      "value": 65536
+    },
+    {
+      "name": "threads_io_default_null",
+      "yaml": {},
+      "path": "threads.io",
+      "value": null
+    },
+    {
+      "name": "threads_offload_default_null",
+      "yaml": {},
+      "path": "threads.offload",
+      "value": null
+    },
+    {
+      "name": "threads_io_explicit",
+      "yaml": {
+        "threads": {
+          "io": 64
+        }
+      },
+      "path": "threads.io",
+      "value": 64
+    },
+    {
+      "name": "threads_offload_null_explicit",
+      "yaml": {
+        "threads": {
+          "offload": null
+        }
+      },
+      "path": "threads.offload",
+      "value": null
+    },
+    {
+      "name": "cache_flush_interval_default_3s",
+      "yaml": {},
+      "path": "cache.flush_interval",
+      "value": 3.0
+    },
+    {
+      "name": "cache_cleanup_interval_default_1m",
+      "yaml": {},
+      "path": "cache.cleanup_interval",
+      "value": 60.0
+    },
+    {
+      "name": "cache_max_memory_entries_default",
+      "yaml": {},
+      "path": "cache.max_memory_entries",
+      "value": 10000
+    },
+    {
+      "name": "cache_max_memory_entries_zero_unbounded",
+      "yaml": {
+        "cache": {
+          "max_memory_entries": 0
+        }
+      },
+      "path": "cache.max_memory_entries",
+      "value": 0
+    },
+    {
+      "name": "cache_exchange_default_timeout",
+      "yaml": {},
+      "path": "cache.exchange.timeout",
+      "value": 5.0
+    },
+    {
+      "name": "cache_exchange_default_cycle_deadline_null",
+      "yaml": {},
+      "path": "cache.exchange.cycle_deadline",
+      "value": null
+    },
+    {
+      "name": "cache_exchange_cycle_deadline_text",
+      "yaml": {
+        "cache": {
+          "exchange": {
+            "cycle_deadline": "1500ms"
+          }
+        }
+      },
+      "path": "cache.exchange.cycle_deadline",
+      "value": 1.5
+    },
+    {
+      "name": "logging_min_task_duration_default_500ms",
+      "yaml": {},
+      "path": "logging.min_task_duration",
+      "value": 0.5
+    },
+    {
+      "name": "logging_min_task_duration_zero",
+      "yaml": {
+        "logging": {
+          "min_task_duration": 0
+        }
+      },
+      "path": "logging.min_task_duration",
+      "value": 0.0
+    },
+    {
+      "name": "runtime_health_tick_default_250ms",
+      "yaml": {},
+      "path": "runtime_health.tick",
+      "value": 0.25
+    },
+    {
+      "name": "runtime_health_warn_lag_default_100ms",
+      "yaml": {},
+      "path": "runtime_health.warn_lag",
+      "value": 0.1
+    },
+    {
+      "name": "runtime_health_stall_default_1s",
+      "yaml": {},
+      "path": "runtime_health.stall",
+      "value": 1.0
+    },
+    {
+      "name": "runtime_health_sample_interval_default_10s",
+      "yaml": {},
+      "path": "runtime_health.sample_interval",
+      "value": 10.0
+    },
+    {
+      "name": "runtime_health_history_window_default_15m",
+      "yaml": {},
+      "path": "runtime_health.history_window",
+      "value": 900
+    },
+    {
+      "name": "runtime_health_max_episode_default_5m",
+      "yaml": {},
+      "path": "runtime_health.max_episode",
+      "value": 300.0
+    },
+    {
+      "name": "runtime_health_stack_probe_default_off",
+      "yaml": {},
+      "path": "runtime_health.stack_probe_enabled",
+      "value": false
+    },
+    {
+      "name": "runtime_health_stack_probe_interval_default_1s",
+      "yaml": {},
+      "path": "runtime_health.stack_probe_interval",
+      "value": 1.0
+    },
+    {
+      "name": "ui_ws_min_duration_default_500ms",
+      "yaml": {},
+      "path": "ui.ws_min_duration",
+      "value": 0.5
+    },
+    {
+      "name": "ui_max_rows_default",
+      "yaml": {},
+      "path": "ui.max_rows",
+      "value": 5000
+    },
+    {
+      "name": "ui_consume_pause_durations_default",
+      "yaml": {},
+      "path": "ui.consume_pause.durations",
+      "value": [
+        15,
+        60,
+        300,
+        900
+      ]
+    },
+    {
+      "name": "ui_consume_pause_durations_text",
+      "yaml": {
+        "ui": {
+          "consume_pause": {
+            "durations": [
+              "30s",
+              "2m"
+            ]
+          }
+        }
+      },
+      "path": "ui.consume_pause.durations",
+      "value": [
+        30,
+        120
+      ]
+    },
+    {
+      "name": "ui_timeline_max_age_default_1h",
+      "yaml": {},
+      "path": "ui.timeline.max_age",
+      "value": 60
+    },
+    {
+      "name": "ui_timeline_max_age_text",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "max_age": "90m"
+          }
+        }
+      },
+      "path": "ui.timeline.max_age",
+      "value": 90
     }
   ],
   "sink_policies": [

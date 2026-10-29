@@ -15,6 +15,7 @@ from drakkar.config.units import (
     Duration,
     WholeDays,
     WholeHours,
+    WholeMinutes,
     WholeSeconds,
     format_duration,
     format_size,
@@ -166,6 +167,7 @@ class _Units(BaseModel):
     timeout: Duration = 5.0
     optional_timeout: Duration | None = None
     interval: WholeSeconds = 30
+    max_age: WholeMinutes = 60
     rotation: WholeHours = 2
     retention: WholeDays = 30
     max_size: ByteSize = 1024
@@ -175,7 +177,12 @@ class _Units(BaseModel):
 def _whole_type_cases() -> list[tuple[str, Any, int]]:
     return [
         (field, *case)
-        for field, section in (('interval', 'whole_seconds'), ('rotation', 'whole_hours'), ('retention', 'whole_days'))
+        for field, section in (
+            ('interval', 'whole_seconds'),
+            ('max_age', 'whole_minutes'),
+            ('rotation', 'whole_hours'),
+            ('retention', 'whole_days'),
+        )
         for case in FIXTURE[section]['accepted']
     ]
 
@@ -183,7 +190,12 @@ def _whole_type_cases() -> list[tuple[str, Any, int]]:
 def _whole_type_refusals() -> list[tuple[str, Any, str]]:
     return [
         (field, *case)
-        for field, section in (('interval', 'whole_seconds'), ('rotation', 'whole_hours'), ('retention', 'whole_days'))
+        for field, section in (
+            ('interval', 'whole_seconds'),
+            ('max_age', 'whole_minutes'),
+            ('rotation', 'whole_hours'),
+            ('retention', 'whole_days'),
+        )
         for case in FIXTURE[section]['refused']
     ]
 
@@ -236,6 +248,7 @@ def test_a_dump_writes_the_canonical_text_in_both_modes(mode):
         timeout='90s',
         optional_timeout='1500ms',
         interval='2m',
+        max_age='90m',
         rotation='48h',
         retention='30d',
         max_size='256MiB',
@@ -246,6 +259,7 @@ def test_a_dump_writes_the_canonical_text_in_both_modes(mode):
         'timeout': '1m30s',
         'optional_timeout': '1s500ms',
         'interval': '2m',
+        'max_age': '1h30m',
         'rotation': '2d',
         'retention': '30d',
         'max_size': '256MiB',
@@ -270,6 +284,7 @@ def test_the_metadata_names_the_unit_types_and_writes_canonical_defaults():
         'timeout': 'duration',
         'optional_timeout': 'duration',
         'interval': 'duration',
+        'max_age': 'duration',
         'rotation': 'duration',
         'retention': 'duration',
         'max_size': 'size',
@@ -278,6 +293,7 @@ def test_the_metadata_names_the_unit_types_and_writes_canonical_defaults():
     assert entries['section.timeout'].default == '5s'
     assert entries['section.optional_timeout'].default is None
     assert entries['section.interval'].default == '30s'
+    assert entries['section.max_age'].default == '1h'
     assert entries['section.rotation'].default == '2h'
     assert entries['section.retention'].default == '30d'
     assert entries['section.max_size'].default == '1KiB'

@@ -86,7 +86,7 @@ def _timeline_wire(cfg: UITimelineConfig) -> dict[str, object]:
     labels = {role: key for role, key in cfg.labels.model_dump().items() if key}
     out: dict[str, object] = {
         'history_factor': cfg.history_factor,
-        'max_age_minutes': cfg.max_age_minutes,
+        'max_age_minutes': cfg.max_age,
         'color_rules': rules,
         'labels': labels,
     }
@@ -635,14 +635,13 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         idle_sleep = WS_DRAIN_SLEEP_MIN
         try:
             while not disconnected.is_set():
-                # Drain what is already queued, without ever blocking. The
-                # previous q.get(timeout=0.1) was a stdlib queue.Queue call —
-                # a real OS-level block inside an async handler. The server
-                # runs uvicorn on ONE thread with ONE loop, so during that
-                # wait nothing else on this server could run: not other
-                # WebSocket clients, not /healthz, not /readyz. An idle
-                # dashboard tab was enough to trigger it, and the Kubernetes
-                # probes share the loop.
+                # Drain what is already queued, without ever blocking. A
+                # blocking queue read here would be an OS-level block inside
+                # an async handler. The server runs uvicorn on ONE thread
+                # with ONE loop, so during that wait nothing else on this
+                # server could run: not other WebSocket clients, not
+                # /healthz, not /readyz, and the Kubernetes probes share the
+                # loop.
                 #
                 # ``drain_encoded`` yields JSON text, and the encoding is
                 # memoized on an event object shared by every subscriber —

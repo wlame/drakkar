@@ -761,7 +761,7 @@ for Kafka demos. It runs the HTTP source in both shapes: **mixed** on
   8086. Its compose healthcheck polls `/readyz`, which proves the
   HTTP-only readiness rule: the worker turns ready once the socket is bound
   and every sink is connected, with no partitions to wait for. Its `dlq.topic` is empty, so
-  it also exercises the `dlq=off` path.
+  it also exercises the path with no DLQ topic (`dlq=unconfigured`).
 - **The mirror** -- the producer POSTs about 1% of the messages it
   produces (`HTTP_MIRROR_RATIO`) to `http-worker` as well as sending them
   to Kafka. The requests are mirrored, not diverted, so the Kafka path is

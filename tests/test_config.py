@@ -46,17 +46,17 @@ def test_executor_config_binary_path_defaults_to_none():
 def test_executor_config_defaults():
     cfg = ExecutorConfig(binary_path='/usr/bin/echo')
     assert cfg.max_executors == 4
-    assert cfg.task_timeout_seconds == 120
+    assert cfg.task_timeout == 120
     assert cfg.window_size == 100
     assert cfg.max_retries == 3
-    # drain_timeout default raised to 30 so graceful shutdown has a reasonable
-    # chance of finishing in-flight subprocess tasks rather than hard-killing
-    # them and relying on at-least-once replay.
-    assert cfg.drain_timeout_seconds == 30
+    # A drain timeout of 30s gives graceful shutdown a reasonable chance of
+    # finishing in-flight subprocess tasks rather than hard-killing them and
+    # relying on at-least-once replay.
+    assert cfg.drain_timeout == 30
     assert cfg.backpressure_high_multiplier == 32
     assert cfg.backpressure_low_multiplier == 4
-    assert cfg.max_stdout_bytes == 0
-    assert cfg.max_stderr_bytes == 0
+    assert cfg.max_stdout == 0
+    assert cfg.max_stderr == 0
 
 
 def test_executor_config_rejects_empty_binary_path():
@@ -71,28 +71,28 @@ def test_executor_config_rejects_zero_workers():
 
 def test_executor_config_output_caps_default_to_unlimited():
     cfg = ExecutorConfig()
-    assert cfg.max_stdout_bytes == 0
-    assert cfg.max_stderr_bytes == 0
+    assert cfg.max_stdout == 0
+    assert cfg.max_stderr == 0
 
 
 def test_executor_config_rejects_negative_stdout_cap():
     with pytest.raises(ValidationError):
-        ExecutorConfig(max_stdout_bytes=-1)
+        ExecutorConfig(max_stdout=-1)
 
 
 def test_executor_config_rejects_negative_stderr_cap():
     with pytest.raises(ValidationError):
-        ExecutorConfig(max_stderr_bytes=-1)
+        ExecutorConfig(max_stderr=-1)
 
 
 def test_executor_config_output_caps_env_override(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DK_EXECUTOR__MAX_STDOUT_BYTES', '1048576')
-    monkeypatch.setenv('DK_EXECUTOR__MAX_STDERR_BYTES', '65536')
+    monkeypatch.setenv('DK_EXECUTOR__MAX_STDOUT', '1MiB')
+    monkeypatch.setenv('DK_EXECUTOR__MAX_STDERR', '64KiB')
     monkeypatch.setenv('DK_SOURCES__KAFKA__ENABLED', 'true')
     monkeypatch.setenv('DK_CONNECTIONS__KAFKA__MAIN__BROKERS', 'localhost:9092')
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
-    assert cfg.executor.max_stdout_bytes == 1048576
-    assert cfg.executor.max_stderr_bytes == 65536
+    assert cfg.executor.max_stdout == 1048576
+    assert cfg.executor.max_stderr == 65536
 
 
 def _denied(name: str) -> bool:
@@ -380,13 +380,14 @@ def test_logging_config_invalid_format():
 # --- DrakkarConfig (root) ---
 
 
-def test_worker_name_env_default():
+def test_worker_and_cluster_name_defaults():
     cfg = DrakkarConfig(
         connections=kafka_connections(),
         executor=ExecutorConfig(binary_path='/bin/true'),
         sources={'kafka': {'enabled': True}},
     )
-    assert cfg.worker_name_env == 'WORKER_ID'
+    assert (cfg.worker.name, cfg.worker.name_env) == ('', 'WORKER_ID')
+    assert (cfg.cluster.name, cfg.cluster.name_env) == ('', '')
 
 
 def test_drakkar_config_sinks_default():
@@ -1127,7 +1128,7 @@ def test_config_domain_modules_layer_without_cycles():
     import subprocess
     import sys
 
-    modules = ['connections', 'sinks', 'runtime', 'ui', 'cache', 'webapp', 'root']
+    modules = ['connections', 'identity', 'sinks', 'runtime', 'ui', 'cache', 'webapp', 'root']
     for name in modules:
         assert importlib.import_module(f'drakkar.config.{name}') is not None
 

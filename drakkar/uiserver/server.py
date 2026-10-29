@@ -602,8 +602,8 @@ def create_api_app(drakkar_app: DrakkarApp) -> FastAPI:
     # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
     # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
     # served, and that route is created by FastAPI itself so it carries none
-    # of our auth dependencies — it answered 200 with the full route table
-    # (including every /api/v1/debug/* path) even with ui.auth_token set. The
+    # of our auth dependencies: it would answer with the full route table
+    # (including every /api/v1/debug/* path) whatever ui.auth_token says. The
     # contract surface is served instead by routes_openapi.py, which vendors
     # the spec and is auth-gated like the rest of its route class.
     app = FastAPI(title='Drakkar', docs_url=None, redoc_url=None, openapi_url=None)
@@ -770,7 +770,7 @@ class APIServer:
         Raises:
             ValueError: ``ui`` is given without the ``recorder`` its routes read.
         """
-        if self._ui is None:
+        if self._ui is None or not self._ui.enabled:
             return create_api_app(self._drakkar_app)
         if self._recorder is None:
             raise ValueError('APIServer: the UI routes need a recorder')

@@ -114,9 +114,9 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 
 | Loop | Default interval | What it does |
 |------|------------------|--------------|
-| `cache.flush` | `flush_interval_seconds` (3s) | Drains the pending `_dirty` map to SQLite via `UPSERT` / `DELETE` in one transaction |
+| `cache.flush` | `flush_interval` (3s) | Drains the pending `_dirty` map to SQLite via `UPSERT` / `DELETE` in one transaction |
 | `cache.sync` | `cache.exchange.interval_seconds` (30s) | Pulls new `cluster`/`global` rows from peer workers over HTTP and LWW-merges them into the local DB. See [Cache exchange](#cache-exchange) |
-| `cache.cleanup` | `cleanup_interval_seconds` (60s) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
+| `cache.cleanup` | `cleanup_interval` (1m) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
 
 The three loops are worker-scope system tasks: every worker runs its own,
 on its own timer. They are configured here, under `cache.*` and
@@ -190,21 +190,21 @@ And the matching config:
 ```yaml
 cache:
   enabled: true                 # the cache file lives in storage.dir
-  flush_interval_seconds: 3.0
-  cleanup_interval_seconds: 60.0
+  flush_interval: 3s
+  cleanup_interval: 1m
   max_memory_entries: 10000     # LRU cap; omit for unbounded
   exchange:
     enabled: true
-    interval_seconds: 30.0
+    interval: 30s
     page_size: 500                # rows per page pulled from a peer, 1-1000
-    timeout_seconds: 5.0          # one request to a peer
+    timeout: 5s                   # one request to a peer
     max_concurrent_peers: 4       # peers pulled at the same time
     # Upper bound on one exchange cycle. null (default) means
-    # interval_seconds * 0.9, so the next tick never overlaps the current
-    # one. An explicit value must stay strictly below interval_seconds
+    # interval * 0.9, so the next tick never overlaps the current
+    # one. An explicit value must stay strictly below interval
     # (config load fails otherwise, so a misconfiguration surfaces at
     # startup).
-    cycle_deadline_seconds: null
+    cycle_deadline: null
 ```
 
 With `storage.dir: ""` (memory-only mode) the cache has no file, and every
@@ -295,7 +295,7 @@ pulled at the same time; the others wait for a free slot. Each request
 has a connect timeout of 2 seconds and a total timeout of
 `cache.exchange.timeout_seconds` (default 5).
 
-The whole cycle ends at `cache.exchange.cycle_deadline_seconds`
+The whole cycle ends at `cache.exchange.cycle_deadline`
 (default `0.9 x interval_seconds`). When the deadline fires, the worker
 cuts the peers that are still pulling or still waiting for a slot. A cut
 peer is **not** counted as a failure and does not back off; the pages it
@@ -498,7 +498,7 @@ writes without touching consumers.
 | "Is recomputation expensive, and would it be OK to recompute on a cold cache?" | **Cache.** Cold start is bounded by whatever time it takes for reasonable cache population via normal traffic. |
 | "Do I need strict consistency across workers?" | **Not cache.** Cache is eventually consistent (exchange lag + LWW + no tombstones). Use Redis / Postgres / a distributed consensus system. |
 | "Is the value small, JSON-serializable, and idempotent?" | **Cache fits well.** |
-| "Does the value contain secrets?" | **Not cache.** `cluster` and `global` values are served without a token to anyone who can reach the UI port, and the `/debug/cache` entries browser shows every persisted value. No redaction layer applies to cache values. |
+| "Does the value contain secrets?" | **Not cache.** `cluster` and `global` values are served without a token to anyone who can reach the API port, and the `/debug/cache` entries browser shows every persisted value. No redaction layer applies to cache values. |
 
 ---
 
@@ -556,15 +556,15 @@ before a failure keep it, so the next pull continues from there.
 ### Cross-cluster visibility
 
 The exchange takes each peer's cluster from its card in the
-[fleet registry](fleet.md). Workers are grouped by `cluster_name` (from
-`DrakkarConfig.cluster_name` or `cluster_name_env`).
+[fleet registry](fleet.md). Workers are grouped by their cluster name (from
+`cluster.name` or the variable named by `cluster.name_env`).
 
 The scopes asked of a peer depend on cluster membership:
 
 - Peer in same cluster as self → `cluster` and `global`
 - Peer in different cluster → `global` only
 
-Unclustered workers (`cluster_name=''`) are treated as a single
+Unclustered workers (an empty cluster name) are treated as a single
 implicit cluster — they pull cluster-scoped entries from other
 unclustered workers, and global-scoped entries from anyone.
 
@@ -648,8 +648,8 @@ See [`delete()` above](#deletekey) for the full story.
   mark with the next registry heartbeat, B refreshes its registry
   snapshot, and B runs its next exchange cycle.
 - **Worst-case staleness**, concretely: local durability is bounded by
-  `flush_interval_seconds` (default 3s); cross-worker freshness is
-  bounded by `flush_interval_seconds + autodiscover.heartbeat +
+  `cache.flush_interval` (default 3s); cross-worker freshness is
+  bounded by `cache.flush_interval + autodiscover.heartbeat +
   autodiscover.refresh + cache.exchange.interval_seconds`
   (default 3s + 10s + 15s + 30s = 58s), when the pull succeeds. Size
   intervals based on your tolerance — shorter intervals trade more SQLite
@@ -674,7 +674,7 @@ See [`delete()` above](#deletekey) for the full story.
   [`handler.offload()`](offload.md) thread can be flushed after a newer
   `set()` from the event loop and produce such a row.
 - **No tombstones in v1.** `delete` is local-only. Use TTL.
-- **Durability window** = `flush_interval_seconds` (default 3s). A
+- **Durability window** = `cache.flush_interval` (default 3s). A
   worker crash between `set()` and the next flush loses the
   unflushed writes. Tune shorter for stricter durability at the cost
   of more SQLite transactions.

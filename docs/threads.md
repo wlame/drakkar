@@ -12,8 +12,8 @@ page is the map.
 |---|---|---|---|---|
 | **Event loop** (main thread) | all `async` framework + handler code: arrange, hooks, sinks, recorder, scheduling | exactly 1 — not configurable | held while running Python | no — cooperative |
 | **Executor subprocesses** | the tasks themselves (your binary) | `executor.max_executors` | separate processes: none | **yes** — real parallelism |
-| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call on the main loop: handler blocking I/O, plus the framework's own short file work | `io.max_threads` (0 = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
-| **Offload pool** | `handler.offload(...)` — CPU-bound Python in hooks | `offload.max_threads` (0 = auto: `ceil(max_executors / 4)`, min 2) | held for pure Python; released only by numpy-style extensions | mostly no (GIL) |
+| **Blocking-I/O pool** — asyncio's default `to_thread` executor | every `asyncio.to_thread(...)` call on the main loop: handler blocking I/O, plus the framework's own short file work | `threads.io` (null = Python's `min(32, cpu_count + 4)`) | released during blocking I/O | yes, for I/O waits |
+| **Offload pool** | `handler.offload(...)` — CPU-bound Python in hooks | `threads.offload` (null = auto: `ceil(max_executors / 4)`, min 2) | held for pure Python; released only by numpy-style extensions | mostly no (GIL) |
 
 Plus service threads you never size: the runtime-health sampler (it must
 observe the loop from outside — [Runtime Health](runtime-health.md)), the
@@ -42,7 +42,7 @@ The debug UI routes that work on `shared.dir` (the databases list, the
 history trace, the merge, the downloads and the archive list) read such a
 folder from a `to_thread` pool. They run on the API server's own event loop,
 and their file calls use the thread pools of that loop, not the pool that
-`io.max_threads` sizes. A hung mount holds those threads and slows the debug
+`threads.io` sizes. A hung mount holds those threads and slows the debug
 pages, not the pipeline.
 
 ## Choosing the mechanism
@@ -70,7 +70,7 @@ the loop responsive; it does not make the computation faster.
 every partition, sink, and the recorder. The runtime-health monitor tells
 you when this rule was broken and by which call site.
 
-## The blocking-I/O pool (`io.max_threads`)
+## The blocking-I/O pool (`threads.io`)
 
 Every `asyncio.to_thread` call on the main event loop shares **one** pool:
 asyncio's default executor. (The API server and the webapp server run
@@ -84,8 +84,8 @@ census on the Runtime tab shows the symptom: a pile of tasks suspended in
 `to_thread`.
 
 ```yaml
-io:
-  max_threads: 0   # 0 = Python's default; set e.g. 128 to lift the cap
+threads:
+  io: null   # null = Python's default; set e.g. 128 to lift the cap (1 to 512)
 ```
 
 Sizing considerations:
@@ -107,7 +107,7 @@ Sizing considerations:
   small multiple of `executor.max_executors` — the executor pool already
   expresses how much concurrent work the deployment intends.
 
-## The offload pool (`offload.max_threads`)
+## The offload pool (`threads.offload`)
 
 The deliberate opposite: small, dedicated, for work that *holds* the GIL.
 More threads do not make pure-Python computation faster — they time-slice
@@ -122,8 +122,8 @@ gently with the executor pool: `ceil(executor.max_executors / 4)`, minimum
 |---|---|---|
 | `stalled` badge, stall stack names a handler line | blocking call ran **on the loop** | [Runtime Health](runtime-health.md) — move it to `to_thread` / `offload` |
 | lag episode verdict `cpu_bound` | CPU-bound Python on the loop | episode stacks → `offload()` it |
-| census shows hundreds suspended in `to_thread` | blocking-I/O pool saturated | `io.max_threads`, and [Host Pressure](host-pressure.md) RTT for the storage side |
-| `drakkar_offload_queued` sustained > 0 | offload pool saturated | raise `offload.max_threads` only if the work releases the GIL or partitions genuinely overlap |
+| census shows hundreds suspended in `to_thread` | blocking-I/O pool saturated | `threads.io`, and [Host Pressure](host-pressure.md) RTT for the storage side |
+| `drakkar_offload_queued` sustained > 0 | offload pool saturated | raise `threads.offload` only if the work releases the GIL or partitions genuinely overlap |
 | tasks slow, loop healthy | the subprocesses themselves | timeline, host pressure |
 
 ## See also

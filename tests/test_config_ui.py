@@ -22,8 +22,7 @@ def test_ui_defaults():
     assert ui.auth_token == ''
     assert ui.allowed_origins == []
     assert ui.max_rows == 5000
-    assert ui.ws_min_duration_ms == 500
-    assert ui.log_min_duration_ms == 500
+    assert ui.ws_min_duration == 0.5
     assert ui.prometheus.rate_interval == '5m'
     assert ui.custom_links == []
 
@@ -113,7 +112,7 @@ def test_unknown_top_level_section_fails_with_the_unknown_keys_message():
 def test_config_summary_uses_ui_token():
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on:8080 ' in summary
+    assert ' api=8080 ui=on ' in summary
     assert 'debug=' not in summary
 
 
@@ -122,10 +121,10 @@ def test_config_summary_ui_off():
     assert ' ui=off ' in cfg.config_summary(worker_id='w1')
 
 
-def test_config_summary_storage_and_fleet_tokens_follow_ui():
+def test_config_summary_storage_recorder_and_autodiscover_tokens_follow_ui():
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on:8080 storage=/tmp/drakkar fleet=off cache=off ' in summary
+    assert ' ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off ' in summary
 
 
 def test_probe_and_merge_default_to_enabled():

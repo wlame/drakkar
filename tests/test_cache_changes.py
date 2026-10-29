@@ -41,9 +41,9 @@ def _engine(tmp_path: Path, *, worker_id: str = 'w-a', exchange: bool = True) ->
     engine = CacheEngine(
         config=CacheConfig(
             enabled=True,
-            flush_interval_seconds=3600,
-            cleanup_interval_seconds=3600,
-            exchange=CacheExchangeConfig(enabled=exchange, interval_seconds=3600),
+            flush_interval='1h',
+            cleanup_interval='1h',
+            exchange=CacheExchangeConfig(enabled=exchange, interval='1h'),
         ),
         storage_dir=str(tmp_path),
         worker_id=worker_id,

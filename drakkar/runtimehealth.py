@@ -2,12 +2,12 @@
 
 Two cooperating parts, because a blocked event loop cannot observe itself:
 
-- A **heartbeat task** (coroutine) sleeps ``tick_seconds`` and measures how
+- A **heartbeat task** (coroutine) sleeps ``tick`` and measures how
   late it wakes — that lateness IS the event-loop lag. Each tick it folds
   the lag into a per-second ring buffer, updates Prometheus metrics, and
   advances a monotonic heartbeat timestamp.
 - A **sampler thread** wakes at the same interval and does exactly one
-  comparison: heartbeat age vs ``stall_seconds``. Only while the loop is
+  comparison: heartbeat age vs ``stall``. Only while the loop is
   actually stalled does it call ``sys._current_frames()`` and capture the
   traceback of the code blocking the loop — the introspection payload.
 
@@ -62,7 +62,7 @@ HealthState = Literal['healthy', 'degraded', 'stalled']
 STATE_VALUES: dict[HealthState, int] = {'healthy': 0, 'degraded': 1, 'stalled': 2}
 
 # Consecutive clean ticks required to leave 'degraded' — hysteresis so a
-# loop hovering around warn_lag_seconds emits one transition, not dozens.
+# loop hovering around warn_lag emits one transition, not dozens.
 RECOVERY_TICKS = 5
 
 # What this worker counts as its concurrency unit. The UI takes wording
@@ -273,7 +273,7 @@ class RuntimeHealthMonitor:
     def __init__(self, config: RuntimeHealthConfig, recorder: EventRecorder | None = None) -> None:
         self._config = config
         self._recorder = recorder
-        self._window = _LagWindow(config.history_window_seconds)
+        self._window = _LagWindow(config.history_window)
         self._samples = _StallSamples(config.max_stall_stacks)
         self.state: HealthState = 'healthy'
         # Monotonic timestamp of the last completed heartbeat tick. Plain
@@ -326,9 +326,9 @@ class RuntimeHealthMonitor:
         logger.info(
             'runtime_health_started',
             category='runtime_health',
-            tick_seconds=self._config.tick_seconds,
-            warn_lag_seconds=self._config.warn_lag_seconds,
-            stall_seconds=self._config.stall_seconds,
+            tick_seconds=self._config.tick,
+            warn_lag_seconds=self._config.warn_lag,
+            stall_seconds=self._config.stall,
         )
 
     async def stop(self) -> None:
@@ -337,7 +337,7 @@ class RuntimeHealthMonitor:
         if self._thread is not None:
             # join() from the loop is acceptable: the thread's loop body is
             # one Event.wait(tick) away from observing the stop flag.
-            self._thread.join(timeout=self._config.tick_seconds * 4)
+            self._thread.join(timeout=self._config.tick * 4)
             self._thread = None
         if self._task is not None:
             self._task.cancel()
@@ -350,7 +350,7 @@ class RuntimeHealthMonitor:
     # -- heartbeat task --------------------------------------------------------
 
     async def _run(self) -> None:
-        tick = self._config.tick_seconds
+        tick = self._config.tick
         while True:
             expected = time.monotonic() + tick
             await asyncio.sleep(tick)
@@ -368,7 +368,7 @@ class RuntimeHealthMonitor:
     def _advance_state(self, lag: float, wall_now: float) -> None:
         """One state-machine step; emits transition events and stall reports."""
         cfg = self._config
-        if lag >= cfg.stall_seconds:
+        if lag >= cfg.stall:
             # The loop just came back from a stall long enough that the
             # sampler thread saw it. Emit the stall report regardless of
             # the previous state — the stacks are already captured.
@@ -376,7 +376,7 @@ class RuntimeHealthMonitor:
             self._transition('stalled', lag, wall_now)
             # A stall tick is not a clean tick.
             self._clean_ticks = 0
-        elif lag >= cfg.warn_lag_seconds:
+        elif lag >= cfg.warn_lag:
             self._clean_ticks = 0
             self._transition('degraded', lag, wall_now)
         else:
@@ -400,12 +400,12 @@ class RuntimeHealthMonitor:
             self._episode = episode
         # Clean ticks inside the recovery hysteresis keep the episode open
         # (wall time counts) but their sub-warn lags are noise, not signal.
-        if lag >= self._config.warn_lag_seconds:
+        if lag >= self._config.warn_lag:
             episode.lag_sum_ms += lag * 1000
             episode.peak_lag_ms = max(episode.peak_lag_ms, lag * 1000)
-        if lag >= self._config.stall_seconds:
+        if lag >= self._config.stall:
             episode.stall_count += 1
-        if time.monotonic() - episode.started_monotonic >= self._config.episode_max_seconds:
+        if time.monotonic() - episode.started_monotonic >= self._config.max_episode:
             # The incident outlives the cap: flush what we have (so the
             # evidence exists even if the process dies mid-incident) and
             # keep tracking in a fresh episode.
@@ -522,7 +522,7 @@ class RuntimeHealthMonitor:
             )
 
     def _maybe_emit_sample(self, wall_now: float, lag: float) -> None:
-        if wall_now - self._last_sample_at < self._config.sample_interval_seconds:
+        if wall_now - self._last_sample_at < self._config.sample_interval:
             return
         self._last_sample_at = wall_now
         self._last_unit_count = len(asyncio.all_tasks())
@@ -563,17 +563,17 @@ class RuntimeHealthMonitor:
 
     def _sampler(self) -> None:
         """Thread body: watch heartbeat age; capture stacks only while stalled."""
-        while not self._thread_stop.wait(self._config.tick_seconds):
+        while not self._thread_stop.wait(self._config.tick):
             self._sample_once()
 
     def _sample_once(self) -> None:
         """One sampler-thread iteration, split out so tests can drive it
         with a synthetic heartbeat instead of real wall-clock stalls."""
         now = time.monotonic()
-        stalled_now = now - self._heartbeat >= self._config.stall_seconds
+        stalled_now = now - self._heartbeat >= self._config.stall
         episode = self._episode
-        probe_due = self._config.probe_interval_seconds > 0 and (
-            self._last_probe_at is None or now - self._last_probe_at >= self._config.probe_interval_seconds
+        probe_due = self._config.stack_probe_enabled and (
+            self._last_probe_at is None or now - self._last_probe_at >= self._config.stack_probe_interval
         )
         if not stalled_now and episode is None and not probe_due:
             return
@@ -641,7 +641,7 @@ class RuntimeHealthMonitor:
         """
         heartbeat_age = time.monotonic() - self._heartbeat
         return {
-            'state': ('stalled' if heartbeat_age >= self._config.stall_seconds else self.state),
+            'state': ('stalled' if heartbeat_age >= self._config.stall else self.state),
             'unit_label': UNIT_LABEL,
             'current_lag_ms': round(self._current_lag * 1000, 3),
             'heartbeat_age_ms': round(heartbeat_age * 1000, 3),
@@ -658,7 +658,7 @@ class RuntimeHealthMonitor:
         must stay cheap; the heartbeat-age override matches snapshot().
         """
         heartbeat_age = time.monotonic() - self._heartbeat
-        state: HealthState = 'stalled' if heartbeat_age >= self._config.stall_seconds else self.state
+        state: HealthState = 'stalled' if heartbeat_age >= self._config.stall else self.state
         return state, round(self._current_lag * 1000, 3)
 
     def _current_episode_view(self) -> dict[str, Any] | None:

@@ -41,7 +41,7 @@ suppressed_zombie_deliveries = Counter(
         'Sink deliveries suppressed because the task completed after its '
         'partition was revoked and the drain timed out. The new partition '
         'owner re-processes these messages, so delivering here would '
-        'double-write. A rising rate means drain_timeout_seconds is too '
+        'double-write. A rising rate means executor.drain_timeout is too '
         'small for the workload.'
     ),
     ['partition'],
@@ -200,7 +200,7 @@ output_truncated = Counter(
     'drakkar_executor_output_truncated_total',
     (
         'Total executor task output streams truncated to '
-        'executor.max_stdout_bytes / executor.max_stderr_bytes, labeled by '
+        'executor.max_stdout / executor.max_stderr, labeled by '
         'stream (stdout|stderr).'
     ),
     ['stream'],
@@ -571,14 +571,14 @@ cache_sync_errors = Counter(
 # this one ticks when the whole cycle (all peers combined) blew past the
 # wall-clock cap. Unlabelled — the deadline is a worker-level property so
 # per-peer labels would add cardinality without analytical value. Any
-# nonzero rate means the worker has more peers than ``interval_seconds``
+# nonzero rate means the worker has more peers than ``cache.exchange.interval``
 # can comfortably accommodate, or one peer's DB is pathologically slow.
 cache_peer_sync_timeouts = Counter(
     'drakkar_cache_peer_sync_timeouts_total',
     (
         'Peer-sync cycles that hit the per-cycle deadline before completing. '
         'Any nonzero rate indicates a slow peer or large peer count relative '
-        'to interval_seconds.'
+        'to cache.exchange.interval.'
     ),
 )
 
@@ -1001,7 +1001,7 @@ annotations_dropped = Counter(
 #
 #   drakkar_drain_timeout_hit_total
 #       Increments each time an input source's drain exceeds its
-#       ``drain_timeout_seconds`` budget without finishing — the Kafka
+#       ``executor.drain_timeout`` budget without finishing — the Kafka
 #       source's partition processors or the HTTP source's in-flight
 #       requests. A nonzero rate means workers are being killed
 #       mid-flight — investigate whether the timeout is too tight or
@@ -1153,7 +1153,7 @@ loop_lag_seconds = Histogram(
     'drakkar_loop_lag_seconds',
     (
         'Event-loop lag per heartbeat tick: how late the runtime woke the '
-        'monitor. Sustained values near runtime_health.warn_lag_seconds '
+        'monitor. Sustained values near runtime_health.warn_lag '
         'mean synchronous work is starving coroutines.'
     ),
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
@@ -1168,7 +1168,7 @@ runtime_stalls = Counter(
     'drakkar_runtime_stalls_total',
     (
         'Stalls detected: the event loop went silent for longer than '
-        'runtime_health.stall_seconds. Each one carries captured stacks '
+        'runtime_health.stall. Each one carries captured stacks '
         'in its runtime_stall flight-recorder event.'
     ),
 )
@@ -1191,7 +1191,7 @@ offload_queued = Gauge(
     'drakkar_offload_queued',
     (
         'Offloaded computations waiting for a free offload-pool thread. '
-        'Sustained non-zero values mean offload.max_threads is too small '
+        'Sustained non-zero values mean threads.offload is too small '
         'for how often hooks offload concurrently.'
     ),
 )

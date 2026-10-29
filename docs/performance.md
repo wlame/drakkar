@@ -391,11 +391,13 @@ pushes it to the thread-safe queue (~20us per event).
 For high-throughput fast-task workloads:
 
 ```yaml
+logging:
+  min_task_duration: 100ms     # skip structlog for fast tasks
 ui:
-  ws_min_duration_ms: 100      # skip live UI updates for tasks < 100ms
-  log_min_duration_ms: 100     # skip structlog for fast tasks
-  recorder:
-    event_min_duration_ms: 50    # skip DB writes for tasks < 50ms
+  ws_min_duration: 100ms       # skip live UI updates for tasks < 100ms
+recorder:
+  capture:
+    min_event_duration: 50ms   # skip DB writes for tasks < 50ms
     output_min_duration_ms: 100  # skip stdout/stderr for fast tasks
     store_output: false          # no stdout/stderr storage at all
 ```
@@ -505,7 +507,7 @@ to buffer more in memory.
 executor:
   max_executors: 16              # the ~400 tasks/sec loop ceiling binds before core count
   window_size: 200             # larger windows for batching opportunity
-  task_timeout_seconds: 30     # short timeout for fast tasks
+  task_timeout: 30s            # short timeout for fast tasks
   backpressure_high_multiplier: 16
   backpressure_low_multiplier: 4
 
@@ -513,11 +515,13 @@ sources:
   kafka:
     max_poll_records: 500        # pull more messages per poll cycle
 
+logging:
+  min_task_duration: 100ms     # don't log fast tasks
 ui:
-  ws_min_duration_ms: 100      # hide fast tasks from live UI
-  log_min_duration_ms: 100     # don't log fast tasks
-  recorder:
-    event_min_duration_ms: 50    # don't store fast tasks in DB
+  ws_min_duration: 100ms       # hide fast tasks from live UI
+recorder:
+  capture:
+    min_event_duration: 50ms   # don't store fast tasks in DB
     output_min_duration_ms: 100  # don't store stdout for fast tasks
     store_output: false          # skip stdout/stderr storage entirely
 ```
@@ -527,7 +531,7 @@ ui:
 | `max_executors: 16` | With fast tasks, the event-loop ceiling (~400 tasks/sec, see [Bottleneck: Event Loop](#bottleneck-event-loop)) binds before core count: ~400 x average task duration is all the slots one worker can drain. At p80=40ms that is ~16 slots — more would complete tasks faster than the loop can orchestrate. On a big machine, run several workers per host instead of one worker with a larger pool. |
 | `window_size: 200` | With fast tasks, larger windows let `arrange()` batch more messages per subprocess. Even without batching, larger windows reduce `arrange()` call frequency. |
 | `max_poll_records: 500` | Pull more messages per Kafka poll to keep partition queues full. Reduces poll overhead per message. |
-| `ws_min_duration_ms: 100` | Fast tasks flood the WebSocket and live UI. Hiding them reduces event loop work and browser rendering cost. |
+| `ws_min_duration: 100ms` | Fast tasks flood the WebSocket and live UI. Hiding them reduces event loop work and browser rendering cost. |
 | `event_min_duration_ms: 50` | Skip SQLite writes for fast tasks. At high throughput, SQLite INSERT rate becomes a bottleneck. |
 | `store_output: false` | Stdout/stderr for fast tasks is usually small and uninteresting. Skipping it eliminates JSON encoding and storage. |
 
@@ -537,14 +541,14 @@ ui:
 executor:
   max_executors: 8
   window_size: 20
-  task_timeout_seconds: 300
+  task_timeout: 5m
 
 sources:
   kafka:
     max_poll_records: 100
 
 ui:
-  ws_min_duration_ms: 0        # show all tasks in live UI
+  ws_min_duration: 0           # show all tasks in live UI
   recorder:
     event_min_duration_ms: 0     # store everything
     store_output: true           # stdout/stderr is valuable for debugging
@@ -561,9 +565,9 @@ observability.
 executor:
   max_executors: 16
   window_size: 5               # small windows -- few tasks in flight at once
-  task_timeout_seconds: 120    # generous timeout, but not infinite
+  task_timeout: 2m             # generous timeout, but not infinite
   max_retries: 2               # retry on transient failures
-  drain_timeout_seconds: 30    # allow time for in-flight tasks on shutdown
+  drain_timeout: 30s           # allow time for in-flight tasks on shutdown
   backpressure_high_multiplier: 8
   backpressure_low_multiplier: 2
 
@@ -573,11 +577,13 @@ sources:
     session_timeout_ms: 60000    # longer session timeout to avoid rebalance during slow processing
     max_poll_interval_ms: 600000 # 10 min between polls -- tasks may run long
 
+logging:
+  min_task_duration: 0         # log every task
 ui:
-  ws_min_duration_ms: 0        # show everything in live UI
-  log_min_duration_ms: 0       # log every task
-  recorder:
-    event_min_duration_ms: 0     # store all events
+  ws_min_duration: 0           # show everything in live UI
+recorder:
+  capture:
+    min_event_duration: 0      # store all events
     store_output: true           # stdout/stderr is critical for 10s tasks
 ```
 
@@ -588,7 +594,7 @@ ui:
 | `max_poll_records: 20` | Don't fetch 500 messages when each takes 10s to process -- that's 83 minutes of work per poll. |
 | `session_timeout_ms: 60000` | Default 45s may trigger rebalance if the event loop is busy with task completions. 60s gives more headroom. |
 | `max_poll_interval_ms: 600000` | Kafka kicks a consumer out if it doesn't poll within this interval. With 10s tasks and window_size 5, a full window takes ~50s. 10 minutes provides ample margin. |
-| `drain_timeout_seconds: 30` | On shutdown, wait up to 30s for 10s tasks to finish rather than killing them. |
+| `drain_timeout: 30s` | On shutdown, wait up to 30s for 10s tasks to finish rather than killing them. |
 
 ---
 

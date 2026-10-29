@@ -689,12 +689,7 @@ def test_every_combination_prints_a_config_that_loads(answers, tmp_path, clean_e
     assert config.autodiscover.enabled is (answers.discover != OFF)
     assert config.autodiscover.provider == ('' if answers.discover == OFF else answers.discover)
     summary = config.config_summary()
-    assert re.search(r' fleet=(\S+)', summary).group(1) == answers.discover
-    election_token = re.search(r' election=(\S+)', summary)
-    if answers.discover in (OFF, 'filesystem'):
-        assert election_token is None, summary
-    else:
-        assert election_token.group(1) == answers.discover
+    assert f' autodiscover={answers.discover} ' in summary, summary
 
 
 def test_fragment_leaves_are_never_secret_and_every_secret_has_an_env_entry():
@@ -801,8 +796,8 @@ def test_there_are_golden_examples_for_the_main_cases():
 
 
 def _fleet_part(document: dict[str, Any]) -> dict[str, Any]:
-    """``document`` without what the calculator prints: three sections and ``recorder.capture``."""
-    fleet = {key: value for key, value in document.items() if key not in {'sources', 'executor', 'ui'}}
+    """``document`` without what the calculator prints: four sections and ``recorder.capture``."""
+    fleet = {key: value for key, value in document.items() if key not in {'sources', 'executor', 'logging', 'ui'}}
     recorder = {key: value for key, value in fleet.pop('recorder', {}).items() if key != 'capture'}
     return {**fleet, 'recorder': recorder} if recorder else fleet
 
@@ -925,7 +920,7 @@ def test_wizard_golden_disk_no():
     loaded = yaml.safe_load(example['yaml'])
 
     assert example['query'] == 'v=1&disk=no'
-    assert list(loaded) == ['sources', 'executor', 'ui', 'storage', 'recorder', 'connections']
+    assert list(loaded) == ['sources', 'executor', 'logging', 'ui', 'storage', 'recorder', 'connections']
     assert loaded['storage'] == {'dir': ''}
     assert 'autodiscover' not in loaded
 

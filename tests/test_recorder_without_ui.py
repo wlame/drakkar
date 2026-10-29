@@ -37,7 +37,7 @@ def _app(tmp_path, *, ui_enabled: bool, recorder_enabled: bool, **recorder) -> D
         config=DrakkarConfig(
             connections=kafka_connections(),
             storage={'dir': str(tmp_path / 'storage')},
-            cluster_name=CLUSTER,
+            cluster={'name': CLUSTER},
             api={'port': 8123, 'public_url': 'http://w-1.example:8123'},
             ui={'enabled': ui_enabled, 'release': {'enabled': False}},
             recorder={'enabled': recorder_enabled, **recorder},

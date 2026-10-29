@@ -258,7 +258,7 @@ class KafkaSource:
                 processor.suppress_deliveries()
             # Cancel them as well: an uncancelled zombie keeps its
             # executor slot and subprocess for up to
-            # ``task_timeout_seconds`` and keeps its processing loop from
+            # ``executor.task_timeout`` and keeps its processing loop from
             # exiting, so every ``processor.stop()`` below would wait out
             # its full timeout inside the pod's grace period.
             await asyncio.gather(*(p.cancel_active_tasks() for p in zombies))
@@ -291,7 +291,7 @@ class KafkaSource:
         """Commit what drained cleanly, stop the processors, close the consumer.
 
         ``deadline`` is advisory here: every step below already carries its own
-        ``executor.drain_timeout_seconds`` bound, and the background-task wait
+        ``executor.drain_timeout`` bound, and the background-task wait
         needs that full budget rather than whatever the drain left of a shared
         deadline.
         """
@@ -365,7 +365,7 @@ class KafkaSource:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*bg_snapshot, return_exceptions=True),
-                    timeout=ctx.config.executor.drain_timeout_seconds,
+                    timeout=ctx.config.executor.drain_timeout,
                 )
             except TimeoutError:
                 await log.awarning(
@@ -469,7 +469,7 @@ class KafkaSource:
         last commit and the drain end would be delivered twice.
 
         The wait is bounded, not open-ended: every ``_stop_processor`` runs
-        against one ``executor.drain_timeout_seconds`` deadline that covers
+        against one ``executor.drain_timeout`` deadline that covers
         the drain, the final commit RPC and the processor stop, so this
         always returns within roughly that budget. That bound matters —
         ``run_coroutine_threadsafe(...).result()`` has no timeout of its
@@ -480,7 +480,7 @@ class KafkaSource:
         A drain that expires cancels the tasks it was waiting for rather
         than leaving them running: their results are discarded anyway, and
         an uncancelled zombie holds an executor slot until
-        ``task_timeout_seconds`` while it also keeps the processing loop
+        ``executor.task_timeout`` while it also keeps the processing loop
         from exiting, adding a full stop timeout on top of the drain.
 
         The handler's ``on_revoke`` hook stays on a background task — it is
@@ -577,7 +577,7 @@ class KafkaSource:
         now would silently skip them on partition reassign and lose data.
         Preferring at-least-once duplication over silent loss.
         """
-        drain_timeout = self._context().config.executor.drain_timeout_seconds
+        drain_timeout = self._context().config.executor.drain_timeout
         # One deadline for the whole teardown. librdkafka's rebalance thread
         # is blocked on this coroutine, so every step below has to come out
         # of the same budget — a step that takes its own would let the

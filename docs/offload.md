@@ -44,7 +44,7 @@ propagate unchanged.
 ## What it does — and does not — buy you
 
 `offload()` runs the function on a small dedicated thread pool
-(`offload.max_threads`; by default sized automatically from the executor
+(`threads.offload`; by default sized automatically from the executor
 pool — `ceil(executor.max_executors / 4)`, minimum 2). Be clear about the
 physics:
 
@@ -56,7 +56,7 @@ physics:
   polling continues, completed tasks are collected, sinks flush, offsets
   commit, other partitions make progress, the UI stays live.
 - If the offloaded code releases the GIL (numpy, compiled extensions),
-  threads DO run in parallel — then `max_threads` becomes a genuine
+  threads DO run in parallel — then `threads.offload` becomes a genuine
   parallelism knob. The same is true on free-threaded Python builds.
 
 The pool is deliberately **not** the subprocess executor pool. Executor
@@ -123,18 +123,18 @@ semantics, minus the shared pool, metrics, and recorder events.
 ## Configuration
 
 ```yaml
-offload:
-  max_threads: 0        # 0 = auto: ceil(executor.max_executors / 4), min 2
-                        # env: DK_OFFLOAD__MAX_THREADS
+threads:
+  offload: null         # null = auto: ceil(executor.max_executors / 4), min 2; otherwise 1 to 32
+                        # env: DK_THREADS__OFFLOAD
 ```
 
-The default (`0` = auto) sizes the pool from the executor pool —
+The default (`null` = auto) sizes the pool from the executor pool —
 `ceil(executor.max_executors / 4)` with a minimum of 2, so pool 8 → 2 threads,
 9 → 3, 13 → 4 — a bigger subprocess fleet gets proportionally more
 offload headroom without tuning a second knob. The knob bounds how many
 offloaded computations run at once before newer calls queue — it is a
 queueing knob, not a speed knob (see the GIL note above). Its sibling
-`io.max_threads` sizes the separate blocking-I/O pool behind
+`threads.io` sizes the separate blocking-I/O pool behind
 `asyncio.to_thread` — see [Threads & Pools](threads.md) for the full map.
 Set an explicit value when
 several partitions routinely offload at the same time *and* the

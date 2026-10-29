@@ -330,7 +330,7 @@ class ExecutorResult(BaseModel):
     stdout_truncated: bool = Field(
         default=False,
         description=(
-            'True when stdout retention stopped at executor.max_stdout_bytes '
+            'True when stdout retention stopped at executor.max_stdout '
             'and the remainder was discarded. Always False when the cap is '
             'unlimited (0) and for handler-supplied precomputed results.'
         ),
@@ -338,7 +338,7 @@ class ExecutorResult(BaseModel):
     stderr_truncated: bool = Field(
         default=False,
         description=(
-            'True when stderr retention stopped at executor.max_stderr_bytes '
+            'True when stderr retention stopped at executor.max_stderr '
             'and the remainder was discarded. Always False when the cap is '
             'unlimited (0) and for handler-supplied precomputed results.'
         ),
@@ -355,7 +355,7 @@ class ExecutorError(BaseModel):
             'Structured failure classification — discriminate failures by this '
             "field, never by parsing ``exception`` text. Values: 'nonzero_exit' "
             '(the subprocess or precomputed result finished with a non-zero exit '
-            "code; the default), 'timeout' (exceeded executor.task_timeout_seconds), "
+            "code; the default), 'timeout' (exceeded executor.task_timeout), "
             "'launch_failure' (the process could not be started: missing binary or "
             "spawn error), 'internal' (synthesized by the framework with no "
             'subprocess outcome behind it — e.g. a hook raised or the pool '

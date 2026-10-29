@@ -12,7 +12,6 @@ a back-reference. See :mod:`drakkar.lifecycle` for the rationale.
 """
 
 import asyncio
-import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -105,15 +104,19 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         '(set it in YAML or through the handler app_env_prefix env vars)',
     ),
     ConsumedSetting(
-        'cluster_name',
+        'cluster.name',
         'the worker resolves its cluster name in DrakkarApp.__init__',
     ),
     ConsumedSetting(
-        'cluster_name_env',
+        'cluster.name_env',
         'the worker resolves its cluster name in DrakkarApp.__init__',
     ),
     ConsumedSetting(
-        'worker_name_env',
+        'worker.name',
+        'the worker id is resolved in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'worker.name_env',
         'the worker id is resolved in DrakkarApp.__init__',
     ),
     ConsumedSetting(
@@ -297,15 +300,11 @@ class DrakkarApp:
         # every hook, on_startup included.
         self._wire_app_config()
         self._wire_executor_on_failure()
-        configured_worker_id = worker_id or os.environ.get(self._config.worker_name_env, '')
+        configured_worker_id = worker_id or self._config.worker.resolved_name()
         self._worker_id = configured_worker_id or f'drakkar-{id(self):x}'
         # The generated name changes at each start; the own archive scope warns about it.
         self._worker_id_is_generated = not configured_worker_id
-        self._cluster_name = ''
-        if self._config.cluster_name_env:
-            self._cluster_name = os.environ.get(self._config.cluster_name_env, '')
-        if not self._cluster_name:
-            self._cluster_name = self._config.cluster_name
+        self._cluster_name = self._config.cluster.resolved_name()
         self._start_time = time.monotonic()
         # Identity of this process in the worker registry: a new random
         # instance at every start, so two processes that share a worker name

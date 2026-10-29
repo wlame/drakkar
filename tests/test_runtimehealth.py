@@ -60,7 +60,7 @@ def isolated_host_readers(monkeypatch):
 
 @pytest.fixture
 def monitor():
-    config = RuntimeHealthConfig(tick_seconds=0.25, warn_lag_seconds=0.1, stall_seconds=1.0)
+    config = RuntimeHealthConfig(tick='250ms', warn_lag='100ms', stall='1s')
     spy = RecorderSpy()
     mon = RuntimeHealthMonitor(config, recorder=spy)  # type: ignore[arg-type]
     return mon, spy
@@ -177,7 +177,7 @@ async def test_degraded_tick_between_stalls_does_not_reemit_stall(monitor):
 async def test_sample_events_respect_interval(monitor):
     mon, spy = monitor
     mon._maybe_emit_sample(100.0, 0.001)
-    mon._maybe_emit_sample(105.0, 0.001)  # < sample_interval_seconds (10) later
+    mon._maybe_emit_sample(105.0, 0.001)  # < sample_interval (10s) later
     mon._maybe_emit_sample(111.0, 0.001)
     samples = [e for e in spy.health_events if e['kind'] == 'sample']
     assert len(samples) == 2
@@ -231,7 +231,7 @@ def test_snapshot_uses_state_machine_state_when_heartbeat_fresh(monitor):
 
 
 async def test_start_and_stop_clean():
-    config = RuntimeHealthConfig(tick_seconds=0.05)
+    config = RuntimeHealthConfig(tick='50ms')
     mon = RuntimeHealthMonitor(config, recorder=None)
     mon.start()
     assert mon._task is not None and mon._thread is not None
@@ -334,19 +334,19 @@ async def test_episode_start_is_backdated_by_the_opening_lag(monitor):
     assert episode.started_wall == pytest.approx(98.0)
 
 
-async def test_episode_max_seconds_flushes_and_reopens(monitor):
+async def test_max_episode_flushes_and_reopens(monitor):
     mon, spy = monitor
     mon._advance_state(0.2, 100.0)
     first = mon._episode
     assert first is not None
     # Simulate an episode that has already outlived the cap.
-    first.started_monotonic -= mon._config.episode_max_seconds + 1
+    first.started_monotonic -= mon._config.max_episode + 1
     mon._advance_state(0.2, 101.0)
 
     assert len(spy.episode_events) == 1
     assert mon._episode is not None
     assert mon._episode is not first
-    assert spy.episode_events[0]['duration_ms'] >= mon._config.episode_max_seconds * 1000
+    assert spy.episode_events[0]['duration_ms'] >= mon._config.max_episode * 1000
 
 
 async def test_episode_verdict_blocked_from_dominant_stack_and_low_cpu(monitor, isolated_host_readers, monkeypatch):
@@ -466,10 +466,26 @@ def test_probes_disabled_by_default(monitor):
     assert spy.probe_events == []
 
 
+def test_stack_probe_off_by_flag():
+    """A short interval alone starts no probe: the flag switches it on."""
+    import threading
+
+    config = RuntimeHealthConfig(stack_probe_enabled=False, stack_probe_interval='1ms')
+    spy = RecorderSpy()
+    mon = RuntimeHealthMonitor(config, recorder=spy)  # type: ignore[arg-type]
+    mon._loop_thread_id = threading.get_ident()
+    mon._heartbeat = time.monotonic()
+
+    mon._sample_once()
+    mon._drain_probes()
+
+    assert spy.probe_events == []
+
+
 def test_probe_captures_and_heartbeat_records_it():
     import threading
 
-    config = RuntimeHealthConfig(probe_interval_seconds=0.0001)
+    config = RuntimeHealthConfig(stack_probe_enabled=True, stack_probe_interval='1ms')
     spy = RecorderSpy()
     mon = RuntimeHealthMonitor(config, recorder=spy)  # type: ignore[arg-type]
     mon._loop_thread_id = threading.get_ident()
@@ -488,7 +504,7 @@ def test_probe_captures_and_heartbeat_records_it():
 def test_probe_respects_interval():
     import threading
 
-    config = RuntimeHealthConfig(probe_interval_seconds=3600.0)
+    config = RuntimeHealthConfig(stack_probe_enabled=True, stack_probe_interval='1h')
     mon = RuntimeHealthMonitor(config, recorder=RecorderSpy())  # type: ignore[arg-type]
     mon._loop_thread_id = threading.get_ident()
     mon._heartbeat = time.monotonic()
@@ -503,13 +519,13 @@ def test_probe_respects_interval():
 def test_probe_first_capture_ignores_host_uptime(monkeypatch):
     # time.monotonic() counts from BOOT on Linux: on a freshly started host
     # (every CI runner) it can be smaller than the probe interval, and the
-    # old 0.0 sentinel silently delayed the first probe until host uptime
-    # exceeded it. The first probe must fire regardless of the clock value.
+    # a 0.0 sentinel would delay the first probe until host uptime exceeded
+    # it. The first probe must fire regardless of the clock value.
     import threading
 
     from drakkar import runtimehealth as rh
 
-    config = RuntimeHealthConfig(probe_interval_seconds=3600.0)
+    config = RuntimeHealthConfig(stack_probe_enabled=True, stack_probe_interval='1h')
     mon = RuntimeHealthMonitor(config, recorder=RecorderSpy())  # type: ignore[arg-type]
     mon._loop_thread_id = threading.get_ident()
     monkeypatch.setattr(rh.time, 'monotonic', lambda: 100.0)  # "booted 100 s ago"

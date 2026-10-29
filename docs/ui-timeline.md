@@ -26,8 +26,8 @@ top of it, not the other way around.
   attached yet), capped at 100000 since neither factor has a ceiling of its own. A caller
   can pass an explicit `limit` (1-100000) to override the derived default.
 - **Age ceiling (time window).** The `minutes` query parameter accepts up to 1440 (24h),
-  but is always clamped down to `ui.timeline.max_age_minutes` — a per-worker override,
-  tighter by default at 60 minutes. Raising `minutes` past `max_age_minutes` has no effect
+  but is always clamped down to `ui.timeline.max_age` — a per-worker override,
+  tighter by default at 60 minutes. Raising `minutes` past `max_age` has no effect
   until the config value itself is raised.
 
 **Worked numbers.** With the framework defaults (`history_factor: 100`,
@@ -36,13 +36,13 @@ going back at most **60 minutes**. This is deliberately smaller than the old fix
 event-based ceiling — the timeline is now sized for what an operator can actually scroll
 through, and depth is a config knob rather than a hardcoded constant. Raise
 `history_factor` for a worker with a small pool that still handles bursty traffic; raise
-`max_age_minutes` (up to the 1440 ceiling) to look further back in time.
+`max_age` (up to the 1440 ceiling) to look further back in time.
 
 ```yaml
 ui:
   timeline:
     history_factor: 100    # depth = history_factor x executor.max_executors (or x8 if no pool), capped at 100000
-    max_age_minutes: 60    # 1-1440; oldest task age the timeline shows
+    max_age: 1h            # 1-1440; oldest task age the timeline shows
 ```
 
 ## Color rules
@@ -184,7 +184,7 @@ The [integration test harness](integration.md) labels every scan task with six v
   # boundary (see handler.py's arrange()).
   timeline:
     history_factor: 100
-    max_age_minutes: 60
+    max_age: 1h
     color_rules:
       - name: empty output
         when: {field: stdout_size, op: eq, value: 0}
@@ -268,7 +268,7 @@ And the five label roles:
   without moving, the next time the timeline re-renders.
 - **Markers derive from the currently-loaded tasks, not full history.** A marker pin exists
   only as long as at least one task carrying that label value is still within the loaded
-  window (bounded by depth and `max_age_minutes`, same as bars). Once every task from a
+  window (bounded by depth and `max_age`, same as bars). Once every task from a
   given batch ages out, its pin disappears along with them.
 
 ## See also
