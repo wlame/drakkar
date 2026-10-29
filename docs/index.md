@@ -175,8 +175,13 @@ class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
 
 ```yaml
 # drakkar.yaml
-kafka:
-  brokers: "localhost:9092"
+connections:
+  kafka:
+    main:
+      brokers: "localhost:9092"
+  postgres:
+    main:
+      dsn: "postgresql://user:pass@localhost:5432/mydb"
 
 sources:
   kafka:
@@ -194,8 +199,7 @@ sinks:
     output:
       topic: "job-results"
   postgres:
-    main:
-      dsn: "postgresql://user:pass@localhost:5432/mydb"
+    main: {}   # uses connections.postgres.main
 ```
 
 All config fields support env var override with `DK_` prefix and `__` for nesting (e.g. `DK_EXECUTOR__MAX_EXECUTORS=16`).

@@ -98,16 +98,16 @@ Annotations are rows in the flight recorder's `events` table, under the
 `annotation` event type. That has three consequences worth knowing:
 
 **They live and expire like any other event.** An annotation rotates into
-a new recorder file every `ui.recorder.rotation_interval_hours` along with
+a new recorder file every `recorder.sqlite.rotation_interval` along with
 everything else. The finished file is sealed into the cluster history
 folder, and once that file's window is archived
-(`history.archive.enabled`, default true — see
+(`recorder.archive.enabled`, default true — see
 [Archiving](local-databases.md#archiving)) the sealed file is deleted but
 the annotation survives, compressed, inside the archive.
-`history.archive.retention_days` (default `30`) is the only thing
+`recorder.archive.retention` (default `30`) is the only thing
 that expires archives, so by default an annotation survives about a
 month after its window is archived. Set it to `0` to keep archives —
-and the annotations inside them — indefinitely. With `history.archive.enabled: false`, sealed
+and the annotations inside them — indefinitely. With `recorder.archive.enabled: false`, sealed
 files — and the annotations inside them — are never deleted
 automatically at all.
 
@@ -135,12 +135,12 @@ Two limits, both per hook invocation:
 
 | Setting | Default | Guards |
 |---|---|---|
-| `ui.recorder.annotation_max_bytes` | 16 KiB | one unreasonable payload |
-| `ui.recorder.annotation_max_bytes_per_call` | 256 KiB | total DB pressure from one hook call |
+| `recorder.annotations.max_size` | 16 KiB | one unreasonable payload |
+| `recorder.annotations.max_size_per_call` | 256 KiB | total DB pressure from one hook call |
 
 Set either to `0` to disable it. The second one matters more than it looks:
 without it, a handler annotating every message of a wide window can flood
-the in-memory buffer (`ui.recorder.max_buffer`) with low-value rows and
+the in-memory buffer (`recorder.max_buffer_rows`) with low-value rows and
 evict genuinely important events that have not been flushed yet, which
 costs you the debug value of everything else.
 
@@ -150,8 +150,8 @@ warning level with the payload attached, so nothing disappears silently:
 
 | `reason` | Meaning |
 |---|---|
-| `oversize` | The payload alone exceeded `annotation_max_bytes`. |
-| `budget_exhausted` | This hook invocation had already spent `annotation_max_bytes_per_call`. |
+| `oversize` | The payload alone exceeded `recorder.annotations.max_size`. |
+| `budget_exhausted` | This hook invocation had already spent `recorder.annotations.max_size_per_call`. |
 | `no_context` | Called outside a framework-invoked hook. |
 | `unserializable` | The payload could not be JSON-encoded (a self-referential structure, typically). |
 
@@ -165,7 +165,7 @@ rate(drakkar_recorder_annotations_dropped_total[5m]) > 0
 ```
 
 The logged copy of a dropped payload is itself capped at
-`ui.recorder.annotation_log_max_bytes` (default 2 KiB, `0` for unlimited)
+`recorder.annotations.max_log_size` (default 2 KiB, `0` for unlimited)
 and marked `data_truncated: true` when cut. This is the one place
 truncation happens — a log line is already a lossy human-facing artifact,
 and log storage is usually metered per byte.
@@ -175,7 +175,7 @@ and log storage is usually metered per byte.
 ## Payloads too large to inline
 
 If a diagnostic genuinely runs to megabytes, do not raise
-`annotation_max_bytes` to fit it — you would be filling the event log with
+`recorder.annotations.max_size` to fit it — you would be filling the event log with
 one message's worth of data. Put the blob in [the cache](cache.md) with a
 TTL and annotate the key:
 
@@ -195,14 +195,14 @@ TTL will show the key with nothing behind it.
 ## Turning it off
 
 ```yaml
-ui:
-  recorder:
-    annotations_enabled: false
+recorder:
+  annotations:
+    enabled: false
 ```
 
 `self.annotate(...)` then becomes a no-op call your handler can keep making
 unconditionally. The same happens automatically when the recorder is not
-running or `ui.recorder.store_events` is false — with no flush loop there is
+running or `recorder.capture.events` is false — with no flush loop there is
 nowhere for an annotation to land, so building one buys nothing.
 
 ---

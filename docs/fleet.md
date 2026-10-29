@@ -209,7 +209,7 @@ code 2, writes the reason and the usage to stderr and nothing to stdout.
 `drakkar-schema --help` prints the usage and exits with 0.
 
 Three more flags print the recorder events table of
-[`persistence: postgres`](recorder-postgres.md) after the provider
+[provider `postgres`](recorder-postgres.md) after the provider
 statements, separated by one empty line:
 
 ```bash
@@ -246,7 +246,7 @@ partitions (see
 **During an outage.** A connection that is refused or lost, a server that
 restarts and a transaction that must be run again are transient errors. They
 are retried under `autodiscover.resilience` (see [Resilience](#resilience)).
-When operations keep failing, the breaker opens after `failure_threshold`
+When operations keep failing, the breaker opens after `breaker_failures`
 failed operations and the provider is skipped until the cooldown has passed.
 The workers list keeps its last snapshot, and
 `drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not
@@ -264,7 +264,7 @@ Redis and has no shared folder for the cards.
 connections:
   redis:
     main:
-      key_prefix: "drakkar:"     # the default; every key starts with it
+      state_prefix: "drakkar:"   # the default; every key starts with it
       # url: set from the environment, see below
 autodiscover:
   enabled: true
@@ -281,7 +281,7 @@ export DK_CONNECTIONS__REDIS__MAIN__URL='redis://drakkar-fleet:...@redis.interna
 Without it the entry uses `redis://localhost:6379/0`. The registry needs the
 API server (`api.enabled: true`), as with every provider. Every worker of the
 fleet uses the same provider and the same server, database number and
-`key_prefix`; workers on different stores do not see each other.
+`state_prefix`; workers on different stores do not see each other.
 
 What it keeps and does:
 
@@ -339,7 +339,7 @@ What it keeps and does:
   server answered.
 
 The address, the database number and the credentials come from the `url` of
-the connection, and the key prefix from its `key_prefix`:
+the connection, and the key prefix from its `state_prefix`:
 `connections.redis.<connection>` (see
 [Configuration](configuration.md#connections)). The client is created once, at the first provider start, and
 the registry and the election share it when they name the same
@@ -411,13 +411,13 @@ line.
 **During an outage.** The client does not retry on its own; the
 [`resilience`](#resilience) block of the registry is the only retry and the
 only time limit. A connect gives up after 5 seconds, and a read or a write
-ends at `timeout_seconds` of the block. A connection that is refused or lost,
+ends at `timeout` of the block. A connection that is refused or lost,
 a timeout, and the server replies `BUSY` (a script is running), `LOADING`
 (the data set is loading), `MASTERDOWN` and `TRYAGAIN` are transient errors,
 and they are retried. Any other reply is final: a wrong password
 (`WRONGPASS`), a missing ACL right (`NOPERM`) and `ERR ...` end the operation
 at once, and each counts as a failed operation for the breaker. When
-operations keep failing, the breaker opens after `failure_threshold` failed
+operations keep failing, the breaker opens after `breaker_failures` failed
 operations and the provider is skipped until the cooldown has passed. The
 workers list keeps its last snapshot, and
 `drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not
@@ -437,7 +437,7 @@ connections:
   consul:
     main:
       address: http://127.0.0.1:8500   # the HTTP API of a Consul agent; the default
-      key_prefix: drakkar              # the default; every key starts with it
+      state_prefix: drakkar            # the default; every key starts with it
       # token: set from the environment, see below
 autodiscover:
   enabled: true
@@ -455,7 +455,7 @@ export DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
 Without a token the requests go out without one, and Consul treats them as
 the anonymous token. The registry needs the API server (`api.enabled: true`), as
 with every provider. Every worker of the fleet uses the same provider and the
-same Consul cluster, datacenter and `key_prefix`; workers on different stores
+same Consul cluster, datacenter and `state_prefix`; workers on different stores
 do not see each other.
 
 What it keeps and does:
@@ -468,7 +468,7 @@ What it keeps and does:
   `drakkar-<worker>-<instance>` (the same stem, then the 16 hex characters of
   the instance). It is created with `Behavior: delete`, so the key goes when
   the session ends, and `LockDelay: 0s`, so another session can take a free
-  key at once. The `key_prefix` may have more than one segment, for example
+  key at once. The `state_prefix` may have more than one segment, for example
   `team/drakkar`.
 - **Publish.** At every heartbeat and every state change the provider renews
   the worker's session, and then writes the card to its key with
@@ -499,7 +499,7 @@ What it keeps and does:
   renew that comes a little late can find the session ended, and the card
   is missing from the list until that publish creates a new session and
   writes the card again.
-- **List.** One read of every key under `<key_prefix>/fleet/workers/`. A key
+- **List.** One read of every key under `<state_prefix>/fleet/workers/`. A key
   that cannot be a card key is skipped without a log line: the folder key
   itself, which a Consul UI creates, and a key nested deeper. A card is
   online while its key has a session, and the workers list shows it with no
@@ -565,7 +565,7 @@ Point the workers at an agent that stays reachable and healthy, usually the
 agent of their own host.
 
 **The token.** Give the providers a token of their own, with these rights, in
-which `drakkar/` is the `key_prefix` of the connection and a `/`:
+which `drakkar/` is the `state_prefix` of the connection and a `/`:
 
 ```hcl
 key_prefix "drakkar/" { policy = "write" }
@@ -599,18 +599,18 @@ not show at the start, so look for it at the first publish:
   `500` is transient, so the operation is retried under the
   [`resilience`](#resilience) block, and it fails with
   `consul: GET /v1/status/leader answered 500: No path to datacenter`. The
-  breaker opens after `failure_threshold` failed operations, and then one
+  breaker opens after `breaker_failures` failed operations, and then one
   probe goes out after each cooldown. Fix the name; nothing else cures it.
 
 **During an outage.** The client does not retry on its own; the
 [`resilience`](#resilience) block of the registry is the only retry and the
 only time limit. A connect gives up after 5 seconds, and a read or a write
-ends at `timeout_seconds` of the block. A connection that is refused or lost,
+ends at `timeout` of the block. A connection that is refused or lost,
 a timeout, and the statuses `429`, `500`, `502`, `503` and `504` are transient
 errors, and they are retried. Any other status is final: a `403` or a `400`,
 for example, ends the operation at once, and it counts as a failed operation
 for the breaker. When operations keep failing, the breaker opens after
-`failure_threshold` failed operations and the provider is skipped until the
+`breaker_failures` failed operations and the provider is skipped until the
 cooldown has passed. The workers list keeps its last snapshot, and
 `drakkar_fleet_registry_snapshot_age_seconds` grows. The pipeline does not wait
 for any of this.
@@ -742,21 +742,21 @@ always listed and always `online: true`. A peer row carries the fields of
 its card that are present; see the UI contract for the full row shape.
 Every row also has `cluster_tasks_hash` and `cluster_tasks_match`, which
 compare the worker's cluster periodic task definitions with this worker's
-(see [Definition hash](periodic-tasks.md#definition-hash)). The archive
-runs only on workers with `ui.recorder.persistence: sqlite`, so a cluster
-that mixes `none` or `postgres` workers with `sqlite` workers shows
-`cluster_tasks_match: false`. A cluster that mixes `none` and `postgres`
-workers shows no mismatch (neither runs a cluster task for the recorder), but
-its history is split: the trace with history on a `postgres` worker reads the
-Postgres table, on a `none` worker the sealed files. Give every worker of a
-cluster the same persistence.
+(see [Definition hash](periodic-tasks.md#definition-hash)). The cluster-wide
+archive is a cluster task of the definition set only on workers that run it
+(`recorder.enabled`, provider `sqlite`, `recorder.archive.enabled`,
+`storage.dir`, `autodiscover.enabled` and `storage.shared_dir`), so a cluster
+that mixes such workers with others shows `cluster_tasks_match: false`. Give
+every worker of a cluster the same recorder settings. Workers with provider
+`postgres` keep their history in the Postgres table, so the trace with history
+on such a worker reads the table, and on a `sqlite` worker the sealed files.
 
 ## Connections {#connections}
 
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
 not carry the address and the credentials itself. The config declares them
 once, under `connections.<service>.<name>`, and a feature names the entry.
-This release ships the `postgres`, `redis` and `consul` providers, which read
+The `postgres`, `redis` and `consul` providers read
 `connections.postgres.<name>`, `connections.redis.<name>` and
 `connections.consul.<name>`.
 
@@ -780,16 +780,15 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
 `url` the same way, for example `DK_CONNECTIONS__REDIS__MAIN__URL`, and a
 `consul` entry its `token`, for example `DK_CONNECTIONS__CONSUL__MAIN__TOKEN`.
 
-- `connections` has one map per service type: `consul`, `redis` and
-  `postgres`. You choose the names. A feature that names none uses `main`.
-- `autodiscover.connection` and `autodiscover.connection` name
-  an entry. The `postgres`, `redis` and `consul` providers read it.
+- `connections` has one map per service type: `kafka`, `postgres`, `redis`,
+  `mongo` and `consul`. You choose the names. A feature that names none uses `main`.
+- `autodiscover.connection` names an entry. The `postgres`, `redis` and `consul` providers read it.
   `filesystem` ignores it. The config load checks the key by
   provider name, so a provider named `consul`, `redis` or `postgres` needs its
   connection declared; otherwise the load fails with
   `autodiscover.connection 'main' is not defined under connections.consul`.
-- Features that name the same connection share one client. The first
-  feature that needs it opens it; nothing opens at startup.
+- The registry and the election share the client of the connection they name.
+  The first of them that needs it opens it; nothing opens at startup.
 - At shutdown the worker closes the clients after the last provider has
   stopped, the newest first, inside what is left of
   `executor.drain_timeout`. A client
@@ -797,9 +796,9 @@ example `DK_CONNECTIONS__POSTGRES__MAIN__DSN` and
   are still closed. When the time runs out first, the worker logs
   `connections_close_timed_out` and the rest go with the process.
 - Passwords and tokens belong in the environment, not in the YAML file; see
-  [Security](security.md#provider-credentials). Write connection names in
-  lower case: the environment path is lower-cased when it is read, so a name
-  with capital letters cannot be set from a `DK_` variable.
+  [Security](security.md#provider-credentials). An environment
+  variable names a connection in lower case with `_` for `-`; see
+  [Configuration](configuration.md#connections).
 
 Every key is in [Configuration](configuration.md#connections).
 
@@ -814,12 +813,12 @@ Both have the same keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `timeout_seconds` | `5` | Time limit for one attempt. Each retry gets its own limit. |
-| `retries` | `2` | Attempts after the first one, made only after a transient error. `0` means one attempt. |
-| `backoff_seconds` | `0.2` | Wait before the first retry. The wait doubles for each further retry. |
-| `backoff_max_seconds` | `5` | Longest wait between two attempts. At least `backoff_seconds`. |
-| `breaker.failure_threshold` | `5` | Failed operations in a row that open the breaker. |
-| `breaker.cooldown_seconds` | `30` | Time the breaker stays open before one operation may probe the provider. |
+| `timeout` | `5s` | Time limit for one attempt. Each retry gets its own limit. |
+| `max_retries` | `2` | Attempts after the first one, made only after a transient error. `0` means one attempt. |
+| `backoff` | `200ms` | Wait before the first retry. The wait doubles for each further retry. |
+| `max_backoff` | `5s` | Longest wait between two attempts. At least `backoff`. |
+| `breaker_failures` | `5` | Failed operations in a row that open the breaker. |
+| `breaker_cooldown` | `30s` | Time the breaker stays open before one operation may probe the provider. |
 
 **Retries.** A transient error is a timeout, an `OSError` (a refused or
 reset connection, for example), or a `drakkar.providers.resilience.TransientError`
@@ -843,10 +842,10 @@ keep the longest operation well below `offline_after`.
 **Breaker.** It counts failed operations, not attempts: an operation fails
 when its last attempt fails. One breaker serves all operations of a feature.
 Failed operations of any mix (for the registry `start`, `publish`, `list`,
-`withdraw` and `stop`) count toward the same `failure_threshold`, a success of
+`withdraw` and `stop`) count toward the same `breaker_failures`, a success of
 any of them resets the count, and an open breaker skips all of them. After
-`failure_threshold` failed operations in a row the breaker opens. While it is open, operations are skipped without a
-call. After `cooldown_seconds` the next operation is a probe, and the others
+`breaker_failures` failed operations in a row the breaker opens. While it is open, operations are skipped without a
+call. After `breaker_cooldown` the next operation is a probe, and the others
 stay skipped until it ends. A probe that succeeds closes the breaker. A
 probe that fails opens it again with a fresh cooldown. An operation that
 started before the breaker opened does not change it when it ends late.
@@ -972,7 +971,7 @@ also counted by the three provider metrics:
 | `fleet_registry_stop_failed` | warning | The registry's own stop raised. A provider that fails to stop shows as `provider_call_failed` with `op` `stop`. |
 | `fleet_registry_loop_failed` | error | A registry loop ended on an unexpected error; logged at stop, before the card is withdrawn. |
 | `connection_close_failed` | warning | A client of a named connection failed to close at shutdown (fields `kind`, `name`, `error`; credentials in the error are removed). |
-| `connections_close_timed_out` | warning | The shutdown time ran out while connections closed (field `timeout_seconds`). |
+| `connections_close_timed_out` | warning | The shutdown time ran out while connections closed (field `timeout`). |
 | `connections_close_failed` | warning | Closing the connections raised an error of its own. |
 | `fleet_card_invalid` | warning | A card was skipped; once per file name (a file that is unreadable, not a plain file, too large or not a JSON object) or per worker (field rules). |
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
@@ -1004,7 +1003,7 @@ Every key has a `DK_` environment override, for example
 - It does not authenticate anything. A card is a public statement of where
   a worker answers; anyone who can write to the card store (the folder, for
   the `filesystem` provider) can publish a card. Protect the store like the
-  rest of `shared.dir`.
+  rest of `storage.shared_dir`.
 - It is not used by the pipeline: a worker with no peers processes messages
   exactly like one in a large fleet.
 - It does not carry cache data. The cards carry only the marks of the

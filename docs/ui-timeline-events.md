@@ -87,8 +87,8 @@ Call it from any hook the framework invokes — `arrange`,
 [`annotate()`](annotations.md) works from. It rides `annotate`'s own
 recorder storage, budgets, and no-context handling unchanged: same `events`
 table, same rotation/archive lifetime, same
-`ui.recorder.annotation_max_bytes` / `annotation_max_bytes_per_call` caps,
-same `ui.recorder.annotations_enabled` master switch. See
+`recorder.annotations.max_size` / `recorder.annotations.max_size_per_call` caps,
+same `recorder.annotations.enabled` master switch. See
 [Annotations](annotations.md#where-the-data-lives-and-for-how-long) for
 what that means for retention and budgets — nothing here changes it.
 

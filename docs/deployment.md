@@ -32,8 +32,7 @@ the same `connections.postgres.main` entry and so share one pool.
 ```yaml
 storage:
   dir: /var/lib/drakkar
-shared:
-  dir: /mnt/drakkar-shared
+  shared_dir: /mnt/drakkar-shared
 
 connections:
   postgres:
@@ -85,7 +84,7 @@ What to check:
   that finds a table missing fails the provider's start with a message that
   names this command and tries again at the next heartbeat (registry) or the
   next slot of a cluster task (election).
-  For the recorder table of `persistence: postgres`, add `--recorder` and,
+  For the recorder table of provider `postgres`, add `--recorder` and,
   as needed, `--table-prefix=<p>` and `--retention-hours=<n>`; see
   [A worker with no disk and a central history](#a-worker-with-no-disk-and-a-central-history).
 - During a database outage the pipeline keeps running. The workers list
@@ -109,13 +108,12 @@ and choose the one worker that runs each slot of a cluster periodic task
 ```yaml
 storage:
   dir: /var/lib/drakkar
-shared:
-  dir: /mnt/drakkar-shared
+  shared_dir: /mnt/drakkar-shared
 
 connections:
   redis:
     main:
-      key_prefix: "drakkar:"
+      state_prefix: "drakkar:"
 
 autodiscover:
   enabled: true
@@ -133,7 +131,7 @@ DK_CONNECTIONS__REDIS__MAIN__URL='redis://drakkar-fleet:...@redis.internal:6379/
 What to check:
 
 - Every worker of the fleet uses the same autodiscover provider, and the same
-  server, database number and `key_prefix`. Workers on different providers or
+  server, database number and `state_prefix`. Workers on different providers or
   different databases do not see each other's cards or leases.
 - Autodiscover needs `api.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
@@ -141,7 +139,7 @@ What to check:
 - Use a **database number of its own** for the fleet, so that the keys of the
   providers stay apart from other data. Use a Redis user of its own too, with
   the rights `~drakkar:* +@read +@write +@scripting +@connection +time` (the
-  pattern follows `key_prefix`) and the `default` user off where no other
+  pattern follows `state_prefix`) and the `default` user off where no other
   client needs it. These are category rights, so they allow more commands than
   the providers send, for example `FLUSHDB` and `KEYS`, and the key pattern
   does not limit those two. A Redis ACL does not limit databases either. ACL
@@ -195,14 +193,13 @@ and they choose the one worker that runs each slot of a cluster periodic task
 ```yaml
 storage:
   dir: /var/lib/drakkar
-shared:
-  dir: /mnt/drakkar-shared
+  shared_dir: /mnt/drakkar-shared
 
 connections:
   consul:
     main:
       address: http://127.0.0.1:8500   # the agent of the worker's host
-      key_prefix: drakkar
+      state_prefix: drakkar
 
 autodiscover:
   enabled: true
@@ -220,16 +217,16 @@ DK_CONNECTIONS__CONSUL__MAIN__TOKEN='...'
 What to check:
 
 - Every worker of the fleet uses the same autodiscover provider, and the same
-  Consul cluster, datacenter and `key_prefix`. Workers on different providers or
+  Consul cluster, datacenter and `state_prefix`. Workers on different providers or
   stores do not see each other's cards or leases.
 - Autodiscover needs `api.enabled: true`.
 - The shared folder still holds the sealed recorder files and the archives.
   Only the cards and the leases of the cluster tasks move to Consul.
-- The Consul token needs two rules, in which `drakkar/` is the `key_prefix`:
+- The Consul token needs two rules, in which `drakkar/` is the `state_prefix`:
   `key_prefix "drakkar/" { policy = "write" }` and
   `session_prefix "" { policy = "write" }`. The first allows every key under
   the prefix and the second every session of the datacenter, so give the fleet
-  a `key_prefix` of its own and a token that nothing else uses. Without
+  a `state_prefix` of its own and a token that nothing else uses. Without
   `session:write` the first publish fails with a `403`, not the start. See
   [Security](security.md#provider-credentials).
 - Consul decides liveness, not a worker's clock: it ends the session of a
@@ -258,19 +255,21 @@ More: [Fleet registry: consul](fleet.md#consul),
 
 ## A worker with no writable disk
 
-A worker in a container with no writable disk leaves `storage.dir` empty.
-The recorder mode then derives to `none`: the worker keeps its recent events
-in the [memory store](recent-events.md) only, and the UI pages read them from
-there. The worker writes no recorder file, no cache file and no crash marker,
+A worker in a container with no writable disk leaves `storage.dir` empty and
+turns the durable recorder off (`recorder.enabled: false`): the worker keeps
+its recent events in the [memory store](recent-events.md) only, and the UI pages
+read them from there. The worker writes no recorder file, no cache file and no crash marker,
 and it seals, publishes and archives nothing.
 
 ```yaml
 storage:
   dir: ''
+recorder:
+  enabled: false
 connections:
   redis:
     main:
-      key_prefix: "drakkar:"
+      state_prefix: "drakkar:"
 autodiscover:
   enabled: true
   provider: redis
@@ -280,25 +279,25 @@ autodiscover:
 Points to check:
 
 - The `filesystem` registry and election need a folder. With no
-  `storage.dir` and no `shared.dir`, use a service provider as above. The
+  `storage.dir` and no `storage.shared_dir`, use a service provider as above. The
   `filesystem` registry then stays off, and the workers list shows only the
   current worker. A `filesystem` election with no folder stops the start of
   a worker that declares a cluster task.
-- With a `shared.dir` mounted, the worker still reads the sealed history of
+- With a `storage.shared_dir` mounted, the worker still reads the sealed history of
   its cluster, but it publishes nothing into it.
 - Plan RAM for the memory store: up to about 600 MiB per worker with the
   default 256 MiB budget. See [RAM to plan](recent-events.md#ram-to-plan).
 - A memory snapshot download holds one more copy of the store in RAM while
   it runs, because there is no folder for a temporary file.
-- `ui.recorder.persistence: sqlite` with an empty `storage.dir` fails the
-  load.
+- An enabled recorder with provider `sqlite` and an empty `storage.dir` fails
+  the load; set `recorder.enabled: false`, or use provider `postgres`.
 
 ### A worker with no disk and a central history
 
 A worker with no writable disk can still keep a long history: set
-`ui.recorder.persistence: postgres`. Every worker then writes its events to
+`recorder.provider: postgres`. Every worker then writes its events to
 one table in Postgres, and the trace with history reads the rows of its
-cluster from there. No `storage.dir` and no `shared.dir` are needed.
+cluster from there. No `storage.dir` and no `storage.shared_dir` are needed.
 
 ```yaml
 storage:
@@ -307,12 +306,11 @@ connections:
   postgres:
     main:
       schema: drakkar                # DSN from DK_CONNECTIONS__POSTGRES__MAIN__DSN
-ui:
-  recorder:
-    persistence: postgres
-    postgres:
-      connection: main
-      retention_hours: 6
+recorder:
+  provider: postgres
+  postgres:
+    connection: main
+    initial_retention: 6h
 autodiscover:
   enabled: true
   provider: postgres
@@ -322,7 +320,7 @@ autodiscover:
 Points to check:
 
 - Size the database first: one busy worker writes about 9 GB per hour, 54 GB
-  at the default 6 hours. See [Write volume](recorder-postgres.md#write-volume).
+  at a retention of 6 hours. See [Write volume](recorder-postgres.md#write-volume).
 - The role of the connection must own the events table. With an
   operator-managed schema, run once as a role with the DDL rights, then give
   the table to the worker role:
@@ -423,7 +421,7 @@ readinessProbe:
 The ``initialDelaySeconds: 10`` on the readiness probe accommodates the
 worker's cold-start sequence: loading config, connecting to Kafka, and
 bringing up sinks. Tune upward if the cluster-align wait
-(``sources.kafka.startup_align_enabled``) or a large sink fleet extends the
+(``sources.kafka.startup_align.enabled``) or a large sink fleet extends the
 cold-start budget.
 
 ### Rolling restarts
@@ -441,6 +439,6 @@ lease) leaves workers of one cluster with different definitions for a
 while: they log `periodic_cluster_mismatch` and
 `drakkar_periodic_cluster_mismatch_peers` is above zero until the last
 worker restarted. See [Definition hash](periodic-tasks.md#definition-hash).
-A rolling upgrade from 2.4.0 needs `history.archive.enabled: false` on every
+A rolling upgrade from 2.4.0 needs `recorder.archive.enabled: false` on every
 worker until the restart ends, or a stop of the whole fleet; see
 [Upgrading](upgrading.md#periodic-tasks-and-the-archive).

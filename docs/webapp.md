@@ -133,12 +133,12 @@ below documents every knob for production deployments.
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `false` | Master switch. When `false`, no FastAPI server runs and the handler's HTTP hooks are never invoked. |
 | `host` | `str` | `'0.0.0.0'` | Interface uvicorn binds. Use `'127.0.0.1'` to keep the endpoint inside the host (private deployments). |
-| `port` | `int` | `8090` | Port uvicorn binds. The webapp does not share a port with the operator UI or the metrics server. |
+| `port` | `int` | `8090` | Port uvicorn binds. The webapp does not share a port with the API server or the metrics server. |
 | `path` | `str` | `'/process'` | Single POST route the framework registers. Must start with `'/'` and contain at least one character after it. |
-| `sinks_enabled` | `bool` | `false` | When `true`, calls `on_message_complete(group)` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped entirely and the response carries `sinks: null`; a worker without the Kafka source then needs no `sinks:` section. |
-| `request_timeout_seconds` | `float` | `30.0` | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 with `status='timeout'` and the runner's post-execute hook is cooperatively cancelled. Must be > 0. |
+| `deliver_to_sinks` | `bool` | `false` | When `true`, calls `on_message_complete(group)` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped entirely and the response carries `sinks: null`; a worker without the Kafka source then needs no `sinks:` section. |
+| `request_timeout` | duration | `30s` | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 with `status='timeout'` and the runner's post-execute hook is cooperatively cancelled. Must be > 0. |
 | `max_concurrent` | `int` | `64` | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. Must be > 0. |
-| `max_body_bytes` | `int` | `10485760` (10 MiB) | Cap on a single POST body, counted from the stream (a lying Content-Length cannot bypass it). Oversized requests receive 413 `error='request_too_large'` before parsing. Must be > 0. |
+| `max_body` | size | `10MiB` | Cap on a single POST body, counted from the stream (a lying Content-Length cannot bypass it). Oversized requests receive 413 `error='request_too_large'` before parsing. Must be > 0. |
 | `clients` | `list[WebClientConfig]` | one anonymous client with rpm=4 | Configured tenants. See the table below. At least one client is required; explicit `clients: []` fails at config load. |
 
 ### `sources.http.clients[]` — `WebClientConfig`
@@ -158,10 +158,10 @@ sources:
     host: 0.0.0.0
     port: 8090
     path: /process
-    sinks_enabled: false
-    request_timeout_seconds: 30.0
+    deliver_to_sinks: false
+    request_timeout: 30s
     max_concurrent: 64
-    max_body_bytes: 10485760
+    max_body: 10MiB
     clients:
       - name: anonymous
         token: ""
@@ -175,7 +175,7 @@ sources:
 ```
 
 Validation runs at config load time. Misconfigurations
-(`request_timeout_seconds <= 0`, duplicate non-empty tokens, two clients
+(`request_timeout <= 0`, duplicate non-empty tokens, two clients
 with empty tokens, `clients: []`, etc.) raise `ValueError` at startup
 with a message naming the offending field.
 
@@ -272,7 +272,7 @@ async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse
     )
 ```
 
-When `sources.http.sinks_enabled=true`, the framework calls
+When `sources.http.deliver_to_sinks=true`, the framework calls
 `on_message_complete(group)` (the same hook used by the Kafka path)
 **before** `on_http_request_complete`, routes any returned payloads
 through the [SinkManager](sinks.md), and records per-sink outcomes into
@@ -317,7 +317,7 @@ Once the worker is running with `sources.http.enabled=true`, send a POST to
 the configured `path` with a JSON body matching `HttpRequestT`. The
 examples below assume the [Enabling](#enabling) handler.
 
-### Without sinks (`sinks_enabled: false`, the default)
+### Without sinks (`deliver_to_sinks: false`, the default)
 
 ```bash
 curl -sS -X POST http://localhost:8090/process \
@@ -379,20 +379,20 @@ Successful response body (HTTP 200):
 | `tasks` | One compact entry per successful executor task (`task_id`, `exit_code`, `duration_ms`, `retries`). **Subprocess `stdout` / `stderr` are deliberately excluded from the response body** -- read those via the recorder or the operator UI. |
 | `task_summary` | Aggregate `total / success / failed` counts for the per-request fan-out. |
 | `cache` | Per-request cache hit/miss counts. Reserved for future use; the runner currently emits zeros. |
-| `sinks` | `null` when `sinks_enabled=false`. With sinks enabled, an aggregated per-sink-type delivery summary -- see below. |
+| `sinks` | `null` when `deliver_to_sinks=false`. With sinks enabled, an aggregated per-sink-type delivery summary -- see below. |
 | `timeline` | One `{stage, duration_ms}` entry per pipeline phase (`arrange`, `execute`, optional `sinks`, `on_http_request_complete`). Lets operators see where time was spent without correlating timestamps across log lines. |
 | `error` | Human-readable error message on the error/timeout paths; `null` on the success path. |
 
-### With sinks (`sinks_enabled: true`)
+### With sinks (`deliver_to_sinks: true`)
 
-The same request as above with `sources.http.sinks_enabled: true` in config
+The same request as above with `sources.http.deliver_to_sinks: true` in config
 and an `on_message_complete` hook returning a `CollectResult`:
 
 ```yaml
 sources:
   http:
     enabled: true
-    sinks_enabled: true
+    deliver_to_sinks: true
     # ... rest unchanged
 ```
 
@@ -500,14 +500,14 @@ topic for higher throughput and worker-restart resilience.
 |------|----------|------|-------------|
 | 200 | `ok` | Successful end-to-end execution | See [Request / response examples](#request-response-examples). |
 | 401 | `auth_failed` | `Authorization` header is missing-with-no-anonymous-slot, malformed, or names a non-configured token | `{"error": "unauthorized"}` |
-| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds sources.http.max_body_bytes (10485760 bytes)"}` |
+| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body` (enforced before parsing) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds sources.http.max_body (10485760 bytes)"}` |
 | 422 | n/a (legacy `error: invalid_request`) | Body is missing or fails Pydantic validation against `HttpRequestT` | `{"error": "invalid_request", "request_id": "req-...", "details": [{"loc": ["query"], "msg": "Field required", "type": "missing"}]}` |
 | 429 | n/a (`error: rate_limited`) | Per-client rpm window is full (rejected at the gate, before the runner; the response also carries a `Retry-After` header with the wait rounded up to whole seconds) | `{"error": "rate_limited", "client": "tenant-a", "rpm_limit": 60, "retry_after_seconds": 1.7, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
-| 408 | n/a (`error: request_timeout`) | The request body was not delivered within `request_timeout_seconds` + 30 s. The size cap alone is not a slow-loris defence — a client can stay under it indefinitely by sending one byte at a time — so the body read is bounded in time too | `{"error": "request_timeout", "request_id": "req-...", "hint": "the request body was not delivered in time"}` |
+| 408 | n/a (`error: request_timeout`) | The request body was not delivered within `request_timeout` + 30 s. The size cap alone is not a slow-loris defence — a client can stay under it indefinitely by sending one byte at a time — so the body read is bounded in time too | `{"error": "request_timeout", "request_id": "req-...", "hint": "the request body was not delivered in time"}` |
 | 503 | `capacity` | `max_concurrent` semaphore is full at request time | `{"status": "capacity", "error": "webapp is over capacity; request rejected", "request_id": "req-...", "max_concurrent": 64, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `shutdown` | The worker is in the drain phase and refusing new requests | `{"status": "shutdown", "error": "webapp is shutting down; request rejected", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `not_ready` | The webapp accepted the connection but the main pipeline has not yet completed startup | `{"status": "not_ready", "error": "webapp is starting; main pipeline is not yet ready", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
-| 504 | `timeout` | `request_timeout_seconds` elapsed while the runner was processing | `{"status": "timeout", "error": "request exceeded 30.0 seconds", "request_id": "req-...", "duration_ms": 30001.4, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
+| 504 | `timeout` | `request_timeout` elapsed while the runner was processing | `{"status": "timeout", "error": "request exceeded 30.0 seconds", "request_id": "req-...", "duration_ms": 30001.4, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 500 | `error` | A user hook (`arrange_http_request`, `on_http_request_complete`, `http_request_id`, etc.) raised an unhandled exception | `{"status": "error", "request_id": "req-...", "error": "internal error"}` |
 
 The 422 response intentionally uses `error: invalid_request` rather than
@@ -540,7 +540,7 @@ mid-flight.
    subsequent request gets a 503 within one event-loop tick.
 2. **In-flight requests complete.** Already-dispatched requests
    continue running on the main pipeline loop. They are bounded by
-   `request_timeout_seconds` -- a slow handler cannot hold shutdown
+   `request_timeout` -- a slow handler cannot hold shutdown
    open indefinitely.
 3. **Uvicorn stop.** Once the drain completes, the framework calls
    `WebApp.stop(drain_timeout)` which signals uvicorn to exit and joins
@@ -558,7 +558,7 @@ Kafka-fallback hint.
 ## Front it with a proxy
 
 Drakkar bounds what it can bound in-process: the body size
-(`max_body_bytes`), the body **read** time (`request_timeout_seconds` +
+(`max_body`), the body **read** time (`request_timeout` +
 30 s → `408`), keep-alive idle time (120 s), and the request header
 section (64 KiB). Those are backstops against a client that misbehaves by
 accident, and against one that is deliberately slow.
@@ -832,4 +832,4 @@ What to expect within ~30 seconds of the stack being healthy:
 - [Observability](observability.md#webapp) -- Prometheus metrics, the
   six new recorder event types, and the recorder upgrade story
 - [Sinks](sinks.md) -- the same `CollectResult` / sink routing the
-  webapp pipeline reuses when `sinks_enabled=true`
+  webapp pipeline reuses when `deliver_to_sinks=true`

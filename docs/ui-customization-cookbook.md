@@ -367,4 +367,4 @@ plumbing.
 - [Probe User Details](probe-user-details.md) — the full `probe_field()` reference and the six view kinds
 - [UI Enrichment](ui-enrichment.md) — links, badges, formats, hints, detail panels, and custom renderers in depth
 - [Declared UI Pages](ui-pages.md) — sources, widget views, and the mixed-fleet contract
-- [Configuration](configuration.md#ui-flight-recorder-ui) — `ui.link_bases` and `ui.custom_renderers_path`
+- [Configuration](configuration.md#operator-ui-ui) — `ui.link_bases` and `ui.custom_renderers_path`

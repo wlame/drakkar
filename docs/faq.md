@@ -65,7 +65,7 @@ There's no single number — memory is dominated by three tunables plus your sub
 
 - **Buffered Kafka messages**: `max_poll_records` × average message size × (number of partitions × `window_size`) in worst case. Defaults (`max_poll_records=100`, `window_size` small) keep this in the tens of MB.
 - **In-memory cache**: capped by `cache.max_memory_entries` (default `10_000`). Each entry is a Python dict + serialized Pydantic JSON; budget roughly 1-10 KB/entry for typical payloads. Set `max_memory_entries: null` for unbounded (the config layer emits a startup warning if you do — monitor RSS).
-- **Flight recorder buffer**: small, bounded by `ui.recorder.flush_interval_seconds` × event rate. Events are buffered in memory and flushed to SQLite; a full buffer is tens of MB.
+- **Flight recorder buffer**: small, bounded by `recorder.flush_interval` × event rate. Events are buffered in memory and flushed to SQLite; a full buffer is tens of MB.
 - **Subprocess children**: `max_executors` live processes, each using whatever your binary consumes. This usually dwarfs the Python RSS.
 
 For a typical worker (max_executors=80, cache enabled with defaults, recorder on), the **Python process** sits in the 150-400 MB range. The subprocess pool adds whatever your binary needs, times `max_executors`. Measure under load; there's no substitute. Raw capacity knobs are documented in [Configuration](configuration.md) and the [Cache memory cap](cache.md) page.
@@ -144,7 +144,7 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval_seconds` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
+Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
 
 What happens with `autodiscover` off (the default): nothing is pulled and the cache operates single-worker. No error — it just behaves like a local cache, and the worker logs `cache_exchange_off_no_autodiscover` once at startup. If you *want* a cluster-wide cache, turn on `autodiscover` with a provider every worker can reach (for example `filesystem` with one `storage.shared_dir`) and make sure every worker can reach the API port of the others at the URL on their cards.
 
@@ -202,7 +202,7 @@ YAML file + env overrides (`DK_` prefix, `__` nesting). See [Configuration Loadi
 
 ### How do I stagger a rolling deploy so my fleet doesn't cascade-rebalance?
 
-Leave `sources.kafka.startup_align_enabled: true` (default). Each worker delays its first `subscribe()` until the next shared wall-clock boundary, so 10 workers booting over 15 seconds all join the consumer group at the same moment. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
+Leave `sources.kafka.startup_align.enabled: true` (default). Each worker delays its first `subscribe()` until the next shared wall-clock boundary, so 10 workers booting over 15 seconds all join the consumer group at the same moment. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
 
 ### How many workers should I run per consumer group?
 
@@ -210,7 +210,7 @@ Up to the number of Kafka partitions. Extra workers sit idle (Kafka only assigns
 
 ### Can I hot-reload config without restarting?
 
-No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `sources.kafka.startup_align_enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
+No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `sources.kafka.startup_align.enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
 
 ### Where do logs go?
 
@@ -241,7 +241,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe.enabled: false`.
-- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<shared.dir>/merged/`. The archive pass deletes it after `history.merged_retention_days` (default 32); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
+- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<storage.shared_dir>/merged/`. The archive pass deletes it after `recorder.archive.merged_retention` (default `32d`); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -291,21 +291,21 @@ Mildly. Recent rows come from the in-memory [memory store](recent-events.md), an
 
 ### Where are my events with no disk?
 
-In memory. A worker with `storage.dir: ''` (for example in a container with no writable disk) runs the recorder with `persistence: none`: it keeps the recent events in an in-memory SQLite database, the memory store, and writes no recorder file. The History, Trace and Task Detail pages read the memory store, and the Databases tab shows it as its first row, with a download button for a snapshot. The store keeps two minutes of events by default (`ui.recorder.memory.window_seconds`), bounded also by a row cap and a data budget, so the pages show that window only. Nothing is sealed or archived, and the events are gone after a restart. With a `shared.dir`, the worker still reads the sealed history of the other workers of its cluster. To keep a long history without a disk, use `persistence: postgres`. See [Recent Events in Memory](recent-events.md).
+In memory. A worker with `storage.dir: ''` and `recorder.enabled: false` (for example in a container with no writable disk) keeps the recent events in an in-memory SQLite database, the memory store, and writes no recorder file. The History, Trace and Task Detail pages read the memory store, and the Databases tab shows it as its first row, with a download button for a snapshot. The store keeps two minutes of events by default (`recorder.memory.window`), bounded also by a row cap and a data budget, so the pages show that window only. Nothing is sealed or archived, and the events are gone after a restart. With a `storage.shared_dir`, the worker still reads the sealed history of the other workers of its cluster. To keep a long history without a disk, use `recorder.provider: postgres`. See [Recent Events in Memory](recent-events.md).
 
 ### Can many clusters share one Postgres for recorder history?
 
-Yes. With `ui.recorder.persistence: postgres`, every worker writes its events to one table in Postgres, and every row carries its cluster and its worker. The history search of a worker reads only the rows of its own cluster, so clusters on one table do not see each other's events. All workers on one `table_prefix` share one table and one retention, which is stored in the table comment; no worker drops partitions by its own setting. Give a busy cluster, or a cluster with another retention, its own prefix (`table_prefix: heavy` gives `<schema>.heavy_recorder_events`).
+Yes. With `recorder.provider: postgres`, every worker writes its events to one table in Postgres, and every row carries its cluster and its worker. The history search of a worker reads only the rows of its own cluster, so clusters on one table do not see each other's events. All workers on one `table_prefix` share one table and one retention, which is stored in the table comment; no worker drops partitions by its own setting. Give a busy cluster, or a cluster with another retention, its own prefix (`table_prefix: heavy` gives `<schema>.heavy_recorder_events`).
 
-Size the database first: one busy worker writes about 9 GB per hour, so one database holds the history of a few busy workers at the default 6 hours, not of every worker of a large fleet at full load. Each worker uses up to 7 server connections with the defaults. See [Recorder History in Postgres](recorder-postgres.md).
+Size the database first: one busy worker writes about 9 GB per hour, so one database holds the history of a few busy workers at a retention of 6 hours, not of every worker of a large fleet at full load. Each worker uses up to 7 server connections with the defaults. See [Recorder History in Postgres](recorder-postgres.md).
 
-### What happens to old recorder database files? Where did `retention_hours` go?
+### What happens to old recorder database files?
 
-They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either is ignoring an unknown key. At rotation each worker seals its finished file and moves it into `<shared.dir>/history/<cluster>/`. A periodic pass merges each finished UTC time window's sealed files into one compressed `<cluster>-<from>__<to>.db.gz` in that folder and deletes only the sealed files it merged; with the defaults, that lands 48-72h after the data was recorded. `history.archive.retention_days` (default `30`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `history.archive.enabled: false` if you'd rather prune the history folders yourself.
+They get archived, not deleted outright. At rotation each worker seals its finished file and moves it into `<storage.shared_dir>/history/<cluster>/`. A periodic pass merges each finished UTC time window's sealed files into one compressed `<cluster>-<from>__<to>.db.gz` in that folder and deletes only the sealed files it merged; with the defaults, that lands 48-72h after the data was recorded. `recorder.archive.retention` (default `30d`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `recorder.archive.enabled: false` if you'd rather prune the history folders yourself.
 
 ### What does the shared folder need from the filesystem?
 
-Each worker writes its live recorder file only to its own `storage.dir`. Only finished, sealed files cross to `shared.dir`, in a background job, so a slow network mount never holds up rotation or the pipeline. A local disk per worker plus one network mount for `shared.dir` is the usual layout; when the two are on different filesystems the worker copies the file across, fsyncs it, and only then deletes the source.
+Each worker writes its live recorder file only to its own `storage.dir`. Only finished, sealed files cross to `storage.shared_dir`, in a background job, so a slow network mount never holds up rotation or the pipeline. A local disk per worker plus one network mount for `storage.shared_dir` is the usual layout; when the two are on different filesystems the worker copies the file across, fsyncs it, and only then deletes the source.
 
 The shared folder needs two things:
 
@@ -412,7 +412,7 @@ The poll loop compares in-flight message count to high/low watermarks (multiples
 
 ### What's the difference between the recorder DB and the cache DB?
 
-They're separate SQLite files with separate schemas and separate reader/writer connections. The recorder stores per-message lifecycle events (flight recorder for the UI); the cache stores operator-written key/value pairs for memoization. See [UI / Flight Recorder](configuration.md#ui-flight-recorder-ui) and [Cache](cache.md).
+They're separate SQLite files with separate schemas and separate reader/writer connections. The recorder stores per-message lifecycle events (flight recorder for the UI); the cache stores operator-written key/value pairs for memoization. See [UI / Flight Recorder](configuration.md#operator-ui-ui) and [Cache](cache.md).
 
 ---
 
@@ -430,9 +430,9 @@ See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary 
 
 ### Why are peer workers trusted?
 
-Every worker reads, archives and serves the sealed recorder files in `<shared.dir>/history/` (see `drakkar/recorder/archive.py`), and the cache exchange sends requests to the URL on every registry card and applies the `cluster` and `global` rows it gets back (see `drakkar/cache/exchange.py`). There's no per-write signature, no auth check between workers, no schema-level integrity verification. Anyone who can write to the shared folder can plant recorder files that your workers will archive and serve, or plant a card whose URL serves cache rows under that card's name. The worker filters those rows to the card's own origin and the scopes it asked for, which stops `local` rows and rows that claim another worker, but not rows under the planted name.
+Every worker reads, archives and serves the sealed recorder files in `<storage.shared_dir>/history/` (see `drakkar/recorder/archive.py`), and the cache exchange sends requests to the URL on every registry card and applies the `cluster` and `global` rows it gets back (see `drakkar/cache/exchange.py`). There's no per-write signature, no auth check between workers, no schema-level integrity verification. Anyone who can write to the shared folder can plant recorder files that your workers will archive and serve, or plant a card whose URL serves cache rows under that card's name. The worker filters those rows to the card's own origin and the scopes it asked for, which stops `local` rows and rows that claim another worker, but not rows under the planted name.
 
-Treat `shared.dir` (and the card folder, when it lives elsewhere) as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
+Treat `storage.shared_dir` (and the card folder, when it lives elsewhere) as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
 ### How is the UI protected?
 

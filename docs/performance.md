@@ -208,7 +208,7 @@ and move anything heavier to
 
 The ceiling also drops when:
 
-- `event_min_duration_ms: 0` is set at high throughput — every task
+- `recorder.capture.min_event_duration: 0` is set at high throughput — every task
   pays the full JSON-encode cost into the recorder buffer
 - Sink payloads are large enough that per-sink JSON encoding is
   non-trivial (group size x payload complexity)
@@ -358,25 +358,25 @@ blocks the partition pipeline for the duration of that call.
 
 ## Bottleneck: Recorder and UI
 
-With `event_min_duration_ms: 0` (default), every task writes events to
+With `recorder.capture.min_event_duration: 0` (default), every task writes events to
 the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At the ~400 tasks/sec per-worker ceiling, that's
 ~1,200 events/sec (started + completed + consumed), written every
-`flush_interval_seconds`. Each write is a batch INSERT that takes ~10-50ms
+`recorder.flush_interval`. Each write is a batch INSERT that takes ~10-50ms
 for 10,000 rows.
 
 The recorder writes in two stages. Stage M writes the events to the
-in-memory [memory store](recent-events.md); with `persistence: sqlite`
+in-memory [memory store](recent-events.md); with provider `sqlite`
 stage F then writes them to the file. The two run on separate loops, so the
 memory intake does not wait for the disk: a slow disk delays only the file,
 and the recent events stay readable. The UI reads recent rows (time windows,
 newest rows, polls) from memory while the store still holds them. Pages
 keyed by task, message or label, and the whole-table pages, still read the
-file with `sqlite`, so they still compete with the file writer for the disk.
+file with provider `sqlite`, so they still compete with the file writer for the disk.
 
 A memory read holds a read lock on the store, and the memory writer waits
 for it. Every memory read has a 2 second limit, under the writer's 5 second
 busy timeout, so a slow read delays a memory write and never makes it fail.
-The default memory store (a 120 second window, 3000 rows per executor and a
+The default memory store (a `2m` window, 3000 rows per executor and a
 256 MiB budget) keeps each read small. See
 [Sizing the row cap](recent-events.md#sizing-the-row-cap) and
 [RAM to plan](recent-events.md#ram-to-plan).
@@ -398,8 +398,8 @@ ui:
 recorder:
   capture:
     min_event_duration: 50ms   # skip DB writes for tasks < 50ms
-    output_min_duration_ms: 100  # skip stdout/stderr for fast tasks
-    store_output: false          # no stdout/stderr storage at all
+    min_output_duration: 100ms   # skip stdout/stderr for fast tasks
+    output: false                # no stdout/stderr storage at all
 ```
 
 This keeps the recorder and UI useful (slow tasks, failures, and sink
@@ -408,32 +408,32 @@ the fast majority.
 
 ### Recorder history in Postgres
 
-With `ui.recorder.persistence: postgres`, stage P writes every row of the
+With `recorder.provider: postgres`, stage P writes every row of the
 memory store to a table in Postgres. It runs on a thread of its own with one
 connection, so the main loop pays only for handing a chunk to the Postgres
 queue; a slow or absent database never stalls the pipeline, and only the
 bounds of that queue drop rows.
 
 The cost moves to the database. A busy worker at about 5000 rows per second
-writes about 2.5 MB per second, 9 GB per hour and 54 GB at the default
+writes about 2.5 MB per second, 9 GB per hour and 54 GB at a
 retention of 6 hours, and the write-ahead log about doubles the disk writes.
 See [Write volume](recorder-postgres.md#write-volume) for the table.
 
 Two kinds of settings cut that volume:
 
-- The recorder filters `event_min_duration_ms` and `output_min_duration_ms`
-  act before the memory store. They cut every mode, and they also shorten
+- The recorder filters `recorder.capture.min_event_duration` and `recorder.capture.min_output_duration`
+  act before the memory store. They cut every provider, and they also shorten
   the live view and the memory store.
-- `ui.recorder.postgres.store_output: false` (the default) writes `stdout`
+- `recorder.postgres.store_completed_output: false` (the default) writes `stdout`
   and `stderr` as `NULL` in Postgres only; the memory store keeps them.
   With `true`, rows with output can be many KB each.
 
 Put a busy cluster on its own `table_prefix` with a short
-`retention_hours`, or keep it on `sqlite`. Watch
+`recorder.postgres.initial_retention`, or keep it on `sqlite`. Watch
 `drakkar_recorder_postgres_rows_written_total`,
 `drakkar_recorder_postgres_queue_rows` and
 `drakkar_recorder_postgres_dropped_rows_total{reason="queue_full"}`: a queue
-that stays near `ui.recorder.max_buffer` means the database does not keep up.
+that stays near `recorder.max_buffer_rows` means the database does not keep up.
 
 ---
 
@@ -522,8 +522,8 @@ ui:
 recorder:
   capture:
     min_event_duration: 50ms   # don't store fast tasks in DB
-    output_min_duration_ms: 100  # don't store stdout for fast tasks
-    store_output: false          # skip stdout/stderr storage entirely
+    min_output_duration: 100ms   # don't store stdout for fast tasks
+    output: false                # skip stdout/stderr storage entirely
 ```
 
 | Setting | Rationale |
@@ -532,8 +532,8 @@ recorder:
 | `window_size: 200` | With fast tasks, larger windows let `arrange()` batch more messages per subprocess. Even without batching, larger windows reduce `arrange()` call frequency. |
 | `max_poll_records: 500` | Pull more messages per Kafka poll to keep partition queues full. Reduces poll overhead per message. |
 | `ws_min_duration: 100ms` | Fast tasks flood the WebSocket and live UI. Hiding them reduces event loop work and browser rendering cost. |
-| `event_min_duration_ms: 50` | Skip SQLite writes for fast tasks. At high throughput, SQLite INSERT rate becomes a bottleneck. |
-| `store_output: false` | Stdout/stderr for fast tasks is usually small and uninteresting. Skipping it eliminates JSON encoding and storage. |
+| `recorder.capture.min_event_duration: 50ms` | Skip SQLite writes for fast tasks. At high throughput, SQLite INSERT rate becomes a bottleneck. |
+| `recorder.capture.output: false` | Stdout/stderr for fast tasks is usually small and uninteresting. Skipping it eliminates JSON encoding and storage. |
 
 ### Slow tasks (> 1s), moderate core count
 
@@ -549,9 +549,10 @@ sources:
 
 ui:
   ws_min_duration: 0           # show all tasks in live UI
-  recorder:
-    event_min_duration_ms: 0     # store everything
-    store_output: true           # stdout/stderr is valuable for debugging
+recorder:
+  capture:
+    min_event_duration: 0      # store everything
+    output: true               # stdout/stderr is valuable for debugging
 ```
 
 For slow tasks, the overhead analysis inverts: process launch is
@@ -574,8 +575,8 @@ executor:
 sources:
   kafka:
     max_poll_records: 20         # don't over-fetch -- each message = 10s of work
-    session_timeout_ms: 60000    # longer session timeout to avoid rebalance during slow processing
-    max_poll_interval_ms: 600000 # 10 min between polls -- tasks may run long
+    session_timeout: 1m          # longer session timeout to avoid rebalance during slow processing
+    max_poll_interval: 10m       # 10 min between polls -- tasks may run long
 
 logging:
   min_task_duration: 0         # log every task
@@ -584,7 +585,7 @@ ui:
 recorder:
   capture:
     min_event_duration: 0      # store all events
-    store_output: true           # stdout/stderr is critical for 10s tasks
+    output: true               # stdout/stderr is critical for 10s tasks
 ```
 
 | Setting | Rationale |
@@ -592,8 +593,8 @@ recorder:
 | `max_executors: 16` | With 10s tasks, 16 workers means ~1.6 tasks/sec throughput. Adding more workers only helps if you have enough CPU cores. |
 | `window_size: 5` | Small windows avoid buffering too many 10s tasks. Each window takes ~10s to complete, so commit latency = 10s per window. |
 | `max_poll_records: 20` | Don't fetch 500 messages when each takes 10s to process -- that's 83 minutes of work per poll. |
-| `session_timeout_ms: 60000` | Default 45s may trigger rebalance if the event loop is busy with task completions. 60s gives more headroom. |
-| `max_poll_interval_ms: 600000` | Kafka kicks a consumer out if it doesn't poll within this interval. With 10s tasks and window_size 5, a full window takes ~50s. 10 minutes provides ample margin. |
+| `sources.kafka.session_timeout: 1m` | Default 45s may trigger rebalance if the event loop is busy with task completions. 60s gives more headroom. |
+| `sources.kafka.max_poll_interval: 10m` | Kafka kicks a consumer out if it doesn't poll within this interval. With 10s tasks and window_size 5, a full window takes ~50s. 10 minutes provides ample margin. |
 | `drain_timeout: 30s` | On shutdown, wait up to 30s for 10s tasks to finish rather than killing them. |
 
 ---

@@ -27,7 +27,7 @@ them is off.
 | Delivery guarantee | At-least-once: offsets commit on a per-partition watermark | One HTTP round trip. Nothing is redelivered; the client owns the retry |
 
 Sinks behave the same for both. A Kafka sink works on an HTTP-only worker,
-because the cluster connection in [`kafka:`](configuration.md#kafka-connection-kafka)
+because the cluster connection in [`connections.kafka`](configuration.md#kafka-connectionskafkaname)
 is separate from the Kafka source.
 
 ## Choosing a mode
@@ -38,8 +38,10 @@ The classic pipeline. Messages arrive on a topic, `arrange()` turns each one
 into tasks, and offsets commit as the work completes.
 
 ```yaml
-kafka:
-  brokers: kafka:9092
+connections:
+  kafka:
+    main:
+      brokers: kafka:9092
 
 sources:
   kafka:
@@ -61,8 +63,10 @@ can still go to sinks.
 cluster:
   name: "http cluster"
 
-kafka:
-  brokers: "kafka:9092"          # still needed: the sink below is Kafka
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"          # still needed: the sink below is Kafka
 
 sources:
   kafka:
@@ -72,8 +76,8 @@ sources:
     host: "0.0.0.0"
     port: 8092
     path: "/process"
-    sinks_enabled: true
-    request_timeout_seconds: 60.0
+    deliver_to_sinks: true
+    request_timeout: 1m
     max_concurrent: 16
     clients:
       - name: mirror
@@ -151,7 +155,7 @@ source there is nothing to derive it from, so the DLQ needs an explicit
 |---|---|---|
 | on | empty | DLQ built, topic `{sources.kafka.topic}_dlq` |
 | on | set | DLQ built with that topic |
-| off | set | DLQ built with that topic; brokers from `dlq.brokers`, else `kafka.brokers` |
+| off | set | DLQ built with that topic, on the cluster of `dlq.connection` |
 | off | empty | **No DLQ producer.** The summary line reports `dlq=unconfigured`; with `dlq.enabled: false` it reports `dlq=off`. |
 
 In the last row a DLQ send is dropped. The worker logs

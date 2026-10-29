@@ -44,15 +44,15 @@ When the incident is over, the flight-recorder database still holds:
 
 - Every task's timings, labels, `queue_wait_ms`, `spawn_ms`, exit code —
   and its stdout/stderr when the task ran at least
-  `ui.recorder.output_min_duration_ms` (failures always store output).
-- The task's **stdin** when `ui.recorder.store_stdin` is on (capped at
-  `stdin_max_bytes`); failed tasks store stdin regardless of the flag.
+  `recorder.capture.min_output_duration` (failures always store output).
+- The task's **stdin** when `recorder.capture.stdin` is on (capped at
+  `recorder.capture.max_stdin`); failed tasks store stdin regardless of the flag.
   Copy it from the task detail page into the message probe to replay the
   exact input.
 - Every runtime stall with its captured stack traces
   (`runtime_stall` events) — the Runtime tab aggregates them by blocking
   site; the raw rows survive rotation and archiving like everything else.
-- A `resource_sample` row every `state_sync_interval_seconds`: RSS,
+- A `resource_sample` row every `recorder.sqlite.state_interval`: RSS,
   thread count, open fds, CPU percent for the worker and its reaped
   subprocesses, and host network byte totals. Chart these against the
   task timeline to see *which* resource moved when the system froze —

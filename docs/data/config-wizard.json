@@ -147,14 +147,14 @@
       "id": "recorder_memory_only",
       "when": {"disk": "no", "history": "files"},
       "text": "With an empty storage.dir this config turns durable recording off with recorder.enabled: false. Each worker keeps the recent events in memory only, two minutes by default, and has no cache file. Nothing is sealed or archived.",
-      "docs": "recent-events.md#the-three-modes",
+      "docs": "recent-events.md#the-recorder-cases",
       "fragment": {"recorder": {"enabled": false}}
     },
     {
       "id": "recorder_postgres",
       "when": {"history": "postgres"},
       "text": "Every worker writes its events to the table drakkar.recorder_events. The table has one partition per hour and keeps 24 hours. One busy worker writes about 9 GB per hour, so size the database before you start. The role in the DSN must own the table. The trace search then reads the history of its own cluster from this table, not from sealed files.",
-      "docs": "recorder-postgres.md#what-the-mode-does"
+      "docs": "recorder-postgres.md#what-the-provider-does"
     },
     {
       "id": "autodiscover_off_no_disk",

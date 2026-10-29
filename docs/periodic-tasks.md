@@ -383,6 +383,6 @@ of a cluster run has the metadata keys `"scope": "cluster"` and
 `seconds=` is gone: write `@periodic(30)` or `@periodic(interval=30)`. The
 archive keys and its lock changed, and old and new workers take different
 archive locks, so they must not archive at the same time. Stop the whole
-fleet for the upgrade, or set `history.archive.enabled: false` on every
+fleet for the upgrade, or set `recorder.archive.enabled: false` on every
 worker during a rolling restart. See
 [Upgrading](upgrading.md#periodic-tasks-and-the-archive).

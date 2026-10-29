@@ -621,6 +621,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The docs, the config wizard and the upgrade guide follow the new layout.** The
+  upgrade guide has one section for this release: the rules, the steps, a row for every
+  old key, the behaviour changes and the handler changes.
 - **New help texts for four DLQ and sink metrics.**
   `drakkar_sink_deliveries_skipped_total` names every cause of a skip (the
   handler, the declared policy, an open circuit, and a window result that

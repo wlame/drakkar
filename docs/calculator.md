@@ -249,7 +249,7 @@ majority of tasks are routine -- only slow outliers and failures matter.
 For slow workloads (p80 > 500ms), every task is worth observing. The
 thresholds scale with p80.
 
-**`store_output`** trades disk I/O for debuggability. For fast tasks
+**`recorder.capture.output`** trades disk I/O for debuggability. For fast tasks
 producing small stdout, the per-second write volume is high and the
 data is rarely needed. For slow tasks, stdout often contains the only
 clue about what went wrong.

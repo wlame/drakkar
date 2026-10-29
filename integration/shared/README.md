@@ -31,7 +31,7 @@ directory holds:
 
 No worker opens another worker's files at the top level. The cache
 exchange propagates cluster/global-scope entries over HTTP: every
-`cache.exchange.interval_seconds` each worker reads the registry
+`cache.exchange.interval` each worker reads the registry
 cards and pulls new rows from the other workers with
 `GET /api/v1/peer/cache/changes` at the URL on their card. The Message
 Trace reads the sealed files in the history folder.
@@ -82,7 +82,7 @@ across restarts**.
   archive is a cluster task with a slot every 30 seconds
   (`recorder.archive.interval`): at each slot one of worker-2 and worker-3
   takes the lease and looks for a due window. worker-1 turns the archive off
-  (`DK_HISTORY__ARCHIVE__ENABLED` in `docker-compose.yml`). The lease of a
+  (`DK_RECORDER__ARCHIVE__ENABLED` in `docker-compose.yml`). The lease of a
   holder that died ends 40 seconds after its last refresh
   (`recorder.archive.lease`). When a window is due, one worker of
   the cluster merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive and

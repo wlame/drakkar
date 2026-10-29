@@ -25,13 +25,20 @@ round happens per window. The Postgres pool exposed in [on_ready()](handler.md#o
 the Postgres sink -- you can query it directly for lookups, migrations, or health checks.
 
 ```yaml
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"
+  postgres:
+    main:
+      dsn: "postgresql://user:pass@db:5432/app"   # better: DK_CONNECTIONS__POSTGRES__MAIN__DSN
+
 sinks:
   kafka:
     results:
-      topic: "search-results"
+      topic: "search-results"       # connection main
   postgres:
-    main:
-      dsn: "postgresql://user:pass@db:5432/app"
+    main: {}                        # connection main
   http:
     webhook:
       url: "https://hooks.example.com/notify"
@@ -322,7 +329,7 @@ happens when its delivery fails for good:
 sinks:
   postgres:
     main_db:
-      dsn: "postgresql://user:pass@db:5432/app"
+      connection: main       # a name under connections.postgres
       on_failure: dlq        # dlq (default) | skip
       max_retries: 2         # 0 to 10: retries after the first attempt, spent only by a hook that returns RETRY
       depends_on: []         # sinks to deliver first, as '<type>/<name>'
@@ -394,15 +401,13 @@ consumer of the event never reads before the row and the cache entry exist:
 ```yaml
 sinks:
   postgres:
-    main_db:                 # sink 1
-      dsn: "postgresql://user:pass@db:5432/app"
+    main_db: {}              # sink 1
   kafka:
     order_events:            # sink 2: announces what sinks 1 and 3 wrote
       topic: "order-events"
       depends_on: [postgres/main_db, redis/order_cache]
   redis:
-    order_cache:             # sink 3
-      url: "redis://cache:6379/0"
+    order_cache: {}          # sink 3
 ```
 
 The rules for one result:
@@ -516,8 +521,8 @@ not count.
 
 | State | Behavior | Transition |
 |-------|----------|------------|
-| `closed` | Every `deliver()` call goes through. Terminal failures increment `_consecutive_failures`; any success resets it to zero. | After `failure_threshold` consecutive failures → `open`. |
-| `open` | `deliver()` is skipped for the cooldown window. The sink's declared `on_failure` decides without calling `on_delivery_error`: `skip` drops and counts the payloads, `dlq` writes the [DLQ record](#the-dlq-record) with `dk-error: circuit open` and `dk-attempts: 0`. An open breaker is an infrastructure signal, not a per-message decision. | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
+| `closed` | Every `deliver()` call goes through. Terminal failures increment `_consecutive_failures`; any success resets it to zero. | After `breaker_failures` consecutive failures → `open`. |
+| `open` | `deliver()` is skipped for the cooldown window. The sink's declared `on_failure` decides without calling `on_delivery_error`: `skip` drops and counts the payloads, `dlq` writes the [DLQ record](#the-dlq-record) with `dk-error: circuit open` and `dk-attempts: 0`. An open breaker is an infrastructure signal, not a per-message decision. | After `breaker_cooldown` elapsed, the next incoming batch promotes to `half_open`. |
 | `half_open` | A **single probe** delivery is allowed through. Parallel delivery attempts against the same sink observe the in-flight probe and skip — the `_probe_inflight` gate enforces single-flight semantics. | Probe success → `closed` with counters reset. Probe failure → `open` with a fresh cooldown. |
 
 **Operator-visible signals:**
@@ -535,11 +540,11 @@ not count.
   this sentinel so operators can distinguish breaker-routed DLQ
   records from actual delivery failures.
 
-The breaker defaults (`failure_threshold=5`, `cooldown_seconds=30.0`)
+The breaker defaults (`breaker_failures: 5`, `breaker_cooldown: 30s`)
 are tuned for typical throughput. Pipelines with stricter latency
 budgets can lower the threshold so one persistent outage trips the
 breaker sooner; long-recovery downstreams may want a longer cooldown.
-See [Configuration → Circuit Breaker](configuration.md#circuit-breaker-sinkscircuit_breaker)
+See [Configuration → Circuit Breaker](configuration.md#circuit-breaker)
 for the full knobs.
 
 #### Circuit open with no DLQ configured
@@ -689,7 +694,7 @@ The DLQ topic is configured under the `dlq` key:
 dlq:
   topic: ""       # empty = derived from sources.kafka.topic, or no DLQ at all
                   #   when the Kafka source is disabled
-  brokers: ""     # empty = inherits from kafka.brokers
+  connection: main  # the Kafka cluster: a name under connections.kafka
 ```
 
 When `topic` is empty and the Kafka source is enabled, the framework derives
@@ -777,11 +782,12 @@ headers of each record it reads from the DLQ topic.
 Because the record holds the original message, give the DLQ topic the same
 access rules as the source topic ([Security](security.md)).
 
-### Broker inheritance
+### Cluster of the DLQ
 
-When `dlq.brokers` is empty, the DLQ producer connects to the same brokers as the
-main Kafka consumer (`kafka.brokers`). Set `dlq.brokers` explicitly to write DLQ
-records to a different Kafka cluster.
+The DLQ producer connects to the cluster of the connection `dlq.connection`
+names (default `main`), with that connection's brokers, `security` and
+`client_config`. Point `dlq.connection` at another entry of `connections.kafka`
+to write DLQ records to a different Kafka cluster.
 
 ### When the DLQ itself fails
 
@@ -868,7 +874,7 @@ uv run python scripts/replay_dlq.py \
 |------|---------|
 | `--dlq-config` | The worker's YAML config; the DLQ topic and brokers come from it, with the worker's own fallback rules. |
 | `--target-topic` | The topic to republish to. Required unless `--dry-run`. |
-| `--target-brokers` | Brokers for the producer. Defaults to `dlq.brokers`, else `kafka.brokers`. |
+| `--target-brokers` | Brokers for the producer. Defaults to the brokers of `dlq.connection`. |
 | `--dry-run` | Read and count, publish nothing. |
 | `--limit` | Stop after N records have been **read** (filtered records count too). |
 | `--filter` | Publish only records whose value contains this text. The value is read as UTF-8; bytes that are not UTF-8 become U+FFFD and the rest still matches. |
@@ -957,7 +963,7 @@ sinks:
     webhook:
       url: "https://hooks.example.com/notify"
       method: "POST"
-      timeout_seconds: 10
+      request_timeout: 10s
       headers:
         Authorization: "Bearer ${WEBHOOK_TOKEN}"
 ```
@@ -969,19 +975,19 @@ Note the current limit: handlers are never handed sink instances, so this is
 reachable only from a sink subclass. A general `self.sinks` accessor is
 a separate design.
 
-It uses `redis.asyncio` (via `from_url`), connecting to the URL specified in
-config:
+It uses `redis.asyncio` (via `from_url`), connecting to the URL of its
+connection:
 
 ```yaml
 sinks:
   redis:
     cache:
-      url: "redis://redis:6379/0"
+      connection: main          # the URL comes from connections.redis.main
       key_prefix: "drakkar:"
 ```
 
-**KafkaSink** inherits `kafka.brokers` when its own `brokers` field is empty, so you
-only need to specify brokers once for sinks on the same cluster.
+**KafkaSink** takes its brokers, `security` and `client_config` from its connection, so
+you declare a cluster once for every sink that writes to it.
 
 **MongoSink** uses PyMongo's `AsyncMongoClient` for native asyncio support, and
 holds any operator-authored MQL under `statements`:
@@ -990,7 +996,7 @@ holds any operator-authored MQL under `statements`:
 sinks:
   mongo:
     main:
-      uri: "mongodb://mongo:27017"
+      connection: main          # the URI comes from connections.mongo.main
       database: app
       statements:
         record_attempt:

@@ -429,7 +429,7 @@ Two load errors follow from it:
 
 ## UI (`ui:`)
 
-📚 [Deep details](configuration.md#ui-flight-recorder-ui) · [Authentication](configuration.md#authentication) · [Operator UI](observability.md#operator-ui)
+📚 [Deep details](configuration.md#operator-ui-ui) · [Authentication](configuration.md#authentication) · [Operator UI](observability.md#operator-ui)
 
 The largest section. Provides the operator web UI, drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming and Prometheus deep-links, on the listener of the [`api` section](#api-api). With `ui.enabled: false` those routes answer 404 and the worker fetches no bundle. The event log is the [flight recorder](#flight-recorder-recorder).
 

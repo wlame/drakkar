@@ -4,7 +4,7 @@
 
 Drakkar is a Python 3.13+ framework that consumes messages from a Kafka topic, fans them out to per-partition async processors, runs user-defined logic as subprocesses, and delivers results to one or more output sinks (Kafka, PostgreSQL, MongoDB, HTTP, Redis, filesystem). The architecture follows a pipeline model: **poll -> partition -> window -> arrange -> execute -> on_task_complete -> on_message_complete -> on_window_complete -> deliver -> commit**. A single Drakkar worker runs one async event loop (`asyncio.run`) that hosts all partition processors, a shared subprocess executor pool with semaphore-based concurrency control, a sink manager, a dead-letter queue (DLQ), optional Prometheus metrics, and an optional flight recorder with an operator web UI. The user implements a handler class with hooks (`arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, `on_delivery_error`, plus lifecycle hooks like `on_startup`/`on_ready`/`on_assign`/`on_revoke`) that define the application-specific logic; everything else -- Kafka consumption, offset tracking, backpressure, retries, subprocess lifecycle, sink connections, and graceful shutdown -- is managed by the framework. See [Fan-out](fan-out.md) for a dedicated walkthrough of the per-task / per-message / per-window hook trio.
 
-Configuration is loaded from a YAML file (path via `config_path` argument or `DK_CONFIG` env var) with environment variable overrides using the `DK_` prefix and `__` as a nesting delimiter (e.g., `DK_KAFKA__BROKERS`). Environment variables are deep-merged on top of YAML values. The root configuration object is `DrakkarConfig`, a Pydantic `BaseSettings` model. All config fields referenced below are part of this hierarchy.
+Configuration is loaded from a YAML file (path via `config_path` argument or `DK_CONFIG` env var) with environment variable overrides using the `DK_` prefix and `__` as a nesting delimiter (e.g., `DK_CONNECTIONS__KAFKA__MAIN__BROKERS`). Environment variables are deep-merged on top of YAML values. The root configuration object is `DrakkarConfig`, a Pydantic `BaseSettings` model. All config fields referenced below are part of this hierarchy.
 
 ---
 
@@ -27,7 +27,7 @@ When `DrakkarApp.run()` is called, the framework:
 
 After `on_startup`, the framework builds all components in this order:
 
-1. **Validates sinks are configured** -- if `sinks.is_empty` is True (no sinks of any type defined) and results go to sinks (`sources.delivers_to_sinks`: the Kafka source is on, or `sources.http.sinks_enabled` is true), raises `SinkNotConfiguredError` immediately. An HTTP-only worker with `sinks_enabled: false` may have no sinks.
+1. **Validates sinks are configured** -- if `sinks.is_empty` is True (no sinks of any type defined) and results go to sinks (`sources.delivers_to_sinks`: the Kafka source is on, or `sources.http.deliver_to_sinks` is true), raises `SinkNotConfiguredError` immediately. An HTTP-only worker with `deliver_to_sinks: false` may have no sinks.
 
 2. **Creates the ExecutorPool** with:
    - `executor.binary_path` (default: `None` -- each task must then provide its own `binary_path`)
@@ -38,21 +38,21 @@ After `on_startup`, the framework builds all components in this order:
 
 4. **Resolves the periodic tasks** ([Periodic Tasks](periodic-tasks.md)): finds the handler's methods decorated with `@periodic`. It splits the tasks into worker tasks and cluster tasks and computes the definition hash of the cluster tasks (`history.archive` included when the worker runs it), so the registry card carries it from its first publish. When the worker runs at least one cluster task, it also makes the election service from `autodiscover`: an unknown provider name, or the `filesystem` provider without a shared folder, fails startup. The provider itself starts later, at the first slot that needs it.
 
-5. **If `ui.enabled`** (default: `True`):
-   - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
-   - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `ui.recorder.state_sync_interval_seconds` (default: `10`) seconds.
+5. **Recorder, API server and autodiscover**, each only when its switch is on:
+   - With `recorder.enabled` or `ui.enabled`, creates an `EventRecorder` with the recorder config, worker name, and cluster name. (With both off there is no recorder object.)
+   - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `recorder.sqlite.state_interval` (default: `10`) seconds.
    - Starts the recorder (creates/opens the SQLite database, starts flush/rotation/state-sync background tasks).
      Once the worker runs, a background job seals and moves files an earlier process with the same worker name left in `storage.dir` ([leftovers](local-databases.md#leftovers)); startup never waits on it.
-   - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
-   - Creates and starts an `APIServer` (FastAPI) on `api.port` (default: `8080`) when `api.enabled`. It always answers `/healthz`, `/readyz` and the peer route; with `ui.enabled` it also provides a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
+   - Writes the full worker configuration to the `worker_config` table (if `recorder.capture.config` is True, default: `True`), so every recorder file names the worker and cluster that wrote it.
+   - Creates and starts the API server (FastAPI) on `api.port` (default: `8080`) when `api.enabled`. It always answers `/healthz`, `/readyz` and the peer route; with `ui.enabled` it also provides the web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
    - Starts the [fleet registry](fleet.md) service (when `autodiscover.enabled`): it publishes this worker's card with state `starting` (with the cluster task hash in `features.periodic`) and reads the peer cards in the background. After each read it compares the hash with the online peers of its cluster. The card moves to `running` once the sources start and to `draining` when shutdown begins; a clean stop withdraws it after the recorder stops and before the API server stops.
 
 6. **Builds all sinks** from config by iterating each type's dict:
-   - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
-   - `sinks.postgres` -- creates `PostgresSink(name, config)` for each
-   - `sinks.mongo` -- creates `MongoSink(name, config)` for each
+   - `sinks.kafka` -- creates a `KafkaSink` for each named entry, on the cluster of its `connection`
+   - `sinks.postgres` -- creates a `PostgresSink` for each, on the database of its `connection`
+   - `sinks.mongo` -- creates a `MongoSink` for each, on the server of its `connection`
    - `sinks.http` -- creates `HttpSink(name, config)` for each
-   - `sinks.redis` -- creates `RedisSink(name, config)` for each
+   - `sinks.redis` -- creates a `RedisSink` for each, on the server of its `connection`
    - `sinks.filesystem` -- creates `FileSink(name, config)` for each
    Each is registered with the `SinkManager` under a `(sink_type, name)` key.
 
@@ -60,18 +60,18 @@ After `on_startup`, the framework builds all components in this order:
 
 8. **Builds and connects the DLQ sink**:
    - Topic: `dlq.topic` if non-empty, otherwise `'{sources.kafka.topic}_dlq'` (default source topic: `'input-events'`). With the Kafka source disabled and `dlq.topic` empty, **no DLQ producer is built** -- see [the DLQ rule](sources.md#the-dlq-without-the-kafka-source).
-   - Brokers: `dlq.brokers` if non-empty, otherwise `kafka.brokers` (default: `'localhost:9092'`).
+   - Cluster: the brokers, `security` and `client_config` of `connections.kafka.<dlq.connection>`, with `dlq.client_config` merged after them.
    - Connects a dedicated Kafka producer for the DLQ.
 
 9. **Builds the enabled input sources**, in the fixed order `kafka`, then `http`. A source whose `enabled` flag is false is not built at all. The Kafka source creates a `KafkaConsumer` (wrapping `confluent_kafka.aio.AIOConsumer`) with:
-   - `bootstrap.servers`: `kafka.brokers` (default: `'localhost:9092'`)
+   - `bootstrap.servers`: the brokers of `connections.kafka.<sources.kafka.connection>` (default `'localhost:9092'`)
    - `group.id`: `sources.kafka.consumer_group` (default: `'drakkar-workers'`)
    - `enable.auto.commit`: `False` (offsets are committed manually by the framework)
    - `auto.offset.reset`: `'earliest'`
    - `partition.assignment.strategy`: `'cooperative-sticky'`
-   - `max.poll.interval.ms`: `sources.kafka.max_poll_interval_ms` (default: `300000` = 5 minutes)
-   - `session.timeout.ms`: `sources.kafka.session_timeout_ms` (default: `45000` = 45 seconds)
-   - `heartbeat.interval.ms`: `sources.kafka.heartbeat_interval_ms` (default: `3000` = 3 seconds)
+   - `max.poll.interval.ms`: `sources.kafka.max_poll_interval` (default: `300000` = 5 minutes)
+   - `session.timeout.ms`: `sources.kafka.session_timeout` (default: `45000` = 45 seconds)
+   - `heartbeat.interval.ms`: `sources.kafka.heartbeat_interval` (default: `3000` = 3 seconds)
    - Assign/revoke callbacks are wired to `_on_assign` and `_on_revoke`.
 
    The HTTP source builds the webapp server. See [Input Sources](sources.md).
@@ -168,7 +168,7 @@ request at the same time), and delivers the result to the sinks itself.
 The synthetic partition keeps HTTP work out of the partition
 trackers in the recorder and the operator UI. There are no offsets to
 commit, so Phase 9 does not apply either: the result goes back in the HTTP
-response, and to the sinks when `sources.http.sinks_enabled` is true. See
+response, and to the sinks when `sources.http.deliver_to_sinks` is true. See
 [Webapp](webapp.md) for the request lifecycle and status codes.
 
 ---
@@ -589,7 +589,7 @@ Otherwise a loop of hook-level attempts runs, with `attempt` starting at 1:
    - **KafkaSink**: each payload's `data` is serialized via `model_dump_json().encode()` as the Kafka message value; `key` is passed through. All payloads are produced in one batch, then the producer is flushed. The method raises `RuntimeError` if flush is incomplete, any future is None, or any result contains an error.
    - **PostgresSink**: acquires a single connection from the `asyncpg.Pool` (pool_min default: `2`, pool_max default: `10`). For each payload, `data` is serialized via `model_dump()` to a column->value dict, and an `INSERT INTO {table} ({columns}) VALUES ($1, $2, ...)` query is run. Table and column names are validated against SQL injection via a `^[a-zA-Z_][a-zA-Z0-9_]*$` regex.
    - **MongoSink**: for each payload, `data` is serialized via `model_dump()` to a document dict, then `collection.insert_one(document)` is called.
-   - **HttpSink**: for each payload individually, `data` is encoded per the sink's `encoding` setting — `json` (default, `model_dump_json()`), `form`, or `multipart` — and the encoder supplies the matching `Content-Type`. An HTTP request is sent using the configured `method` (default: `'POST'`) to the configured `url`, plus any custom `headers`. Timeout is `timeout_seconds` (default: `30`). Non-2xx responses raise `httpx.HTTPStatusError` via `raise_for_status()`.
+   - **HttpSink**: for each payload individually, `data` is encoded per the sink's `encoding` setting — `json` (default, `model_dump_json()`), `form`, or `multipart` — and the encoder supplies the matching `Content-Type`. An HTTP request is sent using the configured `method` (default: `'POST'`) to the configured `url`, plus any custom `headers`. Timeout is `timeout` (default: `30`). Non-2xx responses raise `httpx.HTTPStatusError` via `raise_for_status()`.
    - **RedisSink**: for each payload, `data` is serialized via `model_dump_json()` as the string value. The full key is `{config.key_prefix}{payload.key}`. If `payload.ttl` is set, `SET key value EX ttl`; otherwise, `SET key value` (no expiry).
    - **FileSink**: for each payload, `data` is serialized via `model_dump_json() + '\n'` (JSONL format). The file at `payload.path` is opened in append mode. Parent directory must exist.
 
@@ -738,8 +738,8 @@ follow describe what the **Kafka** source does inside its share of it.
 - This runs **before** the consumer is closed so those tasks can still use `self._consumer` safely. Skipping this step caused use-after-close errors and missed final commits under revoke-then-shutdown sequences.
 
 ### Step 7: Stop the Flight Recorder
-- If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<shared.dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
-- An archive pass still running is asked to stop after its current window; the recorder waits for it until only `autodiscover.resilience.timeout_seconds` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
+- If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<storage.shared_dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
+- An archive pass still running is asked to stop after its current window; the recorder waits for it until only `autodiscover.resilience.timeout` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
 - Then the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
 
 ### Step 8: Stop the UI Server
@@ -784,188 +784,6 @@ follow describe what the **Kafka** source does inside its share of it.
 
 ## Configuration Reference
 
-### `kafka` -- Kafka Connection Settings
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `brokers` | str | `'localhost:9092'` | Kafka bootstrap servers |
-
-### `sources.kafka` -- Kafka Source Settings
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Consume the topic; off = no consumer group, no `arrange()` |
-| `topic` | str | `'input-events'` | Topic to consume from |
-| `consumer_group` | str | `'drakkar-workers'` | Consumer group ID |
-| `max_poll_records` | int | `100` | Max messages per poll batch |
-| `max_poll_interval_ms` | int | `300000` | Max time between polls before Kafka considers consumer dead |
-| `session_timeout_ms` | int | `45000` | Session timeout for group membership |
-| `heartbeat_interval_ms` | int | `3000` | Heartbeat interval to the broker |
-
-### `sources.http` -- HTTP Source Settings
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Serve the POST route; off = no server, no HTTP hooks |
-| `port` | int | `8090` | Bind port; see [Webapp](webapp.md) for the rest |
-
-### `executor` -- Subprocess Executor Pool
-
-| Field | Type | Default | Min | Description |
-|-------|------|---------|-----|-------------|
-| `binary_path` | str or None | `None` | 1 char | Default subprocess binary; None requires per-task override |
-| `max_executors` | int | `4` | 1 | Concurrent subprocess limit (semaphore size) |
-| `executor.task_timeout` | int | `120` | 1 | Per-subprocess wall-clock timeout |
-| `window_size` | int | `100` | 1 | Max messages per arrange() window |
-| `max_retries` | int | `3` | 0 | Max retries per failed task (0 = no retries) |
-| `executor.drain_timeout` | int | `30` | 1 | Max wait for in-flight tasks during shutdown or partition revocation. On timeout, final commits are skipped (at-least-once replay). |
-| `backpressure_high_multiplier` | int | `32` | 1 | Pause threshold = max_executors x this |
-| `backpressure_low_multiplier` | int | `4` | 1 | Resume threshold = max(1, max_executors x this) |
-
-### `sinks` -- Output Sink Instances
-
-Each sink type is a dict mapping instance names to their config:
-
-**`sinks.kafka.<name>`**:
-
-| Field | Type | Default |
-|-------|------|---------|
-| `topic` | str | (required) |
-| `brokers` | str | `''` (inherits `kafka.brokers`) |
-| `ui_url` | str | `''` |
-
-**`sinks.postgres.<name>`**:
-
-| Field | Type | Default | Min |
-|-------|------|---------|-----|
-| `dsn` | str | (required) | |
-| `pool_min` | int | `2` | 1 |
-| `pool_max` | int | `10` | 1 |
-| `ui_url` | str | `''` | |
-
-**`sinks.mongo.<name>`**:
-
-| Field | Type | Default |
-|-------|------|---------|
-| `uri` | str | (required) |
-| `database` | str | (required) |
-| `ui_url` | str | `''` |
-
-**`sinks.http.<name>`**:
-
-| Field | Type | Default | Min |
-|-------|------|---------|-----|
-| `url` | str | (required) | |
-| `method` | str | `'POST'` | |
-| `timeout_seconds` | int | `30` | 1 |
-| `headers` | dict | `{}` | |
-| `max_retries` | int | `3` | 0 |
-| `ui_url` | str | `''` | |
-
-**`sinks.redis.<name>`**:
-
-| Field | Type | Default |
-|-------|------|---------|
-| `url` | str | `'redis://localhost:6379/0'` |
-| `key_prefix` | str | `''` |
-| `ui_url` | str | `''` |
-
-**`sinks.filesystem.<name>`**:
-
-| Field | Type | Default |
-|-------|------|---------|
-| `base_path` | str | `''` |
-| `ui_url` | str | `''` |
-
-### `dlq` -- Dead Letter Queue
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `topic` | str | `''` | DLQ topic; empty = `'{sources.kafka.topic}_dlq'`, or no DLQ at all when the Kafka source is off |
-| `brokers` | str | `''` | DLQ brokers; empty = inherits `kafka.brokers` |
-
-### `metrics` -- Prometheus
-
-| Field | Type | Default |
-|-------|------|---------|
-| `enabled` | bool | `True` |
-| `port` | int | `9090` |
-
-### `logging` -- Structured Logging
-
-| Field | Type | Default |
-|-------|------|---------|
-| `level` | str | `'INFO'` |
-| `format` | str | `'json'` (also: `'console'`) |
-
-### `api` -- The HTTP Server
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `True` | Run the HTTP server: `/healthz`, `/readyz` and the peer route |
-| `host` | str | `'127.0.0.1'` | Bind address |
-| `port` | int | `8080` | Port |
-| `public_url` | str | `''` | External URL for this worker's HTTP server |
-
-### `ui` -- Operator UI and Flight Recorder
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `True` | Enable/disable the entire UI feature |
-| `max_rows` | int | `5000` | Max rows returned to UI queries |
-| `logging.min_task_duration` | int | `500` | Min duration to log slow tasks |
-| `ui.ws_min_duration` | int | `500` | Min duration to broadcast via WebSocket |
-| `prometheus.url` | str | `''` | Prometheus server URL for dashboard links |
-| `prometheus.rate_interval` | str | `'5m'` | Rate interval for Prometheus queries |
-| `prometheus.worker_label` | str | `''` | Worker label name in Prometheus |
-| `prometheus.cluster_label` | str | `''` | Cluster label name in Prometheus |
-| `custom_links` | list[dict] | `[]` | Custom links for the UI dashboard |
-| `recorder.store_events` | bool | `True` | Write processing events to events table |
-| `recorder.store_config` | bool | `True` | Write worker config into each file |
-| `recorder.store_state` | bool | `True` | Periodic state snapshots |
-| `recorder.state_sync_interval_seconds` | int | `10` | Seconds between state snapshots |
-| `recorder.rotation_interval_hours` | int | `1` | When to roll over DB files (1 = 1 hour) |
-| `recorder.store_output` | bool | `True` | Include stdout/stderr in event records |
-| `recorder.flush_interval_seconds` | int | `5` | Buffer flush interval |
-| `recorder.max_buffer` | int | `50000` | In-memory event buffer size |
-| `recorder.event_min_duration_ms` | int | `0` | Min duration to persist to DB |
-| `recorder.output_min_duration_ms` | int | `500` | Min duration to include stdout/stderr |
-| `release.enabled` | bool | `True` | Resolve and serve the drakkar-ui bundle |
-| `release.repo` | str | `'wlame/drakkar-ui'` | GitHub repo publishing UI bundles |
-| `release.pinned_version` | str | `''` | Known-good UI release tag; `''` = unpinned |
-| `release.cache_dir` | str | `''` | Bundle cache root; `''` = per-user cache dir |
-| `release.check_update` | bool | `True` | Resolve the latest release tag on startup |
-
-### `storage`, `shared`, `history` -- Files and Archives
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `storage.dir` | str | `'/tmp/drakkar'` | This worker's own files; `''` = no disk persistence |
-| `shared.dir` | str | `''` | Folder every worker sees; `''` = `storage.dir` |
-| `history.archive.enabled` | bool | `True` | Merge sealed files of the cluster history folder into windowed `.db.gz` archives instead of leaking them |
-| `history.archive.window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
-| `history.archive.due_after_hours` | int | `48` | A window is archived this long after it ends |
-| `history.archive.retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |
-| `history.archive.interval` | int \| null | `null` | Seconds between archive slots, aligned to the epoch; `null` with no `cron` = `3600` |
-| `history.archive.cron` | str \| null | `null` | Five-field UTC cron for the archive slots instead of `interval` |
-| `history.archive.lease_seconds` | int | `60` | Lease of an archive slot; a dead archiver's lease ends this long after its last refresh |
-| `history.archive.sweep_after_seconds` | int | `7200` | Age after which an archive work file belongs to a dead worker |
-| `history.merged_retention_days` | int | `32` | Delete UI merge results older than this; `0` = never |
-
-### `fleet` -- Registry and Cache Exchange
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `autodiscover.provider` | str | `'filesystem'` | `filesystem`, `postgres`, `redis`, `consul` |
-| `autodiscover.offline_after` | int | `60` | A peer card older than this is offline |
-| `cache.exchange.enabled` | bool | `True` | Pull `cluster`/`global` cache rows from peers |
-| `cache.exchange.interval` | duration | `30s` | Time between exchange cycles |
-
-### Worker and Cluster Names
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `worker.name` | str | `''` | Literal worker name |
-| `worker.name_env` | str | `'WORKER_ID'` | Env var holding the worker name; set and not empty, it wins over `worker.name` |
-| `cluster.name` | str | `''` | Logical cluster name |
-| `cluster.name_env` | str | `''` | Env var holding the cluster name; set and not empty, it wins over `cluster.name` |
+Every key, with its default, bounds and `DK_` variable, is on the
+[Config Reference](config-reference.md); the rules behind the layout and the
+deep tables are on [Configuration](configuration.md).

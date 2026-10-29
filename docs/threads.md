@@ -25,11 +25,11 @@ archive pass runs on a thread of its own (`drakkar-archive`), and the
 daemon thread of their own (`drakkar-fleet-<worker>`,
 `drakkar-election-files-<worker>`), one call at a time. None of them takes a
 thread from the blocking-I/O pool, so a hung network mount under
-`shared.dir` holds only their own threads.
+`storage.shared_dir` holds only their own threads.
 
 The recorder runs two loops as tasks on the main event loop: the memory
 loop (`memory_flush`) writes the in-memory [memory store](recent-events.md)
-and the file loop (`file_flush`, only with `persistence: sqlite`) writes the
+and the file loop (`file_flush`, only with provider `sqlite`) writes the
 recorder file. Each loop only awaits; the SQL runs on the aiosqlite thread
 of its connection. The memory store has one writer connection and one
 read-only reader connection, each with its own aiosqlite thread, so a hung
@@ -38,7 +38,7 @@ disk holds only the file loop and its connection. A memory read stops after
 list open a short-lived connection to the store by name on a thread of the
 API server loop's `to_thread` pool; a snapshot runs for at most 30 seconds.
 
-The debug UI routes that work on `shared.dir` (the databases list, the
+The debug UI routes that work on `storage.shared_dir` (the databases list, the
 history trace, the merge, the downloads and the archive list) read such a
 folder from a `to_thread` pool. They run on the API server's own event loop,
 and their file calls use the thread pools of that loop, not the pool that

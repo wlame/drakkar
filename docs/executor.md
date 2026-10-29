@@ -369,7 +369,7 @@ DK_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
 ```
 
 This keeps operator-configured secrets — most commonly the `DK_*`
-env overrides like `DK_SINKS__POSTGRES__MAIN__DSN` — from reaching
+env overrides like `DK_CONNECTIONS__POSTGRES__MAIN__DSN` — from reaching
 the executor binary where they could be read, logged, or exfiltrated.
 
 This list is deliberately more conservative than the recorder's
@@ -538,5 +538,5 @@ Environment variable overrides use the `DK_EXECUTOR__` prefix:
 
 ```bash
 DK_EXECUTOR__MAX_EXECUTORS=8
-DK_EXECUTOR__TASK_TIMEOUT_SECONDS=300
+DK_EXECUTOR__TASK_TIMEOUT=5m
 ```

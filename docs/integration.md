@@ -77,12 +77,12 @@ checks.
 
 | Worker | Operator UI | Metrics | Webapp | Config |
 |--------|----------|---------|--------|--------|
-| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled**, recorder in memory only |
+| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled**, recorder off (events in memory only) |
 | worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | -- | 4 executors, all 6 sinks |
 | worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | -- | 4 executors, all 6 sinks |
 
-Webapp port follows the integration convention **UI port + 10**
-(worker-1 UI `8081` → webapp `8091`). The framework default outside
+Webapp port follows the integration convention **API port + 10**
+(worker-1 API `8081` → webapp `8091`). The framework default outside
 the integration cluster is `8090`; the integration `drakkar.yaml`
 overrides it to keep the port plan consistent across services.
 
@@ -95,7 +95,7 @@ framework-level redistribution.
 ### Fast Cluster (symbol counting)
 
 2 workers, consumer group `drakkar-fast`, same source topic. Both keep
-their recorder history in Postgres (`DK_UI__RECORDER__PERSISTENCE:
+their recorder history in Postgres (`DK_RECORDER__PROVIDER:
 "postgres"`): the table `drakkar.fast_recorder_events` on `postgres-fleet`,
 with the table prefix `fast` and a retention of 2 hours. `postgres-fleet`
 starts with every provider.
@@ -196,7 +196,7 @@ its config is `integration/http-worker/drakkar.yaml`). Its
 `arrange_http_request` calls the same task-building code `arrange` uses, so
 a mirrored request runs the identical search. The response carries a
 `SearchResponse` (request id, per-task match counts, succeeded and failed
-counts), and because `sources.http.sinks_enabled` is on, the result also
+counts), and because `sources.http.deliver_to_sinks` is on, the result also
 goes to the `search-results-http` Kafka topic.
 
 ### Webapp Pipeline (worker-1 only)
@@ -354,14 +354,14 @@ To exercise this end-to-end:
 4. Watch `/live` on worker-1: HTTP-origin tasks (purple) are scheduled
    immediately; Kafka tasks remain queued behind them.
 
-### Toggling sinks_enabled
+### Toggling deliver_to_sinks
 
-The webapp's sinks-enabled mode is OFF by default in the integration
+The webapp's `deliver_to_sinks` mode is OFF by default in the integration
 config. To exercise it:
 
 ```bash
 # In integration/docker-compose.yml -> worker-1 -> environment
-DK_SOURCES__HTTP__SINKS_ENABLED: "true"
+DK_SOURCES__HTTP__DELIVER_TO_SINKS: "true"
 ```
 
 Restart worker-1. Now each HTTP request also flows through the
@@ -597,8 +597,8 @@ cluster-tasks scenario watches its slots for about five minutes).
 | `scenario-unclean-exit.sh` | Kills worker-2, which cannot withdraw its card. With `consul` it starts worker-2 again at once. | With `filesystem`, `postgres` or `redis`: within 20 s worker-1 lists worker-2 offline, and within 45 s of the kill the card is deleted. After a start, worker-2 is online within 20 s with a new `instance`. With `consul`: the card is still held by the session of the killed worker, which lives until its TTL runs out. The new worker-2 takes the card over: within 10 s of the start (one heartbeat, one refresh and 5 s) worker-1 lists it with a new `instance`, and the agent log shows that the new worker-2 destroyed the old session, which did not end by its TTL. When the host starts the worker too slowly for that, the scenario fails and names the measured times. The second half tests the archive election; see [The election half](#the-election-half). |
 | `scenario-secrets.sh` | Reads the config reference and the metrics page of each main-cluster and fast-cluster worker, and their logs. | None of them contains the password of the Postgres DSN or of the Redis URL (`drakkar:drakkar@`, `postgresql://drakkar:`, `redis://drakkar:`) or the Consul token. The config reference of a main-cluster worker lists the three connections, with `connections.consul.main.token` masked; that of a fast worker lists `connections.postgres.main.dsn`, masked. Runs with every provider. |
 | `scenario-cluster-tasks.sh` | Watches 8 slots of `harness_cluster_tick`, a cluster task of the harness handler with a slot every 30 s of epoch time, and 15 s after the last of them. Each run logs `harness_cluster_tick` with its slot. Then it reads `/api/v1/workers` on worker-2. | No slot ran on two workers, and at least 7 of the 8 slots ran exactly once (a slot whose lease does not come within its 10 s acquire window is skipped, so one missed slot is allowed). worker-2 lists worker-1 with `cluster_tasks_match: false` (worker-1 turns the archive off, so its cluster task definitions differ), and worker-3 and itself with `true`. worker-3 matches only because worker-2 and worker-3 run the archive with the same settings and the same handler: a config change on one of them makes the check fail. Runs with every provider. |
-| `scenario-recorder-memory.sh` | Reads `/api/v1/debug/databases`, `/api/v1/events`, the metrics and `/api/v1/debug/download-live` of worker-1, which keeps its recorder events in memory only (`DK_UI__RECORDER__PERSISTENCE: "none"`, a memory window of 60 s), and of worker-2, which keeps the recorder file. When the shared history folder is still empty (a fresh harness, the script run alone), it first plants one small due window with `integration/plant_history.py`. | worker-1 lists exactly one own database, the memory store, and no live file, and it lists the shared history folders. Its events answer has rows. Once it has run for 90 s, `drakkar_recorder_memory_rows` is above 0, `drakkar_recorder_memory_evicted_rows_total{reason="window"}` is above 0, `drakkar_recorder_memory_oldest_age_seconds` is at most 75 (the window, one flush interval and slack), and `drakkar_recorder_memory_allocated_bytes` is at least `drakkar_recorder_memory_bytes`. Its `download-live` without `source` answers a SQLite database (the memory store), and with `source=file` 404. worker-2 lists a memory row and a live row, and both `source=file` and `source=memory` download a SQLite database. The verdict line carries worker-1's memory numbers and the count of `ui_read_memory_timed_out` lines in the logs of the three workers. Runs with every provider. |
-| `scenario-recorder-postgres.sh` | Reads the table `drakkar.fast_recorder_events` with `psql` in `postgres-fleet`, and the history search, the metrics and `/api/v1/debug/databases` of fast-worker-1. It creates a partition of the hour 5 hours ago by hand and restarts fast-worker-1, then pauses `postgres-fleet` for 60 s and, later, for 15 s. | The table exists, its comment is `retention_hours=2`, and the partitions of the current hour to 3 hours ahead exist. The rows of the cluster `fast cluster` grow over 30 s, with the names of both fast workers. `/api/v1/debug/trace?history=1` for one consumed message answers a non-empty list: every row has `worker_name`, one row is `consumed`, and no row has a `cluster` key. Within 60 s of the restart the hand-made partition is gone and a fast worker logged `recorder_postgres_partitions_changed` with it: fast-worker-1 at its start, or fast-worker-2 when its own upkeep (every 300 s) came first; the verdict names the worker. During the 60 s pause `drakkar_recorder_postgres_queue_rows` rises above 0; within 60 s of the unpause it falls below 5000 (`batch_rows`) and `drakkar_recorder_postgres_rows_written_total` rises; `drakkar_recorder_postgres_dropped_rows_total` does not change. During the 15 s pause the history search answers 503 `{"detail": "history search failed"}` within 12 s (`ui.trace.history_max_seconds` and 2 s). fast-worker-1 lists exactly one own database, the memory store. Runs with every provider. |
+| `scenario-recorder-memory.sh` | Reads `/api/v1/debug/databases`, `/api/v1/events`, the metrics and `/api/v1/debug/download-live` of worker-1, which keeps its recorder events in memory only (`DK_RECORDER__ENABLED: "false"`, a memory window of 60 s), and of worker-2, which keeps the recorder file. When the shared history folder is still empty (a fresh harness, the script run alone), it first plants one small due window with `integration/plant_history.py`. | worker-1 lists exactly one own database, the memory store, and no live file, and it lists the shared history folders. Its events answer has rows. Once it has run for 90 s, `drakkar_recorder_memory_rows` is above 0, `drakkar_recorder_memory_evicted_rows_total{reason="window"}` is above 0, `drakkar_recorder_memory_oldest_age_seconds` is at most 75 (the window, one flush interval and slack), and `drakkar_recorder_memory_allocated_bytes` is at least `drakkar_recorder_memory_bytes`. Its `download-live` without `source` answers a SQLite database (the memory store), and with `source=file` 404. worker-2 lists a memory row and a live row, and both `source=file` and `source=memory` download a SQLite database. The verdict line carries worker-1's memory numbers and the count of `ui_read_memory_timed_out` lines in the logs of the three workers. Runs with every provider. |
+| `scenario-recorder-postgres.sh` | Reads the table `drakkar.fast_recorder_events` with `psql` in `postgres-fleet`, and the history search, the metrics and `/api/v1/debug/databases` of fast-worker-1. It creates a partition of the hour 5 hours ago by hand and restarts fast-worker-1, then pauses `postgres-fleet` for 60 s and, later, for 15 s. | The table exists, its comment is `retention_hours=2`, and the partitions of the current hour to 3 hours ahead exist. The rows of the cluster `fast cluster` grow over 30 s, with the names of both fast workers. `/api/v1/debug/trace?history=1` for one consumed message answers a non-empty list: every row has `worker_name`, one row is `consumed`, and no row has a `cluster` key. Within 60 s of the restart the hand-made partition is gone and a fast worker logged `recorder_postgres_partitions_changed` with it: fast-worker-1 at its start, or fast-worker-2 when its own upkeep (every 300 s) came first; the verdict names the worker. During the 60 s pause `drakkar_recorder_postgres_queue_rows` rises above 0; within 60 s of the unpause it falls below 5000 (`batch_rows`) and `drakkar_recorder_postgres_rows_written_total` rises; `drakkar_recorder_postgres_dropped_rows_total` does not change. During the 15 s pause the history search answers 503 `{"detail": "history search failed"}` within 12 s (`recorder.search.timeout` and 2 s). fast-worker-1 lists exactly one own database, the memory store. Runs with every provider. |
 | `scenario-dlq-record.sh` | Produces one message into `search-requests` with the console producer of the `kafka` service: a key and a value unique to the run (the value is not JSON, so the harness input model cannot parse it) and three headers, the last a stale `dk-stage: replayed`. The main cluster runs with `DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"`. It then reads the DLQ topic through worker-1's `GET /api/v1/debug/kafka/dlq/messages` (a time window from shortly before the produce) until a record with that key is there, for up to 600 s, and reads the source message at the record's `dk-source-partition` and `dk-source-offset` through `GET /api/v1/debug/kafka/source/message`. | The record's key and value are the produced bytes. Its headers are exactly the two source headers that do not start with `dk-`, in their order, then `dk-record-version` (`1`), `dk-stage` (`parse`), `dk-error` (not empty), `dk-source-topic` (`search-requests`), `dk-source-partition`, `dk-source-offset`, `dk-source-timestamp`, `dk-worker` (a worker of the main cluster), `dk-instance` (16 hex characters) and `dk-failed-at` (RFC 3339 in UTC with microseconds): the order of the `parse` case of `tests/fixtures/dlq_contract.json`, with no `dk-attempts`, `dk-sink` or `dk-task-id`. The source message at the record's offset is the produced one (same key, value and headers), and its timestamp is `dk-source-timestamp`. The verdict names both offsets and the worker that wrote the record. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
@@ -616,20 +616,20 @@ because the outage scenario does not apply to `filesystem`.
 
 The second half of `scenario-unclean-exit.sh` tests the election of the
 archive task with the provider of the run. It uses these archive settings
-of `integration/worker/drakkar.yaml` (`history.archive`):
+of `integration/worker/drakkar.yaml` (`recorder.archive`):
 
 | Key | Value | Effect |
 |-----|-------|--------|
-| `window_hours` | 1 | A window is one hour. |
-| `due_after_hours` | 1 | A window is due one hour after it ends. |
-| `retention_days` | 1 | Archives are kept one day. |
-| `interval` | 30 | An archive slot comes every 30 s of epoch time. At each slot one worker of the cluster wins the lease, looks for due windows and archives them. |
-| `lease_seconds` | 40 | The lease of a holder that died ends 40 s after its last refresh; the next slot after that is won by another worker. |
+| `window` | `1h` | A window is one hour. |
+| `due_after` | `1h` | A window is due one hour after it ends. |
+| `retention` | `1d` | Archives are kept one day. |
+| `interval` | `30s` | An archive slot comes every 30 s of epoch time. At each slot one worker of the cluster wins the lease, looks for due windows and archives them. |
+| `lease` | `40s` | The lease of a holder that died ends 40 s after its last refresh; the next slot after that is won by another worker. |
 
 Worker-1 is the observer of every scenario and sets
-`DK_HISTORY__ARCHIVE__ENABLED: "false"` in `docker-compose.yml`, so it never
+`DK_RECORDER__ARCHIVE__ENABLED: "false"` in `docker-compose.yml`, so it never
 runs the archive and never holds its lock. It also keeps its recorder events in memory only
-(`DK_UI__RECORDER__PERSISTENCE: "none"`), so it writes no recorder file
+(`DK_RECORDER__ENABLED: "false"`), so it writes no recorder file
 and seals nothing; worker-2 and worker-3 keep the file, seal it and archive
 it. The lock is in
 `tasks/main_cluster/history.archive.lock` in the shared folder
@@ -770,12 +770,14 @@ if random.random() < 0.15:
 
 ### Change rebalance speed
 
-The main cluster uses `session_timeout_ms: 10000` (10s) for fast
+The main cluster uses `sources.kafka.session_timeout: 10s` for fast
 rebalance detection. Increase for production-like behavior:
 
 ```yaml
 # integration/worker/drakkar.yaml
-session_timeout_ms: 45000
+sources:
+  kafka:
+    session_timeout: 45s
 ```
 
 ### Disable duration thresholds

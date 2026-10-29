@@ -8,7 +8,7 @@ question a per-task view cannot: **which resource is this worker fighting
 for?**
 
 The samples ride the existing `resource_sample` flight-recorder event
-(one per `ui.recorder.state_sync_interval_seconds` tick, default 10 s),
+(one per `recorder.sqlite.state_interval` tick, default 10 s),
 so they are persisted, rotated, archived, and replayable like every other
 event: an archive alone can show what the host looked like during an
 incident long after the process is gone. The Runtime tab renders the

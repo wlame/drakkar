@@ -101,8 +101,13 @@ class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
 
 ```yaml
 # drakkar.yaml
-kafka:
-  brokers: "localhost:9092"
+connections:
+  kafka:
+    main:
+      brokers: "localhost:9092"
+  postgres:
+    main:
+      dsn: "postgresql://user:pass@localhost:5432/mydb"
 
 sources:
   kafka:
@@ -120,8 +125,7 @@ sinks:
     job_results_out:
       topic: "job-results"
   postgres:
-    main_db:
-      dsn: "postgresql://user:pass@localhost:5432/mydb"
+    main_db: {}   # uses connections.postgres.main
 ```
 
 ```python

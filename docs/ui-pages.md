@@ -230,11 +230,10 @@ other unmatched route.
 recorder through the endpoints above. Those endpoints read their newest rows
 from the recorder's in-memory [memory store](recent-events.md) while it still
 holds them, and from the live file otherwise. With
-`ui.recorder.persistence: none` or `postgres` there is no file, so a widget
+`recorder.enabled: false` or provider `postgres` there is no file, so a widget
 shows only the rows of the memory window (two minutes by default). With
 `postgres`, only the trace with history (`trace?history=1`) reads the
-[Postgres table](recorder-postgres.md#the-history-search); with `sqlite` and
-`none` it reads the sealed files of the cluster. The Databases tab of the
+[Postgres table](recorder-postgres.md#the-history-search); with provider `sqlite` it reads the sealed files of the cluster, and with the recorder off it answers the memory rows. The Databases tab of the
 debug UI shows the memory store as its first row, "Recent events in memory;
 not a file", with a download button; see
 [The Databases page](local-databases.md#the-databases-page).
@@ -258,5 +257,5 @@ pages needs no special handling.
 - [Probe User Details](probe-user-details.md) — the sibling User-defined
   probe tab, sharing the same startup-validation posture
 - [Annotations](annotations.md) — the event kind `AnnotationsSource` reads
-- [Configuration](configuration.md#ui-flight-recorder-ui) — `ui.link_bases`,
+- [Configuration](configuration.md#operator-ui-ui) — `ui.link_bases`,
   the config that resolves a template's `{<base>}` tokens

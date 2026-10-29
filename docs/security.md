@@ -53,7 +53,7 @@ network access.
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
 | **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
-| **Path containment** | Database download and merge take paths relative to `shared.dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `shared.dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`) or of its recorder memory store (`source=memory`), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `store_output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. |
+| **Path containment** | Database download and merge take paths relative to `storage.shared_dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `storage.shared_dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`) or of its recorder memory store (`source=memory`), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `recorder.capture.output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
 | **Owner-only files** | Recorder databases, meta files, archives and merge results are created with mode `0600`; `storage.dir`, each cluster history folder, each cluster task lock folder (`tasks/<cluster>/`) and `merged/` are created with mode `0700`. |
 | **Secret masking** | The config reference masks secret-flagged fields (including the `token`, `url` and `dsn` of every `connections` entry), `executor.env`, and every `*.client_config`; the flight recorder applies the same redaction before storing task env. |
@@ -77,7 +77,7 @@ Stated plainly, so nobody plans around a control that is not there:
 - **No sandbox around your handler binary.** It runs with the worker's
   privileges and receives message bytes on stdin unvalidated.
 - **No authentication between peer workers.** Anything that can write to
-  `shared.dir` is trusted as a peer. Every worker of the fleet trusts the
+  `storage.shared_dir` is trusted as a peer. Every worker of the fleet trusts the
   shared folder: anyone who can write it can plant files that the workers
   archive and serve through the download endpoint. The same holds for the
   [fleet registry](fleet.md): anyone who can write to the card store (the
@@ -260,13 +260,13 @@ uses them.
   [Recorder History in Postgres](recorder-postgres.md#schema-management-and-ownership).
 - **The recorder rows hold what the recorder holds.** Every row carries the
   cluster, the worker, the task `args`, the event `metadata` (with the stored
-  stdin of `ui.recorder.store_stdin` and the capped stdin of failed tasks) and
-  the labels. With `ui.recorder.postgres.store_output: true` it also carries
+  stdin of `recorder.capture.stdin` and the capped stdin of failed tasks) and
+  the labels. With `recorder.postgres.store_completed_output: true` it also carries
   `stdout` and `stderr`. Every worker of every cluster on one database writes
   to tables that any role with `SELECT` on them can read, so give read rights
   only to the people who may see the task data of all those clusters. To keep
-  stdin out of Postgres, keep `store_stdin` off and lower
-  `ui.recorder.stdin_max_bytes`.
+  stdin out of Postgres, keep `recorder.capture.stdin` off and lower
+  `recorder.capture.max_stdin`.
 - **Give the Consul providers a token of their own.** The `consul` providers
   send `GET /v1/status/leader`, the session requests (`create`, `renew`,
   `destroy` and `info`) and the key requests (a read of one key, a recursive
@@ -410,7 +410,7 @@ in order of how much they buy you:
 4. **Close what you do not need**: `ui.probe.enabled: false`,
    `ui.merge_enabled: false`, and `ui.enabled: false` entirely on workers
    nobody debugs.
-5. **Restrict `storage.dir` and `shared.dir` permissions** to the worker
+5. **Restrict `storage.dir` and `storage.shared_dir` permissions** to the worker
    user, on every host that mounts them.
 6. **Remember the public peer route.** The token does not cover
    `/api/v1/peer/`; see [The public peer route](#the-public-peer-route).

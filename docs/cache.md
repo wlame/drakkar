@@ -115,7 +115,7 @@ UI's periodic tasks page alongside user-defined `@periodic` methods):
 | Loop | Default interval | What it does |
 |------|------------------|--------------|
 | `cache.flush` | `flush_interval` (3s) | Drains the pending `_dirty` map to SQLite via `UPSERT` / `DELETE` in one transaction |
-| `cache.sync` | `cache.exchange.interval_seconds` (30s) | Pulls new `cluster`/`global` rows from peer workers over HTTP and LWW-merges them into the local DB. See [Cache exchange](#cache-exchange) |
+| `cache.sync` | `cache.exchange.interval` (30s) | Pulls new `cluster`/`global` rows from peer workers over HTTP and LWW-merges them into the local DB. See [Cache exchange](#cache-exchange) |
 | `cache.cleanup` | `cleanup_interval` (1m) | Removes rows where `expires_at_ms < now_ms`; refreshes DB-size Prometheus gauges |
 
 The three loops are worker-scope system tasks: every worker runs its own,
@@ -207,16 +207,14 @@ cache:
     cycle_deadline: null
 ```
 
-With `storage.dir: ""` (memory-only mode) the cache has no file, and every
+With `storage.dir: ""` the cache has no file, and every
 entry behaves like a `memory` entry: an entry the LRU evicts is gone, a
 restart loses all of them, and nothing is pulled from or served to peers.
 The worker logs `cache_engine_disabled_no_storage_dir` at start. The cache
 then keeps no pending writes, so `max_memory_entries` bounds its memory.
-The same empty `storage.dir` makes the recorder derive `persistence: none`:
-it keeps its recent events in memory only (see
-[Recent Events in Memory](recent-events.md)). `ui.recorder.persistence: none`
-with a folder set keeps the cache file, because the recorder mode does not
-change where the cache lives.
+The recorder does not change where the cache lives: with
+`recorder.enabled: false` and a folder set, the cache file stays in that
+folder.
 
 ---
 
@@ -224,7 +222,7 @@ change where the cache lives.
 
 Workers do not read each other's cache files. Each worker keeps its cache
 file private in its own `storage.dir`, and pulls the rows of other workers
-over HTTP. Every `cache.exchange.interval_seconds` (default 30) the
+over HTTP. Every `cache.exchange.interval` (default 30) the
 `cache.sync` loop asks each peer worth a pull for the `cluster` and
 `global` rows that this peer originated, from
 `GET /api/v1/peer/cache/changes`. The wire format is specified in
@@ -293,10 +291,10 @@ cuts the pull; the next cycle continues from the cursor.
 At most `cache.exchange.max_concurrent_peers` peers (default 4) are
 pulled at the same time; the others wait for a free slot. Each request
 has a connect timeout of 2 seconds and a total timeout of
-`cache.exchange.timeout_seconds` (default 5).
+`cache.exchange.timeout` (default 5).
 
 The whole cycle ends at `cache.exchange.cycle_deadline`
-(default `0.9 x interval_seconds`). When the deadline fires, the worker
+(default `0.9 x interval`). When the deadline fires, the worker
 cuts the peers that are still pulling or still waiting for a slot. A cut
 peer is **not** counted as a failure and does not back off; the pages it
 already applied keep their cursor. The worker counts the cut cycle in
@@ -317,7 +315,7 @@ cycle as `fleet_peer_rows_rejected` with the counts by reason (`scope`,
 is not the expected JSON shape, one larger than 64 MiB, and a page whose
 rows are not strictly after the cursor and in `(updated_at_ms, key)` order
 (a faulty peer cannot keep a pull looping). The timeout
-`cache.exchange.timeout_seconds` covers the whole request, the body
+`cache.exchange.timeout` covers the whole request, the body
 included.
 
 Peer requests go to the URL on the peer's card (`api.public_url`, else
@@ -650,7 +648,7 @@ See [`delete()` above](#deletekey) for the full story.
 - **Worst-case staleness**, concretely: local durability is bounded by
   `cache.flush_interval` (default 3s); cross-worker freshness is
   bounded by `cache.flush_interval + autodiscover.heartbeat +
-  autodiscover.refresh + cache.exchange.interval_seconds`
+  autodiscover.refresh + cache.exchange.interval`
   (default 3s + 10s + 15s + 30s = 58s), when the pull succeeds. Size
   intervals based on your tolerance — shorter intervals trade more SQLite
   writes, card writes and peer requests for tighter staleness. The cache

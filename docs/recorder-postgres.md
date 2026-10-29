@@ -1,21 +1,21 @@
 # Recorder History in Postgres
 
-With `ui.recorder.persistence: postgres`, every worker sends its recorder
+With `recorder.provider: postgres`, every worker sends its recorder
 events to one table in a central Postgres database. Many workers and many
 clusters write to the same table. The trace search of the UI
 (`trace?history=1`) reads that table instead of sealed recorder files. A
-worker in this mode needs no local disk.
+worker with this provider needs no local disk.
 
-This page tells you what the mode does, how to set it up, how large the
+This page tells you what the provider does, how to set it up, how large the
 database gets, and what happens when Postgres is down. For the memory store
-that every mode keeps, see [Recent Events in Memory](recent-events.md).
+that every provider keeps, see [Recent Events in Memory](recent-events.md).
 
-## What the mode does
+## What the provider does
 
-The mode does this:
+The provider does this (with `recorder.enabled: true`):
 
 - The worker keeps its recent events in the memory store, exactly as with
-  `none`. Every UI read except the history search uses the memory store.
+  a worker whose recorder is off. Every UI read except the history search uses the memory store.
 - Stage P, a write stage next to the memory stage, sends every row that
   the memory store takes to the table, with the same `id`, `ts`, `event` and
   worker name. So the UI joins memory rows and table rows without duplicates.
@@ -23,7 +23,7 @@ The mode does this:
   the expired ones (see [Hourly partitions and the upkeep](#hourly-partitions-and-the-upkeep)).
 - `trace?history=1` searches the table rows of the worker's own cluster.
 
-The mode does not do this:
+The provider does not do this:
 
 - It writes no recorder file. There is no rotation, no sealing, no publish
   into the history folder, and the `history.archive` cluster task does not
@@ -36,18 +36,18 @@ The mode does not do this:
 - `/api/v1/debug/databases` shows no Postgres row, and there is no download
   of Postgres rows.
 
-`postgres` is never derived from `storage.dir`. Write it in the config. It
+Write `provider: postgres` in the config; it is never chosen for you. It
 loads with an empty `storage.dir`: the worker then has no cache file and no
-crash marker, as with `none`.
+crash marker.
 
-| | `none` | `sqlite` | `postgres` |
+| | `enabled: false` | `sqlite` | `postgres` |
 |---|---|---|---|
-| Memory store | yes | yes | yes |
+| Memory store (with `ui.enabled`) | yes | yes | yes |
 | Local recorder file | no | yes | no |
 | Rotation, sealing, publish into the history folder | no | yes | no |
-| `history.archive` cluster task | no | yes | no |
+| `history.archive` pass | no | yes | no |
 | Rows in Postgres, partition upkeep | no | no | yes |
-| `trace?history=1` reads | sealed files, when a shared folder resolves | sealed files | the Postgres table, rows of the own cluster |
+| `trace?history=1` reads | the memory rows | sealed files | the Postgres table, rows of the own cluster |
 | Other UI reads | memory | memory or file | memory |
 | `storage.dir` | optional | required | optional |
 
@@ -85,33 +85,30 @@ recorder:
 | `recorder.postgres.max_queue` | size | `128MiB` | `16MiB` to `1GiB` | `DK_RECORDER__POSTGRES__MAX_QUEUE` |
 | `recorder.postgres.resilience.*` | the shared resilience block | `5s`, 2 retries, `200ms`, `5s`, breaker 5 / `30s` | its rules | `DK_RECORDER__POSTGRES__RESILIENCE__<KEY>` |
 
-No key is secret; the DSN stays in `connections`. The whole-number keys
-accept `30.0` and refuse `30.5`. The keys load and do nothing unless the mode
-is `postgres`.
+No key is secret; the DSN stays in `connections`. `batch_rows` is a whole
+number and `initial_retention` is a whole number of hours. The keys load and
+do nothing unless the recorder is on with provider `postgres`.
 
 These existing keys also act with `postgres`:
 
-- `ui.recorder.flush_interval_seconds` is also the tick of the Postgres loop.
-- `ui.recorder.max_buffer` is also the row bound of the Postgres queue.
-- `ui.trace.history_max_seconds` is also the time limit of the history
-  search. `ui.trace.history_max_files` does not apply.
+- `recorder.flush_interval` is also the tick of the Postgres loop.
+- `recorder.max_buffer_rows` is also the row bound of the Postgres queue.
+- `recorder.search.timeout` is also the time limit of the history
+  search. `recorder.search.max_files` does not apply.
 
-`max_flush_retries`, `rotation_interval_hours`, `store_state` and the whole
-`history.archive` block load and are checked as usual, then ignored.
-`recorder_started` lists `rotation_interval_hours` (and `store_state` when it
-is on) in `ignored_keys`.
+The `recorder.sqlite` block and the whole `recorder.archive` block load and
+are checked as usual, then do nothing with this provider.
 
 The config load fails when the connection is not declared:
 
 ```
-ui.recorder.postgres.connection '<name>' is not defined under connections.postgres
+recorder.postgres.connection '<name>' is not defined under connections.postgres
 ```
 
-This check runs after the `sqlite` folder check and before the history and
-rotation check, whatever `ui.enabled` says. A bad prefix fails with:
+A bad prefix fails with:
 
 ```
-ui.recorder.postgres.table_prefix '<value>' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores
+recorder.postgres.table_prefix '<value>' must be empty, or a lower-case letter followed by at most 23 lower-case letters, digits or underscores
 ```
 
 A limit below its bound fails with one of these:
@@ -270,7 +267,7 @@ upkeep and the COPY, so many such errors in a row can open it.
 ## Retention
 
 The table stores its retention in its comment, `retention_hours=<n>`. The
-worker that creates the table writes its own `retention_hours` there. After
+worker that creates the table writes its own `recorder.postgres.initial_retention` there (as whole hours). After
 that the comment rules: the upkeep drops partitions only by the stored value,
 never by a worker's setting. So the clusters on one prefix share one
 retention, and no cluster can delete the history of another one.
@@ -279,7 +276,7 @@ A comment counts when it is exactly `retention_hours=<n>` with `n` from 1 to
 168. Without such a comment (no comment, `retention_hours=0`, a trailing
 space, any other text), the upkeep still creates partitions and drops none.
 
-When the stored value differs from the worker's `retention_hours`, or there
+When the stored value differs from the worker's `initial_retention`, or there
 is none, the worker logs `recorder_postgres_retention_mismatch` once per
 process and goes on. It checks this only in an upkeep in which it holds the
 try-lock, so the line can come late on a worker that seldom wins the lock.
@@ -374,7 +371,7 @@ The command cannot print partitions; they depend on the time.
 
 ## Write volume
 
-Size the database before you turn the mode on. The numbers below assume about
+Size the database before you turn the provider on. The numbers below assume about
 1200 tasks per second on a busy worker and 3 to 5 rows per task, so up to 5000
 rows per second per worker, and about 0.5 KB per row with
 `store_completed_output: false` (the row and its share of the key and the
@@ -398,8 +395,8 @@ short retention, or keep them on `sqlite`.
 
 Two kinds of settings cut the volume:
 
-- The recorder filters `ui.recorder.event_min_duration_ms` and
-  `output_min_duration_ms` act before the memory store. They also shorten the
+- The recorder filters `recorder.capture.min_event_duration` and
+  `recorder.capture.min_output_duration` act before the memory store. They also shorten the
   live view and the memory store.
 - `recorder.postgres.store_completed_output` and `max_output` act on
   Postgres only (see below), and `max_size` bounds the whole table (see
@@ -438,10 +435,10 @@ whole. Runtime health events (`runtime_stall` with its stacks and the rest)
 keep their `metadata` whole too.
 
 Stdin inside `metadata` follows the existing recorder rules:
-`ui.recorder.store_stdin` (default off) for `task_started`, and the capped
-stdin of `task_failed` (at most `ui.recorder.stdin_max_bytes`, default 64
-KiB). To keep stdin out of Postgres, keep `store_stdin` off and lower
-`stdin_max_bytes`.
+`recorder.capture.stdin` (default off) for `task_started`, and the capped
+stdin of `task_failed` (at most `recorder.capture.max_stdin`, default 64
+KiB). To keep stdin out of Postgres, keep `recorder.capture.stdin` off and lower
+`recorder.capture.max_stdin`.
 
 With `store_completed_output: true`, a row with output holds up to
 `max_output` of `stdout` and as much of `stderr`. Size the database again.
@@ -461,14 +458,14 @@ number of workers.
 ## While Postgres is down
 
 Rows wait in the **Postgres queue** between the memory store and stage P. The
-queue has two bounds: `ui.recorder.max_buffer` rows (default 50000) and
-`queue_max_mib` MiB of text (default 128), counted in characters of text. When a new row passes either bound,
+queue has two bounds: `recorder.max_buffer_rows` rows (default 50000) and
+`max_queue` of text (default `128MiB`), counted in characters of text. When a new row passes either bound,
 the oldest rows are dropped. The memory stage never waits for stage P.
 
 Stage P runs on a thread of its own with its own event loop and one
 connection, so a slow or absent Postgres never stalls the main loop, the
 memory store or the pipeline. It runs on every memory tick, on the
-`flush_interval_seconds` tick, and when the queue passes half of either
+`recorder.flush_interval` tick, and when the queue passes half of either
 bound. One run starts stage P when it has not started, runs the upkeep when
 it is due, then writes chunks until the queue is empty. A chunk is at most
 `batch_rows` rows and at most 4 MiB of text (counted in characters of text), and one COPY in one transaction.
@@ -495,7 +492,7 @@ upkeep counts as usual.
 
 The COPY transaction sets `statement_timeout` to `0` for itself, so a limit
 set for the role or the database never cuts a COPY; the attempt time limit
-of `ui.recorder.postgres.resilience.timeout_seconds` bounds it.
+of `recorder.postgres.resilience.timeout` bounds it.
 
 When Postgres comes back, the probe succeeds and the queue drains chunk after
 chunk in one run. At the defaults the queue holds about 10 seconds of a
@@ -528,7 +525,7 @@ cluster only. It never reads the history folder.
   failed"}` and logs `ui_read_postgres_failed`. The UI then shows "(the
   history search failed)" instead of "No events found". Every other read
   keeps its usual empty answer on failure.
-- **Time limit.** `ui.trace.history_max_seconds` bounds the whole search,
+- **Time limit.** `recorder.search.timeout` bounds the whole search,
   connect included, on the worker and on the server (`statement_timeout`),
   so the server stops its work when the worker gives up. The server limit is
   at most 3600 seconds; a larger or non-finite value uses 3600.
@@ -570,21 +567,23 @@ storage:
   dir: ""                       # no disk: no cache file, no crash marker
 
 connections:
+  kafka:
+    main:
+      brokers: kafka:9092
   postgres:
     main:
       schema: drakkar           # the DSN comes from DK_CONNECTIONS__POSTGRES__MAIN__DSN
       manage_schema: true
 
-ui:
-  recorder:
-    persistence: postgres
-    postgres:
-      connection: main
-      table_prefix: heavy       # drakkar.heavy_recorder_events
-      retention_hours: 3        # written into the comment when this worker creates the table
-      store_output: false
-  trace:
-    history_max_seconds: 10
+recorder:
+  provider: postgres
+  postgres:
+    connection: main
+    table_prefix: heavy         # drakkar.heavy_recorder_events
+    initial_retention: 3h       # written into the comment when this worker creates the table
+    store_completed_output: false
+  search:
+    timeout: 10s
 ```
 
 ```bash
@@ -600,5 +599,5 @@ To create the table as an administrator instead:
 drakkar-schema postgres --schema=drakkar --recorder --table-prefix=heavy --retention-hours=3 | psql "$ADMIN_DSN"
 ```
 
-The [config wizard](calculator.md) prints a starting config for this mode
+The [config wizard](calculator.md) prints a starting config for this provider
 when you answer "Postgres" to "Where should the long event history live?".

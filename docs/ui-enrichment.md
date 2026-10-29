@@ -472,7 +472,7 @@ with one addition specific to enrichment:
 - [Declared UI Pages](ui-pages.md) — a `table` widget's `columns` reuses
   this same `Column` verbatim, addressed by a declared page instead of a
   probe run
-- [Configuration](configuration.md#ui-flight-recorder-ui) — the full `ui.*`
+- [Configuration](configuration.md#operator-ui-ui) — the full `ui.*`
   config section, including `ui.link_bases` and `ui.custom_renderers_path`
 - [Annotations](annotations.md) — the message/task/window-scoped sibling of
   probe details

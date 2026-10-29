@@ -102,7 +102,7 @@ statement**.
 sinks:
   postgres:
     primary_warehouse:
-      dsn: "postgresql://user:pass@db:5432/app"
+      connection: main          # the DSN comes from connections.postgres.main
       statements:
         claim_job: |
           UPDATE jobs
@@ -211,7 +211,7 @@ interleave with another writer; the same pair inside a script cannot.
 sinks:
   redis:
     result_cache:
-      url: "redis://redis:6379/0"
+      connection: main          # the URL comes from connections.redis.main
       key_prefix: "drakkar:"
       scripts:
         push_and_cap: |
@@ -341,7 +341,7 @@ from matching every document in the collection.
 sinks:
   mongo:
     main:
-      uri: "mongodb://mongo:27017"
+      connection: main          # the URI comes from connections.mongo.main
       database: app
       statements:
         record_attempt:

@@ -1,29 +1,32 @@
 # Recent Events in Memory
 
-Every worker with the UI on keeps its recent recorder events in an in-memory
+A worker with the UI on keeps its recent recorder events in an in-memory
 SQLite database, the **memory store**. The UI pages read their recent rows
-from it. A worker can also keep a recorder file on disk, send its events to a
-table in Postgres, or keep nothing else at all. This page tells you what the
-memory store holds, how to size it, how much
-RAM to plan for it, and what each page shows in each mode.
+from it. A worker can also keep a recorder file on disk (provider `sqlite`),
+send its events to a table in Postgres (provider `postgres`), or keep nothing
+else at all (`recorder.enabled: false`). This page tells you what the memory
+store holds, how to size it, how much RAM to plan for it, and what each page
+shows in each case.
 
-The memory store exists when `ui.enabled` and `ui.recorder.store_events` are
-both on (the defaults). With `store_events: false` there is no memory store
-and no event rows anywhere; the live WebSocket view still streams.
+The memory store exists when `ui.enabled` and `recorder.capture.events` are
+both on (the defaults). With `capture.events: false` there is no memory store
+and no event rows anywhere; the live WebSocket view still streams. A worker
+with `ui.enabled: false` has no memory store either: it inserts nothing in
+memory, and the memory gauges stay `0`.
 
-## The three modes
+## The recorder cases
 
-`ui.recorder.persistence` selects where the recorder keeps events besides the
-memory store:
+`recorder.enabled` and `recorder.provider` select where the recorder keeps
+events besides the memory store:
 
-| | `none` | `sqlite` | `postgres` |
+| | `enabled: false` | `sqlite` | `postgres` |
 |---|---|---|---|
-| Memory store | yes | yes | yes |
+| Memory store (with `ui.enabled`) | yes | yes | yes |
 | Recorder file in `storage.dir` | no | yes | no |
 | Rotation, sealing, publish into the history folder | no | yes | no |
-| `history.archive` cluster task | does not run | runs | does not run |
+| `history.archive` pass | does not run | runs | does not run |
 | Rows in a Postgres table, partition upkeep | no | no | yes |
-| Trace with history (`history=1`) | sealed files, when a shared folder resolves | sealed files | the Postgres table, rows of the own cluster |
+| Trace with history (`history=1`) | the memory rows only | sealed files | the Postgres table, rows of the own cluster |
 | Merge, file downloads, archives list | yes, when a shared folder resolves | yes | yes, when a shared folder resolves |
 | `worker_state` rows | not written | written to the file only | not written |
 | `worker_config` row | in memory | in memory and in the file | in memory |
@@ -31,48 +34,38 @@ memory store:
 | Last-breath flush at exit | nothing | into the file | nothing |
 | `storage.dir` | optional (cache file, crash marker, snapshot temp file) | required | optional |
 
-The `postgres` mode has its own page: [Recorder History in Postgres](recorder-postgres.md).
+The `postgres` provider has its own page: [Recorder History in Postgres](recorder-postgres.md).
 
-When you do not set the key, the worker derives the mode from `storage.dir`:
-
-| `persistence` | `storage.dir` | Mode |
-|---|---|---|
-| not set | a folder | `sqlite` |
-| not set | `''` | `none` |
-| `none` | anything | `none` |
-| `sqlite` | a folder | `sqlite` |
-| `sqlite` | `''` | the config does not load |
-| `postgres` | anything | `postgres` |
-
-`postgres` is never derived; write it in the config. So a config with
-`storage.dir: ''` runs in `none` mode with no change. An
-explicit `sqlite` with an empty folder fails the load with this message:
+`recorder.enabled` defaults to `true` and `provider` to `sqlite`, and nothing is
+derived from `storage.dir`. A worker with an empty `storage.dir`, the recorder
+on and provider `sqlite` fails the load with this message:
 
 ```
-ui.recorder.persistence is sqlite but storage.dir is empty; set storage.dir to a folder, or set ui.recorder.persistence to none (or remove it) to keep recorder events in memory only
+recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, or set recorder.enabled to false
 ```
 
-The rule does not depend on `ui.enabled`.
+So a worker that keeps its recent events in memory only, for example in a
+container with no writable disk, sets `recorder.enabled: false`.
 
 `storage.dir` keeps one meaning: the folder of this worker's own files. With
-`persistence: none` and a folder set, the cache file and the crash marker stay
-in that folder, and the recorder writes no recorder file there. The config
+`recorder.enabled: false` and a folder set, the cache file and the crash marker
+stay in that folder, and the recorder writes no recorder file there. The config
 summary line then shows the token ` recorder=off` after ` storage=...` (and
 the optional ` shared=...`).
 
-The shared folder (`shared.dir`, else `storage.dir`) does not depend on the
-mode. A `none` worker with a shared folder still reads the sealed history of
-its cluster, merges files and downloads archives. It publishes nothing into
+The shared folder (`storage.shared_dir`, else `storage.dir`) does not depend on
+the provider. A worker with `recorder.enabled: false` and a shared folder still
+reads nothing of the sealed history in a trace (the search answers the memory
+rows), but it merges files and downloads archives. It publishes nothing into
 the history folder.
 
 ```yaml
-ui:
-  recorder:
-    persistence: none          # none | sqlite | postgres | unset (derived from storage.dir)
-    memory:
-      window_seconds: 120      # keep events this many seconds
-      rows_per_executor: 3000  # row cap = rows_per_executor x executor.max_executors
-      max_mib: 256             # data budget of the store, in MiB
+recorder:
+  enabled: false             # keep recent events in memory only
+  memory:
+    window: 2m               # keep events this long
+    rows_per_executor: 3000  # row cap = rows_per_executor x executor.max_executors
+    max_size: 256MiB         # data budget of the store
 ```
 
 ## The three bounds
@@ -81,13 +74,13 @@ The worker removes the oldest rows of the memory store after each write to
 it, and on every memory tick when the worker is idle. It applies three bounds,
 in this order:
 
-1. **Time window**, `ui.recorder.memory.window_seconds` (default 120, from 10
-   to 86400). Rows older than the window go.
-2. **Row cap**, `ui.recorder.memory.rows_per_executor` times
+1. **Time window**, `recorder.memory.window` (default `2m`, from `10s`
+   to `24h`). Rows older than the window go.
+2. **Row cap**, `recorder.memory.rows_per_executor` times
    `executor.max_executors` (default 3000 per executor, from 100 to 1000000).
    The oldest rows above the cap go.
-3. **Data budget**, `ui.recorder.memory.max_mib` (default 256, from 16 to
-   512). Rows go until the data in use (pages in use times the page size) fits
+3. **Data budget**, `recorder.memory.max_size` (default `256MiB`, from `16MiB` to
+   `512MiB`). Rows go until the data in use (pages in use times the page size) fits
    the budget.
 
 The worker deletes at most 5000 rows per transaction. The byte step stops
@@ -98,7 +91,7 @@ The budget bounds the data, not the RAM. The SQLite in-memory database refuses
 to grow past 1 GiB, so the budget stops at 512 MiB: 512 MiB, plus one write
 stage, plus free pages, stays under that limit.
 
-The three keys are whole numbers. `120.0` loads as 120; `30.5` fails the load.
+`window` is a whole number of seconds (`2m`, `90s`); `rows_per_executor` is a whole number; `max_size` is a size.
 
 ### Sizing the row cap
 
@@ -107,7 +100,7 @@ four rows per task:
 
 > rows per executor per window is about 4 x window / average task seconds
 
-With the default window of 120 seconds, the default of 3000 fits tasks of
+With the default window of `2m`, the default of 3000 fits tasks of
 0.16 seconds (4 x 120 / 0.16 = 3000). With faster tasks, the row cap binds
 first, and the store covers less than the window. For example, with 0.05
 second tasks the default cap covers about 37 seconds. A longer window needs a
@@ -125,8 +118,8 @@ memory back. So per worker:
   ever had, and never more than 1 GiB;
 - the rollback pages of the open write transaction are in memory too;
 - one growth step holds the old and the new buffer for a short time;
-- the intake buffer and, with `sqlite`, the file queue each hold up to
-  `ui.recorder.max_buffer` rows, outputs included.
+- the intake buffer and, with a durable store, its queue each hold up to
+  `recorder.max_buffer_rows` rows, outputs included.
 
 With the default budget of 256 MiB, plan up to about 600 MiB for the store.
 
@@ -143,9 +136,9 @@ rollback pages and the Python objects of the buffered rows.
 
 ## What reads memory and what reads the file
 
-With `none` and `postgres`, every UI read uses the memory store. A page that
-asks for an older range gets a shorter answer. With `postgres`, only the trace
-with history reads the Postgres table.
+With the recorder off and with provider `postgres`, every UI read uses the
+memory store. A page that asks for an older range gets a shorter answer. With
+`postgres`, only the trace with history reads the Postgres table.
 
 With `sqlite`, each read picks one source, memory or the live file. It never
 merges the two:
@@ -160,25 +153,25 @@ merges the two:
 | Label keys | `/api/v1/debug/label-keys` | always memory |
 
 The timeline reads up to `ui.timeline.max_age` (default 60 minutes).
-With the default window of 120 seconds, the default timeline reads the file.
+With the default window of `2m`, the default timeline reads the file.
 
 A page with two queries reads both from the same source. A memory read has a
 time limit of 2 seconds. A read stopped by the limit answers an empty page and
 logs `ui_read_memory_timed_out`.
 
-### What each page shows with `none` and `postgres`
+### What each page shows with the recorder off or on `postgres`
 
-With `none` and `postgres`, the pages cover the memory window only. The UI does not label it.
+With the recorder off or on `postgres`, the pages cover the memory window only. The UI does not label it.
 
 - The **timeline** shows the tasks of the window, not the last hour.
 - The **partition counts** count the rows of the window.
 - **`/debug/periodic`** totals count only the runs inside the window.
 - **Task detail** shows only the rows of the task that are still in the
   window. A task whose older rows left the window shows its newer rows only.
-- **Trace** finds the rows of the window, plus the sealed history of the
-  cluster when you ask for it (`history=1`) and a shared folder resolves.
-  With `postgres`, `history=1` adds the rows of the cluster from the Postgres
-  table instead.
+- **Trace** finds the rows of the window. With `history=1`, a `sqlite` worker
+  adds the sealed history of the cluster, and a `postgres` worker adds the rows
+  of the cluster from the Postgres table. With the recorder off, `history=1`
+  answers the memory rows only.
   **Trace by label** finds the rows of the window.
 
 Rare events leave with the window too. An event that happens once an hour is
@@ -251,16 +244,15 @@ the number of lines left out since the last one.
 | Event | Level | Fields | When |
 |---|---|---|---|
 | `recorder_memory_write_retry` | warning | `error`, `batch_size` | The store was busy or locked. The chunk goes back to the intake and is written on the next tick. Nothing is lost. |
-| `recorder_memory_write_failed` | error | `error`, `batch_size` | Any other failed memory write. The worker deletes the memory rows up to that chunk. With `sqlite` the chunk still goes to the file; with `none` it is lost. |
+| `recorder_memory_write_failed` | error | `error`, `batch_size` | Any other failed memory write. The worker deletes the memory rows up to that chunk. With provider `sqlite` the chunk still goes to the file; with the recorder off it is lost. |
 | `recorder_memory_eviction_failed` | warning | `error`, `reason` (`window`, `rows`, `bytes`, `gap`, `floor`), `rollback_error` when the rollback failed too | An eviction pass or a gap delete failed. The next pass starts again. |
 | `recorder_memory_rollback_failed` | warning | `error` | The rollback after a failed memory write failed. The next write rolls back first. |
 | `recorder_memory_config_write_failed` | warning | `error` | The `worker_config` row could not be written to the store. The file write goes on. |
 | `ui_read_memory_timed_out` (category `debug`) | warning | `endpoint`, `limit_seconds` | A memory read stopped at its 2 second limit. |
 
-`recorder_started` carries `persistence`, `memory_window_seconds`,
-`memory_max_rows` and `memory_max_bytes` (the last three only with a memory
-store) and, with `none` and `postgres`, `ignored_keys`: the keys that load
-and do nothing without a file (`rotation_interval_hours`, and `store_state` when it is on).
+`recorder_started` carries `persistence` (`none` with the recorder off, else the
+provider), `memory_window_seconds`, `memory_max_rows` and `memory_max_bytes`
+(the last three only with a memory store).
 
 See [Observability](observability.md#flight-recorder) for the recorder metrics
 and the write stages, and [Local Databases](local-databases.md) for the files.

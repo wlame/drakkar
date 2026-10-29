@@ -174,23 +174,23 @@ CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.m
 
 #### Recorder
 
-Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). Track flight-recorder health -- buffer depth, drops under load, flush latency, and the memory store. The memory metrics are explained in [Recent Events in Memory](recent-events.md#metrics). Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
+Emitted only when the worker has a recorder (`recorder.enabled` or `ui.enabled`, see [Flight recorder](configuration.md#flight-recorder-recorder)). Track flight-recorder health -- buffer depth, drops under load, flush latency, and the memory store. The memory metrics are explained in [Recent Events in Memory](recent-events.md#metrics). Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `recorder.flush_interval`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_recorder_buffer_size` | Gauge | -- | Events that wait in the intake plus rows that wait in the file queue. Updated on every `_record()` call and after each stage. A sustained value near `max_buffer` signals the loops can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
+| `drakkar_recorder_buffer_size` | Gauge | -- | Events that wait in the intake plus rows that wait in the file queue. Updated on every `_record()` call and after each stage. A sustained value near `recorder.max_buffer_rows` signals the loops can't keep up with incoming events -- raise `recorder.flush_interval` or `recorder.max_buffer_rows`, or investigate disk latency. |
 | `drakkar_recorder_dropped_events_total` | Counter | -- | Rows evicted from the intake or the file queue because it was full. Non-zero means event history has gaps; scale the buffer up or speed up flushes. |
-| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of one stage F, the file write (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
+| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of one stage F, the file write (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `recorder.flush_interval` -- flushes overlapping the next scheduled flush starve the buffer. |
 | `drakkar_recorder_flush_retries_total` | Counter | -- | Flush attempts that failed with `aiosqlite.OperationalError` and re-queued their batch at the front of the buffer. A non-zero `rate(...[5m])` signals a transient DB-health issue (WAL lock, disk pressure); if it climbs without stabilising, the recorder is about to start dropping batches. Pair with `drakkar_recorder_flush_batches_dropped_total` to distinguish "retrying" from "giving up". |
-| `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
-| `drakkar_recorder_requeue_overflow_total` | Counter | -- | Rows evicted from the tail of a full queue (`max_buffer`) while a chunk is put back at its front. With a recorder file, a failed or cancelled file write puts its chunk back at the front of the file queue; a transient memory error (busy or locked) puts its chunk back at the front of the intake, and so does a cancelled memory write without a file. Rows recorded during the write can fill the queue. Any non-zero value is data loss; alert alongside `flush_batches_dropped_total`. |
+| `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `recorder.sqlite.max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
+| `drakkar_recorder_requeue_overflow_total` | Counter | -- | Rows evicted from the tail of a full queue (`recorder.max_buffer_rows`) while a chunk is put back at its front. With a recorder file, a failed or cancelled file write puts its chunk back at the front of the file queue; a transient memory error (busy or locked) puts its chunk back at the front of the intake, and so does a cancelled memory write without a file. Rows recorded during the write can fill the queue. Any non-zero value is data loss; alert alongside `flush_batches_dropped_total`. |
 | `drakkar_recorder_memory_rows` | Gauge | -- | Rows in the events table of the recorder memory store |
 | `drakkar_recorder_memory_bytes` | Gauge | -- | Bytes of data in the recorder memory store: pages in use times the page size |
 | `drakkar_recorder_memory_allocated_bytes` | Gauge | -- | Database size of the recorder memory store, free pages included; the memory it holds is at least this. The process RSS is larger; see [RAM to plan](recent-events.md#ram-to-plan). |
 | `drakkar_recorder_memory_oldest_age_seconds` | Gauge | -- | Age in seconds of the oldest event in the recorder memory store, 0 when it is empty. Shows how much time the store really covers when the row cap or the budget binds first. |
 | `drakkar_recorder_memory_evicted_rows_total` | Counter | `reason` | Rows removed from the recorder memory store, by reason: `window`, `rows`, `bytes`, `gap`. |
 | `drakkar_recorder_memory_write_failures_total` | Counter | -- | Event chunks that could not be written to the recorder memory store. Final errors only; a busy or locked store is retried and logs `recorder_memory_write_retry`. |
-| `drakkar_recorder_postgres_queue_rows` | Gauge | -- | Rows waiting to be written to the recorder Postgres table: the Postgres queue plus the chunk that stage P holds. Only with `persistence: postgres`. See [Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down). |
+| `drakkar_recorder_postgres_queue_rows` | Gauge | -- | Rows waiting to be written to the recorder Postgres table: the Postgres queue plus the chunk that stage P holds. Only with provider `postgres`. See [Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down). |
 | `drakkar_recorder_postgres_rows_written_total` | Counter | -- | Rows written to the recorder Postgres table. With the table size, it gives the real write volume. |
 | `drakkar_recorder_postgres_dropped_rows_total` | Counter | `reason` | Rows that never reached the recorder Postgres table, by reason: `queue_full` (the Postgres queue passed a bound), `rejected` (a chunk failed twice with a final error), `no_partition` (the same, and the last error was `23514`), `shutdown` (left over at stop). Any non-zero rate is a gap in the Postgres history. |
 | `drakkar_recorder_postgres_partitions_dropped_total` | Counter | `reason` | Recorder Postgres partitions dropped, by reason: `retention` (the hour is past the retention stored with the table), `size` (the table was above `recorder.postgres.max_size`). Counted when the upkeep commits. A steady `size` rate means the table is too small for its retention. |
@@ -201,9 +201,9 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_seal_failures_total` | Counter | -- | Recorder files whose sealing failed; they stay in the backlog and are retried. Counts a failed seal and a failed move into the history folder (log `recorder_seal_failed`, field `stage`). |
 | `drakkar_recorder_archive_failures_total` | Counter | -- | Archive passes that did not finish cleanly: a window failed, the pass was fenced (another worker took the lease over, or the provider could not confirm it; see `reason` of `recorder_archive_fenced`), or an unexpected error. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
-| `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
+| `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `recorder.annotations.max_size`), `budget_exhausted` (the hook invocation had spent `recorder.annotations.max_size_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
-The memory store logs `recorder_memory_write_retry`, `recorder_memory_write_failed`, `recorder_memory_eviction_failed` (with `rollback_error` when the rollback failed too), `recorder_memory_rollback_failed` and `recorder_memory_config_write_failed`, and a UI read stopped by the 2 second memory read limit logs `ui_read_memory_timed_out` (category `debug`). Each appears at most once per 60 seconds. See [Recent Events in Memory](recent-events.md#log-events). `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed` carry `stage` (`memory`, `file` or `postgres`); see [Buffer Mechanics](#buffer-mechanics). The log events of `persistence: postgres` are in [Recorder history in Postgres](#recorder-history-in-postgres).
+The memory store logs `recorder_memory_write_retry`, `recorder_memory_write_failed`, `recorder_memory_eviction_failed` (with `rollback_error` when the rollback failed too), `recorder_memory_rollback_failed` and `recorder_memory_config_write_failed`, and a UI read stopped by the 2 second memory read limit logs `ui_read_memory_timed_out` (category `debug`). Each appears at most once per 60 seconds. See [Recent Events in Memory](recent-events.md#log-events). `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed` carry `stage` (`memory`, `file` or `postgres`); see [Buffer Mechanics](#buffer-mechanics). The log events of provider `postgres` are in [Recorder history in Postgres](#recorder-history-in-postgres).
 
 #### Cache
 
@@ -246,7 +246,7 @@ hits its deadline. With `autodiscover` off, an enabled exchange logs
 
 #### Fleet registry and provider operations
 
-Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [`persistence: postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [provider `postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -277,9 +277,9 @@ Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client req
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_webapp_requests_total` | Counter | `client`, `status` | One increment per HTTP request, labelled by the matched client name and the terminal outcome. Replaces a separate `webapp_rate_limited_total` -- query `drakkar_webapp_requests_total{status='rate_limited'}` instead. |
-| `drakkar_webapp_request_duration_seconds` | Histogram | `client`, `status` | Server-side wall-clock duration of HTTP requests. Buckets: 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30 -- covers sub-second work and the default 30s `request_timeout_seconds` budget. The duration starts at route entry and ends at response emission, so it includes auth + rate-limit + body parsing as well as the runner. |
+| `drakkar_webapp_request_duration_seconds` | Histogram | `client`, `status` | Server-side wall-clock duration of HTTP requests. Buckets: 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30 -- covers sub-second work and the default 30s `request_timeout` budget. The duration starts at route entry and ends at response emission, so it includes auth + rate-limit + body parsing as well as the runner. |
 | `drakkar_webapp_inflight` | Gauge | -- | Number of HTTP requests currently being processed by the runner on T1. Incremented on runner entry, decremented in `finally`. **Alert on `drakkar_webapp_inflight > sources.http.max_concurrent` to spot semaphore-leak bugs** -- a permit accidentally held past response would surface here. |
-| `drakkar_webapp_dropped_after_timeout_total` | Counter | `client` | Requests whose pipeline result was dropped on T1 after T2 had already returned a 504 to the caller. Incremented at each cancellation gate (post-execute and pre-`on_http_request_complete`). A high rate signals either a too-tight `request_timeout_seconds` or a slow subprocess pipeline -- correlate with `drakkar_executor_duration_seconds`. |
+| `drakkar_webapp_dropped_after_timeout_total` | Counter | `client` | Requests whose pipeline result was dropped on T1 after T2 had already returned a 504 to the caller. Incremented at each cancellation gate (post-execute and pre-`on_http_request_complete`). A high rate signals either a too-tight `request_timeout` or a slow subprocess pipeline -- correlate with `drakkar_executor_duration_seconds`. |
 | `drakkar_webapp_rpm_limit` | Gauge | `client` | Configured rpm cap per client. **Informational gauge** set once at webapp startup and never updated thereafter (the cap is a config field; operators edit YAML and restart). Read alongside `drakkar_webapp_requests_total{status='rate_limited'}` to confirm deployed limits match the workload's expectations. |
 
 #### Shutdown
@@ -518,12 +518,14 @@ Output (JSON format):
 
 ## Operator UI
 
-The operator web UI is a FastAPI application served in a separate thread so that CPU-intensive executor tasks on the main event loop do not block the interface. Enabled by default on port 8080.
+The operator web UI is a FastAPI application served in a separate thread so that CPU-intensive executor tasks on the main event loop do not block the interface. Enabled by default on the API port 8080 (`api.port`); it needs `api.enabled`.
 
 ```yaml
-ui:
+api:
   enabled: true
   port: 8080
+ui:
+  enabled: true
 ```
 
 ### Pages
@@ -594,7 +596,7 @@ Multi-purpose debug page with:
 - **Cross-worker message trace** -- two search modes:
     - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across the partitions of this worker.
-    A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. With `ui.recorder.persistence: none` both search the memory store instead of the own files. See [Cross-Worker Trace](#cross-worker-trace).
+    A partition:offset trace searches the current worker's own files, or the sealed history of its cluster on request. A label search searches the current worker's live file. With `recorder.enabled: false` both search the memory store instead of the own files. See [Cross-Worker Trace](#cross-worker-trace).
 - **Database management** -- list this worker's memory store (one row, `kind: "memory"`), its own recorder files and the shared history folders (sealed files, archives, merge results) with event counts and sizes, download history files, merge several of them into one, and view per-file breakdown by event type. See [The Databases page](local-databases.md#the-databases-page).
 - **Live file and memory download** -- `GET /api/v1/debug/download-live` answers a consistent snapshot of this worker's live recorder file (`source=file`) or of its memory store (`source=memory`). The default is `file` when a live file is open, else `memory`. A file copy is made with the SQLite backup API on its own read-only connection, in rollback-journal format, so it opens on its own. The temp copy is removed at once. `404` when the asked source does not exist, `400` for another `source` value, `500` `{"error": "Snapshot failed: ..."}` when the copy fails. Behind `ui.auth_token` like the other debug routes. See [The snapshot download](recent-events.md#the-snapshot-download).
 - **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, nothing for peers to pull. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
@@ -608,7 +610,7 @@ Detailed view of a single task's lifecycle:
 - **Duration** -- wall-clock execution time
 - **PID** -- OS process ID
 - **CLI** -- reconstructed command line (`binary_path` + `args`)
-- **stdout/stderr** -- captured process output (subject to `output_min_duration_ms` threshold)
+- **stdout/stderr** -- captured process output (subject to `recorder.capture.min_output_duration` threshold)
 - **Source offsets** -- which Kafka offsets this task covers
 - **Event timeline** -- chronological list of all events for this task_id (started, completed/failed, task_complete)
 
@@ -642,40 +644,43 @@ For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --ver
 
 ## Flight Recorder
 
-The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the operator UI. It keeps recent events in an in-memory database, the memory store, and with `ui.recorder.persistence: sqlite` it also writes files that survive worker restarts (within retention limits). See [Recent Events in Memory](recent-events.md).
+The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the operator UI. It keeps recent events in an in-memory database, the memory store, and with provider `sqlite` it also writes files that survive worker restarts (within retention limits). See [Recent Events in Memory](recent-events.md).
 
 ### Configuration
 
 ```yaml
 storage:
-  dir: /tmp/drakkar                   # This worker's own files; '' disables disk persistence
-ui:
-  recorder:
-    persistence: null                 # none | sqlite | null (derived: sqlite with a storage.dir, none without)
-    memory:
-      window_seconds: 120             # Keep events in the memory store this long
-      rows_per_executor: 3000         # Row cap = this x executor.max_executors
-      max_mib: 256                    # Data budget of the memory store
-    store_events: true                # Write processing events to the events table
-    store_config: true                # Write worker config into each file
-    store_state: true                 # Periodic state snapshots
-    state_sync_interval_seconds: 10   # Snapshot frequency for worker_state
-    flush_interval_seconds: 5         # Tick of the memory loop and the file loop
-    max_buffer: 50000                 # Capacity of the intake and of the file queue, each
+  dir: /tmp/drakkar                   # This worker's own files
+recorder:
+  enabled: true                       # Durable recording; off keeps recent events in memory for the UI
+  provider: sqlite                    # sqlite | postgres
+  flush_interval: 5s                  # Tick of the memory loop and the file loop
+  max_buffer_rows: 50000              # Capacity of the intake and of the file queue, each
+  memory:
+    window: 2m                        # Keep events in the memory store this long
+    rows_per_executor: 3000           # Row cap = this x executor.max_executors
+    max_size: 256MiB                  # Data budget of the memory store
+  capture:
+    events: true                      # Write processing events to the events table
+    config: true                      # Write worker config into each file
+    output: true                      # Include stdout/stderr in event records
+    min_output_duration: 500ms        # Tasks faster than this store no args/stdout/stderr
+    min_event_duration: 0             # Task events faster than this are not persisted at all
+    stdin: false                      # Store each task's stdin in task_started metadata (failures always store it)
+    max_stdin: 64KiB                  # Size cap for stored stdin; 0 = unlimited
+  annotations:
+    enabled: true                     # Accept handler-emitted annotations
+    max_size: 16KiB                   # Largest single annotation; 0 = unlimited
+    max_size_per_call: 256KiB         # Per hook invocation; 0 = unlimited
+    max_log_size: 2KiB                # Cap on a dropped payload's log copy; 0 = unlimited
+  sqlite:
+    rotation_interval: 1h             # Rotate to a new DB file every N hours
     max_flush_retries: 3              # Failed-batch retries before the batch is dropped
-    rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
-    store_output: true                # Include stdout/stderr in event records
-    output_min_duration_ms: 500       # Tasks faster than this store no args/stdout/stderr
-    event_min_duration_ms: 0          # Task events faster than this are not persisted at all
-    store_stdin: false                # Store each task's stdin in task_started metadata (failures always store it)
-    stdin_max_bytes: 65536            # Byte cap for stored stdin; 0 = unlimited
-    annotations_enabled: true         # Accept handler-emitted annotations
-    annotation_max_bytes: 16384       # Largest single annotation; 0 = unlimited
-    annotation_max_bytes_per_call: 262144  # Per hook invocation; 0 = unlimited
-    annotation_log_max_bytes: 2048    # Cap on a dropped payload's log copy; 0 = unlimited
+    state_snapshots: true             # Periodic state snapshots
+    state_interval: 10s               # Snapshot frequency for worker_state
 ```
 
-The four `annotation_*` settings govern
+The four `recorder.annotations` settings govern
 [handler annotations](annotations.md) — diagnostic records your handler
 attaches to a window, message, or task. They are stored as ordinary
 `events` rows, so they rotate, archive, and (optionally) expire with
@@ -683,7 +688,7 @@ everything else — see [Archiving](#archiving) below.
 
 ### Database Schema
 
-Each database file can contain up to three tables, controlled by the `store_events`, `store_config`, and `store_state` flags:
+Each database file can contain up to three tables, controlled by the `recorder.capture.events`, `recorder.capture.config` and `recorder.sqlite.state_snapshots` flags:
 
 #### `events` -- Processing Events
 
@@ -700,9 +705,9 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `consumed` | Message polled from Kafka | `partition`, `offset` |
 | `arranged` | `arrange()` completes for a window | `partition`, `metadata` (message_count, task_count, offsets, message_labels, window_id) |
 | `annotation` | A handler calls `self.annotate(...)` — see [Annotations](annotations.md) | `partition`, `offset` (message scope), `task_id` (task scope), `labels`, `metadata` (kind, scope, hook, window_id, offsets, data) |
-| `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot, queue_wait_ms; stdin + stdin_truncated when `store_stdin` is on, else stdin_bytes size marker) |
+| `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot, queue_wait_ms; stdin + stdin_truncated when `recorder.capture.stdin` is on, else stdin_bytes size marker) |
 | `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms) |
-| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `stdin_max_bytes`) |
+| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `recorder.capture.max_stdin`) |
 | `task_complete` | `on_task_complete()` hook finishes for one task | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
 | `message_complete` | `on_message_complete()` hook finishes for one source message | `partition`, `offset`, `duration`, `metadata` (task_count, succeeded, failed, replaced, output_message_count) |
 | `window_complete` | `on_window_complete()` hook finishes for one arrange() window | `partition`, `duration`, `metadata` (window_id, task_count, output_message_count) |
@@ -719,19 +724,19 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `runtime_stall` | Event loop resumed after a stall; carries the stack traces sampled while it lasted | `duration`, `metadata` (duration_ms, stacks: [{stack, location, count}], dropped_stacks, unit_count) |
 | `runtime_lag_episode` | A degraded/stalled span ended (or hit `runtime_health.max_episode`); carries stacks aggregated across the whole span and a verdict — see [Runtime Health](runtime-health.md#lag-episodes-and-verdicts) | `duration`, `metadata` (duration_ms, peak_lag_ms, lag_sum_ms, cpu_ms, cpu_ratio, verdict: blocked/cpu_bound/starved/inconclusive, stall_count, sample_count, stacks, dropped_stacks, unit_count, plus optional evidence: cpu_throttled_ms, psi_cpu_some_avg10, load1) |
 | `runtime_probe` | Opt-in stack probe (`runtime_health.stack_probe_enabled`) — a flight-recorder profiler sample, recorded regardless of health state | `metadata` (lag_ms, unit_count, stacks: [{stack, location, count}]) |
-| `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
+| `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `recorder.sqlite.state_interval` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
 | `offload` | One `handler.offload()` call completed — CPU-bound hook work run on the offload thread pool; see [Offload](offload.md) | `partition` (NULL outside hooks), `offset` / `task_id` (annotation-style anchoring), `duration`, `metadata` (hook, function, queued, status: ok/error/cancelled, window_id, offsets, error) |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error; `system: true` for a framework task; `scope: "cluster"` and `slot` (the slot's epoch second) for a cluster run) |
 | `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |
 | `webapp_request_completed` | An HTTP request returned 200 to the caller | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (status='ok', duration_ms) |
-| `webapp_request_timeout` | T2's `asyncio.wait_for` tripped its `request_timeout_seconds` budget; client received a 504 | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (duration_ms) |
+| `webapp_request_timeout` | T2's `asyncio.wait_for` tripped its `request_timeout` budget; client received a 504 | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (duration_ms) |
 | `webapp_request_rate_limited` | Per-client rpm window full; client received a 429 | `origin='http'`, `client_name`, `metadata` (rpm_limit, requests_in_window) |
 | `webapp_request_auth_failed` | `Authorization` header missing or naming a non-configured token; client received a 401 | `origin='http'`, `metadata` (token_prefix -- redacted to first 4 chars) |
 | `webapp_request_dropped_after_timeout` | T1 reached a cancellation gate after T2 had already 504'd. Marks pipeline work the framework managed to skip thanks to cooperative cancellation. | `origin='http'`, `client_name`, `request_id` |
 
 For HTTP-origin rows, `partition=-1` is used as a synthetic partition value so they remain distinct from any real Kafka partition without requiring a separate table. Filter by `origin='http'` to see all webapp activity, or by `request_id=...` to walk the full lifecycle of one HTTP request (received → task_started → task_completed → completed/timeout/dropped).
 
-Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all. Stdin content is gated by `store_stdin` / `stdin_max_bytes` rather than by duration — failed tasks always store it. See [Local Databases](local-databases.md#what-the-events-table-stores-and-the-knobs-that-trim-it) for the full retention-knob table.
+Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `recorder.capture.min_output_duration`. Events below `recorder.capture.min_event_duration` are not stored at all. Stdin content is gated by `recorder.capture.stdin` / `recorder.capture.max_stdin` rather than by duration — failed tasks always store it. See [Local Databases](local-databases.md#what-the-events-table-stores-and-the-knobs-that-trim-it) for the full retention-knob table.
 
 !!! warning "Recorder upgrade story (delete pre-webapp DBs)"
     The webapp release added three columns to the `events` table --
@@ -801,7 +806,7 @@ This table names the worker and cluster that wrote each file, for history, merge
 
 #### `worker_state` -- Periodic Snapshots
 
-Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), `paused` flag, `health_state` and `loop_lag_ms` from the [runtime health monitor](runtime-health.md).
+Appended every `recorder.sqlite.state_interval` (default `10s`). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), `paused` flag, `health_state` and `loop_lag_ms` from the [runtime health monitor](runtime-health.md).
 
 ### File Layout and Rotation
 
@@ -813,19 +818,18 @@ The live database file follows the naming pattern:
 
 For example: `/tmp/drakkar/worker-1-2026-04-06__14_55_00.db`. Only the worker that writes it opens it.
 
-**Rotation**: every `rotation_interval_hours` (default: 1), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file. The old file is then **sealed**: switched to a rollback journal, given a meta file with its statistics, and closed. A background job moves it into the history folder of the worker's cluster:
+**Rotation**: every `recorder.sqlite.rotation_interval` (default `1h`), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file. The old file is then **sealed**: switched to a rollback journal, given a meta file with its statistics, and closed. A background job moves it into the history folder of the worker's cluster:
 
 ```
-{shared.dir}/history/{cluster}/{worker_name}-{timestamp}.db
-{shared.dir}/history/{cluster}/{worker_name}-{timestamp}.db.meta.json
+{storage.shared_dir}/history/{cluster}/{worker_name}-{timestamp}.db
+{storage.shared_dir}/history/{cluster}/{worker_name}-{timestamp}.db.meta.json
 ```
 
-`shared.dir` empty means `storage.dir`. `{cluster}` is the cluster name with every character outside `[a-zA-Z0-9_-]` replaced by `_` (`default` when it is empty). A clean stop seals the live file too, and moves it while shutdown time remains. A file whose seal or move fails stays in `storage.dir` and is retried on every rotation tick. The full rules — the cross-filesystem copy, the backlog, leftovers of a crashed process, the meta file format — are in [Local Databases → Sealing](local-databases.md#sealing-and-the-history-folder). Rotation itself deletes nothing — see [Archiving](#archiving), next.
+`storage.shared_dir` empty means `storage.dir`. `{cluster}` is the cluster name with every character outside `[a-zA-Z0-9_-]` replaced by `_` (`default` when it is empty). A clean stop seals the live file too, and moves it while shutdown time remains. A file whose seal or move fails stays in `storage.dir` and is retried on every rotation tick. The full rules — the cross-filesystem copy, the backlog, leftovers of a crashed process, the meta file format — are in [Local Databases → Sealing](local-databases.md#sealing-and-the-history-folder). Rotation itself deletes nothing — see [Archiving](#archiving), next.
 
 ### Archiving
 
-Age- and count-based retention (the old `retention_hours` /
-`retention_max_events` keys) are gone. In their place, a periodic
+A periodic
 **archive pass** folds each finished UTC time window's sealed files into
 one compressed, merged database per cluster
 (`<cluster>-<from>__<to>.db.gz`, in the same cluster history folder), and
@@ -833,9 +837,9 @@ deletes only the sealed files it successfully merged — see
 [Local Databases → Archiving](local-databases.md#archiving) for the full
 byte-level spec. The short version:
 
-- **Defaults** (`ui.recorder.rotation_interval_hours: 1`, and
-  `history.archive` `enabled: true`, `window_hours: 24`,
-  `due_after_hours: 48`, `retention_days: 30`): files rotate hourly and
+- **Defaults** (`recorder.sqlite.rotation_interval: 1h`, and
+  `recorder.archive` `enabled: true`, `window: 1d`,
+  `due_after: 2d`, `retention: 30d`): files rotate hourly and
   are sealed into the history folder; a UTC day's window becomes due
   exactly 48h after it closes and is archived at the next archive slot
   after that (hourly by default), merging its sealed files into one `.db.gz` per cluster and deleting
@@ -844,7 +848,7 @@ byte-level spec. The short version:
   it was *created* rather than from window close, can reach up to ~72h (up
   to 24h as part of its own window, plus the ~48h due delay after that
   window closes). Archives themselves are deleted once their window ended
-  more than `retention_days` ago; `0` keeps them forever and warns at
+  more than `retention` ago; `0` keeps them forever and warns at
   startup. Track the footprint with `drakkar_recorder_archive_bytes`.
 - **The pass has [two scopes](local-databases.md#archive-scopes).** With
   `autodiscover.enabled` and `storage.shared_dir` set, one worker runs the pass
@@ -866,9 +870,9 @@ byte-level spec. The short version:
   the election provider for the lease of `<cluster>/history.archive`; one
   wins, and the others skip the slot and lose nothing. With the default
   `filesystem` provider the lease is the file
-  `<shared.dir>/tasks/<cluster>/history.archive.lock`, made with an
+  `<storage.shared_dir>/tasks/<cluster>/history.archive.lock`, made with an
   exclusive create. A lease nobody refreshed for
-  `history.archive.lease_seconds` (default 60) belongs to a dead archiver
+  `recorder.archive.lease` (default `1m`) belongs to a dead archiver
   and is taken over (`periodic_lock_taken_over`, with the fields `provider`
   and `scope`); a fresh lock that two racing takers moved aside is put back,
   and `periodic_lock_put_back_failed` reports when a third worker's lock
@@ -890,9 +894,9 @@ byte-level spec. The short version:
   overwritten. A pass that took the lock and failed counts in
   `drakkar_recorder_archive_failures_total`.
 - **Merge results expire.** The pass also deletes UI merge results in
-  `<shared.dir>/merged/` older than `history.merged_retention_days`
+  `<storage.shared_dir>/merged/` older than `recorder.archive.merged_retention`
   (default 32; `0` keeps them), logging `recorder_merged_pruned`.
-- **Opting out** (`history.archive.enabled: false`) disables the pass
+- **Opting out** (`recorder.archive.enabled: false`) disables the pass
   entirely — nothing then deletes sealed recorder files or merge results
   automatically, and a startup log line (`recorder_archiving_disabled`,
   field `folder`) says so.
@@ -916,7 +920,7 @@ Archives are downloaded from the same place as the other history files —
 **Debug → Databases tab** — backed by `GET /api/v1/debug/archives` (the
 archives of every cluster folder, each with `folder` and `path`) and
 `GET /api/v1/debug/download/{path}`, where `path` is relative to
-`shared.dir` (for example
+`storage.shared_dir` (for example
 `history/search/search-2026-10-12_00-00__2026-10-13_00-00.db.gz`). See
 [Merging Databases](#merging-databases) below for why archives never
 appear as merge candidates. A downloaded archive is a plain gzip file:
@@ -938,15 +942,15 @@ Two operational gotchas worth knowing:
 ### Buffer Mechanics
 
 Events are not written to SQLite immediately. They wait in the **intake**,
-an in-memory buffer (`collections.deque` with `maxlen=max_buffer`, default
+an in-memory buffer (`collections.deque` with `maxlen=recorder.max_buffer_rows`, default
 50,000). Two background loops then write them, each on the tick of
-`flush_interval_seconds` (default: 5):
+`recorder.flush_interval` (default `5s`):
 
 - **Stage M** (the memory loop, background task `memory_flush`) takes the
   intake in chunks, gives each row its id, and writes the chunk to the
-  [memory store](recent-events.md). With `persistence: sqlite` it then puts
+  [memory store](recent-events.md). With provider `sqlite` it then puts
   the `(id, row)` pairs in the **file queue**, which also holds at most
-  `max_buffer` rows. After the write it runs one eviction pass.
+  `recorder.max_buffer_rows` rows. After the write it runs one eviction pass.
 - **Stage F** (the file loop, background task `file_flush`, `sqlite` only)
   writes the file queue to the recorder file in transactions of up to 5000
   rows.
@@ -964,24 +968,24 @@ When the intake or the file queue is full, its oldest rows are evicted.
 Drops are not silent: `drakkar_recorder_dropped_events_total`
 ([see Recorder metrics](#recorder)) counts the evictions of both, and
 `drakkar_recorder_buffer_size` shows the intake plus the file queue. While
-the disk stalls, up to twice `max_buffer` rows wait in memory: a full intake
+the disk stalls, up to twice `recorder.max_buffer_rows` rows wait in memory: a full intake
 and a full file queue. While stage M is held back (the memory store is busy
 or locked), the intake fills, and its overflow counts as dropped. Alert on
-sustained non-zero drops and raise `max_buffer` or shorten
-`flush_interval_seconds` when they appear.
+sustained non-zero drops and raise `recorder.max_buffer_rows` or shorten
+`recorder.flush_interval` when they appear.
 
 Stage M writes in chunks of 5000 rows, and the loop is handed back between
 chunks: building a row tuple costs one lookup per column, so an unchunked
 write of tens of thousands of events would stall the loop for tens of
 milliseconds and show up as loop lag in [runtime health](runtime-health.md).
-Stage M also starts early, before `flush_interval_seconds` elapses, once the
+Stage M also starts early, before `recorder.flush_interval` elapses, once the
 intake is half full, and stage F once the file queue is half full. A burst
-is written out rather than left to reach `max_buffer` and evict.
+is written out rather than left to reach `recorder.max_buffer_rows` and evict.
 
 Stage M starts early on **size** as well as on count, once the buffered
-payload passes roughly 64 MiB. `max_buffer` bounds the buffer by event count,
-which says nothing about how much memory it holds: with `store_output` on,
-every task at or above `output_min_duration_ms` has its whole stdout and
+payload passes roughly 64 MiB. `recorder.max_buffer_rows` bounds the buffer by event count,
+which says nothing about how much memory it holds: with `recorder.capture.output` on,
+every task at or above `recorder.capture.min_output_duration` has its whole stdout and
 stderr buffered, and `executor.max_stdout` is unlimited by default. A
 handler producing hundreds of kilobytes per task therefore reaches gigabytes
 of resident buffer long before it reaches 25,000 events. The size trigger is
@@ -1003,25 +1007,26 @@ the chunk still goes to the file, with `none` it is lost. See
 [Recent Events in Memory](recent-events.md#log-events).
 
 The file chunk is the unit of loss on disk. A file chunk that still fails
-after `max_flush_retries` consecutive attempts is dropped from the file and
+after `recorder.sqlite.max_flush_retries` consecutive attempts is dropped from the file and
 `drakkar_recorder_flush_batches_dropped_total` ticks; the rest of the file
-queue stays and is retried on the next tick. Size `max_buffer` for how long a
+queue stays and is retried on the next tick. Size `recorder.max_buffer_rows` for how long a
 database stall you want to ride out:
 
-    max_buffer >= event_rate x flush_interval_seconds x (max_flush_retries + 1)
+    recorder.max_buffer_rows >= event_rate x recorder.flush_interval x (recorder.sqlite.max_flush_retries + 1)
 
 At 5000 events/s with the defaults (5 s interval, 3 retries) that is 100 000,
-twice the default `max_buffer`. Raise it if your workers must survive a
+twice the default `recorder.max_buffer_rows`. Raise it if your workers must survive a
 15-second SQLite stall — the usual cause is a network filesystem — without
 losing a chunk.
 
-With `persistence: none` (for example `storage.dir` empty) there is no file
+With `recorder.enabled: false` there is no file
 queue and no stage F: events are buffered and written to the memory store
-only. With `store_events: false` there is no memory store and no loop, so
+only. With a worker whose `ui.enabled` is false and the recorder off, there is
+no recorder object at all. With `recorder.capture.events: false` there is no memory store and no loop, so
 events are streamed to the live WebSocket view and not buffered at all: the
 buffer gauge stays at 0 and the drop counter never moves.
 
-With `persistence: postgres` there is no stage F either. Stage M hands every
+With provider `postgres` there is no stage F either. Stage M hands every
 row it wrote to the Postgres queue, and stage P writes that queue to the
 table on a thread of its own (see
 [Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down)).
@@ -1036,7 +1041,7 @@ The memory store closes last.
 
 ### Recorder history in Postgres
 
-With `persistence: postgres` the recorder also writes these log events
+With provider `postgres` the recorder also writes these log events
 (category `recorder` unless named). The metrics are in the
 [Recorder](#recorder) table above. See
 [Recorder History in Postgres](recorder-postgres.md) for the mode.
@@ -1046,7 +1051,7 @@ With `persistence: postgres` the recorder also writes these log events
 | `recorder_postgres_rows_dropped` | warning | `reason` (`queue_full`, `rejected`, `no_partition`, `shutdown`), `rows`, `error` (empty for `queue_full` and `shutdown`), `suppressed` | Rows were dropped. At most one line per 60 seconds per reason; the rows of the lines left out are added to the next one. |
 | `recorder_postgres_copy_rejected` | warning | `sqlstate`, `error`, `rows`, `final_failures`, `suppressed` | A COPY failed with a final error. The chunk stays for one more try, and is dropped at its second final error. At most one line per 60 seconds. |
 | `recorder_postgres_partitions_changed` | info | `table` (schema-qualified), `created`, `dropped` (by the retention), `dropped_for_size` (by the size cap), each sorted partition names | An upkeep created or dropped partitions. |
-| `recorder_postgres_retention_mismatch` | warning | `table`, `stored_retention_hours` (a number, or `null` when the table has no valid comment), `configured_retention_hours` | The table comment differs from `retention_hours`, or there is none. Once per process, at the first upkeep in which this worker holds the try-lock. |
+| `recorder_postgres_retention_mismatch` | warning | `table`, `stored_retention_hours` (a number, or `null` when the table has no valid comment), `configured_retention_hours` | The table comment differs from `recorder.postgres.initial_retention`, or there is none. Once per process, at the first upkeep in which this worker holds the try-lock. |
 | `ui_read_postgres_failed` (category `debug`) | warning | `endpoint`, `reason`, `error`, `suppressed` | A history search failed. `reason` is `timeout` (the time limit passed), `error` (the connection or the statement failed), `busy` (two searches were already running; the search did not start) or `close` (the search completed and answered its rows, but the connection did not close cleanly). Every reason but `close` answers 503. At most one line per 60 seconds. |
 
 The recorder calls also log the provider events with `feature=recorder` and
@@ -1069,16 +1074,16 @@ into a single file. This is useful for:
 - **Archival** -- download a merged file for offline analysis with
   any SQLite tool
 
-`POST /api/v1/debug/merge` takes paths relative to `shared.dir`
+`POST /api/v1/debug/merge` takes paths relative to `storage.shared_dir`
 (`history/<cluster>/<name>.db` or `merged/<name>.db`). The merge process
 copies all events from the selected files into a new file
-`<shared.dir>/merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db`; the
+`<storage.shared_dir>/merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db`; the
 answer carries its `path`. It does not remove duplicates. The `workers`
 table lists every source worker; a selected merged file keeps its own
 workers, events and states. The file is written under a hidden temporary
 name and appears in the database list only when it is complete. It can be
 downloaded. `merged/` is created with mode `0700`, and the archive pass
-deletes merge results older than `history.merged_retention_days`
+deletes merge results older than `recorder.archive.merged_retention`
 (default 32 days; `0` keeps them).
 
 A worker's own files in `storage.dir` — the live file and the backlog —
@@ -1145,12 +1150,12 @@ streaming still work (events are held in memory only), but these
 features are disabled: event history (`/history`), message trace,
 label search, database download/merge and periodic task history. Worker
 discovery needs a card folder for the [fleet registry](fleet.md): with
-`storage.dir: ""` set `shared.dir` (or another registry provider) to keep
+`storage.dir: ""` set `storage.shared_dir` (or another registry provider) to keep
 the workers list. The live pipeline view (`/live`) and dashboard counters
 continue working since they read from in-memory state.
 
-When workers share one `shared.dir` (e.g., a shared NFS mount,
-Kubernetes PVC, or Docker volume; with `shared.dir` empty, one shared
+When workers share one `storage.shared_dir` (e.g., a shared NFS mount,
+Kubernetes PVC, or Docker volume; with `storage.shared_dir` empty, one shared
 `storage.dir`), several additional UI features become available:
 
 - **Worker switcher** -- jump between worker UIs from a dropdown in the
@@ -1223,8 +1228,8 @@ The minimal config for worker discovery:
 
 ```yaml
 # every worker mounts the same folder; the registry keeps its cards there
-shared:
-  dir: "/shared"
+storage:
+  shared_dir: "/shared"
 # optional: set a cluster name to group workers
 cluster:
   name: "my-cluster"
@@ -1284,11 +1289,11 @@ What each mode searches:
   sealed into the history folder.
 - **By partition:offset with `history=1`**: only the sealed files in the
   history folder of the worker's own cluster
-  (`<shared.dir>/history/<cluster>/`), newest first. The search stops after
-  `ui.trace.history_max_files` files (default 256) or
-  `ui.trace.history_max_seconds` (default 10). Sealed files never change,
+  (`<storage.shared_dir>/history/<cluster>/`), newest first. The search stops after
+  `recorder.search.max_files` files (default 256) or
+  `recorder.search.timeout` (default `10s`). Sealed files never change,
   so the search opens them with `immutable=1` and takes no locks.
-- **By partition:offset with `history=1` on a `persistence: postgres`
+- **By partition:offset with `history=1` on a provider `postgres`
   worker**: the rows of the worker's own cluster in the Postgres table of
   its prefix, never the history folder. The answer is complete or a 503
   `{"detail": "history search failed"}`; see
