@@ -240,7 +240,8 @@ Each HTTP request of the exchange is also counted in the fleet metrics
 `fleet_peer_rows_rejected` ([Fleet registry — Log events](fleet.md#log-events)),
 `cache_peer_sync_failed` when a pulled page cannot be applied locally
 (fields `peer`, `error`), and `cache_peer_sync_cycle_timeout` when a cycle
-hits its deadline.
+hits its deadline. With `autodiscover` off, an enabled exchange logs
+`cache_exchange_off_no_autodiscover` (info, category `cache`) once at startup.
 
 #### Fleet registry and provider operations
 
@@ -1358,6 +1359,7 @@ All in category `periodic`.
 | `periodic_lease_refresh_failed` | error | The lease refresher of a running slot raised outside a provider call. Field `scope`. |
 | `periodic_skip_hook_failed` | error | The framework's hook for a skipped slot raised (for the archive: starting the footprint update). Fields `name`, `slot`, `outcome`. The slot is skipped either way. |
 | `periodic_cluster_mismatch` | warning | An online peer of this worker's cluster has another [definition hash](periodic-tasks.md#definition-hash). Fields `peer`, `own_hash`, `peer_hash`. Once per peer and hash; again when the peer leaves the registry listing and comes back. |
+| `cluster_name_empty` | warning | `autodiscover` is on and the cluster name is empty, so the lock scope of cluster tasks is `default`. Field `scope`; category `lifecycle`. Once at startup. |
 | `periodic_lock_taken_over` | warning | A worker took over the lease of a cluster task (the archive included) whose holder died. Fields `provider`, `scope`, `previous_worker`, `previous_instance`, `age_seconds`. Written by the `filesystem` and `postgres` election providers only: the `redis` and `consul` providers write no such line, because an expired lease is a key that the server deleted. |
 | `periodic_lock_put_back_failed` | warning | Two workers took over one `filesystem` lock at once, and a third worker's lock came first, so the lock moved aside could not be put back. Fields `scope`, `folder`, `error`. The holder of the moved lock is fenced at its next check. |
 | `periodic_election_stop_failed` | warning | Stopping the election at shutdown raised. Field `error`. The rest of the shutdown still runs. |

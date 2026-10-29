@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breakers. The root sections `fleet` and `periodic` are gone. With it off, a worker
   publishes no card, reads no peers and runs no election, and a declared cluster task fails
   startup. `autodiscover.provider filesystem needs storage.shared_dir`: the fallback to
-  `storage.dir` is gone. An unknown provider fails the load. Until the archive runs without
-  an election, a worker with it off runs no archive.
+  `storage.dir` is gone. An unknown provider fails the load. A worker with it off runs no
+  `history.archive` task.
 - **`fleet.cache_exchange` is `cache.exchange`.** With autodiscover off it does nothing and
   logs `cache_exchange_off_no_autodiscover` once. `CacheEngine` takes no `exchange` argument.
 - **Log events.** `periodic_cluster_check_off` and `fleet_registry_disabled_no_dir` are
