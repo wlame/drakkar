@@ -1,5 +1,5 @@
 {
-  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_refused and sizes_refused: [input, key of messages]; {v} in a message is the input as text. durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar and {v} is that text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the largest binary unit that divides it, else the largest decimal one, else B.",
+  "_comment": "Durations and sizes in config values, shared by every implementation. A number is ASCII digits with an optional fraction; the arithmetic is exact, so 1.1s is 1100 milliseconds. A duration is 0, or terms <number><unit> with no spaces, units in the order d, h, m, s, ms, each at most once; the total must be whole milliseconds and below 292 years of 365 days. A size is 0, or one <number><unit>, units B, KB, MB, GB, TB (1000) and KiB, MiB, GiB, TiB (1024), case-sensitive; the value must be whole bytes and fit a signed 64-bit integer. durations and sizes: [input, value], the value in milliseconds or bytes; an input that is a JSON number is a YAML number. durations_refused and sizes_refused: [input, key of messages]; {v} in a message is the input as text. durations_refused_yaml and sizes_refused_yaml: the same, the input is the text of one YAML scalar and {v} is that text. whole_seconds, whole_hours and whole_days: accepted is [input, whole value], refused is [input, key of messages]. canonical_durations and canonical_sizes: [value, text]; a duration has descending terms and no zero term; a size has the unit that divides it and gives the smallest whole number; on a tie the binary unit wins.",
   "durations": [
     ["2h45m", 9900000],
     ["1.5h", 5400000],
@@ -143,16 +143,18 @@
   ],
   "canonical_sizes": [
     [268435456, "256MiB"],
+    [256000000, "256MB"],
     [5000000, "5MB"],
     [1000, "1KB"],
+    [1024, "1KiB"],
+    [1024000, "1000KiB"],
     [1500, "1500B"],
     [0, "0"],
     [65536, "64KiB"],
-    [1024, "1KiB"],
     [1536, "1536B"],
     [1, "1B"],
     [1099511627776, "1TiB"],
-    [256000000, "250000KiB"]
+    [1000000000000, "1TB"]
   ],
   "messages": {
     "duration_needs_unit": "needs a unit, for example 30s; got '{v}'",

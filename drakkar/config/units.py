@@ -148,15 +148,20 @@ def format_duration(milliseconds: int) -> str:
 
 
 def format_size(size: int) -> str:
-    """The canonical text of a size: the largest binary unit that divides it, else the largest decimal one, else B."""
+    """The canonical text of a size: the unit that divides it and gives the smallest whole number.
+
+    ``256000000`` is ``256MB`` and ``268435456`` is ``256MiB``. On a tie the binary unit wins.
+    """
     if size < 0:
         raise ValueError(f'a size cannot be negative, got {size} bytes')
     if size == 0:
         return ZERO_TEXT
-    for unit, factor in (*_BINARY_UNITS, *_DECIMAL_UNITS):
-        if size % factor == 0:
-            return f'{size // factor}{unit}'
-    return f'{size}B'
+    # min() keeps the first of equal counts, and the binary units come first.
+    unit, factor = min(
+        ((unit, factor) for unit, factor in _SIZE_UNITS.items() if size % factor == 0),
+        key=lambda candidate: size // candidate[1],
+    )
+    return f'{size // factor}{unit}'
 
 
 @dataclass(frozen=True)
