@@ -34,6 +34,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.fleet.card import sanitize_worker_name
 from drakkar.providers.connections import Connections
@@ -43,7 +44,7 @@ from drakkar.recorder.election_consul import consul_election_factory
 from drakkar.recorder.election_postgres import postgres_election_factory
 from drakkar.recorder.election_redis import redis_election_factory
 from drakkar.recorder.history import task_lock_dir
-from drakkar.recorder.task_lock import FILESYSTEM_PROVIDER, TaskLock
+from drakkar.recorder.task_lock import TaskLock
 from drakkar.schedule import parse_task_scope
 
 if TYPE_CHECKING:

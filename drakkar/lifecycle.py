@@ -59,6 +59,7 @@ from drakkar.cluster_tasks import (
     archive_task_runs,
     run_cluster_task,
 )
+from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.config.recorder import PERSISTENCE_POSTGRES
 from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
@@ -121,7 +122,10 @@ def registry_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     """
     autodiscover = config.autodiscover
     builders = {
-        'filesystem': lambda: {'dir': config.resolved_registry_dir, 'prune_after_seconds': autodiscover.prune_after},
+        FILESYSTEM_PROVIDER: lambda: {
+            'dir': config.resolved_registry_dir,
+            'prune_after_seconds': autodiscover.prune_after,
+        },
         'postgres': lambda: _connection_and_prune(autodiscover),
         'redis': lambda: _connection_and_prune(autodiscover),
         # A consul card lives as long as its session, whose TTL comes from the offline limit; it is never pruned.
@@ -137,7 +141,7 @@ def election_provider_options(config: DrakkarConfig) -> dict[str, Any]:
     keep their lock in the service of the named connection.
     """
     autodiscover = config.autodiscover
-    return {} if autodiscover.provider == 'filesystem' else {'connection': autodiscover.connection}
+    return {} if autodiscover.provider == FILESYSTEM_PROVIDER else {'connection': autodiscover.connection}
 
 
 def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSettings | None:
@@ -309,6 +313,7 @@ class AppLifecycle:
             # A source that delivers results to sinks needs at least one.
             if app._config.sinks.is_empty and app._config.sources.delivers_to_sinks:
                 raise SinkNotConfiguredError(NO_SINKS_ERROR)
+            self._check_autodiscover_after_startup()
 
             await self._build_executor_pool()
             await self._start_observability()
@@ -635,20 +640,14 @@ class AppLifecycle:
         await app._recorder.start()
         await app._recorder.write_config(config)
 
-    def _build_periodic_roster(self) -> None:
-        """Resolve the handler's periodic tasks and make the election of its cluster tasks.
+    def _check_autodiscover_after_startup(self) -> None:
+        """Check the ``autodiscover`` keys again, and say once when the cluster name is empty.
 
-        Runs after ``on_startup`` and before any connection opens, the
-        registry starts or a sink connects, so the registry card carries the
-        definition hash from its first publish. The election serves every
-        cluster task, ``history.archive`` included when the worker runs it.
-
-        ``on_startup`` may have changed the ``autodiscover`` keys, so they are
-        checked again here with the messages of the load.
+        ``on_startup`` may have changed the keys, so this gives the messages of
+        the config load.
 
         Raises:
-            ValueError: ``autodiscover`` cannot run as configured, or a cluster
-                task is declared while it is off.
+            ValueError: ``autodiscover`` cannot run as configured.
         """
         app = self._app
         app._config.check_autodiscover()
@@ -658,6 +657,19 @@ class AppLifecycle:
                 category='lifecycle',
                 scope=DEFAULT_CLUSTER,
             )
+
+    def _build_periodic_roster(self) -> None:
+        """Resolve the handler's periodic tasks and make the election of its cluster tasks.
+
+        Runs after ``on_startup`` and before any connection opens, the
+        registry starts or a sink connects, so the registry card carries the
+        definition hash from its first publish. The election serves every
+        cluster task, ``history.archive`` included when the worker runs it.
+
+        Raises:
+            ValueError: a cluster task is declared while ``autodiscover`` is off.
+        """
+        app = self._app
         app._periodic_roster = resolve_periodic_roster(app._handler, app._config)
         app._cluster_election = self._build_cluster_election(app._periodic_roster.cluster_task_names)
 

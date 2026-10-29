@@ -194,7 +194,8 @@ def _seconds_from_text(value: Any) -> float:
     return parse_duration(value) / _MS_PER_SECOND
 
 
-def _text_from_seconds(seconds: float) -> str:
+def seconds_text(seconds: float) -> str:
+    """The canonical text of a duration held in seconds: ``90`` gives ``1m30s``."""
     return format_duration(round(seconds * _MS_PER_SECOND))
 
 
@@ -221,8 +222,8 @@ def _whole_duration_type(unit_name: str, unit_ms: int) -> Any:
 Duration = Annotated[
     float,
     BeforeValidator(_seconds_from_text),
-    PlainSerializer(_text_from_seconds, return_type=str),
-    UnitKind(type_name=DURATION_TYPE, to_text=_text_from_seconds),
+    PlainSerializer(seconds_text, return_type=str),
+    UnitKind(type_name=DURATION_TYPE, to_text=seconds_text),
 ]
 """A duration held as float seconds."""
 

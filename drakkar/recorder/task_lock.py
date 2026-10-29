@@ -36,6 +36,7 @@ from typing import Any
 
 import structlog
 
+from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.dbfiles import DB_FILE_MODE
 from drakkar.recorder.history import folder_server_now, serialize_json
 from drakkar.timefmt import format_rfc3339_micro
@@ -47,7 +48,6 @@ logger = structlog.get_logger()
 LOCK_SUFFIX = '.lock'
 STALE_INFIX = '.lock.stale.'
 # The election provider this lock implements: named in the lock body and the takeover log line.
-FILESYSTEM_PROVIDER = 'filesystem'
 REFRESH_THREAD_NAME = 'drakkar-task-lock'
 DEFAULT_REFRESH_SECONDS = 60.0
 MAX_LOCK_BYTES = 4096

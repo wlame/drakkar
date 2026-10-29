@@ -875,8 +875,13 @@ def test_wizard_one_worker_leaves_autodiscover_off_with_no_note():
     assert not [note for note in resolution.notes if 'autodiscover' in note['id']]
 
 
-def test_wizard_several_hosts_with_no_service_leaves_autodiscover_off_and_says_what_that_means():
-    resolution = resolve(TABLE, parse_query(TABLE, 'v=1&workers=2&hosts=many')[0])
+@pytest.mark.parametrize(
+    'query',
+    ['v=1&workers=2&hosts=many', 'v=1&workers=2&hosts=many&svc=postgres&discover=off'],
+    ids=['no-service', 'off-chosen-next-to-a-service'],
+)
+def test_wizard_several_hosts_with_autodiscover_off_says_what_that_means(query):
+    resolution = resolve(TABLE, parse_query(TABLE, query)[0])
 
     assert resolution.autodiscover == OFF
     assert 'autodiscover' not in resolution.fleet
@@ -889,7 +894,7 @@ def test_wizard_several_workers_on_one_host_share_a_folder_on_that_host():
 
     assert resolution.autodiscover == 'filesystem'
     assert resolution.fleet['autodiscover'] == {'enabled': True, 'provider': 'filesystem'}
-    assert resolution.fleet['storage'] == {'shared_dir': '/tmp/drakkar'}
+    assert resolution.fleet['storage'] == {'shared_dir': '/var/lib/drakkar/shared'}
 
 
 def test_wizard_disk_no_with_a_shared_folder_keeps_the_filesystem_provider():

@@ -186,13 +186,13 @@ class CacheEngine:
         self._cleanup_task: asyncio.Task | None = None
         # Task reference for the periodic peer-sync loop. Same lifecycle
         # as flush/cleanup; only scheduled when peer sync is effectively
-        # enabled (``cache.exchange.enabled`` and a writable local
-        # DB). None when disabled so there's no wakeup cost.
+        # enabled (``cache.exchange.enabled``, peer views from a registry and
+        # a writable local DB). None when disabled so there's no wakeup cost.
         self._sync_task: asyncio.Task | None = None
         # Whether peer-sync is *effectively* enabled — the config flag is
-        # on and ``start()`` opened a writable local DB to apply pulled rows
-        # into. ``_sync_once`` short-circuits on this flag to keep the
-        # idle-engine cost at O(1).
+        # on, a registry gives the peer views, and ``start()`` opened a
+        # writable local DB to apply pulled rows into. ``_sync_once``
+        # short-circuits on this flag to keep the idle-engine cost at O(1).
         self._peer_sync_enabled: bool = False
         # Per-peer cursors: the (updated_at_ms, key) of the last row pulled
         # from each peer; the next page asks for rows after it. In memory

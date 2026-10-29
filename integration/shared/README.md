@@ -4,8 +4,8 @@ This directory is mounted into all Drakkar integration test workers as `/shared`
 
 ## Purpose
 
-Every worker's `storage.dir` is `/shared`, and `storage.shared_dir` is empty, so the
-shared folder is `/shared` too. The directory holds:
+Every worker's `storage.dir` and `storage.shared_dir` are both `/shared`. The
+directory holds:
 
 1. **Flight-recorder databases** — rotating event logs (consumed / arranged /
    task lifecycle / produced / committed events). The live file of each

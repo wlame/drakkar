@@ -7,9 +7,7 @@ all the same way. The breaker counts failed operations, not attempts.
 from pydantic import Field
 
 from drakkar.config.base import ConfigModel
-from drakkar.config.units import Duration, format_duration
-
-_MILLISECONDS_PER_SECOND = 1000
+from drakkar.config.units import Duration, seconds_text
 
 
 class ResilienceConfig(ConfigModel):
@@ -55,10 +53,6 @@ class ResilienceConfig(ConfigModel):
     )
 
 
-def _duration_text(seconds: float) -> str:
-    return format_duration(round(seconds * _MILLISECONDS_PER_SECOND))
-
-
 def validate_resilience(path: str, cfg: ResilienceConfig) -> None:
     """Check the rules that span fields; ``path`` is the config path of the block, for the message.
 
@@ -68,6 +62,6 @@ def validate_resilience(path: str, cfg: ResilienceConfig) -> None:
     """
     if cfg.max_backoff < cfg.backoff:
         raise ValueError(
-            f'{path}.max_backoff ({_duration_text(cfg.max_backoff)}) must be >= '
-            f'{path}.backoff ({_duration_text(cfg.backoff)})'
+            f'{path}.max_backoff ({seconds_text(cfg.max_backoff)}) must be >= '
+            f'{path}.backoff ({seconds_text(cfg.backoff)})'
         )

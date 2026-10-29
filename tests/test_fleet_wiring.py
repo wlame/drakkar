@@ -907,11 +907,21 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
     )
     app._lifecycle._clock = _parked_clock()
     lifecycle = app._lifecycle
-    build_roster, create_connections, start_fleet = (
+    run_on_startup, check_autodiscover, build_roster, create_connections, start_fleet = (
+        lifecycle._run_on_startup,
+        lifecycle._check_autodiscover_after_startup,
         lifecycle._build_periodic_roster,
         lifecycle._create_connections,
         lifecycle._start_fleet,
     )
+
+    async def recorded_on_startup() -> None:
+        order.append('on_startup')
+        await run_on_startup()
+
+    def recorded_check() -> None:
+        order.append('check')
+        check_autodiscover()
 
     def recorded_roster() -> None:
         order.append('roster')
@@ -925,6 +935,8 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
         order.append('fleet')
         await start_fleet()
 
+    monkeypatch.setattr(lifecycle, '_run_on_startup', recorded_on_startup)
+    monkeypatch.setattr(lifecycle, '_check_autodiscover_after_startup', recorded_check)
     monkeypatch.setattr(lifecycle, '_build_periodic_roster', recorded_roster)
     monkeypatch.setattr(lifecycle, '_create_connections', recorded_connections)
     monkeypatch.setattr(lifecycle, '_start_fleet', recorded_fleet)
@@ -932,7 +944,7 @@ async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, m
 
     await _run_until_ready_then_stop(app)
 
-    assert order[:5] == ['connections', 'roster', 'ui_and_recorder', 'fleet', 'sinks']
+    assert order[:7] == ['on_startup', 'check', 'connections', 'roster', 'ui_and_recorder', 'fleet', 'sinks']
 
 
 class _PipelineGuardHandler(KafkaOnlyHandler):

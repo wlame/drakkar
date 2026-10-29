@@ -10,16 +10,18 @@ from pydantic import Field, model_validator
 
 from drakkar.config.base import ConfigModel
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
-from drakkar.config.units import WholeSeconds, format_duration
+from drakkar.config.units import WholeSeconds, seconds_text
+
+# The name of the provider that keeps its data in ``storage.shared_dir``. Every
+# reader of the name takes it from here.
+FILESYSTEM_PROVIDER = 'filesystem'
 
 # The providers, sorted: the order the two messages print them in.
-AUTODISCOVER_PROVIDERS = ('consul', 'filesystem', 'postgres', 'redis')
+AUTODISCOVER_PROVIDERS = ('consul', FILESYSTEM_PROVIDER, 'postgres', 'redis')
 
 # Providers that reach a shared service through a named entry of ``connections``.
-# The tuple is the set of keys of ``ConnectionsConfig``.
+# Each is a key of ``ConnectionsConfig``.
 CONNECTION_PROVIDERS = ('consul', 'redis', 'postgres')
-
-FILESYSTEM_PROVIDER = 'filesystem'
 
 # The floor of ``offline_after`` for every provider, not for one: a config written for one provider
 # stays valid for the others. The consul registry's session TTL is derived from the setting (half the
@@ -29,12 +31,6 @@ MIN_OFFLINE_AFTER_SECONDS = 10
 # The consul registry sets the TTL of a card's session to half of ``offline_after``, and Consul
 # accepts a TTL of 24 hours at most. One day is the documented limit of the setting.
 CONSUL_MAX_OFFLINE_AFTER_SECONDS = 86_400
-
-_MILLISECONDS_PER_SECOND = 1000
-
-
-def _seconds_text(seconds: int) -> str:
-    return format_duration(seconds * _MILLISECONDS_PER_SECOND)
 
 
 class AutodiscoverConfig(ConfigModel):
@@ -74,8 +70,8 @@ class AutodiscoverConfig(ConfigModel):
         ge=1,
         description=(
             'A peer whose card is older than this (on the provider clock) is offline. '
-            f'Must be at least 2 x heartbeat and at least {_seconds_text(MIN_OFFLINE_AFTER_SECONDS)}. '
-            f'With the consul provider it must also be at most {_seconds_text(CONSUL_MAX_OFFLINE_AFTER_SECONDS)}.'
+            f'Must be at least 2 x heartbeat and at least {seconds_text(MIN_OFFLINE_AFTER_SECONDS)}. '
+            f'With the consul provider it must also be at most {seconds_text(CONSUL_MAX_OFFLINE_AFTER_SECONDS)}.'
         ),
     )
     prune_after: WholeSeconds = Field(
@@ -116,13 +112,13 @@ class AutodiscoverConfig(ConfigModel):
     @model_validator(mode='after')
     def _validate_timing(self) -> 'AutodiscoverConfig':
         """Offline needs two missed heartbeats and the shared floor; pruning must not delete an online card."""
-        offline_text = f'autodiscover.offline_after ({_seconds_text(self.offline_after)})'
+        offline_text = f'autodiscover.offline_after ({seconds_text(self.offline_after)})'
         if self.offline_after < MIN_OFFLINE_AFTER_SECONDS:
-            raise ValueError(f'{offline_text} must be >= {_seconds_text(MIN_OFFLINE_AFTER_SECONDS)}')
+            raise ValueError(f'{offline_text} must be >= {seconds_text(MIN_OFFLINE_AFTER_SECONDS)}')
         if self.offline_after < 2 * self.heartbeat:
-            raise ValueError(f'{offline_text} must be >= 2 * autodiscover.heartbeat ({_seconds_text(self.heartbeat)})')
+            raise ValueError(f'{offline_text} must be >= 2 * autodiscover.heartbeat ({seconds_text(self.heartbeat)})')
         if self.prune_after < self.offline_after:
-            raise ValueError(f'autodiscover.prune_after ({_seconds_text(self.prune_after)}) must be >= {offline_text}')
+            raise ValueError(f'autodiscover.prune_after ({seconds_text(self.prune_after)}) must be >= {offline_text}')
         return self
 
     @model_validator(mode='after')
@@ -130,8 +126,8 @@ class AutodiscoverConfig(ConfigModel):
         """The consul registry's card session lives at most a day."""
         if self.provider == 'consul' and self.offline_after > CONSUL_MAX_OFFLINE_AFTER_SECONDS:
             raise ValueError(
-                f'autodiscover.offline_after ({_seconds_text(self.offline_after)}) must be <= '
-                f'{_seconds_text(CONSUL_MAX_OFFLINE_AFTER_SECONDS)} when autodiscover.provider is consul'
+                f'autodiscover.offline_after ({seconds_text(self.offline_after)}) must be <= '
+                f'{seconds_text(CONSUL_MAX_OFFLINE_AFTER_SECONDS)} when autodiscover.provider is consul'
             )
         return self
 

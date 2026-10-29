@@ -12,6 +12,7 @@ from typing import Any
 
 import structlog
 
+from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.dbfiles import DB_DIR_MODE, DB_FILE_MODE
 from drakkar.fleet.card import MAX_CARD_BYTES, decode_card, sanitize_worker_name, serialize_card
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext, RegistryFactory
@@ -267,7 +268,7 @@ def _filesystem_factory(options: Mapping[str, Any]) -> FilesystemRegistry:
 
 
 BUILTIN_PROVIDERS: dict[str, RegistryFactory] = {
-    'filesystem': _filesystem_factory,
+    FILESYSTEM_PROVIDER: _filesystem_factory,
     'postgres': postgres_registry_factory,
     'redis': redis_registry_factory,
     'consul': consul_registry_factory,
