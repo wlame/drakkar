@@ -272,7 +272,7 @@ def _existing_name(segment: str, yaml_map: Mapping[Any, Any], path: str) -> str:
 def decode_env_json(merged: Mapping[str, Any], env_tree: Mapping[str, Any], model: type[BaseModel]) -> dict[str, Any]:
     """Decode each ``DK_`` value that is a JSON text for a list or map field.
 
-    ``DK_UI__EXPOSE_ENV_VARS='["A","B"]'`` gives the list. The decoded value replaces
+    ``DK_RECORDER__CAPTURE__ENV_VARS='["A","B"]'`` gives the list. The decoded value replaces
     the whole YAML value, so this runs on the tree after the merge, which would
     otherwise overlay a list by index. ``env_tree`` holds the resolved env values.
     A text that is not a JSON list or object stays text, and the field check reports it.
