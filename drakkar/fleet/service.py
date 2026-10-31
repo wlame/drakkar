@@ -61,6 +61,23 @@ LOOP_OPS = {'publish': 'publish', 'refresh': 'list'}
 # The ``drakkar_fleet_peers`` state of each liveness verdict.
 PEER_STATE_BY_VERDICT = {True: 'online', False: 'offline', None: 'unknown'}
 
+# The same-name check at startup. A card of this worker's name whose age is
+# at least this many heartbeats belongs to a process that stopped publishing.
+NAME_PROBE_STALE_HEARTBEATS = 2
+# The wait before the second listing is one heartbeat plus this margin, so
+# a live owner has published once more by then.
+NAME_PROBE_WAIT_MARGIN_SECONDS = 2.0
+# The whole check is bounded by two heartbeats plus this margin.
+NAME_PROBE_BOUND_MARGIN_SECONDS = 5.0
+
+WORKER_NAME_IN_USE_MESSAGE = (
+    "worker name '{worker}' is used by a live worker (instance {instance}, {url}); give each worker a unique name"
+)
+
+
+class WorkerNameInUseError(RuntimeError):
+    """A live worker of another process publishes this worker's name: the start is refused."""
+
 
 def _liveness(online: bool | None, age_seconds: float | None, offline_after_seconds: float) -> bool | None:
     """The provider's verdict when it gives one, else the age rule, else ``None`` (unknown)."""
@@ -124,8 +141,11 @@ class FleetRegistry:
         caller: ResilientCaller | None = None,
         connections: Connections | None = None,
         on_refresh: Callable[[list['PeerView']], Awaitable[None]] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._provider = provider
+        # The pause of the same-name check; tests replace it so no test waits a heartbeat.
+        self._sleep = sleep
         # Called with the peer views after each refresh that succeeded; an
         # error it raises is a failed refresh iteration (counted and logged).
         self._on_refresh = on_refresh
@@ -237,7 +257,8 @@ class FleetRegistry:
         per-call timeout. While the breaker is open, or when the provider
         never started, both are skipped at once.
         """
-        if self._stopped or not self._started:
+        # A provider that only the same-name check started is stopped too.
+        if self._stopped or not (self._started or self._provider_started.is_set()):
             return
         self._stopped = True
         deadline_at = None if deadline_seconds is None else self._now_monotonic() + deadline_seconds
@@ -259,18 +280,118 @@ class FleetRegistry:
             self._caller.skip('withdraw', OUTCOME_NOT_STARTED)
             self._caller.skip('stop', OUTCOME_NOT_STARTED)
             return
-        await self._call_provider(
-            'withdraw',
-            lambda: self._provider.withdraw(self._identity.worker, self._identity.instance),
-            attempts=1,
-            deadline_seconds=self._time_left(deadline_at),
-        )
+        # Only the loops publish: after a refused start no card of this process exists.
+        if self._started:
+            await self._call_provider(
+                'withdraw',
+                lambda: self._provider.withdraw(self._identity.worker, self._identity.instance),
+                attempts=1,
+                deadline_seconds=self._time_left(deadline_at),
+            )
         await self._call_provider(
             'stop', self._provider.stop, attempts=1, deadline_seconds=self._time_left(deadline_at)
         )
 
     def _time_left(self, deadline_at: float | None) -> float | None:
         return None if deadline_at is None else deadline_at - self._now_monotonic()
+
+    # --- the same-name check at startup ---
+
+    async def check_name_free(self) -> None:
+        """Refuse the start when a live process of another instance publishes this worker's name.
+
+        Runs before :meth:`start`, so before the first publish: on some
+        providers a publish takes the card key from the process that holds
+        it, which would evict a live twin without a trace. It starts the
+        provider and lists the cards. A card of this name and another
+        instance is stale, and the start goes on at once, when its age is
+        at least two heartbeats or the provider says it is offline.
+        Otherwise the check waits one heartbeat plus 2 s, logs that it
+        waits, and lists again: a card whose ``heartbeat_at`` moved belongs
+        to a live worker. The whole check takes at most two heartbeats plus
+        5 s. A provider that does not start or list in that time skips the
+        check with a warning: a registry that is down never blocks a start.
+
+        Raises:
+            WorkerNameInUseError: a live worker publishes this name.
+        """
+        heartbeat = self._config.heartbeat
+        deadline_at = self._now_monotonic() + NAME_PROBE_STALE_HEARTBEATS * heartbeat + NAME_PROBE_BOUND_MARGIN_SECONDS
+        if not await self._ensure_started(deadline_seconds=self._time_left(deadline_at)):
+            await self._name_probe_skipped('start did not succeed')
+            return
+        first = await self._call_provider('list', self._list_checked, deadline_seconds=self._time_left(deadline_at))
+        if not first.ok:
+            await self._name_probe_skipped(f'list {first.outcome}')
+            return
+        suspects = {
+            card['instance']: card
+            for card, age_seconds, online in self._same_name_cards(first.value)
+            if not self._is_stale(age_seconds, online)
+        }
+        if not suspects:
+            return
+        wait_seconds = heartbeat + NAME_PROBE_WAIT_MARGIN_SECONDS
+        await self._logger.ainfo(
+            'fleet_worker_name_probe_waiting',
+            category='fleet',
+            worker=self._identity.worker,
+            other_instances=sorted(suspects),
+            wait_seconds=wait_seconds,
+        )
+        await self._sleep(wait_seconds)
+        second = await self._call_provider('list', self._list_checked, deadline_seconds=self._time_left(deadline_at))
+        if not second.ok:
+            await self._name_probe_skipped(f'list {second.outcome}')
+            return
+        for card, _age_seconds, _online in self._same_name_cards(second.value):
+            before = suspects.get(card['instance'])
+            if before is not None and card['heartbeat_at'] != before['heartbeat_at']:
+                await self._refuse_start(card)
+
+    def _same_name_cards(self, listed: PeerCardList) -> list[tuple[dict[str, Any], float | None, bool | None]]:
+        """Valid cards of this worker's name and another instance, with their age and liveness verdict."""
+        found: list[tuple[dict[str, Any], float | None, bool | None]] = []
+        for listed_card in listed:
+            card = getattr(listed_card, 'card', None)
+            if not isinstance(card, dict) or validate_card(card):
+                continue
+            if card['worker'] != self._identity.worker or card['instance'] == self._identity.instance:
+                continue
+            online = getattr(listed_card, 'online', None)
+            found.append(
+                (card, getattr(listed_card, 'age_seconds', None), online if isinstance(online, bool) else None)
+            )
+        return found
+
+    def _is_stale(self, age_seconds: float | None, online: bool | None) -> bool:
+        """True for a card whose owner stopped publishing: offline by its provider, or two heartbeats old."""
+        if online is False:
+            return True
+        return age_seconds is not None and age_seconds >= NAME_PROBE_STALE_HEARTBEATS * self._config.heartbeat
+
+    async def _name_probe_skipped(self, error: str) -> None:
+        await self._logger.awarning(
+            'fleet_worker_name_probe_skipped',
+            category='fleet',
+            worker=self._identity.worker,
+            provider=self._provider_name,
+            error=error,
+        )
+
+    async def _refuse_start(self, card: dict[str, Any]) -> None:
+        """Log ``fleet_worker_name_in_use`` and raise :class:`WorkerNameInUseError`."""
+        await self._logger.aerror(
+            'fleet_worker_name_in_use',
+            category='fleet',
+            worker=self._identity.worker,
+            instance=self._identity.instance,
+            other_instance=card['instance'],
+            other_url=card['url'],
+        )
+        raise WorkerNameInUseError(
+            WORKER_NAME_IN_USE_MESSAGE.format(worker=self._identity.worker, instance=card['instance'], url=card['url'])
+        )
 
     # --- loops ---
 
@@ -325,7 +446,7 @@ class FleetRegistry:
         except Exception as exc:
             await self._report_iteration_failure('refresh', exc)
 
-    async def _ensure_started(self) -> bool:
+    async def _ensure_started(self, deadline_seconds: float | None = None) -> bool:
         """Start the provider unless it has started; True when it is started."""
         if self._provider_started.is_set():
             return True
@@ -337,7 +458,9 @@ class FleetRegistry:
             options=self._provider_options,
             connections=self._connections,
         )
-        result = await self._call_provider('start', lambda: self._provider.start(ctx))
+        result = await self._call_provider(
+            'start', lambda: self._provider.start(ctx), deadline_seconds=deadline_seconds
+        )
         if not result.ok:
             return False
         # Set before the log await: a cancellation there must not leave a

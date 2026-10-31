@@ -762,9 +762,16 @@ class AppLifecycle:
         """Start the worker registry when ``autodiscover`` is on, or leave ``app._fleet`` unset.
 
         Runs right after the API server listens: peers reach this worker
-        through the URL its card publishes. The service starts its loops in
-        the background and returns at once; nothing later in startup, and
-        nothing in the pipeline, waits on a registry call.
+        through the URL its card publishes. Before the first publish the
+        same-name check refuses the start when a live worker of another
+        process publishes this worker's name; it waits at most two
+        heartbeats plus 5 s, and a registry that is down only skips it.
+        Then the service starts its loops in the background and returns at
+        once; nothing later in startup, and nothing in the pipeline, waits on
+        a registry call.
+
+        Raises:
+            WorkerNameInUseError: a live worker publishes this worker's name.
         """
         app = self._app
         config = app._config
@@ -782,6 +789,7 @@ class AppLifecycle:
             connections=app._connections,
             on_refresh=ClusterHashChecker(app.cluster_tasks_hash, app._cluster_name).check,
         )
+        await app._fleet.check_name_free()
         await app._fleet.start()
 
     def _card_features(self) -> dict[str, Any]:
