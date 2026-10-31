@@ -768,7 +768,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
 
 #### `worker_config` -- Worker identity {#worker_config-autodiscovery}
 
-Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `executor.task_timeout`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
+Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`. On a worker with the Kafka source disabled, `source_topic` and `consumer_group` are written **empty**; the column set does not change, so peers reading the file need no special case.
 
 This table names the worker and cluster that wrote each file, for history, merges and archives.
 
@@ -1064,8 +1064,7 @@ With provider `postgres` the recorder also writes these log events
 The recorder calls also log the provider events with `feature=recorder` and
 `category=recorder`: `provider_started` (stage P started), `provider_call_failed`,
 `provider_breaker_opened` and `provider_breaker_closed`. `recorder_started`
-carries `postgres_connection`, `postgres_table` (schema-qualified) and
-`ignored_keys`.
+carries `postgres_connection` and `postgres_table` (schema-qualified).
 
 ### Merging Databases
 

@@ -746,7 +746,10 @@ The `provider` key names the election provider that made the lock, here
 - **The file server's clock.** Ages are measured on the file server's
   clock: the worker touches a marker file `.clock.<instance>` in the same
   folder and uses its modification time as "now". No host's wall clock is
-  compared with another host's.
+  compared with another host's. The worker deletes the marker at once. A
+  crash between the two steps leaves an empty marker; the sweep removes one
+  in the history folder, but nothing sweeps `tasks/<cluster>/` and
+  `merged/`, and a marker there is safe to delete.
 - **Fencing.** Right before it publishes an archive, and before it deletes
   any source, the archive pass checks that the lock still holds its token.
   When the token is no longer its own — another worker took the lock over —
@@ -1095,8 +1098,8 @@ Every provider operation is counted in `drakkar_provider_calls_total` with
 ### The sweep
 
 With the lease held, the pass first deletes work files in the history
-folder older than `recorder.archive.sweep_after` (default 7200, at
-least 60), together with their `-wal`, `-shm` and `-journal` sidecars. The
+folder older than `recorder.archive.sweep_after` (default `2h`, at
+least `1m`), together with their `-wal`, `-shm` and `-journal` sidecars. The
 sweep age is kept apart from the lease, because the sweep also deletes the
 `.incoming` sealing copies of other workers, and a short lease must not
 delete a slow copy:
@@ -1106,7 +1109,7 @@ delete a slow copy:
 | `.*.merge.db`, `.*.tmp`, `.*.previous.db` | Work files of an archive pass that stopped. |
 | `.*.incoming` | A cross-filesystem copy that stopped. |
 | `.clock.*` | Age markers of the file server's clock. |
-| `.archive.lock.stale.*` | Locks set aside by a takeover in earlier releases, which kept the archive lock in the history folder. |
+| `.archive.lock.stale.*` | Copies of a `.archive.lock` file in the history folder, set aside by a takeover. They hold no data. |
 | `<name>.db.meta.json` with no `<name>.db` | A meta file whose database is gone. A fresh one is kept: it is a move in progress, because the meta file is written before the database is renamed in. |
 
 Each deletion logs `recorder_archive_temp_swept`.
@@ -1302,22 +1305,22 @@ worker writes a small JSON card to `<storage.shared_dir>/fleet/workers/<worker>.
 and reads the cards of its peers every `autodiscover.refresh`. The workers list
 answers from that in-memory snapshot. Liveness comes from the card's age on
 the file server's clock: a peer is `online` while its card is no older than
-`autodiscover.offline_after` (default 60). See
+`autodiscover.offline_after` (default `1m`). See
 [Fleet registry](fleet.md) for the card format and the rules.
 
 **Message trace** (`GET /api/v1/debug/trace`) searches this worker's own
 files by default: the live file and its closed own files in `storage.dir`
-(with `none` and `postgres`, the memory store).
-What `history=1` reads depends on the recorder mode:
+(with provider `postgres` or the recorder off, the memory store).
+What `history=1` reads depends on the recorder:
 
-| Mode | `trace?history=1` reads |
+| Recorder | `trace?history=1` reads |
 |---|---|
-| `sqlite` | the sealed files of the history folder of the worker's own cluster, newest first |
-| `none` | the same sealed files, when a shared folder resolves |
-| `postgres` | the rows of the worker's own cluster in the Postgres table of its prefix, never the history folder |
+| on, provider `sqlite` | the sealed files of the history folder of the worker's own cluster, newest first |
+| on, provider `postgres` | the rows of the worker's own cluster in the Postgres table of its prefix, never the history folder |
+| off (`recorder.enabled: false`) | the memory store, the same rows as without `history=1` |
 
 The search of sealed files stops after `recorder.search.max_files` files
-(default 256) or `recorder.search.timeout` (default 10), and it opens
+(default 256) or `recorder.search.timeout` (default `10s`), and it opens
 sealed files with `immutable=1`. The Postgres search is complete or answers
 503 `{"detail": "history search failed"}`, within
 `recorder.search.timeout`; see
@@ -1328,7 +1331,7 @@ worker opens another worker's live file.
 ## Cache exchange
 
 No worker opens another worker's cache file. Every
-`cache.exchange.interval` (default 30) a worker pulls the
+`cache.exchange.interval` (default `30s`) a worker pulls the
 `cluster` and `global` rows that other workers originated, over HTTP, from
 `GET /api/v1/peer/cache/changes` at the URL on each peer's
 [registry card](fleet.md#the-card). This section is the wire rule. Which
@@ -1436,25 +1439,6 @@ come from the [fleet registry](fleet.md).
 Every worker trusts the shared folder. Anyone who can write it can plant
 files that the workers archive and serve. See
 [Security posture](security.md).
-
-## Removed files
-
-Earlier releases wrote five more files into `storage.dir`. The worker no
-longer writes them:
-
-| File | Replaced by |
-|---|---|
-| `<worker>-live.db` *(symlink)* | Nothing. No worker opens another worker's live file. |
-| `<worker>-cache.db` *(symlink)* | Nothing. The cache file itself now has this name; peers pull rows over HTTP. See [Cache exchange](#cache-exchange). |
-| `<worker>-cache.db.actual` | `<worker>-cache.db`, a plain file. |
-| `.dbstats.db` | Meta files for sealed files, and in-memory statistics for own files. See [The Databases page](#the-databases-page). |
-| `.archive-<cluster>.lock` (`flock`) | `tasks/<cluster>/history.archive.lock` in `storage.shared_dir`. See [The task lock](#the-task-lock). |
-
-The worker does not delete them. Delete them by hand; see the
-[upgrade guide](upgrading.md#step-8-old-files). Delete the two cache files
-**before** the first start: the new cache file has the name of the old
-link, and a link that is still there is followed to the old `.actual`
-file.
 
 ## Watchdog file
 

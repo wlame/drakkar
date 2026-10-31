@@ -513,10 +513,10 @@ that says "unchanged" keeps its path, its default and its meaning.
 | `fleet.registry.offline_after_seconds` | `autodiscover.offline_after` | `60` is `1m` |
 | `fleet.registry.prune_after_seconds` | `autodiscover.prune_after` | `86400` is `24h` |
 | `fleet.registry.resilience.timeout_seconds` | `autodiscover.resilience.timeout` | `5.0` is `5s`; one block for the registry and the election |
-| `fleet.registry.resilience.retries` | `autodiscover.resilience.max_retries` | ; one block for the registry and the election |
+| `fleet.registry.resilience.retries` | `autodiscover.resilience.max_retries` | one block for the registry and the election |
 | `fleet.registry.resilience.backoff_seconds` | `autodiscover.resilience.backoff` | `0.2` is `200ms`; one block for the registry and the election |
 | `fleet.registry.resilience.backoff_max_seconds` | `autodiscover.resilience.max_backoff` | `5.0` is `5s`; one block for the registry and the election |
-| `fleet.registry.resilience.breaker.failure_threshold` | `autodiscover.resilience.breaker_failures` | ; one block for the registry and the election |
+| `fleet.registry.resilience.breaker.failure_threshold` | `autodiscover.resilience.breaker_failures` | one block for the registry and the election |
 | `fleet.registry.resilience.breaker.cooldown_seconds` | `autodiscover.resilience.breaker_cooldown` | `30.0` is `30s`; one block for the registry and the election |
 | `fleet.registry.filesystem.dir` | removed | The card folder is `<storage.shared_dir>/fleet/workers`. |
 | `fleet.registry.static.peers[].name` | removed | The `static` provider is removed. Use `filesystem`, `postgres`, `redis` or `consul`. |
@@ -538,7 +538,6 @@ that says "unchanged" keeps its path, its default and its meaning.
 | `connections.redis.*.url` | unchanged |  |
 | `connections.redis.*.key_prefix` | `connections.redis.*.state_prefix` |  |
 | `connections.postgres.*.dsn` | unchanged |  |
-| `connections.postgres.*.schema_name` | `connections.postgres.*.schema` | the YAML key was already `schema` |
 | `connections.postgres.*.manage_schema` | unchanged |  |
 | `connections.postgres.*.pool_min` | unchanged |  |
 | `connections.postgres.*.pool_max` | unchanged |  |

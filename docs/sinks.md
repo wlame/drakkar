@@ -888,12 +888,12 @@ completes and the producer is flushed before exit.
 
 #### Caveats
 
-- **An old-format record is never replayed**: a record without a
-  `dk-record-version` header was written by an older release (a JSON
-  document of payloads, not a source message). The script skips it, also in
-  a `--dry-run`, and counts it as `skipped_old_format` in the summary line.
-  It stays in the DLQ topic: drain or delete the old topic content before a
-  replay if it must not stay (see [Upgrading](upgrading.md#dlq-record)).
+- **A record of another format is never replayed**: a record without a
+  `dk-record-version` header is not a DLQ record of this format. The script
+  skips it, also in a `--dry-run`, and counts it as `skipped_old_format` in
+  the summary line. It stays in the DLQ topic: drain or delete such topic
+  content before a replay if it must not stay (see
+  [Upgrading](upgrading.md#dlq-record)).
 - **Duplicate processing**: the script does NOT deduplicate against the
   source topic. A message that reached the DLQ after some of its sinks
   delivered (`dk-delivered-sinks`) delivers to those sinks again when it is
