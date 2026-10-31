@@ -545,14 +545,22 @@ class PartitionProcessor:
         A dead processor returns at once. Its loop gave up, so nothing will
         ever empty its queue or settle its pending offsets; waiting would
         burn the caller's whole drain budget and then suppress a commit that
-        was in fact safe to make.
+        was in fact safe to make. A processor whose loop has ended after a
+        stop returns too, for the same reason: no loop reads its queue.
         """
         if self._dead or self._deliveries_suppressed:
             await self._commit_now()
             return
-        while self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0:
+        while (
+            self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0
+        ) and not self._loop_ended:
             await asyncio.sleep(DRAIN_POLL_INTERVAL)
         await self._commit_now()
+
+    @property
+    def _loop_ended(self) -> bool:
+        """Whether the partition loop task has returned, so nothing reads the queue any more."""
+        return self._task is not None and self._task.done()
 
     async def _run(self) -> None:
         log = logger.bind(partition=self._partition_id, category='partition')

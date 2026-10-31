@@ -175,6 +175,20 @@ class KafkaSource:
                     backpressure_active.set(1)
 
             messages = await consumer.poll_batch()
+            if self._stop_requested:
+                # A stop arrived while the poll was in flight. The partition
+                # loops are leaving, and a loop that has already ended never
+                # reads its queue again. The messages were never registered,
+                # so the final commit stays below them and they are read
+                # again by the next owner of the partition.
+                if messages:
+                    logger.info(
+                        'messages_polled_at_stop_dropped',
+                        category='kafka',
+                        count=len(messages),
+                        partitions=sorted({msg.partition for msg in messages}),
+                    )
+                break
             for msg in messages:
                 processor = self.processors.get(msg.partition)
                 if processor:

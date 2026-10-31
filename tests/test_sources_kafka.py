@@ -4,8 +4,13 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+from structlog.testing import capture_logs
+
 from drakkar.config import DrakkarConfig
 from drakkar.consume_pause import ConsumePauseController
+from drakkar.executor import ExecutorPool
+from drakkar.models import SourceMessage
+from drakkar.partition import PartitionProcessor
 from drakkar.sources.base import SourceContext
 from drakkar.sources.kafka import KafkaSource
 from tests.conftest import kafka_connections
@@ -71,6 +76,76 @@ async def test_run_flips_ready_after_first_poll_and_exits_on_signal_stop(monkeyp
     assert source.is_ready is True
     source.signal_stop()
     await asyncio.wait_for(task, timeout=2)
+
+
+async def test_run_with_stop_during_poll_does_not_enqueue_the_polled_messages(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    await source.start()
+    processor = MagicMock(queue_size=0, inflight_count=0)
+    source.processors[0] = processor
+    source.processors[3] = MagicMock(queue_size=0, inflight_count=0)
+    messages = [MagicMock(partition=3, offset=9), MagicMock(partition=0, offset=7), MagicMock(partition=3, offset=10)]
+
+    async def poll_then_stop(*_args, **_kwargs):
+        source.signal_stop()
+        return messages
+
+    fake.poll_batch = AsyncMock(side_effect=poll_then_stop)
+    with capture_logs() as logs:
+        await asyncio.wait_for(source.run(), timeout=2)
+
+    processor.enqueue.assert_not_called()
+    source.processors[3].enqueue.assert_not_called()
+    dropped = [entry for entry in logs if entry['event'] == 'messages_polled_at_stop_dropped']
+    assert dropped == [
+        {
+            'event': 'messages_polled_at_stop_dropped',
+            'log_level': 'info',
+            'category': 'kafka',
+            'count': 3,
+            'partitions': [0, 3],
+        }
+    ]
+
+
+async def test_run_with_stop_during_an_empty_poll_logs_no_drop(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    await source.start()
+
+    async def poll_then_stop(*_args, **_kwargs):
+        source.signal_stop()
+        return []
+
+    fake.poll_batch = AsyncMock(side_effect=poll_then_stop)
+    with capture_logs() as logs:
+        await asyncio.wait_for(source.run(), timeout=2)
+
+    assert not [entry for entry in logs if entry['event'] == 'messages_polled_at_stop_dropped']
+
+
+async def test_drain_returns_when_a_message_reaches_a_partition_whose_loop_has_ended(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    await source.start()
+    processor = PartitionProcessor(
+        partition_id=0,
+        handler=MagicMock(),
+        executor_pool=ExecutorPool(binary_path='/bin/echo', max_executors=1, task_timeout_seconds=10),
+        window_size=10,
+    )
+    source.processors[0] = processor
+    processor.start()
+    source.signal_stop()
+    for _ in range(200):
+        if processor._task is not None and processor._task.done():
+            break
+        await asyncio.sleep(0.01)
+    processor.enqueue(SourceMessage(topic='t', partition=0, offset=5, value=b'{}', timestamp=1000))
+
+    started = time.monotonic()
+    drained = await source.drain(deadline=started + 1)
+
+    assert drained is True
+    assert time.monotonic() - started < 0.5
 
 
 async def test_stop_closes_consumer(monkeypatch):
