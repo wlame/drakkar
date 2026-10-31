@@ -947,6 +947,11 @@ recorder_seal_failures = Counter(
     'Recorder files whose sealing failed; they stay in the backlog and are retried.',
 )
 
+recorder_orphan_failures = Counter(
+    'drakkar_recorder_orphan_failures_total',
+    'Orphan worker folders the leftover pass could not look at, move or seal; each is tried again at the next pass.',
+)
+
 recorder_archive_failures = Counter(
     'drakkar_recorder_archive_failures_total',
     'Archive passes that did not finish cleanly.',

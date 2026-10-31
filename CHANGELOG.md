@@ -207,8 +207,11 @@ the steps of the upgrade and the changes of behaviour.
 - **Orphan folders.** The leftover pass seals the recorder files of another
   worker name's own folder in the same cluster when no process holds the folder,
   its files are idle for 300 s and the registry shows the name is not online, then
-  deletes the folder (`recorder_orphan_folder_sealed`). With `autodiscover` off it
-  only logs the folder (`recorder_orphan_folder_found`).
+  deletes the folder (`recorder_orphan_folder_sealed`). The folder's lock is held
+  only while the files move into a staging folder; the seal runs from there. An
+  error in one folder is logged (`recorder_orphan_folder_failed`), counted in
+  `drakkar_recorder_orphan_failures_total`, and the pass goes on. With
+  `autodiscover` off it only logs the folder (`recorder_orphan_folder_found`).
 - **Download temps are swept.** A worker deletes the download temps an earlier
   process of its name left in its own folder at start.
 

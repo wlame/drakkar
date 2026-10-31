@@ -1012,8 +1012,9 @@ The file names and the shared folder do not change.
 
 **New log events:** `fleet_worker_name_probe_waiting`, `fleet_worker_name_in_use`,
 `fleet_worker_name_probe_skipped`, `recorder_orphan_folder_sealed`,
-`recorder_orphan_folder_found`. `recorder_leftover_sealed` and `recorder_seal_failed`
-carry `orphan_worker` for a file of an orphan folder.
+`recorder_orphan_folder_found`, `recorder_orphan_folder_failed`,
+`recorder_orphan_folder_clock_ahead`. `recorder_leftover_sealed` carries `orphan_worker`
+for a file of an orphan folder. **New metric:** `drakkar_recorder_orphan_failures_total`.
 
 **In code:** `DrakkarApp(worker_id=...)` follows the same name rule. `EventRecorder`
 takes `sibling_dir` and `worker_online`; its `storage_dir` is the own folder.

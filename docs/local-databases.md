@@ -541,6 +541,7 @@ hand) leaves the backlog.
 |---|---|
 | `drakkar_recorder_unsealed_files` | Own recorder files closed but not yet sealed into the history folder. |
 | `drakkar_recorder_seal_failures_total` | Recorder files whose sealing failed; they stay in the backlog and are retried. |
+| `drakkar_recorder_orphan_failures_total` | Orphan worker folders the leftover pass could not look at, move or seal; each is tried again at the next pass. |
 
 Suggested alert: `drakkar_recorder_unsealed_files > 0` for two rotation
 intervals.
@@ -575,9 +576,18 @@ new sealed file.
 
 ### Orphan folders
 
-An **orphan folder** is the own folder of a worker name that never starts
-again: a Deployment recreated a pod under a new host name, or a configured
-name changed. Its recorder files are never sealed by their owner.
+An **orphan folder** is the own folder of a worker name that is not
+running: a Deployment recreated a pod under a new host name, a configured
+name changed, or a worker stays stopped. Its recorder files are not sealed
+by their owner.
+
+The pass cannot tell a name that never comes back from a worker that
+stopped cleanly more than about 300 seconds ago: a clean stop withdraws the
+card, so the registry lists no card of the name. On a host where several
+workers share `storage.dir`, a worker that stays stopped for some minutes
+therefore has its folder sealed by a sibling, and it loses its cache file
+and its watchdog file. Its recorder files are not lost: they are in the
+history folder. It starts with an empty cache.
 
 Each worker's leftover pass (at start, 300 seconds later, and at each
 rotation tick) also looks at the other worker folders of its own cluster,
@@ -585,8 +595,8 @@ rotation tick) also looks at the other worker folders of its own cluster,
 it can prove that the name is dead:
 
 1. it takes the folder's owner lock (no process on this host holds the
-   folder) and holds it while it works; a folder without a lock file is not
-   a worker folder and is never touched;
+   folder); a folder without a lock file is not a worker folder and is never
+   touched;
 2. no file in the folder changed for 300 seconds;
 3. `autodiscover` is on, and the last registry refresh (not older than
    `autodiscover.offline_after`, or two `autodiscover.refresh` intervals when
@@ -594,19 +604,43 @@ it can prove that the name is dead:
    or only offline ones. A card whose liveness is unknown counts as not
    proved.
 
-Then it seals and publishes every recorder file of the folder into the
-history folder. The meta file names the owner from the file name, not the
-worker that sealed it. It deletes the owner's cache file, watchdog file and
-download temps, and removes the folder when nothing else is left. The cache
-file is deleted, not merged: the cache guarantees nothing, and the peers
-already pulled its `cluster` and `global` rows. A file it cannot seal or
-move stays in the folder for a later pass; it never joins the sealing
-worker's own backlog.
+Then, still holding the folder's lock, it moves the recorder files (with
+their sidecars) by rename into a staging folder
+`<storage.dir>/<cluster>/.orphan-<worker>-<16 hex>/`, which it creates with
+mode `0700` and locks first. It deletes the owner's cache file, watchdog
+file and download temps, removes the folder when nothing else is left, and
+releases the folder's lock. The lock is held only for these renames, so a
+worker of that name that starts again meanwhile gets its folder; the slow
+part, the seal and the copy to the shared history, runs from the staging
+folder under the staging folder's lock. The cache file is deleted, not
+merged: the cache guarantees nothing, and the peers already pulled its
+`cluster` and `global` rows.
 
-With `autodiscover` off, no worker can prove that a name is dead (the lock
-holds only on one host, and the idle rule fails for a worker that writes
-rarely), so the pass only logs `recorder_orphan_folder_found` once per
-folder and seals nothing. Clean such a folder by hand when no process holds
+Each recorder file is sealed and published into the history folder. The
+meta file names the owner from the file name, not the worker that sealed
+it. A file it cannot seal or move stays in the staging folder; a later
+pass of any worker of the cluster on this host finishes a staging folder
+whose lock is free, so a staging folder left by a crash is not lost. Such a
+file never joins the sealing worker's own backlog. An own folder that is a
+mount point of its own cannot be staged (a rename cannot cross
+filesystems): the move fails and the folder stays as it is.
+
+Each folder is handled on its own. An error in one folder (a folder of
+another OS user that cannot be opened, a failed seal or move) is logged as
+`recorder_orphan_folder_failed`, at most once a minute per folder, counted
+in `drakkar_recorder_orphan_failures_total`, and the pass goes on with the
+next folder. No orphan error stops the worker's own leftover pass.
+
+With `autodiscover` off, no worker can prove that a name is not running
+(the lock holds only on one host, and the idle rule fails for a worker that
+writes rarely), so the pass only logs `recorder_orphan_folder_found` (reason
+`no_registry`) once per folder and seals nothing. With `autodiscover` on, a
+folder whose name the registry cannot judge for an hour (no fresh refresh,
+or a card with an unknown liveness) is logged the same way once, with reason
+`registry_unknown`. A file whose modification time is more than 2 seconds
+ahead of the local clock (the clock was set back) keeps its folder from ever
+looking idle; the pass logs `recorder_orphan_folder_clock_ahead` once for
+that folder. Clean such a folder by hand when no process holds
 its lock: `flock -n <folder>/.owner.lock true` succeeds, then seal or delete
 the folder.
 
@@ -638,9 +672,11 @@ The Kafka side of a crash is in [Deployment](deployment.md#sudden-restart).
 |---|---|
 | `recorder_sealed` | A sealed file reached the history folder. Fields: `db_path`, `destination`, `crossed_filesystems`, `size_bytes`, `events`. |
 | `recorder_leftover_sealed` | The same, for a leftover. For a file of an orphan folder it also carries `orphan_worker`. |
-| `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. For a file of an orphan folder it carries `orphan_worker`, and the file stays in that folder instead. |
-| `recorder_orphan_folder_sealed` | info. Every recorder file of an [orphan folder](#orphan-folders) reached the history folder. Fields: `folder`, `worker`, `files`, `folder_removed`. |
-| `recorder_orphan_folder_found` | warning. With `autodiscover` off, an orphan folder that no process holds and whose files are idle; once per folder per process. Fields: `folder`, `worker`, `hint`. |
+| `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. |
+| `recorder_orphan_folder_sealed` | info. Every recorder file of an [orphan folder](#orphan-folders) (or of a staging folder a dead sealer left) reached the history folder. Fields: `folder`, `worker`, `files`, `folder_removed`. |
+| `recorder_orphan_folder_found` | warning. An orphan folder that no process holds and whose files are idle, but that cannot be sealed; once per folder and reason per process. Fields: `folder`, `worker`, `reason` (`no_registry`: `autodiscover` is off; `registry_unknown`: the registry has not judged the name for an hour), `hint`. |
+| `recorder_orphan_folder_failed` | warning. An orphan folder or a staging folder failed at one step; at most once a minute per folder. Fields: `folder`, `worker`, `stage` (`list`, `lock`, `idle`, `stage`, `cleanup`, `seal`, `publish`), `error`, `error_type`, `suppressed`. The pass goes on with the next folder. |
+| `recorder_orphan_folder_clock_ahead` | warning. A file of an orphan folder has a modification time ahead of the local clock, so the folder never looks idle; once per folder. Fields: `folder`, `worker`, `file`, `seconds_ahead`. |
 | `recorder_background_job_failed` | A background job failed with an unexpected error. Field `job` names it: `sealing`, `leftover_sealing`, `archive` (an archive pass) or `archive_footprint` (the footprint update of an archive slot that this worker did not win). A seal runs again at the next rotation tick, an archive pass at the next archive slot. |
 
 ## The meta file
