@@ -77,7 +77,7 @@ across restarts**.
 
 - **Recorder**: rotates automatically. Files rotate hourly and are sealed
   into `history/<cluster>/`. In the harness, windows are one hour long and
-  due one hour after they close (`history.archive` in
+  due one hour after they close (`recorder.archive` in
   `worker/drakkar.yaml`; the defaults are 24 hours and 48 hours). The
   archive is a cluster task with a slot every 30 seconds
   (`recorder.archive.interval`): at each slot one of worker-2 and worker-3
