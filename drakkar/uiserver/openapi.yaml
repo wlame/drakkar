@@ -258,7 +258,7 @@ paths:
       summary: Recent task entries for the timeline
       description: >-
         Tasks from the last N minutes plus the computed lane count. `minutes`
-        is clamped further down to `ui.timeline.max_age_minutes` when that
+        is clamped further down to `ui.timeline.max_age` when that
         config is smaller. `limit` caps the number of tasks returned, newest
         by start time; it defaults to `ui.timeline.history_factor` times the
         executor pool's `max_executors` (or times 8 when no pool is
@@ -288,7 +288,7 @@ paths:
       description: >-
         History backfill for operator-declared custom timeline events
         (ui.timeline.events). `minutes` is clamped to
-        `ui.timeline.max_age_minutes`; results are newest-first and capped
+        `ui.timeline.max_age`; results are newest-first and capped
         at `ui.max_rows`. A degraded recorder reader answers 200 with an
         empty `events` array and `unavailable: true` rather than failing.
         404 on backends predating v1.21 — clients must tolerate it and
@@ -501,7 +501,7 @@ paths:
         v1.23: an object. own lists the serving worker's live file and its
         files closed but not sealed yet (statistics measured on request);
         history lists one folder per history/<cluster> plus merged, read
-        from shared.dir. Pre-v1.23 backends answer an array.
+        from storage.shared_dir. Pre-v1.23 backends answer an array.
       responses:
         '200':
           description: Own files and history folders.
@@ -517,7 +517,7 @@ paths:
       summary: Merge recorder databases
       description: >-
         Merges ≥2 sealed recorder files or merge results into one file
-        under merged/ (v1.23). filenames are paths relative to shared.dir
+        under merged/ (v1.23). filenames are paths relative to storage.shared_dir
         (history/<cluster>/<name>.db or merged/<name>.db); every segment is
         hardened against separators, leading dots, quotes, semicolons and
         control characters. Errors use the legacy {"error": ...} envelope
@@ -566,10 +566,10 @@ paths:
       operationId: getDownload
       summary: Download a sealed file, an archive or a merge result
       description: >-
-        path is relative to shared.dir and keeps its / separators:
+        path is relative to storage.shared_dir and keeps its / separators:
         history/<cluster>/<name>.db, history/<cluster>/<archive>.db.gz or
         merged/<name>.db (v1.23). Every segment is hardened as in merge and
-        the resolved file must stay inside shared.dir. Attachment with
+        the resolved file must stay inside storage.shared_dir. Attachment with
         Cache-Control no-store. The bearer token may ride as ?token=
         because plain <a> downloads cannot set headers.
       parameters:
@@ -650,7 +650,7 @@ paths:
       summary: Compressed recorder archives
       description: >-
         One row per archive file in every history/<cluster> folder of
-        shared.dir (name `<cluster>-<from>__<to>.db.gz`), all fields parsed
+        storage.shared_dir (name `<cluster>-<from>__<to>.db.gz`), all fields parsed
         from the file name — no file is opened. Sorted newest-first by
         to_ts. Download through /debug/download/{path} (v1.23).
       responses:
@@ -1256,7 +1256,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '404':
-          description: The cache or the cache exchange is off on this worker.
+          description: The cache or the cache exchange is off on this worker, or autodiscover is off.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -1715,7 +1715,7 @@ components:
         # v1.18, optional: liveness. Absent on older backends — clients must
         # then treat every worker as online. The is_current worker is always
         # online. Since v1.23 the age comes from the worker registry's own
-        # clock (fleet.registry.offline_after_seconds, default 30) and online
+        # clock (autodiscover.offline_after) and online
         # is null when the registry knows no age (a fixed peer list): unknown,
         # not offline.
         last_seen_ts: {type: [number, 'null']}
@@ -2001,7 +2001,7 @@ components:
       properties:
         folder:
           type: string
-          description: history/<cluster> or merged, relative to shared.dir.
+          description: history/<cluster> or merged, relative to storage.shared_dir.
         kind: {type: string, enum: [history, merged]}
         cluster: {type: [string, 'null']}
         files:
@@ -2014,7 +2014,7 @@ components:
       properties:
         path:
           type: string
-          description: Relative to shared.dir; the /debug/download/{path} argument.
+          description: Relative to storage.shared_dir; the /debug/download/{path} argument.
         name: {type: string}
         kind: {type: string, enum: [sealed, archive, merged]}
         size_bytes: {type: integer}
@@ -2073,7 +2073,7 @@ components:
       type: object
       properties:
         filename: {type: string}
-        # v1.23: the output's path relative to shared.dir (merged/...).
+        # v1.23: the output's path relative to storage.shared_dir (merged/...).
         path: {type: string}
         worker_count: {type: integer}
         event_count: {type: integer}
