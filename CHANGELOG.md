@@ -7,659 +7,314 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Changes since 2.4.0. `docs/upgrading.md` has a row for every 2.4.0 config key,
+the steps of the upgrade and the changes of behaviour.
+
 ### Breaking
 
-- **Names, executor, threads, cache and the rest take their final keys.**
-  `worker_name_env`, `cluster_name` and `cluster_name_env` are `worker.name_env`,
-  `cluster.name` and `cluster.name_env`; `worker.name` is new, a literal worker name.
-  `executor.task_timeout`, `drain_timeout` (whole seconds), `max_stdout` and `max_stderr`
-  (sizes) drop their unit suffixes. `io.max_threads` and `offload.max_threads` are
-  `threads.io` and `threads.offload`: `null` derives the size and `0` fails the load. The
-  cache, `cache.exchange` and `runtime_health` durations take units;
-  `runtime_health.probe_interval_seconds` is `stack_probe_enabled` and
-  `stack_probe_interval`. `cache.max_memory_entries: 0` means no cap. `ui.log_min_duration_ms`
-  is `logging.min_task_duration`; `ui.ws_min_duration`, `ui.consume_pause.durations` and
-  `ui.timeline.max_age` (whole minutes) take units. See the upgrade guide.
-- **The summary line has a new form.** `api=<port|off> ui=<on|off>` replaces `ui=on:<port>`,
-  `recorder=` is always printed, `autodiscover=<provider|off>` replaces `fleet=` and
-  `election=`, and `dlq=unconfigured` marks a DLQ that is on with no topic.
-
-- **The HTTP server is its own section, `api`.** `ui.host`, `ui.port` and `ui.public_url` are
-  `api.host`, `api.port` and `api.public_url`. With `ui.enabled: false` the worker still
-  serves `/healthz`, `/readyz` and `/api/v1/peer/cache/changes`; every other route answers
-  404 and no bundle is fetched. `api.enabled: false` starts no server. `ui.enabled` and
-  `autodiscover.enabled` each need `api.enabled`, and the load fails without it. The registry
-  now runs with the UI off. `ui_disabled_no_probes` follows `api.enabled`.
-  `fleet_registry_disabled_no_ui` is gone. `UIServer` is `APIServer`, and `DrakkarApp.ui_url`
-  is `api_url`.
-- **Keys grouped under `ui`.** `ui.allowed_ws_origins` is `ui.allowed_origins`.
-  `ui.probe_enabled` and `ui.probe_details.*` are `ui.probe.enabled`, `.max_writes` and
-  `.max_total_size`, which takes a size such as `5MB`. `ui.prometheus_*` is `ui.prometheus.*`.
-- **API contract v1.28.** `GET /api/v1/identity` gains `capabilities`; `Worker` rows of
-  `GET /api/v1/workers` gain `ui_enabled`, from the card's new `features.ui`.
-- **Autodiscover is one optional feature, off by default.** `fleet.registry` and
-  `periodic.election` become the root section `autodiscover`, with `enabled`, one
-  `provider` for the registry and the election, `connection`, `heartbeat`, `refresh`,
-  `offline_after`, `prune_after` and one `resilience` block; the two callers keep separate
-  breakers. The root sections `fleet` and `periodic` are gone. With it off, a worker
-  publishes no card, reads no peers and runs no election, and a declared cluster task fails
-  startup. `autodiscover.provider filesystem needs storage.shared_dir`: the fallback to
-  `storage.dir` is gone. An unknown provider fails the load.
-- **The archive has two scopes.** With `autodiscover.enabled` and `storage.shared_dir` set,
-  a pass covers the whole cluster with an election, as `history.archive` in the definition
-  hash. In every other case it runs at the same slots with no election, no lease and no hash
-  entry, takes only this worker's sealed files and writes
-  `<cluster>-<worker>-<from>__<to>.db.gz`; retention and the sweep touch only that worker's
-  names. `ui.enabled` is not part of the gate. The `cluster` of an archive row is the folder
-  name. `archive_task_runs` is `archive_scope`; `PeriodicRoster.runs_archive` is
-  `archive_scope`; `run_archive_pass` takes `only_worker` and needs a `fence` or `only_worker`.
-  `recorder_archive_pass_abandoned` has a second `detail` for this scope. This scope needs a
-  stable worker name: a generated one logs `archive_own_scope_unstable_worker_name` at startup,
-  and files of a retired name stay until an operator deletes them. The wizard no
-  longer turns the archive off on several hosts without a folder.
-- **`fleet.cache_exchange` is `cache.exchange`.** With autodiscover off it does nothing and
-  logs `cache_exchange_off_no_autodiscover` once. `CacheEngine` takes no `exchange` argument.
-- **Log events.** `periodic_cluster_check_off` and `fleet_registry_disabled_no_dir` are
-  gone. `cluster_name_empty` warns at startup with autodiscover on and no cluster name.
-- **The config wizard prints `autodiscover`,** off when the deployment has no shared service,
-  and its links use one key `discover`.
-- **The recorder is a feature of its own.** A root section `recorder:` holds it, and
-  `ui.enabled` no longer decides it. A worker with `ui.enabled: false` now records into
-  `storage.dir` or Postgres, seals and archives, with no memory store. Set
-  `recorder.enabled: false` to record nothing durable; with the UI on, the UI then shows
-  the memory window and a trace with `history=1` reads no folder and no table.
-  `recorder.provider` is `sqlite` or `postgres`. `ui.recorder.persistence` and its derive
-  rule are gone: with `sqlite`, an empty `storage.dir` now fails the load.
-- **Keys moved into `recorder`.** `ui.recorder.*` is split into `recorder.memory`,
-  `capture`, `annotations`, `sqlite` and `postgres`; `history.archive.*` and
-  `history.merged_retention_days` are in `recorder.archive`; `ui.trace` is
-  `recorder.search`; `ui.expose_env_vars` is `recorder.capture.env_vars`. Durations and
-  sizes carry a unit. `recorder.postgres.initial_retention` defaults to `24h`.
-  `shared.dir` is `storage.shared_dir`. See the path table in `docs/upgrading.md`.
-- **Resilience keys renamed.** `timeout`, `max_retries`, `backoff`, `max_backoff`,
-  `breaker_failures`, `breaker_cooldown`, with units; the `breaker` block is gone.
-- **`recorder_started` has no `ignored_keys` field, and `db_path` is empty when there is no file.**
+- **One config layout.** Every section and key has its final name. Unknown keys
+  fail the load: one message lists every unknown key from the YAML file and the
+  `DK_*` environment, with a suggestion when a valid key is close. A config model
+  built in code refuses an unknown keyword too, and `PostgresConnectionConfig`
+  takes only `schema`. The main moves:
+  - Names: `worker.name_env`, `worker.name` (a literal worker name),
+    `cluster.name` and `cluster.name_env`.
+  - Executor and threads: `executor.task_timeout`, `executor.drain_timeout`,
+    `executor.max_stdout`, `executor.max_stderr`; `threads.io` and
+    `threads.offload` (`null` derives the size, `0` fails the load).
+  - Services are declared once under `connections` (`kafka`, `postgres`, `mongo`,
+    `redis`, `consul`). The root `kafka:` section is gone. The Kafka source, the
+    DLQ and every Kafka, Postgres, Mongo and Redis sink name an entry with
+    `connection` (default `main`), and an entry that is not declared fails the
+    load. A sink keeps its own client or pool. A sink's or the DLQ's
+    `client_config` is merged after the connection's. The key prefix of a Redis or
+    Consul connection is `state_prefix`. The `kafka_brokers` column of
+    `worker_config` holds the brokers of the source's connection.
+  - Sources: `sources.kafka.max_poll_interval`, `session_timeout`,
+    `heartbeat_interval` and `startup_align` (`enabled`, `min_wait`, `interval`);
+    `sources.http.deliver_to_sinks`, `request_timeout` and `max_body`.
+  - Sinks: `sinks.defaults` holds `on_failure`, `max_retries`, `delivery_timeout`,
+    `breaker_failures` and `breaker_cooldown`, and a sink may give any of them.
+    `sinks.delivery_timeout_seconds` and `sinks.circuit_breaker` are gone. Each
+    policy is resolved when the worker is constructed, so a change of these keys
+    in `on_startup` is ignored and logged as `on_startup_config_change_ignored`.
+    `sinks.kafka.*.flush_timeout` and `sinks.http.*.request_timeout` take units.
+  - DLQ: `dlq.enabled`, `dlq.provider` (only `kafka`) and `dlq.connection`;
+    `dlq.brokers` and `dlq.security` are gone. With `dlq.enabled: false` a `dlq`
+    outcome follows `dlq.on_send_failure`.
+  - API server: the root section `api` (`enabled`, `host`, `port`, `public_url`).
+    With `ui.enabled: false` the worker serves `/healthz`, `/readyz` and
+    `/api/v1/peer/cache/changes`; every other route answers 404 and no bundle is
+    fetched. `api.enabled: false` starts no server. `ui.enabled` and
+    `autodiscover.enabled` each need `api.enabled`. `UIServer` is `APIServer`,
+    and `DrakkarApp.ui_url` is `api_url`.
+  - UI: `ui.allowed_origins`, `ui.probe.enabled`, `ui.probe.max_writes`,
+    `ui.probe.max_total_size`, `ui.prometheus.*`, `ui.ws_min_duration`,
+    `ui.consume_pause.durations` and `ui.timeline.max_age` (whole minutes).
+    `logging.min_task_duration` replaces `ui.log_min_duration_ms`.
+  - Recorder: the root section `recorder` (`enabled`, `provider`,
+    `flush_interval`, `max_buffer_rows`, and the blocks
+    `memory`, `capture`, `annotations`, `sqlite`, `postgres`, `archive` and
+    `search`). `ui.recorder.*`, `history.*` and `ui.trace.*` are gone;
+    `ui.expose_env_vars` is `recorder.capture.env_vars`; `shared.dir` is
+    `storage.shared_dir`. `ui.enabled` does not decide the recorder: a worker
+    with the UI off records into `storage.dir` or Postgres, seals and archives,
+    with no memory store. `recorder.provider` is `sqlite` (default) or
+    `postgres`; with `sqlite` an empty `storage.dir` fails the load. With
+    `recorder.enabled: false` the worker records nothing durable.
+  - Autodiscover: `fleet.registry` is the root section `autodiscover`, off by
+    default, with `enabled`, one `provider` for the registry and the election
+    (`filesystem`, `postgres`, `redis` or `consul`), `connection`, `heartbeat`,
+    `refresh`, `offline_after` (default `1m`; it was 30 s), `prune_after` and one
+    `resilience` block. The `filesystem` provider needs `storage.shared_dir` and
+    keeps its cards in `<storage.shared_dir>/fleet`. With autodiscover off a
+    worker publishes no card, reads no peers and runs no election, and a
+    declared cluster task fails startup. The registry runs with the UI off.
+  - Cache exchange: `fleet.cache_exchange` is `cache.exchange`. With autodiscover
+    off it does nothing and logs `cache_exchange_off_no_autodiscover` once.
+    `CacheEngine` takes no `exchange` argument. `cache.max_memory_entries: 0`
+    means no cap.
+  - Resilience blocks use `timeout`, `max_retries`, `backoff`, `max_backoff`,
+    `breaker_failures` and `breaker_cooldown`.
+- **Durations and sizes carry their unit in the value.** A duration is text such
+  as `30s`, `2h45m` or `500ms`; a size is text such as `64KiB` or `256MB`. A bare
+  number other than `0` fails the load, and so does a value that is not a whole
+  number of the unit a key counts in. A value outside the range of its key fails
+  with the range and the value in the same form:
+  `recorder.memory.max_size must be from 16MiB to 512MiB, got 600MiB`.
+- **Environment variables.** A `DK_` segment at a sink or connection name reaches
+  the YAML name whose lower-case form with `-` replaced by `_` equals it, so
+  `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` changes `sinks.postgres.main-db`; two
+  matches fail the load. `load_config` reads upper-case `DK_` names only. A JSON
+  text for a list or map field is the whole value
+  (`DK_RECORDER__CAPTURE__ENV_VARS='["A","B"]'`), and `DK_APP` is refused like
+  `DK_APP__*`.
+- **The summary line has a new form.** `api=<port|off> ui=<on|off>` replaces
+  `ui=on:<port>`, `recorder=` is always printed, `autodiscover=<provider|off>`
+  replaces `fleet=`, and `dlq=` is `on`, `off`, a topic, or `unconfigured` for a
+  DLQ that is on with no topic.
+- **API contract v1.28** (2.4.0 served v1.23). `/api/v1/workers` rows gain
+  `cluster_tasks_hash`, `cluster_tasks_match` and `ui_enabled`;
+  `/api/v1/debug/periodic` groups gain `scope`; `/api/v1/debug/databases` shows
+  the memory store as its first row; `/api/v1/debug/download-live` takes
+  `source=memory` or `source=file`; `trace?history=1` on a worker with the
+  `postgres` recorder reads the table and can answer 503
+  `{"detail": "history search failed"}`; a DLQ record read through the API
+  carries the `dk-` headers; `GET /api/v1/identity` gains `capabilities`; the
+  recorder events `message_dlq` and `sink_not_started` are new, and `sink_error`
+  gains `action`. The `throughput` frame of `/ws` is gone.
+- **The DLQ record is the original message, and every sink declares a failure
+  policy.** A DLQ record is the failed source message: its key and value
+  unchanged, its own headers (minus any `dk-` header), then `dk-` headers with
+  the failure facts (`dk-record-version`, `dk-stage`, `dk-error`, `dk-sink`,
+  `dk-attempts`, `dk-source-*`, `dk-worker` and more). The JSON body with
+  `original_payloads` is gone, so every consumer of the DLQ topic must change.
+  The replay tool never republishes a record without `dk-` headers and counts it
+  as `skipped_old_format`. `DLQMessage` and `ParseFailurePayload` are removed,
+  `DLQSink.send` takes a `DLQRecord`, `read_dlq_entries` yields `DLQEntry` (key,
+  value, headers, partition, offset), and `SourceMessage` has `headers`.
+  `sinks.http.<name>.max_retries` is the shared retry budget: the default is 2
+  (it was 3), and a value above 10 fails the load. A raising
+  `on_delivery_error` applies the sink's declared `on_failure` and logs
+  `delivery_error_hook_failed`. With the circuit open the declared `on_failure`
+  decides. After a message's first DLQ record no later result of that message
+  is delivered. A window result cannot reach the DLQ: there `on_failure: dlq`
+  acts as `skip` with `window_delivery_not_dlq`.
+  `drakkar_dlq_dropped_payloads_total` counts source messages. The HTTP
+  response's sink summary reports `<type>/<name>: not started` and
+  `<type>/<name>: failed, no DLQ record`. `dlq_message_sent` and
+  `dlq_send_failed` carry `stage`, `sink` and `value_bytes`;
+  `dlq_payload_serialization_fallback`, `webapp_on_delivery_error_failed` and
+  `webapp_sink_dlq_send_failed` are gone. `scripts/replay_dlq.py` republishes
+  each record's key, value and source headers, takes `--stage`, and its summary
+  has `skipped_old_format` instead of `skipped_invalid`. See
+  `docs/upgrading.md` ("The DLQ record").
+- **The archive runs at slots and has two scopes.** `recorder.archive` holds
+  `enabled`, `window`, `due_after`, `retention`, `merged_retention`,
+  `interval` or `cron` (one archive slot every hour by default), `lease` and
+  `sweep_after`. The pass runs at its slots, not after each rotation. With
+  `autodiscover` on and `storage.shared_dir` set it covers the whole cluster,
+  and one worker per slot wins the election. In every other case each worker
+  archives only its own sealed files into `<cluster>-<worker>-<from>__<to>.db.gz`,
+  with no election; this scope needs a stable worker name, and a generated one
+  logs `archive_own_scope_unstable_worker_name`. The `filesystem` lock is
+  `tasks/<cluster>/history.archive.lock` in the shared folder (2.4.0 used
+  `history/<cluster>/.archive.lock`), so upgrade with the whole fleet stopped,
+  or turn the archive off on every worker during a rolling restart.
+  `drakkar.recorder.task_lock.TaskLock` replaces `ArchiveLock`;
+  `recorder_archive_lock_taken_over` and `recorder_archive_lock_put_back_failed`
+  are `periodic_lock_taken_over` (field `scope`) and
+  `periodic_lock_put_back_failed`, in category `periodic`. `EventRecorder` takes
+  no election arguments, `run_archive_pass` takes a `fence` or `only_worker`, and
+  `EventRecorder.stop` takes `reserve_seconds=`. A lease is refreshed at a third
+  of its length, at most every 60 seconds.
+- **`@periodic` takes `interval` instead of `seconds`.** Write `@periodic(30)` or
+  `@periodic(interval=30)`; `seconds=` raises `TypeError`. The decorator checks
+  the method name (1 to 64 characters of `a-z`, `0-9` and `_`, not starting with
+  a digit) and the schedule at import, and raises `PeriodicRuleError` (a
+  `ValueError`). `run_periodic_task` takes `interval=` or `cron=` as keywords.
+- **Plugins are removed.** There are no custom sinks and no custom registry
+  providers: `sinks.custom`, `CustomPayload`, `CollectResult.custom`,
+  `SinkRegistry`, the entry-point groups `drakkar.sinks` and
+  `drakkar.registry_providers`, `fleet.registry.plugin_options`, the
+  `fleet_registry_entry_point_*` log events and the registry test kit are gone.
+  A probe record has no sink type `custom`, and the HTTP response summary has
+  no `custom` entry.
+- **Task cost, speed and throughput are removed.** The `throughput` section, the
+  `cost` and `speed` keys of `task_completed` metadata and `recent-tasks` rows,
+  the `worker_state.throughput` column, and the metrics `drakkar_task_speed`,
+  `drakkar_throughput` and `drakkar_task_rate` are gone. Merge still reads
+  recorder files that carry extra `worker_state` columns.
+- **The `static` and `none` registry providers are removed,** with
+  `fleet.registry.static` and `fleet.registry.filesystem.dir`. A registry that
+  is off shows only the current worker.
+- **Provider calls.** `autodiscover.resilience.timeout` limits one attempt, and
+  an operation retries twice by default. A registry provider that fails to start
+  is tried again at the next heartbeat. `fleet_registry_{op}_failed` and
+  `fleet_registry_start_failed` are replaced by `provider_call_failed`.
+  `drakkar_fleet_registry_errors_total` counts operations (retries are part of
+  one operation) and loop iterations that raised, and its `op` label gains
+  `start` and `stop`. A config error does not print the input of the section it
+  rejected. The lock body has the key `provider`.
+- **Log events.** `fleet_registry_disabled_no_ui` and
+  `fleet_registry_disabled_no_dir` are gone. `ui_disabled_no_probes` follows
+  `api.enabled`. `cluster_name_empty` warns at startup with autodiscover on and
+  no cluster name. `recorder_started` gains `persistence` and, with a memory
+  store, its bounds; `db_path` is empty when there is no file.
 - **Metric help texts name the current keys.** The help of
   `drakkar_recorder_requeue_overflow_total`, `drakkar_recorder_archive_bytes`,
   `drakkar_recorder_archive_files`, `drakkar_recorder_archive_failures_total` and
   `drakkar_recorder_annotations_dropped_total` changed.
-- **A service is declared once under `connections`.** The root `kafka:` section
-  is gone: brokers, security, `client_config` and the Kafka-UI links live in
-  `connections.kafka.<name>`. `connections.mongo.<name>` holds the Mongo `uri`.
-  The Kafka source, the DLQ and every Kafka, Postgres, Mongo and Redis sink name
-  an entry with `connection` (default `main`), and the entry must be declared, or
-  the load fails. A sink keeps its own client or pool. Two Kafka sinks may share
-  one connection, and a sink's or the DLQ's `client_config` is merged after the
-  connection's. `key_prefix` of a Redis or Consul connection is `state_prefix`.
-  The `kafka_brokers` column of `worker_config` holds the brokers of the source's
-  connection, or `''` with the source off.
-- **Durations and sizes in `sources`, `sinks` and `dlq` carry a unit.**
-  `max_poll_interval`, `session_timeout`, `heartbeat_interval`,
-  `sources.kafka.startup_align` (`enabled`, `min_wait`, `interval`),
-  `sources.http.deliver_to_sinks`, `request_timeout` and `max_body`,
-  `sinks.kafka.*.flush_timeout`, `sinks.http.*.request_timeout` and
-  `dlq.flush_timeout` replace the old names.
-- **Each sink has its own timeout and breaker.** `sinks.defaults` holds
-  `on_failure`, `max_retries`, `delivery_timeout`, `breaker_failures` and
-  `breaker_cooldown`. A sink may give any of them, and a key it gives wins.
-  `sinks.delivery_timeout_seconds` and `sinks.circuit_breaker` are gone. Each
-  policy is resolved when the worker is constructed, so a change of these keys in
-  `on_startup` is ignored and logged as `on_startup_config_change_ignored`.
-- **`dlq.enabled` and `dlq.provider` are new.** With `dlq.enabled: false` a `dlq`
-  outcome follows `dlq.on_send_failure`. `dlq.provider` accepts only `kafka`.
-  `dlq.brokers` and `dlq.security` are gone.
-- **Unknown config keys fail the load.** One message lists every unknown key
-  from the YAML file and the `DK_*` environment, with a suggestion when a valid
-  key is close. The message for moved keys and the refusal of `webapp:` are gone:
-  those keys are unknown keys now. Every config model refuses an unknown keyword
-  when it is built in code, and `PostgresConnectionConfig` takes only `schema`,
-  not `schema_name`. See `docs/upgrading.md`.
-- **A `DK_` variable reaches the existing map name.** A segment at a sink or
-  connection name takes the YAML name whose lower-case form with `-` replaced by
-  `_` equals it, so `DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX` changes
-  `sinks.postgres.main-db` and does not make a second instance. Two matches fail
-  the load. `load_config` reads upper-case `DK_` names only.
-- **A JSON text in a `DK_` value now loads through `load_config`.** For a list or
-  map field, `DK_UI__EXPOSE_ENV_VARS='["A","B"]'` is the whole value and replaces
-  the YAML value. A text that is not valid JSON fails at the field. `DK_APP` is
-  refused like `DK_APP__*`.
-- **Plugins are removed.** There are no custom sinks and no custom registry or
-  election providers. `sinks.custom`, `CustomPayload` and
-  `CollectResult.custom` are gone, and so are `SinkRegistry`, the entry-point
-  groups `drakkar.sinks`, `drakkar.registry_providers` and
-  `drakkar.election_providers`, and the keys `fleet.registry.plugin_options`
-  and `periodic.election.plugin_options`. The `provider_entry_point_*` log
-  events and the provider test kits are gone too. A probe record no longer has
-  the sink type `custom`, and the HTTP response summary has no `custom` entry.
-  The built-in sinks and providers are the only ones. See `docs/upgrading.md`.
-- **Task cost, speed and throughput are removed.** The `throughput` config
-  section (`cost_label`, `min_cost`), the `cost` and `speed` keys of
-  `task_completed` metadata and `recent-tasks` rows, the `throughput` frame on
-  `/ws`, the `worker_state.throughput` column, and the metrics
-  `drakkar_task_speed`, `drakkar_throughput` and `drakkar_task_rate` are gone.
-  Merge still reads recorder files that carry extra `worker_state` columns.
-  See `docs/upgrading.md`.
-- **Periodic task overrides and the `static` and `none` registry providers are
-  removed.** `periodic.tasks` is not a config key: the schedule and the lease of
-  a task come from its `@periodic` decorator only. The `fleet.registry.provider`
-  values `static` and `none`, and the keys `fleet.registry.static`,
-  `fleet.registry.filesystem.dir`, `fleet.registry.consul` (`mode`,
-  `service_name`), `fleet.registry.redis` and `fleet.registry.postgres`, are
-  gone. The card folder is `<shared.dir>/fleet`, or `<storage.dir>/fleet`.
-  A registry that is off shows only the current worker. See `docs/upgrading.md`.
-- **Provider settings changed.** `fleet.registry.timeout_seconds` is now
-  `fleet.registry.resilience.timeout_seconds` (env
-  `DK_FLEET__REGISTRY__RESILIENCE__TIMEOUT_SECONDS`). The old key fails the
-  load as an unknown key. The value now limits one attempt, and an
-  operation retries twice by default. The default of
-  `fleet.registry.offline_after_seconds` is now 60 (it was 30), and its
-  smallest value is 10. A registry provider that fails to start is tried
-  again at the next heartbeat. It is no longer replaced with `none`. The log
-  events `fleet_registry_publish_failed`, `fleet_registry_list_failed`,
-  `fleet_registry_withdraw_failed` and `fleet_registry_start_failed` are
-  replaced by `provider_call_failed`. `drakkar_fleet_registry_errors_total` now counts
-  operations (retries are part of one operation) and loop iterations that
-  raised, and its `op` label gains `start` and `stop`. A config error no
-  longer prints the input of the section it rejected. The archive lock body
-  has a new key, `provider`. A registry or election provider named `consul`,
-  `redis` or `postgres` fails the config load unless the connection it uses
-  is declared as `connections.<provider>.<connection>`. See
-  `docs/upgrading.md`.
-- **The `redis` package must be version 7.2 or later** (it was 5.2.0). The
-  Redis sink uses the same package, so this applies to it too.
-- **Periodic tasks have new schedules, and the archive is a cluster
-  periodic task.** `@periodic` takes `interval` instead of `seconds`: write
-  `@periodic(30)` or `@periodic(interval=30)`; `seconds=` now raises
-  `TypeError`. The decorator checks the method name (1 to 64 characters of
-  `a-z`, `0-9` and `_`, not starting with a digit) and the schedule when the
-  module is imported, and raises `PeriodicRuleError` (a `ValueError`) that
-  names the method. `run_periodic_task` takes `interval=` or `cron=` as
-  keywords. The archive pass no longer runs after each rotation: it runs at
-  archive slots, at the top of each UTC hour by default.
-  `history.archive.lock_stale_seconds` is replaced by
-  `history.archive.lease_seconds` (the lease, default 60, from 40 to 86400)
-  and `history.archive.sweep_after_seconds` (the age of work files to sweep,
-  default 7200, at least 60); the old key fails the load as an unknown
-  key, and so do `history.archive.election` and
-  `history.archive.pass_interval_seconds` in a config written for an older
-  build. The `filesystem` lock moved from `history/<cluster>/.archive.lock`
-  to `tasks/<cluster>/history.archive.lock` in the shared folder
-  (`drakkar.recorder.task_lock.TaskLock`, was `ArchiveLock`), and the log
-  events `recorder_archive_lock_taken_over` and
-  `recorder_archive_lock_put_back_failed` are now `periodic_lock_taken_over`
-  (field `scope` instead of `folder`) and `periodic_lock_put_back_failed`,
-  in category `periodic`. A 2.4.0 worker and a worker of this release take
-  different archive locks, so upgrade with the whole fleet stopped, or set
-  `history.archive.enabled: false` on every worker during the rolling
-  restart. Old lock files are not read; delete them. `EventRecorder` takes no
-  election arguments, `run_archive_pass` takes a `fence`, and
-  `EventRecorder.stop` takes `reserve_seconds=`. See `docs/upgrading.md`.
-- **The DLQ record is the original message, and every sink declares a
-  failure policy.** A DLQ record is now the failed source message: its key
-  and value unchanged, its own headers (minus any `dk-` header), then `dk-`
-  headers with the failure facts (`dk-record-version`, `dk-stage`,
-  `dk-error`, `dk-sink`, `dk-attempts`, `dk-source-*`, `dk-worker` and more).
-  The JSON body with `original_payloads` is gone, so every consumer of the
-  DLQ topic must change. A record written before the upgrade has no `dk-`
-  headers: the replay tool never republishes one and counts it as
-  `skipped_old_format`, so drain or delete the old topic content when it must
-  not stay. `DLQMessage` and `ParseFailurePayload` are removed,
-  `DLQSink.send` takes a `DLQRecord`, `read_dlq_entries` yields `DLQEntry`
-  (key, value, headers, partition, offset) instead of decoded JSON, and
-  `SourceMessage` has `headers`. `sinks.http.<name>.max_retries` is now the
-  shared retry budget: the default is 2 (it was 3), and a value above 10
-  fails the load. `RETRY` is honoured up to the sink's `max_retries` (it was
-  a fixed 3 attempts). A raising `on_delivery_error` no longer propagates or
-  reaches `dlq.on_send_failure`: the worker logs `delivery_error_hook_failed`
-  and applies the sink's declared `on_failure`, on the HTTP source too. With
-  the circuit open the hook is never called; the declared `on_failure`
-  decides. After a message's first DLQ record no later result of that message
-  is delivered. `drakkar_dlq_dropped_payloads_total` counts source messages,
-  not payloads. The HTTP response's per-type sink
-  summary lost the markers `dlq_unconfigured` and `dlq_send_failed: ...`; it
-  now reports `<type>/<name>: not started` and
-  `<type>/<name>: failed, no DLQ record`, and `dlq` counts only when the
-  request's DLQ record was written. The log events `dlq_message_sent` and
-  `dlq_send_failed` carry `stage`, `sink` and `value_bytes` instead of payload
-  fields; `dlq_payload_serialization_fallback`,
-  `webapp_on_delivery_error_failed` and `webapp_sink_dlq_send_failed` are
-  gone. `scripts/replay_dlq.py` republishes each record's key, value and
-  source headers, takes `--stage`, skips old-format records, and its summary
-  has `skipped_old_format` instead of `skipped_invalid`. A failed delivery of
-  an `on_window_complete` result no longer reaches the DLQ (it was written as
-  the old payload JSON): a window result has no source message, so there
-  `on_failure: dlq` acts as `skip` with `window_delivery_not_dlq`. A handler
-  that needs the DLQ for an aggregate delivers it from
-  `on_message_complete`, or sets `on_failure: skip` on that sink knowingly.
-  See `docs/upgrading.md` ("The DLQ record").
+- **The `redis` package must be version 7.2 or later** (it was 5.2.0). The Redis
+  sink uses the same package.
 
 ### Added
 
-- **Output and size limits for the recorder table in Postgres.** A `task_failed` row
-  always keeps its `stderr`, also with `recorder.postgres.store_completed_output: false`.
-  `recorder.postgres.max_output` (default `64KiB`, `0` or at least `1KiB`) cuts each
-  `stdout` and `stderr` value to its first and last half, at character boundaries, joined
-  by `...[cut <n> bytes]...`; `metadata` is never cut. `recorder.postgres.max_size`
-  (default `0`, `0` or at least `64MiB`) makes the partition upkeep drop the oldest hours,
-  never the previous or the current one, while the table is larger, so the table can stay
-  above it by up to two hours of writes; the upkeep holder's own value applies.
-  New metric `drakkar_recorder_postgres_partitions_dropped_total{reason}` (`retention`,
-  `size`); `recorder_postgres_partitions_changed` gains `dropped_for_size`.
-- **Failure policy, retry budget and dependencies per sink.** Every sink
-  instance takes `on_failure` (`dlq` or `skip`, default
-  `dlq`), `max_retries` (0 to 10, default 2) and `depends_on` (a list of
-  `<type>/<name>`). A sink starts after the sinks in its `depends_on`
-  delivered or skipped; the others run in parallel. The load checks every
-  value and every reference, refuses a sink that depends on itself or a
-  cycle. `on_delivery_error` sees `attempt`, `retries_left` and
-  `declared_policy`, and by default returns the declared policy. A delivery
-  that ends in `dlq` writes one record per source message and ends the
-  message. A window result cannot go to the DLQ, so there `dlq` drops the
-  payloads with a `window_delivery_not_dlq` warning. `on_error` can return
-  `ErrorAction.DLQ` (`dk-stage: execute`), and `executor.on_failure` (`skip`
-  or `dlq`, default `skip`) is what the default `on_error` returns. It also
-  applies when `on_error` returns `RETRY` with `executor.max_retries` spent
-  (`max_retries_exceeded` gains `action`) and when `on_error` raises (after
-  `on_error_hook_failed`, whose `action` names the policy). The parse stage
-  logs and records `message_dlq` too. The `sink_not_started` recorder rows of
-  an HTTP request carry `origin` and `request_id`, as its `message_dlq` rows
-  do. The message probe treats `DLQ` as a failure and writes nothing. The HTTP
-  source delivers a request's sinks in one pass with the same rules; its
-  record holds the raw request body and `dk-request-id`. New metrics
-  `drakkar_dlq_records_total{stage}` and
-  `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`,
-  new log events (`message_dlq`, `message_already_dlq`, `sink_not_started`,
-  `sink_retry_budget_spent`, `delivery_error_hook_failed`,
-  `window_delivery_not_dlq`, `execute_dlq_failed`), new recorder events
-  `message_dlq` and `sink_not_started`, and `sink_error` gains `action`
-  (`retry`, `skip`, `dlq` or `failed`). See `docs/sinks.md`.
-- **DLQ record scenario in the integration harness.** The main cluster
-  runs with `sources.kafka.on_parse_error: dlq`.
-  `integration/scenario-dlq-record.sh` produces one message that cannot be
-  parsed and checks its DLQ record: the key and value unchanged, `dk-stage`
-  `parse`, `dk-record-version` `1`, the source offset, and the headers in
-  the fixed order. `just integration-scenarios` and
-  `just integration-matrix` run it with every provider.
-- **Recorder mode `postgres`: the history table in Postgres.**
-  `ui.recorder.persistence` accepts `postgres`. It is never derived from
-  `storage.dir`. The new section `ui.recorder.postgres` has the keys
-  `connection` (`main`), `table_prefix`, `retention_hours` (6),
-  `store_output` (false), `batch_rows` (5000), `queue_max_mib` (128) and
-  `resilience`. The load fails when the named connection is not declared
-  under `connections.postgres`. The config summary shows
-  ` recorder=postgres`. `drakkar-schema postgres` has the new flags
-  `--recorder`, `--table-prefix` and `--retention-hours` (1 to 168, default
-  6). With `--recorder` it also prints the DDL of the recorder events table,
-  one table partitioned by UTC hour. Rows that the memory store takes wait
-  in a queue for the table, with the same ids. The queue is bounded by
-  `ui.recorder.max_buffer` rows and by `queue_max_mib`. When it is full, the
-  oldest rows are dropped and counted in
-  `drakkar_recorder_postgres_dropped_rows_total{reason="queue_full"}`, and
-  `recorder_postgres_rows_dropped` is logged. Stage P writes the queue to
-  the table with one COPY per chunk, on a thread of its own with one
-  connection. It starts on the first tick and tries again on each tick while
-  Postgres is down; rows wait in the queue. A chunk is dropped only after two
-  final COPY errors (`reason` `no_partition` or `rejected`); each final error
-  logs `recorder_postgres_copy_rejected`. A final error is one that the rows
-  cause: SQLSTATE class 22 or 23, or a value the client cannot encode. Any
-  other server error keeps the chunk and counts toward the breaker. After
-  `42P01` (a missing table) the next run starts stage P again, which creates
-  the table with `manage_schema: true`. The COPY transaction sets
-  `statement_timeout` to `0`. At stop, the rows that stage P
-  cannot write in the time left are dropped with `reason` `shutdown`.
-  `recorder_started` names `postgres_connection` and `postgres_table`.
-  Stage P keeps one partition per UTC hour, from one hour behind to three
-  hours ahead of the server clock. It does this upkeep at start and every
-  300 s, in one transaction under a try-lock, so one writer of a table works
-  at a time. It drops old partitions only by the retention in the table
-  comment (`retention_hours=<n>`), never by its own setting. Change it with
-  `COMMENT ON TABLE <schema>.<table> IS 'retention_hours=<n>'`. A table
-  without a valid comment keeps every partition. A worker whose setting
-  differs from the comment, or finds none, logs
-  `recorder_postgres_retention_mismatch` once. A change logs
-  `recorder_postgres_partitions_changed`.
-  With `postgres`, every local read uses the memory store, as with `none`.
-  `trace?history=1` searches the table rows of the worker's own cluster,
-  not the sealed files. The search runs on the UI server loop with one
-  connection, one attempt, JIT off, and the time limit
-  `ui.trace.history_max_seconds` on the client and on the server. A failed
-  or timed-out search answers 503 `{"detail": "history search failed"}` and
-  logs `ui_read_postgres_failed` (at most once per minute; `reason` is
-  `timeout`, `error` or `busy`). An `offset` outside the 64-bit range
-  answers 422. The answer is API contract v1.26. The
-  server time limit is at most 3600 s. At most two history searches run at
-  once on one worker; a third answers the same 503 and logs `reason=busy`.
-  A complete search whose connection does not close cleanly still answers
-  its rows and logs `reason=close`.
-  New metrics:
-  `drakkar_recorder_postgres_queue_rows`,
-  `drakkar_recorder_postgres_rows_written_total` and
-  `drakkar_recorder_postgres_dropped_rows_total`. The recorder calls use the
-  provider metrics and the `provider_*` log events with `feature=recorder`
-  and the operations `start`, `copy` and `partitions`.
-  `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
-  have the new `stage` value `postgres`. The new docs page
-  `recorder-postgres.md` describes the mode, and the config wizard has the
-  new question "Where should the long event history live?" (`files` or
-  `postgres`). The fast cluster of the integration harness runs in this
-  mode, and `integration/scenario-recorder-postgres.sh` checks the table,
-  its partitions, the history search, a paused database and the 503.
-  `integration/scenario-secrets.sh` also checks the fast workers.
-- **Recorder memory store and the persistence choice.** When
-  `ui.recorder.store_events` is on, the recorder keeps its recent events in
-  an in-memory SQLite database, the memory store. New keys:
-  `ui.recorder.persistence` (`none` or `sqlite`; unset, it is `sqlite` when
-  `storage.dir` is set and `none` when it is empty) and
-  `ui.recorder.memory.window_seconds` (120), `rows_per_executor` (3000,
-  times `executor.max_executors`) and `max_mib` (256). With `sqlite` the
-  recorder also writes recorder files as before; with `none` it writes no
-  file, and the archive pass does not run. `persistence: sqlite` with an
-  empty `storage.dir` fails the load with a message that says what to set.
-  The config summary line shows ` recorder=none` when the mode is `none` and
-  `storage.dir` is set. A config with `storage.dir: ''` keeps working and is
-  now queryable: the UI pages read the memory store. A `none` worker with a
-  shared folder still reads the sealed history of its cluster. A SQLite
-  library without the memdb VFS fails the start with a clear message.
-  The recorder gives each row its id and writes the row with the same id to
-  the memory store and to the file, on two separate loops, so a slow disk
-  does not stop the memory store. Ids continue across file rotations and
-  start again at 1 after a restart. After each memory write, and on every
-  memory tick when the worker is idle, the recorder removes the oldest rows:
-  first the rows older than the window, then the rows above the row cap,
-  then rows until the data bytes fit the budget, at most 5000 rows per
-  transaction and at most 64 byte batches per pass. A busy or locked memory
-  store is tried again on the next tick and loses nothing; any other failed
-  memory write deletes the memory rows up to that chunk.
-  With `sqlite`, a time-window read, a newest-N read and an `after_id` poll
-  use the memory store when it still holds every row they ask for, and the
-  live file otherwise; reads by task, message or label and the whole-table
-  reads use the file; the label keys always use the memory store. With
-  `none` every read uses the memory store, so the pages show the memory
-  window only. A memory read stops after 2 seconds and answers an empty
-  page. `/api/v1/partitions` answers an empty list when the main loop does
-  not answer in time.
-  Contract v1.25: `/api/v1/debug/databases` shows the memory store as the
-  first row (`kind: "memory"`, named `<worker>-memory`), and
-  `/api/v1/debug/download-live` takes `source=memory` or `source=file`
-  (default `file` when a live file is open, else `memory`). The memory
-  snapshot `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` is copied in steps of
-  1024 pages into a temporary file in `storage.dir` (a copy that does not
-  finish in 30 seconds answers 500),
-  or in RAM when there is no such folder or file.
-  One memory snapshot runs at a time: another memory download waits for it
-  up to 30 seconds, then answers 500 `Snapshot failed: another memory
-  snapshot is still running`. A copy in RAM is logged as
-  `debug_download_live_in_ram`.
-  New metrics: `drakkar_recorder_memory_rows`,
-  `drakkar_recorder_memory_bytes`, `drakkar_recorder_memory_allocated_bytes`,
+- **Recorder memory store.** The recorder keeps its recent events in an
+  in-memory SQLite database while the UI is on, bounded by `recorder.memory`
+  (`window` 2m, `rows_per_executor` 3000 times `executor.max_executors`,
+  `max_size` 256MiB). The recorder gives each row its id and writes it with the
+  same id to the memory store and to the durable store, on separate loops, so a
+  slow disk does not stop the memory store. The UI reads the memory store while
+  it holds every row a read asks for, and the durable store otherwise; with the
+  recorder off every read uses the memory store. A memory read stops after 2
+  seconds and answers an empty page. New metrics
+  `drakkar_recorder_memory_rows`, `drakkar_recorder_memory_bytes`,
+  `drakkar_recorder_memory_allocated_bytes`,
   `drakkar_recorder_memory_oldest_age_seconds`,
   `drakkar_recorder_memory_evicted_rows_total` and
-  `drakkar_recorder_memory_write_failures_total`.
-  `drakkar_recorder_buffer_size` and `drakkar_recorder_dropped_events_total`
-  now cover the intake and the file queue. New log events, each at most
-  once per 60 seconds: `recorder_memory_write_retry`,
-  `recorder_memory_write_failed`, `recorder_memory_eviction_failed`,
-  `recorder_memory_rollback_failed`, `recorder_memory_config_write_failed`
-  and `ui_read_memory_timed_out`. `recorder_started` gains `persistence`,
-  the memory bounds and, with `none`, `ignored_keys`;
-  `recorder_flush_loop_iteration_failed` and `recorder_final_flush_failed`
-  gain `stage` (`memory` or `file`). `EventRecorder.reader_db` is removed;
-  use `file_reader_db` or `memory_store`. New docs page: Recent Events in
-  Memory.
-- **Config wizard.** The calculator page is now the Config Wizard (the URL
-  `calculator/` stays). It also asks how many workers run, on one host or on
-  several, and which services every worker reaches. It prints the fleet part
-  of the config (`connections`, `fleet.registry`, `periodic.election`,
-  `shared.dir`) and the `DK_` variables that hold the secrets. It asks
-  whether each worker has a local disk; with no disk it prints
-  `storage.dir: ''`, and with no shared folder it turns the registry off.
-  The link keeps every answer. The rules are one data file, `docs/data/config-wizard.json`,
-  and a test loads every combination it prints.
-
-- **Cluster periodic tasks.** `@periodic(..., scope='cluster')` runs each
-  slot of a task on exactly one worker of the cluster, and
-  `@periodic(cron='<five fields>')` schedules a task by a cron expression in
-  UTC. A cluster task's slots are the same on every worker: whole multiples
-  of its interval since the epoch (at least 30 seconds), or the fire times of
-  its cron expression. Only one subset of cron is accepted, the one on which
-  cron libraries agree; the new dependency `cronsim` is pinned to 2.7 and
-  computes the fire times, and `tests/fixtures/periodic_contract.json` pins
-  the subset, its messages, the slots, the scopes and the definition hash.
-  At each slot every worker asks the election provider for a lease on
-  `<cluster>/<task>`, only in the first 10 seconds of the slot (a later slot
-  is `late`). The winner runs the task, refreshes the lease, holds it for
-  the whole run and at least 20 seconds, and then releases it; a slot runs
-  once while the clocks of the cluster differ by less than 10 seconds.
-  `lease_seconds` (default 60, from 40 to 86400) only sets how long the
-  lease of a dead holder lives. A lost lease is logged and does not stop the
-  run. There is no catch-up of missed slots. A worker that stops does not
-  release a lease it holds. A provider that is down skips slots and never
-  blocks the pipeline. The new section `periodic` holds the election
-  (`periodic.election`, used by every cluster task) and overrides of
-  declared tasks (`periodic.tasks.<name>`: `enabled`, `interval`, `cron`,
-  `lease_seconds`; env `DK_PERIODIC__TASKS__<NAME>__<KEY>`). A name with a
-  dot fails the load; a name the handler does not declare, or an override
-  that breaks a rule, fails startup. The worker resolves its periodic tasks
-  before the recorder, the registry and the sinks start. The election is
-  owned by the worker, not the recorder: it is made only when the worker
-  runs a cluster task (only then does an unknown provider name fail
-  startup), it starts at the first slot that needs it, it stops after the
-  recorder, and cluster tasks run with the UI off. The archive pass is the
-  system cluster task `history.archive` (`history.archive.interval`, default
-  3600, or `history.archive.cron`); a worker that does not win an archive
-  slot updates the archive footprint gauges. The registry card carries
-  `features.periodic.cluster_hash`, a hash of the worker's cluster task
-  definitions; after each registry refresh the worker logs
-  `periodic_cluster_mismatch` once per online peer of its cluster and
-  peer hash, and again when that peer leaves the listing and comes back.
-  Without a registry it logs `periodic_cluster_check_off` once.
-  `/api/v1/workers` rows have `cluster_tasks_hash` and
-  `cluster_tasks_match`, and `/api/v1/debug/periodic` groups have `scope`.
-  New metrics: `drakkar_periodic_cluster_slots_total{name,outcome}` and
-  `drakkar_periodic_cluster_mismatch_peers`. New log events:
+  `drakkar_recorder_memory_write_failures_total`, and the log events
+  `recorder_memory_write_retry`, `recorder_memory_write_failed`,
+  `recorder_memory_eviction_failed`, `recorder_memory_rollback_failed`,
+  `recorder_memory_config_write_failed` and `ui_read_memory_timed_out`.
+  `EventRecorder.reader_db` is removed; use `file_reader_db` or `memory_store`.
+  New docs page: Recent Events in Memory.
+- **Recorder provider `postgres`.** `recorder.provider: postgres` writes every
+  row into one table per prefix in Postgres, partitioned by UTC hour, with one
+  COPY per chunk on a thread and a connection of its own. `recorder.postgres`
+  holds `connection` (`main`), `table_prefix`, `initial_retention` (`24h`),
+  `store_completed_output`, `max_output` (`64KiB`; `0` or at least `1KiB`),
+  `max_size` (`0`; `0` or at least `64MiB`), `batch_rows`, `max_queue` and
+  `resilience`. A `task_failed` row always keeps its `stderr`. The upkeep keeps
+  one partition per hour from one hour behind to three hours ahead, drops old
+  partitions by the retention in the table comment, and by `max_size` drops the
+  oldest hours but never the previous or the current one. `trace?history=1`
+  searches the table rows of the worker's own cluster within
+  `recorder.search.timeout`; at most two searches run at once.
+  `drakkar-schema postgres` gains `--recorder`, `--table-prefix` and
+  `--retention-hours`. New metrics `drakkar_recorder_postgres_queue_rows`,
+  `drakkar_recorder_postgres_rows_written_total`,
+  `drakkar_recorder_postgres_dropped_rows_total` and
+  `drakkar_recorder_postgres_partitions_dropped_total{reason}`. New docs page:
+  `recorder-postgres.md`.
+- **Cluster periodic tasks.** `@periodic(..., scope='cluster')` runs each slot of
+  a task on exactly one worker of the cluster, and `@periodic(cron='...')`
+  schedules a task by a cron expression in UTC (a pinned subset; the new
+  dependency `cronsim` is pinned to 2.7). Slots are the same on every worker. At
+  each slot every worker asks the election provider of `autodiscover` for a
+  lease on `<cluster>/<task>` in the first 10 seconds of the slot; the winner
+  runs the task and holds the lease at least 20 seconds. `lease_seconds`
+  (default 60, from 40 to 86400) sets how long the lease of a dead holder lives.
+  A provider that is down skips slots and never blocks the pipeline. The
+  archive pass is the system cluster task `history.archive`. The registry card
+  carries `features.periodic.cluster_hash`, and the worker logs
+  `periodic_cluster_mismatch` for an online peer of its cluster with another
+  hash. New metrics `drakkar_periodic_cluster_slots_total{name,outcome}` and
+  `drakkar_periodic_cluster_mismatch_peers`, and the log events
   `periodic_slot_skipped`, `periodic_lease_lost`,
   `periodic_lease_refresh_failed`, `periodic_skip_hook_failed`,
-  `periodic_cluster_mismatch`, `periodic_cluster_check_off`,
-  `periodic_election_stop_failed` and `periodic_loop_ended` (the loop of a
-  worker or cluster task ended on an error outside a run). The `periodic_run` row of a cluster run
-  has the metadata keys `scope` and `slot`, and an archive pass writes a
-  `periodic_run` row named `history.archive`. New modules:
-  `drakkar.cronexpr`, `drakkar.schedule`, `drakkar.cluster_tasks` and
-  `drakkar.periodic_roster`. See `docs/periodic-tasks.md`.
-- **Integration harness profiles.** `just integration-up profile=quick` runs
-  a small corpus (1000 messages, repeat counts scaled by `REPEAT_SCALE=0.2`).
-  `full` is the default. The producer reads `REPEAT_SCALE`, and the scenario
-  scripts read the message total from the running producer.
-- **Integration harness run matrix.** `just integration-matrix` runs the
-  harness for each provider and prints a PASS, FAIL or N/A table.
-  `integration/wait-ready.sh` waits until the workers are listed online and
-  answer `/readyz` before the scenarios.
-- **Archive election in the unclean-exit scenario.** The scenario now plants
-  a due history window (`integration/plant_history.py`) between two archive
-  slots, kills the worker that won the next slot during its pass, and checks
-  that another worker takes the lock over and publishes the archive within
-  150 s, with every election provider. The harness runs one-hour windows and
-  the archive as a cluster task with a slot every 30 s and a 40 s lease on
-  worker-2 and worker-3; worker-1 turns the archive off.
-- **Cluster task scenario in the integration harness.** The harness handler
-  declares `harness_cluster_tick`, a cluster task with a slot every 30 s.
-  `integration/scenario-cluster-tasks.sh` watches 8 slots and checks that no
-  slot runs twice, that at least 7 run once, and that worker-2 lists worker-1
-  with `cluster_tasks_match: false` and worker-3 with `true`. It runs in
-  `just integration-scenarios` and `just integration-matrix` with every
-  provider.
-
-- **Provider framework.** The worker registry and the election share
-  one set of rules for their calls to a provider. The blocks
-  `fleet.registry.resilience` and `periodic.election.resilience` set
-  a time limit per attempt, retries with doubling waits, and a circuit
-  breaker. The breaker skips the provider while it is down and lets one
-  operation probe it after a cooldown. The new `connections` section
-  declares shared services by name (`consul`, `redis`, `postgres`; `main` is
-  the default). A feature names an entry with `fleet.registry.connection` or
-  `periodic.election.connection`. Set secrets from the environment.
-  The config reference masks them. `periodic.election.provider`
-  (default `filesystem`) selects which worker of a cluster runs a slot of a
-  cluster task, the archive pass included. Plugins
-  use the entry-point group `drakkar.election_providers`, and
-  `drakkar.recorder.electiontest` holds the checks a provider should pass.
-  A registry provider can give its own `online` verdict (`PeerCard.online`);
-  `drakkar.fleet.testkit.LIVENESS_CHECKS` checks it. The
-  summary line shows ` election=<provider>` when the election provider is not
-  `filesystem`. New metrics:
-  `drakkar_provider_calls_total`, `drakkar_provider_call_duration_seconds`
-  and `drakkar_provider_breaker_open`. New log events: `provider_started`,
-  `provider_call_failed`, `provider_breaker_opened`,
-  `provider_breaker_closed`, `fleet_registry_iteration_failed`,
-  `connections_close_timed_out`, `connections_close_failed`,
-  `connection_close_failed` and `recorder_archive_pass_abandoned`.
-  `recorder_archive_fenced` has the new fields `provider` and `reason`, and
-  its `detail` text follows the reason. The `filesystem` election runs its
-  file calls on a thread of its own, not on the shared `to_thread` pool. At
-  stop, the recorder waits for an archive pass in progress until only
-  `fleet.registry.resilience.timeout_seconds` of the shutdown time is left
-  (all of it when no registry runs), so the card withdraw keeps its time.
-  A provider is single-use: after `stop`, an election provider must refuse
-  every call, `start` included, so an abandoned pass is fenced at its next
-  check. The new kit check `check_calls_after_stop_are_refused` tests it,
-  and the built-in `filesystem` providers fail a `start` after `stop` with
-  `provider stopped`. A lock that cannot be read counts as `unconfirmed`,
-  not as `taken_over`. A pass whose lease another worker took over sends no
-  `release`. The worker removes credentials from a provider's error text
-  before it logs it; a redacted query value ends at white space, so the text
-  after the URL stays. The config reference also masks numbers and booleans
-  under a secret-looking key of `plugin_options`. See `docs/fleet.md`,
-  `docs/local-databases.md` and `docs/configuration.md`.
-- **Postgres providers.** `fleet.registry.provider: postgres` keeps the
-  worker cards in the table `fleet_workers`, and
-  `periodic.election.provider: postgres` keeps the leases of cluster tasks
-  in `task_locks` (key column `scope`). Both use the schema of the connection that the `connection`
-  key of the feature names (`connections.postgres.<name>`). A worker creates
-  the schema and the tables when the provider starts if `manage_schema` is
-  true. If it is false, run `drakkar-schema postgres --schema=<name>` first
-  (also `python -m drakkar.schema`). It prints the DDL for an operator to
-  run. The database server's clock decides the age of a card and the length
-  of a lease. Connection-class errors are retried under the `resilience`
-  block of the feature. A call whose query reaches the time limit closes its
-  connection, so a query on a database server that stops answering does not
-  hold the call past the limit. A release of the connection to the pool that
-  is already in progress when the limit comes still waits for the server. It
-  holds one pool connection until the server answers, and the pool gets the
-  connection back then.
-- **Redis providers.** `fleet.registry.provider: redis` keeps the worker
-  cards in Redis keys with one index of the workers, and
-  `periodic.election.provider: redis` keeps the lease of each cluster task
-  in one key, `<prefix>task-locks:<cluster>/<task>`. Both use the `key_prefix` of the connection that the
-  `connection` key of the feature names (`connections.redis.<name>`). The
-  clock of the Redis server decides the age of a card, and key expiry ends a
-  lease. The client does not retry on its own. The `resilience` block of the
-  feature retries connection errors and four server replies (`BUSY`,
-  `LOADING`, `MASTERDOWN` and `TRYAGAIN`). Any other reply, such as
-  `WRONGPASS` or `NOPERM`, is final. A connect gives up after 5 seconds. The
-  providers need Redis 5.0 or later, standalone. Redis Cluster is not
-  supported. A provider refuses to start when the URL of its connection has
-  query options (`?...`). The error is
-  `redis connection: the url cannot carry query options`. Every other URL
-  goes through one fixed check, and a URL that fails it fails with
-  `redis connection: the url cannot be parsed`. The check refuses a space, a
-  control character (such as a trailing newline) and a non-ASCII character,
-  a `%` that does not start a two-digit escape, a character of the user name
-  or the password outside letters, digits and `-._~!$&'()*+,;=:@` (write it
-  as a percent escape), a host that is not a name or an IPv6 address in
-  brackets, a port outside 1 to 65535 or of more than five digits, a
-  `redis://` path that is not empty, `/`, or `/` and a database number of at
-  most ten digits up to 2147483647 (such as `/three` or
-  `/0/extra`), and a `unix://` path that does not start with `/`. With `rediss://` the client
-  always verifies the certificate and the host name of the server. The
-  providers need version 7.2 or later of the `redis` package, because they
-  read the reply code that the client sets from 7.2 on (see Breaking).
-- **Consul providers.** `fleet.registry.provider: consul` keeps each worker
-  card in a Consul key that a session of its worker holds, and
-  `periodic.election.provider: consul` keeps the lease of each cluster task
-  in one key, `<key_prefix>/task-locks/<cluster>/<task>`, held by a session
-  named `drakkar/task-lock/<cluster>/<task>/<token>`. Both use the `key_prefix` of the connection that the
-  `connection` key of the feature names (`connections.consul.<name>`). The
-  time to live of a session is half of the limit (`offline_after_seconds`
-  for a card, `lease_seconds` for a lease), and at least 10 seconds.
-  Consul can end a session up to twice its time to live after the last
-  renew, so a dead worker's card or lease ends by the limit, one second
-  later for an odd limit, and by 20 seconds when the limit is below 20. With
-  the `consul` registry, keep `offline_after_seconds` at least four times
-  `heartbeat_seconds`, because Consul may also end a session as early as its
-  time to live. A card is
-  online while a session holds its key, and the workers list shows no age
-  for it. A key that no session holds is listed as offline. A worker that
-  restarts under its old name takes its card over at once. Like the redis
-  providers, the client does not retry on its own. The `resilience` block of
-  the feature retries timeouts, connection errors and the statuses 429, 500,
-  502, 503 and 504. Any other status, such as 403, is final. A connect gives
-  up after 5 seconds. The token goes only in the `X-Consul-Token` header. A
-  provider refuses to start when the `address` of its connection is not an
-  `http://` or `https://` address (a host, an optional port and an optional
-  path, with no user info, query or fragment, and no empty, `.` or `..`
-  segment), or when the `token` has a space or a character outside printable
-  ASCII. New load checks: catalog mode is refused with the `consul` registry
-  (this release ships publish mode only), `offline_after_seconds` is at most
-  86400 with the `consul` registry, a Consul datacenter name may only
-  contain letters, digits, `_`, `.` and `-`, and a `key_prefix` of a Consul
-  connection may not have a segment that is `.` or `..`.
-- **Provider outage scenarios in the integration harness.**
-  `just integration-up provider=postgres` runs the main cluster's registry
-  and periodic election on a separate Postgres service, `postgres-fleet`.
-  `just integration-up provider=redis` runs them on a separate Redis
-  service, `redis-fleet`. Its only user has the rights that the docs give
-  the providers, and no more. `just integration-up provider=consul` runs
-  them on a separate Consul agent, `consul-fleet`, with ACLs that deny by
-  default. The workers' token has the two rules that the docs give the
-  providers, and no more.
-  `just integration-scenarios provider=<name>` pauses that service, cuts a
-  worker off the network, kills a worker, and checks that no Postgres or
-  Redis password and no Consul token reaches the config reference, the logs
-  or the metrics. With `consul`, the killed worker is started again at once,
-  and the new instance takes its card over from the old session. See
-  `docs/integration.md`.
+  `periodic_cluster_mismatch`, `periodic_election_stop_failed` and
+  `periodic_loop_ended`. See `docs/periodic-tasks.md`.
+- **Autodiscover providers and the provider framework.** The registry and the
+  election share one set of rules for provider calls: a time limit per attempt,
+  retries with doubling waits and a circuit breaker per caller. Besides
+  `filesystem`, `autodiscover.provider` can be `postgres` (tables `fleet_workers`
+  and `task_locks`; `drakkar-schema postgres --schema=<name>` prints the DDL),
+  `redis` (keys under the connection's `state_prefix`; Redis 5.0 or later,
+  standalone) or `consul` (keys held by sessions; the token only in the
+  `X-Consul-Token` header). Each checks its connection URL or address before it
+  connects. New metrics `drakkar_provider_calls_total`,
+  `drakkar_provider_call_duration_seconds` and `drakkar_provider_breaker_open`,
+  and the log events `provider_started`, `provider_call_failed`,
+  `provider_breaker_opened`, `provider_breaker_closed`,
+  `fleet_registry_iteration_failed`, `connections_close_timed_out`,
+  `connections_close_failed`, `connection_close_failed` and
+  `recorder_archive_pass_abandoned`. `recorder_archive_fenced` gains `provider`
+  and `reason`. The worker removes credentials from a provider's error text
+  before it logs it. See `docs/fleet.md`.
+- **Failure policy, retry budget and dependencies per sink.** Every sink takes
+  `on_failure` (`dlq` or `skip`, default `dlq`), `max_retries` (0 to 10, default
+  2) and `depends_on` (a list of `<type>/<name>`). A sink starts after the sinks
+  in its `depends_on` delivered or skipped. `on_delivery_error` sees `attempt`,
+  `retries_left` and `declared_policy`. `on_error` can return
+  `ErrorAction.DLQ`, and `executor.on_failure` (`skip` or `dlq`) is what the
+  default `on_error` returns. New metrics `drakkar_dlq_records_total{stage}` and
+  `drakkar_sink_deliveries_not_started_total{sink_type,sink_name,reason}`, the
+  log events `message_dlq`, `message_already_dlq`, `sink_not_started`,
+  `sink_retry_budget_spent`, `delivery_error_hook_failed`,
+  `window_delivery_not_dlq` and `execute_dlq_failed`, and the recorder events
+  `message_dlq` and `sink_not_started`. See `docs/sinks.md`.
+- **Capabilities.** `GET /api/v1/identity` says which features the worker runs,
+  and the registry card carries `features.ui`, so the UI hides what a worker
+  cannot do.
+- **Config wizard.** The calculator page is the Config Wizard (the URL
+  `calculator/` stays). It asks how many workers run and which services they
+  reach, and prints `connections`, `autodiscover`, `storage` and the `DK_`
+  variables that hold the secrets. The rules are one data file,
+  `docs/data/config-wizard.json`.
+- **Integration harness.** `profile=quick` runs a small corpus;
+  `just integration-matrix` runs the harness for each provider and prints a
+  table; `provider=postgres|redis|consul` runs the registry and the election on
+  a separate service and pauses it; new scenarios check the archive takeover
+  after a killed holder, cluster tasks, the memory store, the Postgres recorder,
+  the DLQ record and a worker with the UI off.
 
 ### Changed
 
-- **The docs, the config wizard and the upgrade guide follow the new layout.** The
-  upgrade guide has one section for this release: the rules, the steps, a row for every
-  old key, the behaviour changes and the handler changes.
-- **New help texts for four DLQ and sink metrics.**
-  `drakkar_sink_deliveries_skipped_total` names every cause of a skip (the
-  handler, the declared policy, an open circuit, and a window result that
-  cannot reach the DLQ); `drakkar_sink_dlq_messages_total` says it counts
-  records, one per source message, of all stages;
-  `drakkar_dlq_dropped_payloads_total` says it counts lost source messages;
-  and `drakkar_dlq_unconfigured_drops_total` says its unit per path
-  (payloads on the sink path, source messages on the task path).
+- **The docs and the upgrade guide follow the new layout.** The upgrade guide
+  has one section for this release: the rules, the steps, a row for every 2.4.0
+  key, the behaviour changes and the handler changes.
+- **New help texts for four DLQ and sink metrics:**
+  `drakkar_sink_deliveries_skipped_total`, `drakkar_sink_dlq_messages_total`,
+  `drakkar_dlq_dropped_payloads_total` and `drakkar_dlq_unconfigured_drops_total`.
 
 ### Fixed
 
+- **A stop no longer waits out the whole drain time after a late poll.** A Kafka
+  poll that returns after a stop leaves its messages unread (logged as
+  `messages_polled_at_stop_dropped`, with `count` and `partitions`; their offsets
+  stay uncommitted, so the next owner reads them again), and the drain of a
+  partition whose loop has ended returns at once.
 - **The task detail and the two trace reads give up after 5 seconds.**
   `/api/v1/task/{task_id}`, `/api/v1/debug/trace` and
-  `/api/v1/debug/trace-by-label` waited with no limit for the recorder file
-  stage, so a hung disk hung them. They now answer their empty shape after
-  the main-loop dispatch limit, like the other recorder reads.
-- **The help text of `drakkar_recorder_requeue_overflow_total` names both
-  recorder queues.** It said only the buffer tail and one error type; it now
-  says the intake or the file queue, after a failed or cancelled write.
-- **A periodic run whose recorder row fails is counted once.** It counted as
-  both `ok` and `error` in `drakkar_periodic_task_runs_total`; it now counts
-  as `error` only.
-- **Archive lease refresh follows the lease.** A lease is now refreshed at a third of
-  its length, at most every 60 seconds. A short lease no longer lets a long
-  archive pass lose it.
-
-- **Documentation matches the code.** The HTTP source path, the commit
-  rules (per message, batched), the Kafka keys under `sources.kafka.*` in the
-  tuning examples and in the calculator output, the fixed limit of 3 for
-  sink delivery retries, the Dashboard tables that replaced the
-  `/partitions` and `/sinks` pages, the offload pool default, the throughput
-  windows (1, 5 and 30 s) and the Kubernetes UI-bundle comment.
-- **`arrange_http_request` examples pass `source_offsets=[]`.** The field is
-  required, and the examples in `docs/webapp.md` left it out, so a handler
-  built from them answered every HTTP request with 500. The integration
-  harness worker had the same fault.
+  `/api/v1/debug/trace-by-label` answer their empty shape after the main-loop
+  dispatch limit when the disk hangs.
+- **A periodic run whose recorder row fails is counted once,** as `error`.
+- **Documentation matches the code.** The HTTP source path, the commit rules, the
+  Kafka keys in the tuning examples, the Dashboard tables and the Kubernetes
+  UI-bundle comment.
+- **`arrange_http_request` examples pass `source_offsets=[]`.** A handler built
+  from the old examples answered every HTTP request with 500.
 
 ## [2.4.0] - 2026-10-15
 
