@@ -36,7 +36,13 @@ from drakkar.config.recorder import (
     RecorderSqliteConfig,
 )
 from drakkar.config.resilience import ResilienceConfig, validate_resilience
-from drakkar.config.root import DrakkarConfig, _parse_env_overrides, load_config, load_yaml_document
+from drakkar.config.root import (
+    DrakkarConfig,
+    _parse_env_overrides,
+    load_config,
+    load_yaml_document,
+    own_storage_dir,
+)
 from drakkar.config.runtime import (
     ExecutorConfig,
     LoggingConfig,
@@ -177,6 +183,7 @@ __all__ = [
     'format_size',
     'load_config',
     'load_yaml_document',
+    'own_storage_dir',
     'parse_duration',
     'parse_size',
     'unknown_keys_message',

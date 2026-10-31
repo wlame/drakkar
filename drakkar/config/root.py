@@ -47,6 +47,7 @@ from drakkar.config.strict import (
 from drakkar.config.ui import UIConfig
 from drakkar.config.unit_bounds import check_unit_bounds
 from drakkar.config.webapp import WebAppConfig
+from drakkar.schedule import sanitize_cluster
 
 SQLITE_WITHOUT_DIR_MESSAGE = (
     'recorder.provider is sqlite but storage.dir is empty; set storage.dir to a folder, '
@@ -489,6 +490,20 @@ class DrakkarConfig(BaseSettings):
         if self.dlq_unconfigured:
             return 'unconfigured'
         return self.dlq.topic or 'on'
+
+
+def own_storage_dir(storage_dir: str, cluster: str, worker: str) -> str:
+    """The folder of this worker's own files: ``<storage_dir>/<sanitized cluster>/<worker>``.
+
+    An empty cluster gives the folder ``default``, as in the shared folder's
+    ``history/`` and ``tasks/``. The worker name passes the worker name rule
+    (``config.identity.check_worker_name``), so it is already safe as a
+    folder name. An empty ``storage_dir`` (no own files) gives ``''``.
+    ``normpath`` makes ``./data/`` and ``data`` give the same path.
+    """
+    if not storage_dir:
+        return ''
+    return os.path.normpath(os.path.join(storage_dir, sanitize_cluster(cluster), worker))
 
 
 def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> Any:

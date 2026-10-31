@@ -27,7 +27,8 @@ from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
-from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config, own_storage_dir
+from drakkar.config.identity import check_worker_name, generated_worker_name
 from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
@@ -301,8 +302,12 @@ class DrakkarApp:
         self._wire_app_config()
         self._wire_executor_on_failure()
         configured_worker_id = worker_id or self._config.worker.resolved_name()
-        self._worker_id = configured_worker_id or f'drakkar-{id(self):x}'
-        # The generated name changes at each start; the own archive scope warns about it.
+        if configured_worker_id:
+            # Here and not at the config load: the name may come from a
+            # variable or an argument that the load never reads.
+            check_worker_name(configured_worker_id)
+        self._worker_id = configured_worker_id or generated_worker_name()
+        # A generated name can change with the host (a recreated pod); the own archive scope warns about it.
         self._worker_id_is_generated = not configured_worker_id
         self._cluster_name = self._config.cluster.resolved_name()
         self._start_time = time.monotonic()
@@ -509,6 +514,11 @@ class DrakkarApp:
             api = self._config.api
             self._api_url = api.public_url or f'http://{detect_worker_ip()}:{api.port}/'
         return self._api_url
+
+    @property
+    def own_storage_dir(self) -> str:
+        """The folder of this worker's own files, ``<storage.dir>/<sanitized cluster>/<worker>``; ``''`` without one."""
+        return own_storage_dir(self._config.storage.dir, self._cluster_name, self._worker_id)
 
     @property
     def worker_identity(self) -> WorkerIdentity:

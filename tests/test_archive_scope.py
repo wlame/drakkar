@@ -731,6 +731,7 @@ async def test_own_scope_worker_warns_about_archives_kept_for_ever(tmp_path):
         ),
         worker_id=WORKER,
     )
+    Path(app.own_storage_dir).mkdir(parents=True)
     with capture_logs() as logs:
         await app._lifecycle._start_recorder()
     try:
@@ -745,6 +746,7 @@ def _app_with_generated_name(monkeypatch, **values) -> DrakkarApp:
 
 
 async def _events_of_start_recorder(app: DrakkarApp) -> list[dict]:
+    Path(app.own_storage_dir).mkdir(parents=True, exist_ok=True)
     with capture_logs() as logs:
         await app._lifecycle._start_recorder()
     await app._recorder.stop()
@@ -791,7 +793,6 @@ async def test_own_scope_is_silent_about_a_worker_name_from_the_caller(tmp_path)
 
 
 async def test_cluster_scope_is_silent_about_a_generated_worker_name(tmp_path, monkeypatch):
-    (tmp_path / 'storage').mkdir()
     app = _app_with_generated_name(
         monkeypatch, storage={'dir': str(tmp_path / 'storage'), 'shared_dir': str(tmp_path / 'shared')}
     )

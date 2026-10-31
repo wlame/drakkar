@@ -502,13 +502,13 @@ def test_card_features_say_whether_the_ui_is_on(ui_enabled):
 
 async def test_ui_off_defers_no_started_event_for_subscribers_that_cannot_exist(tmp_path, monkeypatch):
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
-    (tmp_path / 'storage').mkdir()
     config = _config(
         ui={'enabled': False},
         recorder={'flush_interval': '60s'},
         storage={'dir': str(tmp_path / 'storage')},
     )
     app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+    Path(app.own_storage_dir).mkdir(parents=True)
     await app._lifecycle._start_recorder_and_api()
     assert app._recorder is not None
     try:

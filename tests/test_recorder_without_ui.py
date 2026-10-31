@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -121,8 +122,8 @@ async def test_memory_only_with_ui_on_and_recorder_off(tmp_path, no_api_server):
 
 
 async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_api_server):
-    (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=False, recorder_enabled=True, flush_interval='60s')
+    Path(app.own_storage_dir).mkdir(parents=True)
     for gauge in (
         recorder_memory_rows,
         recorder_memory_bytes,
@@ -157,8 +158,8 @@ async def test_no_memory_store_with_ui_off_and_recorder_on(tmp_path, no_api_serv
 
 
 async def test_both_stores_with_ui_and_recorder_on(tmp_path, no_api_server):
-    (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=True, recorder_enabled=True)
+    Path(app.own_storage_dir).mkdir(parents=True)
 
     await app._lifecycle._start_recorder_and_api()
     try:
@@ -392,8 +393,8 @@ async def _config_row(rec: EventRecorder, config: DrakkarConfig) -> dict:
 
 
 async def test_worker_config_debug_port_and_url_come_from_the_constructor(tmp_path, no_api_server):
-    (tmp_path / 'storage').mkdir()
     app = _app(tmp_path, ui_enabled=False, recorder_enabled=True, flush_interval='60s')
+    Path(app.own_storage_dir).mkdir(parents=True)
 
     await app._lifecycle._start_recorder_and_api()
     try:

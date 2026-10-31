@@ -63,7 +63,6 @@ from drakkar.cluster_tasks import (
 )
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.config.recorder import PERSISTENCE_POSTGRES
-from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry
@@ -79,6 +78,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
+from drakkar.ownerlock import OwnerLock, open_own_folder
 from drakkar.periodic import STARTUP_NO_AUTODISCOVER, SYSTEM_CLOCK, Clock, run_own_system_task, run_periodic_task
 from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
@@ -240,6 +240,9 @@ class AppLifecycle:
         # the resolved data directory; held here so tests can reach it
         # via ``app._lifecycle._watchdog``.
         self._watchdog: WatchdogFile | None = None
+        # The owner lock of the own folder, taken by ``_prepare_storage`` and
+        # dropped last in the shutdown; None in memory-only mode.
+        self._owner_lock: OwnerLock | None = None
         # The clock of the cluster periodic tasks' slot loops; tests replace it
         # so no test waits for a real slot.
         self._clock: Clock = SYSTEM_CLOCK
@@ -424,22 +427,41 @@ class AppLifecycle:
                 )
 
     async def _prepare_storage(self) -> None:
-        """Create ``storage.dir`` before anything writes into it.
+        """Create this worker's own folder and take its owner lock before anything writes into it.
 
-        The folder holds this worker's own files (recorder, cache, crash
-        marker), so a folder created here is owner-only (0700). An existing
-        folder — typically a mounted volume — keeps the mode the operator
-        gave it: ``os.makedirs`` applies the mode only to the folder it
-        creates. Memory-only mode (``storage.dir: ""``) creates nothing.
+        The own folder ``<storage.dir>/<sanitized cluster>/<worker>/`` holds
+        this worker's own files (recorder, cache, crash marker), so each
+        folder created here is owner-only (0700). An existing folder,
+        typically a mounted volume, keeps the mode the operator gave it.
+        Memory-only mode (``storage.dir: ""``) creates nothing and takes no lock.
 
-        A folder that cannot be created fails startup: every own file lives
-        there, so the worker could not record or cache anything.
+        The owner lock is held until the shutdown ends, so a second live
+        process with this worker name on this host cannot start. Download
+        temps an earlier process left in the folder are deleted once the
+        lock is held.
+
+        Raises:
+            FolderInUseError: another live process holds the folder.
+            OSError: a folder cannot be created: every own file lives there,
+                so the worker could not record or cache anything.
         """
-        storage_dir = self._app._config.storage.dir
+        app = self._app
+        storage_dir = app._config.storage.dir
         if not storage_dir:
             return
         # File I/O on a possibly network-mounted path — keep it off the loop.
-        await asyncio.to_thread(os.makedirs, storage_dir, mode=DB_DIR_MODE, exist_ok=True)
+        self._owner_lock = await asyncio.to_thread(
+            open_own_folder,
+            storage_dir=storage_dir,
+            own_dir=app.own_storage_dir,
+            worker=app._worker_id,
+        )
+
+    async def _release_owner_lock(self) -> None:
+        """Drop the owner lock of the own folder, last in the shutdown; nothing to do when none was taken."""
+        lock, self._owner_lock = self._owner_lock, None
+        if lock is not None:
+            await asyncio.to_thread(lock.release)
 
     async def _setup_watchdog(self) -> None:
         """Construct the watchdog file and check the previous run.
@@ -470,8 +492,8 @@ class AppLifecycle:
         # committed to running. Otherwise an exception during sink
         # connect / consumer.subscribe / on_startup would leave the empty
         # body and falsely flag the next startup as OOM-killed.
-        if app._config.storage.dir:
-            watchdog_dir = Path(app._config.storage.dir)
+        if app.own_storage_dir:
+            watchdog_dir = Path(app.own_storage_dir)
             self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
             # Detect a possible SIGKILL from the prior run BEFORE we
             # claim the slot for this run. ``check_previous`` returns
@@ -639,7 +661,7 @@ class AppLifecycle:
             # zero threshold defers no ``task_started`` for a stream nobody reads.
             ws_min_duration_ms=round(config.ui.ws_min_duration * 1000) if config.ui.enabled else 0,
             log_min_duration_ms=round(config.logging.min_task_duration * 1000),
-            storage_dir=config.storage.dir,
+            storage_dir=app.own_storage_dir,
             shared_dir=config.resolved_shared_dir,
             instance=app._instance,
             memory_window_seconds=memory.window,
@@ -898,7 +920,7 @@ class AppLifecycle:
         if app._config.cache.enabled:
             app._cache_engine = CacheEngine(
                 config=app._config.cache,
-                storage_dir=app._config.storage.dir,
+                storage_dir=app.own_storage_dir,
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
                 recorder=app._recorder,
@@ -1457,6 +1479,9 @@ class AppLifecycle:
                         error=str(exc),
                         exc_info=True,
                     )
+
+            # Last: the own folder stays locked until no file in it is written any more.
+            await self._release_owner_lock()
 
             await log.ainfo('drakkar_stopped', category='lifecycle')
             close_logging()

@@ -176,10 +176,11 @@ def test_app_creation_with_worker_id(test_config):
     assert app._worker_id == 'w1'
 
 
-def test_app_creation_auto_worker_id(test_config):
+def test_app_creation_auto_worker_id(test_config, monkeypatch):
+    monkeypatch.setattr('socket.gethostname', lambda: 'pod-7f9')
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
-    assert app._worker_id.startswith('drakkar-')
+    assert app._worker_id == 'pod-7f9'
 
 
 def test_app_worker_id_from_env(test_config, monkeypatch):
@@ -721,9 +722,10 @@ def test_worker_name_literal_and_env_precedence(monkeypatch, worker, env, expect
 
 
 def test_worker_name_is_generated_with_no_name_and_no_env(monkeypatch):
+    monkeypatch.setattr('socket.gethostname', lambda: 'host.example.com')
     app = _named_app(monkeypatch, env={})
 
-    assert app._worker_id.startswith('drakkar-')
+    assert app._worker_id == 'host_example_com'
     assert app._worker_id_is_generated is True
 
 
@@ -2050,36 +2052,48 @@ async def test_empty_storage_dir_disables_the_watchdog_rather_than_using_cwd(tes
     assert any(e['event'] == 'watchdog_disabled_no_storage_dir' for e in cap)
 
 
-async def test_prepare_storage_creates_a_missing_folder_with_mode_0700(test_config, tmp_path):
-    """Own files are private to the worker: a folder it creates is owner-only."""
+async def test_prepare_storage_creates_each_missing_level_with_mode_0700(test_config, tmp_path):
+    """Own files are private to the worker: every folder it creates is owner-only, the cluster level too."""
     folder = tmp_path / 'own' / 'files'
     cfg = test_config.model_copy(deep=True)
     cfg.storage.dir = str(folder)
-    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+    cfg.cluster.name = 'search.eu'
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg, worker_id='w-1')
 
     await app._lifecycle._prepare_storage()
-
-    assert folder.is_dir()
-    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    try:
+        own = folder / 'search_eu' / 'w-1'
+        assert app.own_storage_dir == str(own)
+        for level in (folder, folder / 'search_eu', own):
+            assert stat.S_IMODE(level.stat().st_mode) == 0o700
+        assert (own / '.owner.lock').is_file()
+    finally:
+        await app._lifecycle._release_owner_lock()
 
 
 @pytest.mark.parametrize('mode', [0o750, 0o777], ids=['owner-and-group', 'world-writable'])
 async def test_prepare_storage_keeps_the_mode_of_an_existing_folder(test_config, tmp_path, mode):
-    """An operator-provided folder (a mounted volume) keeps the mode the operator gave it.
+    """An operator-provided folder (a mounted volume) keeps the mode the operator gave it, at every level.
 
     A world-writable folder is kept too: the recorder warns about it at start
     rather than the worker silently changing a mode it does not own.
     """
     folder = tmp_path / 'mounted'
-    folder.mkdir()
-    folder.chmod(mode)
+    own = folder / 'default' / 'w-1'
+    own.mkdir(parents=True)
+    for level in (folder, folder / 'default', own):
+        level.chmod(mode)
     cfg = test_config.model_copy(deep=True)
     cfg.storage.dir = str(folder)
-    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+    cfg.cluster.name = ''
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg, worker_id='w-1')
 
     await app._lifecycle._prepare_storage()
-
-    assert stat.S_IMODE(folder.stat().st_mode) == mode
+    try:
+        for level in (folder, folder / 'default', own):
+            assert stat.S_IMODE(level.stat().st_mode) == mode
+    finally:
+        await app._lifecycle._release_owner_lock()
 
 
 async def test_prepare_storage_memory_only_creates_nothing(test_config, tmp_path, monkeypatch):
@@ -2377,7 +2391,7 @@ async def test_start_cache_wires_the_exchange_settings(test_config, tmp_path):
 
     try:
         assert app._cache_engine._peer_sync_enabled is False
-        assert (tmp_path / f'{app._worker_id}-cache.db').exists()
+        assert (Path(app.own_storage_dir) / f'{app._worker_id}-cache.db').exists()
     finally:
         await app._cache_engine.stop()
 

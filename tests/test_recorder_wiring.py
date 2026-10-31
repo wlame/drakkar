@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from drakkar.app import DrakkarApp
@@ -43,7 +44,7 @@ def _app(tmp_path, **overrides) -> DrakkarApp:
 
 async def test_the_recorder_seals_into_the_shared_history_folder_with_the_process_instance(tmp_path, monkeypatch):
     app = _app(tmp_path)
-    (tmp_path / 'storage').mkdir()
+    Path(app.own_storage_dir).mkdir(parents=True)
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._start_recorder_and_api()
@@ -71,7 +72,7 @@ async def test_the_archive_task_runs_under_the_configured_election_with_its_opti
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
     resilience = {'timeout': '1500ms', 'max_retries': 0}
     app = _app(tmp_path, autodiscover={'enabled': True, 'provider': 'filesystem', 'resilience': resilience})
-    (tmp_path / 'storage').mkdir()
+    Path(app.own_storage_dir).mkdir(parents=True)
     started_ok = provider_calls.labels(feature='election', provider='filesystem', op='start', outcome='ok')
     started_before = started_ok._value.get()
 
@@ -194,11 +195,15 @@ async def test_lifecycle_creates_storage_dir_and_starts_no_leftover_sealing_with
         assert app._recorder.persistence == 'none'
         app._recorder.start_leftover_sealing()
         assert app._recorder._leftover_task is None
-        assert (tmp_path / 'storage').is_dir()
-        assert list((tmp_path / 'storage').iterdir()) == []
+        own_dir = Path(app.own_storage_dir)
+        assert own_dir == tmp_path / 'storage' / 'search' / 'w-1'
+        assert own_dir.is_dir()
+        # Only the owner lock: persistence none writes no recorder file.
+        assert [path.name for path in own_dir.iterdir()] == ['.owner.lock']
         assert app._recorder.history_dir == str(tmp_path / 'shared' / 'history' / 'search')
     finally:
         await app._recorder.stop()
+        await app._lifecycle._release_owner_lock()
 
 
 async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_run(tmp_path, monkeypatch):
@@ -211,7 +216,7 @@ async def test_warn_if_archives_unbounded_not_called_when_the_archive_does_not_r
     warned.assert_not_called()
 
     file_app = _app(tmp_path)
-    (tmp_path / 'storage').mkdir(exist_ok=True)
+    Path(file_app.own_storage_dir).mkdir(parents=True, exist_ok=True)
     await file_app._lifecycle._start_recorder_and_api()
     await file_app._recorder.stop()
     warned.assert_called_once()
@@ -223,7 +228,7 @@ async def test_lifecycle_passes_the_row_cap_and_the_data_budget(tmp_path, monkey
         recorder={'memory': {'window': '1m', 'rows_per_executor': 200, 'max_size': '16MiB'}},
         executor={'binary_path': '/usr/bin/echo', 'max_executors': 4},
     )
-    (tmp_path / 'storage').mkdir()
+    Path(app.own_storage_dir).mkdir(parents=True)
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._start_recorder_and_api()
@@ -243,7 +248,7 @@ def _result_of(task_id: str, duration_seconds: float) -> ExecutorResult:
 
 async def test_logging_min_task_duration_gates_the_slow_task_line(tmp_path, monkeypatch):
     app = _app(tmp_path, logging={'min_task_duration': '2s'}, ui={'enabled': False})
-    (tmp_path / 'storage').mkdir()
+    Path(app.own_storage_dir).mkdir(parents=True)
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._start_recorder_and_api()
@@ -304,7 +309,7 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
 
 async def test_lifecycle_passes_no_postgres_settings_in_the_other_modes(tmp_path, monkeypatch):
     app = _app(tmp_path)
-    (tmp_path / 'storage').mkdir()
+    Path(app.own_storage_dir).mkdir(parents=True)
     monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
 
     await app._lifecycle._start_recorder_and_api()
