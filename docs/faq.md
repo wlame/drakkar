@@ -271,7 +271,7 @@ You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an
 To silence it (i.e. require auth), pick one of:
 
 - **Set `ui.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
-- **Set `ui.enabled=false`** — if the worker doesn't need the UI at all. `/healthz`, `/readyz` and the peer route stay on, and every other route answers 404.
+- **Set `ui.enabled=false`** — if the worker doesn't need the UI at all. `/healthz`, `/readyz` and the peer route stay on, and every other route answers 404 (a WebSocket handshake on `/ws` answers 403).
 
 See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app_security.py::warn_if_ui_unauthenticated`.
 

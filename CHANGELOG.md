@@ -44,8 +44,8 @@ the steps of the upgrade and the changes of behaviour.
     outcome follows `dlq.on_send_failure`.
   - API server: the root section `api` (`enabled`, `host`, `port`, `public_url`).
     With `ui.enabled: false` the worker serves `/healthz`, `/readyz` and
-    `/api/v1/peer/cache/changes`; every other route answers 404 and no bundle is
-    fetched. `api.enabled: false` starts no server. `ui.enabled` and
+    `/api/v1/peer/cache/changes`; every other route answers 404 (a WebSocket
+    handshake on `/ws` answers 403), and no bundle is fetched. `api.enabled: false` starts no server. `ui.enabled` and
     `autodiscover.enabled` each need `api.enabled`. `UIServer` is `APIServer`,
     and `DrakkarApp.ui_url` is `api_url`.
   - UI: `ui.allowed_origins`, `ui.probe.enabled`, `ui.probe.max_writes`,
