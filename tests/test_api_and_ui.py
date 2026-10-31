@@ -267,6 +267,29 @@ def test_a_hook_that_turns_the_ui_on_without_the_api_gets_the_load_message():
         app._lifecycle._check_config_after_startup()
 
 
+def test_a_hook_that_turns_the_postgres_recorder_on_without_its_connection_gets_the_load_message():
+    config = _config(ui={'enabled': False, 'release': {'enabled': False}}, recorder={'enabled': False})
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+    config.recorder.enabled = True
+    config.recorder.provider = 'postgres'
+
+    with pytest.raises(
+        ValueError, match="recorder.postgres.connection 'main' is not defined under connections.postgres"
+    ):
+        app._lifecycle._check_config_after_startup()
+
+
+def test_a_hook_that_turns_the_sqlite_recorder_on_without_a_folder_gets_the_load_message():
+    config = _config(
+        storage={'dir': ''}, ui={'enabled': False, 'release': {'enabled': False}}, recorder={'enabled': False}
+    )
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+    config.recorder.enabled = True
+
+    with pytest.raises(ValueError, match='recorder.provider is sqlite but storage.dir is empty'):
+        app._lifecycle._check_config_after_startup()
+
+
 def test_the_contract_fixture_pins_both_messages_in_order():
     by_name = {case['name']: case.get('message') for case in CONTRACT['validation']}
     assert by_name['ui_needs_api'] == UI_NEEDS_API

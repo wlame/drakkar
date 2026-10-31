@@ -150,15 +150,15 @@ def recorder_postgres_settings(config: DrakkarConfig) -> RecorderPostgresSetting
     """The table settings of the ``postgres`` recorder mode, or ``None`` when the effective mode is another.
 
     The DSN and the schema come from the connection entry that
-    ``recorder.postgres.connection`` names; the config load already
-    checked that it is declared.
+    ``recorder.postgres.connection`` names; an undeclared one fails with the
+    message of the config load.
     """
     if config.resolved_persistence != PERSISTENCE_POSTGRES:
         return None
     section = config.recorder.postgres
     return RecorderPostgresSettings(
         connection_name=section.connection,
-        connection=config.connections.postgres[section.connection],
+        connection=config.declared_connection('recorder.postgres.connection', PERSISTENCE_POSTGRES, section.connection),
         table_prefix=section.table_prefix,
         retention_hours=section.initial_retention,
         store_completed_output=section.store_completed_output,
@@ -652,16 +652,17 @@ class AppLifecycle:
         await app._recorder.write_config(config)
 
     def _check_config_after_startup(self) -> None:
-        """Check the ``api`` and ``autodiscover`` rules again, and say once when the cluster name is empty.
+        """Check the ``api``, recorder and ``autodiscover`` rules again, and say once when the cluster name is empty.
 
         ``on_startup`` may have changed the keys, so this gives the messages of
         the config load.
 
         Raises:
-            ValueError: the UI or ``autodiscover`` cannot run as configured.
+            ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured.
         """
         app = self._app
         app._config.check_what_needs_the_api()
+        app._config.check_recorder_provider()
         app._config.check_autodiscover()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(

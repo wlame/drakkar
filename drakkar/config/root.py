@@ -174,19 +174,8 @@ class DrakkarConfig(BaseSettings):
 
     @model_validator(mode='after')
     def _validate_recorder_provider(self) -> 'DrakkarConfig':
-        """An enabled ``sqlite`` recorder needs a ``storage.dir``; an enabled ``postgres`` one its connection.
-
-        With the recorder off, the block of its provider loads and does nothing.
-        """
-        if self.resolved_persistence == PERSISTENCE_SQLITE and not self.storage.dir:
-            raise ValueError(SQLITE_WITHOUT_DIR_MESSAGE)
-        if self.resolved_persistence == PERSISTENCE_POSTGRES:
-            _require_declared_connection(
-                'recorder.postgres.connection',
-                PERSISTENCE_POSTGRES,
-                self.recorder.postgres.connection,
-                self.connections,
-            )
+        """What the enabled recorder provider needs from the rest of the config."""
+        self.check_recorder_provider()
         return self
 
     @model_validator(mode='after')
@@ -322,6 +311,26 @@ class DrakkarConfig(BaseSettings):
             raise ValueError(UI_WITHOUT_API_MESSAGE)
         if self.autodiscover.enabled:
             raise ValueError(AUTODISCOVER_WITHOUT_API_MESSAGE)
+
+    def check_recorder_provider(self) -> None:
+        """An enabled ``sqlite`` recorder needs a ``storage.dir``; an enabled ``postgres`` one its connection.
+
+        With the recorder off, the block of its provider loads and does nothing.
+        The load calls this, and so does the startup after ``on_startup``, which
+        may have changed the keys: both give the same messages.
+
+        Raises:
+            ValueError: the provider lacks its folder or its connection.
+        """
+        if self.resolved_persistence == PERSISTENCE_SQLITE and not self.storage.dir:
+            raise ValueError(SQLITE_WITHOUT_DIR_MESSAGE)
+        if self.resolved_persistence == PERSISTENCE_POSTGRES:
+            _require_declared_connection(
+                'recorder.postgres.connection',
+                PERSISTENCE_POSTGRES,
+                self.recorder.postgres.connection,
+                self.connections,
+            )
 
     def check_autodiscover(self) -> None:
         """Refuse an ``autodiscover`` section that cannot run.
