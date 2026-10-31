@@ -124,7 +124,7 @@ async def test_run_with_stop_during_an_empty_poll_logs_no_drop(monkeypatch):
 
 
 async def test_drain_returns_when_a_message_reaches_a_partition_whose_loop_has_ended(monkeypatch):
-    source, fake = _source_with_fake_consumer(monkeypatch)
+    source, _ = _source_with_fake_consumer(monkeypatch)
     await source.start()
     processor = PartitionProcessor(
         partition_id=0,

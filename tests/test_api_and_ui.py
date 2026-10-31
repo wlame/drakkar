@@ -274,7 +274,7 @@ def test_a_hook_that_turns_the_postgres_recorder_on_without_its_connection_gets_
     config.recorder.provider = 'postgres'
 
     with pytest.raises(
-        ValueError, match="recorder.postgres.connection 'main' is not defined under connections.postgres"
+        ValueError, match=r"recorder\.postgres\.connection 'main' is not defined under connections\.postgres"
     ):
         app._lifecycle._check_config_after_startup()
 
@@ -286,7 +286,7 @@ def test_a_hook_that_turns_the_sqlite_recorder_on_without_a_folder_gets_the_load
     app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
     config.recorder.enabled = True
 
-    with pytest.raises(ValueError, match='recorder.provider is sqlite but storage.dir is empty'):
+    with pytest.raises(ValueError, match=r'recorder\.provider is sqlite but storage\.dir is empty'):
         app._lifecycle._check_config_after_startup()
 
 
