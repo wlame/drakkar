@@ -3,10 +3,10 @@
 # Scenario: the recorder history of the fast cluster in Postgres.
 #
 # fast-worker-1 and fast-worker-2 (cluster "fast cluster") run with
-# DK_UI__RECORDER__PERSISTENCE: "postgres", the table prefix "fast" and a
-# retention of 2 hours (docker-compose.yml), so their recorder events go to
-# the table drakkar.fast_recorder_events on postgres-fleet. The main cluster
-# keeps its own modes. The scenario checks, in order:
+# DK_RECORDER__PROVIDER: "postgres", the table prefix "fast", an initial
+# retention of 2 hours and an output limit of 1KiB (docker-compose.yml), so
+# their recorder events go to the table drakkar.fast_recorder_events on
+# postgres-fleet. The main cluster keeps its own modes. The scenario checks, in order:
 #   1. the table exists, its comment is retention_hours=2, and the
 #      partitions of the current hour to 3 hours ahead exist,
 #   2. the rows of cluster 'fast cluster' grow over 30 s, with both worker
@@ -27,9 +27,15 @@
 #      any reason,
 #   6. while postgres-fleet is paused for 15 s, fast-worker-1's history
 #      search answers 503 {"detail": "history search failed"} within
-#      ui.trace.history_max_seconds plus 2 s,
+#      recorder.search.timeout plus 2 s,
 #   7. fast-worker-1 /api/v1/debug/databases has exactly one own row, of
-#      kind memory.
+#      kind memory,
+#   8. a task that fails on purpose (count-symbols.sh, for the file path
+#      /harness/long-stderr-failure: 8000 bytes on stderr, exit code 3) has a
+#      task_failed row that keeps its stderr, cut to the two halves of the
+#      1KiB limit with the cut marker between them, while its stdout is
+#      NULL (recorder.postgres.store_completed_output is off). The message
+#      is one that the main cluster cannot parse, so it goes to its DLQ.
 # The database checks run psql in the postgres-fleet container. The verdict
 # line carries the numbers of the run.
 #
@@ -75,16 +81,26 @@ DROP_LIMIT_SECONDS=60
 READY_LIMIT_SECONDS=90
 QUEUE_PAUSE_SECONDS=60
 DRAIN_LIMIT_SECONDS=60
-# ui.recorder.postgres.batch_rows (the default; the fast workers set none).
+# recorder.postgres.batch_rows (the default; the fast workers set none).
 BATCH_ROWS=5000
 SEARCH_PAUSE_SECONDS=15
-# ui.trace.history_max_seconds (the default; the fast workers set none).
+# recorder.search.timeout in seconds (the default; the fast workers set none).
 HISTORY_MAX_SECONDS=10
 SEARCH_SLACK_SECONDS=2
 SEARCH_FAILED_BODY='{"detail": "history search failed"}'
 QUEUE_METRIC=drakkar_recorder_postgres_queue_rows
 WRITTEN_METRIC=drakkar_recorder_postgres_rows_written_total
 DROPPED_METRIC=drakkar_recorder_postgres_dropped_rows_total
+# The failed-task check: the message goes to the source topic, and a fast
+# worker runs it through count-symbols.sh.
+SOURCE_TOPIC=search-requests
+FAILING_FILE_PATH=/harness/long-stderr-failure
+# recorder.postgres.max_output of the fast workers, in bytes, and the room
+# the cut marker may take on top of it.
+MAX_OUTPUT_BYTES=1024
+CUT_MARKER_ALLOWANCE_BYTES=64
+# The message waits behind the backlog of its partition.
+FAILED_ROW_LIMIT_SECONDS=300
 
 scratch=$(mktemp -d)
 is_paused=false
@@ -201,6 +217,30 @@ partition_gone_and_logged() {
     grep -qxF "$expired_partition" <<<"$listed" && return 1
     dropped_by=$(expired_partition_droppers)
     [ -n "$dropped_by" ]
+}
+
+# Produce one message that the fast cluster counts and that fails: a value
+# the fast input model reads and the main cluster's cannot (no patterns).
+#   produce_failing_message <token>
+produce_failing_message() {
+    printf '{"request_id": "%s", "pattern": "x", "file_path": "%s"}\n' "$1" "$FAILING_FILE_PATH" \
+        | "${COMPOSE[@]}" exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+            --bootstrap-server=localhost:9092 \
+            --topic="$SOURCE_TOPIC" \
+            --producer-property=acks=all
+}
+
+# The columns of the task_failed row of the failing message with the token
+# $1, joined by `|`: exit code, whether stdout is NULL, the stderr size in
+# bytes, and whether stderr starts with its head, ends with its tail and
+# holds the cut marker. Nothing when the row is not there yet.
+#   failed_row <token>
+failed_row() {
+    psql_query "SELECT exit_code || '|' || (stdout IS NULL) || '|' || coalesce(octet_length(stderr), -1) || '|' || coalesce(left(stderr, 11) = 'STDERR-HEAD', false) || '|' || coalesce(right(rtrim(stderr, E'\\n'), 11) = 'STDERR-TAIL', false) || '|' || coalesce(position('...[cut ' in stderr) > 0 and position(' bytes]...' in stderr) > 0, false) FROM ${SCHEMA}.${TABLE} WHERE cluster = '${CLUSTER}' AND event = 'task_failed' AND position('$1' in labels) > 0 LIMIT 1"
+}
+
+failed_row_written() {
+    [ -n "$(failed_row "$failing_token")" ]
 }
 
 fast_worker_ready() {
@@ -385,4 +425,22 @@ print(",".join(str(row.get("kind")) for row in own) or "-")
     || fail "check 7: GET :${FAST_UI_PORT}/api/v1/debug/databases shows own=${own_kinds}, expected exactly one memory row"
 ok "check 7: GET :${FAST_UI_PORT}/api/v1/debug/databases shows own=${own_kinds}"
 
-pass "rows ${rows_after} (workers ${workers}); partitions ${partitions}; expired partition dropped by ${dropped_by} ${drop_seconds}s after the restart; queue peak ${queue_peak}, drained ${drain_seconds}s, written ${written_seconds}s after the unpause; 503 after ${search_seconds}s"
+# Check 8: a failed task keeps its stderr, cut to the limit, in the table.
+failing_token="stderr-${SECONDS}-$$"
+produce_output=$(produce_failing_message "$failing_token" 2>&1) \
+    || fail "check 8: the console producer failed: $(tr '\n' ' ' <<<"$produce_output")"
+wait_until "$FAILED_ROW_LIMIT_SECONDS" failed_row_written \
+    || fail "check 8: no task_failed row of '${CLUSTER}' for ${failing_token} in ${SCHEMA}.${TABLE} within ${FAILED_ROW_LIMIT_SECONDS}s"
+failed_waited=$WAITED
+IFS='|' read -r failed_exit failed_stdout_null failed_stderr_bytes failed_has_head failed_has_tail failed_has_marker <<<"$(failed_row "$failing_token")"
+[ "$failed_exit" = 3 ] || fail "check 8: the failed row has exit code ${failed_exit}, expected 3"
+[ "$failed_stdout_null" = true ] || fail "check 8: the failed row has a stdout, expected NULL"
+[ "$failed_stderr_bytes" -gt 0 ] || fail "check 8: the failed row keeps no stderr (${failed_stderr_bytes}), expected the cut stderr"
+[ "$failed_stderr_bytes" -le $((MAX_OUTPUT_BYTES + CUT_MARKER_ALLOWANCE_BYTES)) ] \
+    || fail "check 8: the failed row keeps ${failed_stderr_bytes} bytes of stderr, expected at most $((MAX_OUTPUT_BYTES + CUT_MARKER_ALLOWANCE_BYTES))"
+[ "$failed_has_head" = true ] || fail "check 8: the stderr of the failed row does not start with its head"
+[ "$failed_has_tail" = true ] || fail "check 8: the stderr of the failed row does not end with its tail"
+[ "$failed_has_marker" = true ] || fail "check 8: the stderr of the failed row has no cut marker"
+ok "check 8: the task_failed row of ${failing_token} appeared ${failed_waited}s after the produce: exit code ${failed_exit}, stdout NULL, stderr ${failed_stderr_bytes} bytes with head, cut marker and tail"
+
+pass "rows ${rows_after} (workers ${workers}); partitions ${partitions}; expired partition dropped by ${dropped_by} ${drop_seconds}s after the restart; queue peak ${queue_peak}, drained ${drain_seconds}s, written ${written_seconds}s after the unpause; 503 after ${search_seconds}s; failed row stderr ${failed_stderr_bytes} bytes, cut"

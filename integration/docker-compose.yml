@@ -454,6 +454,9 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_RECORDER__POSTGRES__TABLE_PREFIX: "fast"
       DK_RECORDER__POSTGRES__INITIAL_RETENTION: "2h"
+      # A value over 1KiB is cut to its two halves; the failed-task check of
+      # scenario-recorder-postgres.sh relies on it.
+      DK_RECORDER__POSTGRES__MAX_OUTPUT: "1KiB"
     ports:
       - "9094:9094"
       - "8084:8084"
@@ -484,9 +487,79 @@ services:
       DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
       DK_RECORDER__POSTGRES__TABLE_PREFIX: "fast"
       DK_RECORDER__POSTGRES__INITIAL_RETENTION: "2h"
+      # A value over 1KiB is cut to its two halves; the failed-task check of
+      # scenario-recorder-postgres.sh relies on it.
+      DK_RECORDER__POSTGRES__MAX_OUTPUT: "1KiB"
     ports:
       - "9095:9095"
       - "8085:8085"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+
+  # --- Headless workers (profile headless) ---
+  #
+  # Two workers of the symbol-counting pipeline without the parts a worker
+  # may leave out; scenario-headless.sh starts and stops them, so a plain
+  # `just integration-up` does not. Each has its own consumer group and its
+  # own cluster, so it takes no partition from the fast cluster and joins no
+  # registry.
+  #
+  # headless-recorder serves only the API (/healthz, /readyz) and records
+  # to its recorder file. headless-no-api has no HTTP server, no UI and no
+  # recorder; its metrics port is the only way to see that it works.
+  headless-recorder:
+    profiles: ["headless"]
+    build:
+      context: ..
+      dockerfile: integration/fast-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: headless-recorder
+      DK_CONFIG: /app/drakkar.yaml
+      DK_CLUSTER__NAME: "headless cluster"
+      DK_SOURCES__KAFKA__CONSUMER_GROUP: "drakkar-headless-recorder"
+      DK_METRICS__PORT: "9097"
+      DK_API__PORT: "8093"
+      DK_UI__ENABLED: "false"
+      DK_RECORDER__ENABLED: "true"
+      DK_RECORDER__ARCHIVE__ENABLED: "false"
+      DK_AUTODISCOVER__ENABLED: "false"
+    ports:
+      - "9097:9097"
+      - "8093:8093"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+
+  headless-no-api:
+    profiles: ["headless"]
+    build:
+      context: ..
+      dockerfile: integration/fast-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: headless-no-api
+      DK_CONFIG: /app/drakkar.yaml
+      DK_CLUSTER__NAME: "headless cluster"
+      DK_SOURCES__KAFKA__CONSUMER_GROUP: "drakkar-headless-no-api"
+      DK_METRICS__PORT: "9098"
+      DK_API__ENABLED: "false"
+      DK_UI__ENABLED: "false"
+      DK_RECORDER__ENABLED: "false"
+      DK_AUTODISCOVER__ENABLED: "false"
+    ports:
+      - "9098:9098"
     volumes:
       - ..:/project:ro
       - ./shared:/shared

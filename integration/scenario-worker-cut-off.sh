@@ -9,7 +9,7 @@
 #                    the provider's service, so its card ages on the
 #                    service's clock). The check waits for the verdict
 #                    instead of reading it at 30 s: a card 30 s old is
-#                    deleted (prune_after_seconds), and the peer would then
+#                    deleted (autodiscover.prune_after), and the peer would then
 #                    be absent, not offline,
 #       consul     - absent (or online: false) within 30 s: worker-3 cannot
 #                    renew its session, Consul ends it about 20 s after the

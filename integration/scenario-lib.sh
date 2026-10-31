@@ -31,7 +31,7 @@ WAITED=0
 #                     folder and has no service, so its value is empty.
 #   LIVENESS_STYLE    how the list shows a worker that stopped publishing:
 #                     offline - its card stays listed with online false
-#                               until it is deleted (prune_after_seconds);
+#                               until it is deleted (autodiscover.prune_after);
 #                     gone    - its card leaves the list: the card key
 #                               belongs to the worker's session, and the
 #                               service deletes the key when the session

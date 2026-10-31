@@ -18,7 +18,7 @@
 #   - reads /api/v1/workers on worker-2 (UI port 8082) and fails unless the
 #     row of worker-1 has cluster_tasks_match false and the rows of worker-3
 #     and of worker-2 itself have true. worker-1 turns the archive off
-#     (DK_HISTORY__ARCHIVE__ENABLED: "false" in docker-compose.yml), so its
+#     (DK_RECORDER__ARCHIVE__ENABLED: "false" in docker-compose.yml), so its
 #     cluster task definitions differ. worker-3 matches only because worker-2
 #     and worker-3 run the archive with the same keys and the same handler: a
 #     config change on one of them must make this check fail.
@@ -112,7 +112,7 @@ actual_matches() {
 
 if ! wait_until "$API_LIMIT_SECONDS" matches_as_expected; then
     actual=$(actual_matches)
-    fail "${OBSERVER_WORKER} does not list the expected cluster_tasks_match within ${API_LIMIT_SECONDS}s: expected worker-1=false worker-3=true worker-2=true, got ${actual} (worker-1 must set DK_HISTORY__ARCHIVE__ENABLED: 'false' in docker-compose.yml, worker-2 and worker-3 must not differ)"
+    fail "${OBSERVER_WORKER} does not list the expected cluster_tasks_match within ${API_LIMIT_SECONDS}s: expected worker-1=false worker-3=true worker-2=true, got ${actual} (worker-1 must set DK_RECORDER__ARCHIVE__ENABLED: 'false' in docker-compose.yml, worker-2 and worker-3 must not differ)"
 fi
 ok "${OBSERVER_WORKER} lists $(actual_matches)"
 

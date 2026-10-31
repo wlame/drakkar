@@ -8,7 +8,7 @@
 # Style offline (filesystem, postgres, redis):
 #   - within 20 s worker-1 lists worker-2 offline,
 #   - within 45 s of the kill worker-2 is gone from the list (the card is
-#     deleted after fleet.registry.prune_after_seconds),
+#     deleted after autodiscover.prune_after),
 #   - after a start, within 20 s worker-1 lists worker-2 online with an
 #     instance different from the one before the kill.
 #
@@ -84,7 +84,7 @@ RESTART_LIMIT_SECONDS=20
 # The registry timings of worker/drakkar.yaml.
 HEARTBEAT_SECONDS=2
 REFRESH_SECONDS=3
-# The card session's TTL: half of offline_after_seconds (10), and at least 10 s.
+# The card session's TTL: half of autodiscover.offline_after (10 s), and at least 10 s.
 SESSION_TTL_SECONDS=10
 TAKEOVER_LIMIT_SECONDS=$((HEARTBEAT_SECONDS + REFRESH_SECONDS + 5))
 # This Consul image ends a session twice its TTL after the last renew (its
@@ -93,13 +93,13 @@ TAKEOVER_LIMIT_SECONDS=$((HEARTBEAT_SECONDS + REFRESH_SECONDS + 5))
 # only explain a failure; the agent log decides how the session ended.
 EARLIEST_TTL_END_SECONDS=$((2 * SESSION_TTL_SECONDS - HEARTBEAT_SECONDS))
 LATEST_TTL_END_SECONDS=$((2 * SESSION_TTL_SECONDS))
-# The card key of the killed worker (connections.consul.main.key_prefix is
+# The card key of the killed worker (connections.consul.main.state_prefix is
 # "drakkar").
 CONSUL_CARD_PATH="/v1/kv/drakkar/fleet/workers/${KILLED_WORKER}"
 # The agent log read at the end covers this much time before the read.
 AGENT_LOG_SINCE=5m
 
-# The archive settings of worker/drakkar.yaml (history.archive).
+# The archive settings of worker/drakkar.yaml (recorder.archive).
 ARCHIVE_INTERVAL_SECONDS=30
 LEASE_SECONDS=40
 # A cluster task's slot is won only in the first 10 s after its boundary.
@@ -434,7 +434,7 @@ while true; do
 done
 case " ${ARCHIVE_WORKERS} " in
     *" ${holder} "*) ;;
-    *) fail "the archive lock is held by ${holder}, expected one of ${ARCHIVE_WORKERS}: worker-1 must not run the archive (check DK_HISTORY__ARCHIVE__ENABLED: \"false\" on worker-1 in docker-compose.yml)" ;;
+    *) fail "the archive lock is held by ${holder}, expected one of ${ARCHIVE_WORKERS}: worker-1 must not run the archive (check DK_RECORDER__ARCHIVE__ENABLED: \"false\" on worker-1 in docker-compose.yml)" ;;
 esac
 ok "${holder} holds the archive lock"
 
