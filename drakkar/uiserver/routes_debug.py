@@ -665,8 +665,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     async def api_debug_databases():
         """This worker's own files with measured stats, then every shared history folder.
 
-        Offloaded: it lists folders on a possibly network-mounted
-        the shared folder and reads the own files with sqlite3 — /healthz and
+        Offloaded: it lists folders in the shared folder, which may be a
+        network mount, and reads the own files with sqlite3 — /healthz and
         /readyz live on this same loop.
         """
         coverage = recorder.memory_coverage()

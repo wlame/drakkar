@@ -2191,7 +2191,6 @@ class EventRecorder(EventWriter):
         """Run one archive pass over this worker's own files in the archive thread, with no election."""
         if self._archive_stop.is_set():
             return
-        self._archive_pass_abandoned_detail = ARCHIVE_OWN_PASS_ABANDONED_DETAIL
         await self._run_pass_in_archive_thread(only_worker=self._worker_name)
 
     async def _run_pass_in_archive_thread(
@@ -2200,6 +2199,10 @@ class EventRecorder(EventWriter):
         """Run one archive pass in the archive thread and wait for it."""
         # Kept so stop() can wait for a pass that runs on in its thread after
         # the slot loop is cancelled, before the worker stops the election.
+        # The detail is set with the future, so it always describes this pass.
+        self._archive_pass_abandoned_detail = (
+            ARCHIVE_PASS_ABANDONED_DETAIL if only_worker is None else ARCHIVE_OWN_PASS_ABANDONED_DETAIL
+        )
         self._archive_pass_future = self._archive_thread().submit(
             functools.partial(
                 run_archive_pass,
