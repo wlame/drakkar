@@ -206,6 +206,11 @@ sinks:
       method: "POST"
       request_timeout: 10s
       max_retries: 2
+      # The alert goes out only after the hot row of the same request is
+      # stored, so a dashboard that follows the link finds the row. Both come
+      # from one high-match result; a result with no hot row has no
+      # dependency payloads, and the webhook starts at once.
+      depends_on: [postgres/hot_recent_matches_db]
 
   filesystem:
     logs:
