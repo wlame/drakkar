@@ -151,6 +151,17 @@ parametrize).
    registry and any sink start, so the registry card carries the definition
    hash from its first publish.
 
+8. Each worker keeps its own files in `<storage.dir>/<sanitized cluster>/<worker>/`
+   and holds an `flock` on `.owner.lock` there until its stop ends
+   (`drakkar/ownerlock.py`); `storage.dir` must be a local filesystem. The
+   worker name must be `[A-Za-z0-9_-]{1,128}`, so it equals its sanitized form
+   in every folder, file name and card key. The same-name check of the
+   registry runs before the first publish, because a publish on some providers
+   takes the card from a live twin. Another worker's folder is sealed
+   (`drakkar/recorder/orphans.py`) only when its lock is free, its files are
+   idle, and the registry shows the name is not online; without a registry
+   nothing proves a name dead, so the folder is only logged.
+
 ## API server footguns
 
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
@@ -204,7 +215,8 @@ drakkar/
   periodic_roster.py       discovery of declared tasks, startup checks, definition hash
   cluster_tasks.py         cluster slot loop, slot lease, the worker's one election service, hash checker
   schedule.py, cronexpr.py slot math, scopes, definition hash; the cron subset check (a library computes fire times)
-  recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock
+  ownerlock.py             the own folder: creation, owner lock, start sweep
+  recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock, orphan folders
   uiserver/                API server: routes + message probe runner
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine

@@ -820,10 +820,10 @@ Appended every `recorder.sqlite.state_interval` (default `10s`). Captures a poin
 The live database file follows the naming pattern:
 
 ```
-{storage.dir}/{worker_name}-{timestamp}.db
+{storage.dir}/{cluster}/{worker_name}/{worker_name}-{timestamp}.db
 ```
 
-For example: `/tmp/drakkar/worker-1-2026-04-06__14_55_00.db`. Only the worker that writes it opens it.
+For example: `/tmp/drakkar/search/worker-1/worker-1-2026-04-06__14_55_00.db`. Only the worker that writes it opens it.
 
 **Rotation**: every `recorder.sqlite.rotation_interval` (default `1h`), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file. The old file is then **sealed**: switched to a rollback journal, given a meta file with its statistics, and closed. A background job moves it into the history folder of the worker's cluster:
 
