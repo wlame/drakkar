@@ -403,3 +403,15 @@ async def test_lifecycle_worker_name_online_asks_the_registry_once_it_runs(tmp_p
     app._fleet = await _refreshed(_Fixed([]), clock)
 
     assert app._lifecycle._worker_name_online('w-old') is False
+
+
+async def test_check_name_free_card_without_instance_and_heartbeat_continues_after_one_wait():
+    clock = _Clock()
+    pauses = _Pauses(clock)
+    bare = {'schema': 1, 'worker': OWN.worker, 'cluster': OWN.cluster, 'url': 'http://10.0.0.9:8080/'}
+    provider = _Fixed([PeerCard(card=bare, age_seconds=None)], [PeerCard(card=dict(bare), age_seconds=None)])
+    service = _service(provider, clock, pauses)
+
+    await service.check_name_free()
+
+    assert pauses.seconds == [HEARTBEAT + 2.0]

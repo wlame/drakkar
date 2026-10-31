@@ -343,8 +343,10 @@ class FleetRegistry:
         if not first.ok:
             await self._name_probe_skipped(f'list {first.outcome}')
             return
+        # ``instance`` and ``heartbeat_at`` are optional card fields: a card
+        # without them is keyed by ``''`` and compared as ``None``.
         suspects = {
-            card['instance']: card
+            card.get('instance', ''): card
             for card, age_seconds, online in self._same_name_cards(first.value)
             if not self._is_stale(age_seconds, online)
         }
@@ -364,8 +366,8 @@ class FleetRegistry:
             await self._name_probe_skipped(f'list {second.outcome}')
             return
         for card, _age_seconds, _online in self._same_name_cards(second.value):
-            before = suspects.get(card['instance'])
-            if before is not None and card['heartbeat_at'] != before['heartbeat_at']:
+            before = suspects.get(card.get('instance', ''))
+            if before is not None and card.get('heartbeat_at') != before.get('heartbeat_at'):
                 await self._refuse_start(card)
 
     def _same_name_cards(self, listed: PeerCardList) -> list[tuple[dict[str, Any], float | None, bool | None]]:
@@ -375,7 +377,7 @@ class FleetRegistry:
             card = getattr(listed_card, 'card', None)
             if not isinstance(card, dict) or validate_card(card):
                 continue
-            if card['worker'] != self._identity.worker or card['instance'] == self._identity.instance:
+            if card['worker'] != self._identity.worker or card.get('instance') == self._identity.instance:
                 continue
             online = getattr(listed_card, 'online', None)
             found.append(
@@ -405,11 +407,13 @@ class FleetRegistry:
             category='fleet',
             worker=self._identity.worker,
             instance=self._identity.instance,
-            other_instance=card['instance'],
+            other_instance=card.get('instance', ''),
             other_url=card['url'],
         )
         raise WorkerNameInUseError(
-            WORKER_NAME_IN_USE_MESSAGE.format(worker=self._identity.worker, instance=card['instance'], url=card['url'])
+            WORKER_NAME_IN_USE_MESSAGE.format(
+                worker=self._identity.worker, instance=card.get('instance', ''), url=card['url']
+            )
         )
 
     # --- loops ---
