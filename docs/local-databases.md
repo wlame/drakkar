@@ -589,7 +589,8 @@ it can prove that the name is dead:
    a worker folder and is never touched;
 2. no file in the folder changed for 300 seconds;
 3. `autodiscover` is on, and the last registry refresh (not older than
-   `autodiscover.offline_after`) lists no online card of that name: no card,
+   `autodiscover.offline_after`, or two `autodiscover.refresh` intervals when
+   that is longer) lists no online card of that name: no card,
    or only offline ones. A card whose liveness is unknown counts as not
    proved.
 

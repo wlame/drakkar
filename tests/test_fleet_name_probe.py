@@ -118,7 +118,8 @@ class _Fixed:
 
 
 def _service(provider, clock: _Clock, pauses: _Pauses, resilience=None) -> FleetRegistry:
-    config = _config(heartbeat=HEARTBEAT, **({'resilience': resilience} if resilience else {}))
+    # refresh 10 s: two intervals stay below offline_after (30 s), so offline_after bounds a trusted refresh.
+    config = _config(heartbeat=HEARTBEAT, refresh=10, **({'resilience': resilience} if resilience else {}))
     return FleetRegistry(
         provider,
         provider_name='memory',
@@ -415,3 +416,24 @@ async def test_check_name_free_card_without_instance_and_heartbeat_continues_aft
     await service.check_name_free()
 
     assert pauses.seconds == [HEARTBEAT + 2.0]
+
+
+async def test_name_online_slow_refresh_trusts_two_refresh_intervals():
+    clock = _Clock()
+    provider = _Fixed([])
+    service = FleetRegistry(
+        provider,
+        provider_name='memory',
+        config=_config(heartbeat=HEARTBEAT, refresh=120),
+        identity=OWN,
+        now_monotonic=lambda: clock.monotonic,
+        now_epoch=lambda: clock.epoch,
+        sleep=_Pauses(clock),
+    )
+    await service._ensure_started()
+    await service._refresh_once()
+
+    clock.advance(200)
+    assert service.name_online('w-old') is False
+    clock.advance(50)
+    assert service.name_online('w-old') is None

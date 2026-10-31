@@ -254,12 +254,15 @@ class FleetRegistry:
 
         ``True`` when a card of the name is online; ``False`` when no card
         has the name, or every card of it is offline; ``None`` when it cannot
-        tell: no refresh yet, a last refresh older than
-        ``autodiscover.offline_after``, or a card whose liveness is unknown.
-        This worker's own name is never listed as a peer.
+        tell: no refresh yet, a last refresh too old to trust (older than
+        ``autodiscover.offline_after``, or two refresh intervals when that is
+        longer, so a slow ``refresh`` does not hide every verdict), or a card
+        whose liveness is unknown. This worker's own name is never listed as
+        a peer.
         """
         refreshed_at = self._snapshot.refreshed_at
-        if refreshed_at is None or self._now_monotonic() - refreshed_at > self._config.offline_after:
+        trusted_seconds = max(self._config.offline_after, 2 * self._config.refresh)
+        if refreshed_at is None or self._now_monotonic() - refreshed_at > trusted_seconds:
             return None
         verdicts = {view.online for view in self.peer_views() if view.card['worker'] == worker}
         if True in verdicts:
