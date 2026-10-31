@@ -228,7 +228,7 @@ def make_authenticate(
             token_prefix=token_prefix,
             header_present=header_present,
         )
-        # Recorder: opt-in via debug.enabled. The redacted prefix lands
+        # Recorder: present when the UI or the recorder is on. The redacted prefix lands
         # in the metadata column so audit queries don't have to walk
         # the structured-log stream.
         if drakkar_app is not None:
@@ -288,7 +288,7 @@ def make_rate_limit(
                 rpm_limit=client.rpm,
                 retry_after_seconds=retry_after,
             )
-            # Recorder: opt-in via debug.enabled. ``len(window)`` is the
+            # Recorder: present when the UI or the recorder is on. ``len(window)`` is the
             # admission count BEFORE the rejection — equal to ``rpm`` when
             # we hit the cap, but kept as a separate field so future
             # tweaks (e.g., burst-allowance > rpm) stay legible in the

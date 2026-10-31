@@ -461,7 +461,7 @@ When a DLQ write fails, both strategies tick `drakkar_dlq_send_failures_total` a
 
 Two surfaces expose env vars:
 
-- **The recorder's `worker_config` table** — framework-level `ExecutorConfig.env` is **never written** to the recorder (it's omitted from the JSON payload entirely). Environment variables listed in `expose_env_vars` are captured by name, and secret-shaped names (`*PASSWORD*`, `*PASSWD*`, `*SECRET*`, `*TOKEN*`, `*KEY*`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`, `*AUTH*`, `*PRIVATE*`, `*CERT*`, `*SALT*`) are redacted to `***`. Non-matching values with embedded URL credentials (`user:pass@host`) have the credentials stripped.
+- **The recorder's `worker_config` table** — framework-level `ExecutorConfig.env` is **never written** to the recorder (it's omitted from the JSON payload entirely). Environment variables listed in `recorder.capture.env_vars` are captured by name, and secret-shaped names (`*PASSWORD*`, `*PASSWD*`, `*SECRET*`, `*TOKEN*`, `*KEY*`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`, `*AUTH*`, `*PRIVATE*`, `*CERT*`, `*SALT*`) are redacted to `***`. Non-matching values with embedded URL credentials (`user:pass@host`) have the credentials stripped.
 - **The recorder's per-task `env` metadata** — `task.env` written by your handler is sanitized with the same secret-name patterns before being stored. The original task object is not mutated; only the recorded copy is redacted. See `drakkar/recorder_helpers.py::sanitize_env_value` for the regex.
 
 The contract is "aggressive redact, accept false positives": `PASSWORD_RESET_URL` is redacted because it matches `*PASSWORD*`, even though a reset URL isn't a credential. Operators who need to expose these exact names should rename them — a leaked secret is a worse outcome than a logged URL.

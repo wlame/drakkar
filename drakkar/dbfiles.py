@@ -8,8 +8,8 @@ A leaf module — it imports nothing from Drakkar.
 Both stores hold message-derived data — the recorder persists task args
 and subprocess stdout/stderr, the cache persists handler results — so the
 files must not be readable by other local users. That matters most in the
-default ``db_dir`` of ``/tmp``, which is world-writable and shared by every
-process on the host. Same-user tools (the debug merge, an operator's
+default ``storage.dir`` of ``/tmp/drakkar``, under the world-writable ``/tmp``
+that every process on the host shares. Same-user tools (the debug merge, an operator's
 sqlite3) are unaffected: 0600 still grants the owner full access.
 """
 
@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 # Owner-only for the DB files themselves. SQLite creates them 0644 & ~umask.
 DB_FILE_MODE = 0o600
 
-# Owner-only for a ``db_dir`` Drakkar creates. The files inside are already
+# Owner-only for a ``storage.dir`` Drakkar creates. The files inside are already
 # 0600, so group/other bits on the directory grant nothing except the
 # ability to enumerate and to create sibling files.
 DB_DIR_MODE = 0o700
@@ -40,7 +40,7 @@ _WAL_SUFFIXES = ('-wal', '-shm')
 # SQLite defaults to ``synchronous=FULL``, which fsyncs the WAL on every
 # single commit. These stores commit often — the recorder on its flush
 # interval, on each state sync and on any UI poll that forces a flush; the
-# handler cache on its own flush interval — and a ``db_dir`` is routinely a
+# handler cache on its own flush interval — and a ``storage.dir`` is routinely a
 # network mount, where one fsync is tens of milliseconds during which reads
 # on the same connection queue behind it.
 #
@@ -74,7 +74,7 @@ def secure_db_file(db_path: str) -> None:
     Creating the file ourselves, rather than letting the driver create it
     0644 and chmod-ing afterwards, closes the window in which the DB is
     briefly world-readable. ``O_EXCL`` additionally means we never follow a
-    symlink planted at the path: in a world-writable ``db_dir`` the
+    symlink planted at the path: in a world-writable ``storage.dir`` the
     filename is predictable, and without it a pre-planted link would have
     us chmod an arbitrary file the worker owns. When the path already
     exists (a restart re-opening the cache DB, or sidecars left behind by

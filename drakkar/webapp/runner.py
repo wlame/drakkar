@@ -222,8 +222,8 @@ class WebappRunner:
         self._request_seq += 1
         offset = self._request_seq
 
-        # Recorder: mark this request entering the runner. Opt-in —
-        # recorder is only present when ``debug.enabled=true``. Helper
+        # Recorder: mark this request entering the runner. The recorder is
+        # present when ``ui.enabled`` or ``recorder.enabled`` is on. Helper
         # is sync so we don't need to await; the recorder buffers the
         # event and the periodic flush loop persists it.
         recorder = self._app._recorder

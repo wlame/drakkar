@@ -223,7 +223,7 @@ class UIDeps:
         self.drakkar_app = drakkar_app
         # Identity v1.2: which drakkar-ui bundle this server serves — the
         # release tag, or ``None`` when no bundle could be resolved and the
-        # server is running API-only. ``ui_source`` is ``'release'`` for a
+        # server serves no pages. ``ui_source`` is ``'release'`` for a
         # fetched or cached bundle and ``''`` when none is served.
         self.ui_version = ui_version
         self.ui_source = ui_source
@@ -857,7 +857,7 @@ class APIServer:
 
         Returns ``None`` when ``ui.release.enabled`` is off, when resolution
         errored, or when nothing could be resolved at all — an offline host
-        whose cache is still empty. The worker then runs API-only; see
+        whose cache is still empty. The worker then serves no pages; see
         :mod:`drakkar.uiserver.routes_spa`.
         """
         from drakkar.uihost import resolve

@@ -169,8 +169,8 @@ _ROW_COLUMNS = EVENT_COLUMNS[1:]
 FLUSH_POLL_SECONDS = 0.25
 
 # Approximate buffered payload bytes that trigger an early flush, alongside
-# the half-full event count. ``max_buffer`` bounds the buffer by COUNT, which
-# says nothing about its size: a task over ``output_min_duration_ms`` has its
+# the half-full event count. ``recorder.max_buffer_rows`` bounds the buffer by COUNT, which
+# says nothing about its size: a task over ``recorder.capture.min_output_duration`` has its
 # whole stdout and stderr stored, uncapped, so a workload with large outputs
 # reaches gigabytes of resident buffer long before it reaches 25 000 events.
 # Bounding both makes the memory a function of throughput rather than of the

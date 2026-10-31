@@ -42,7 +42,7 @@ DEFAULT_REPO = 'wlame/drakkar-ui'
 FETCH_TIMEOUT_SECONDS = 60.0
 
 # What ``where`` prints when nothing would serve. An empty cache is a normal
-# state, not an error: the worker runs API-only until a bundle is fetched.
+# state, not an error: the worker serves no pages until a bundle is fetched.
 # One word, so the report stays easy to parse from a script.
 NOTHING_CACHED = 'nothing'
 

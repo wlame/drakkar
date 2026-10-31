@@ -20,7 +20,7 @@ Resolution order (graceful degradation, never fatal):
 A fetch failure is never fatal — the worker still starts, and serves
 whatever the cache holds. There is deliberately no bundle baked into the
 package: one download, at any point in the worker's life, fills a cache
-that every later start — and every co-located worker — reads. When nothing can be resolved the worker runs API-only and the UI
+that every later start — and every co-located worker — reads. When nothing can be resolved the worker serves its JSON API and WebSocket without pages, and the UI
 server explains how to supply a bundle — see
 :mod:`drakkar.uiserver.routes_spa`.
 """
@@ -157,7 +157,7 @@ def resolve(
     Never raises for fetch/cache problems — it degrades along the resolution
     order in the module docstring and logs a structured event for each step.
     Returns ``None`` when nothing could be resolved — no cache, and no
-    reachable release source. The worker then runs API-only; see
+    reachable release source. The worker then serves no pages; see
     :mod:`drakkar.uiserver.routes_spa`.
 
     ``api_base`` overrides the GitHub API base (GitHub Enterprise, or a stub
@@ -234,7 +234,7 @@ def resolve(
         category='ui',
         cache_root=str(root),
         repo=config.repo,
-        hint='no cached bundle and no reachable release source; the worker runs API-only',
+        hint='no cached bundle and no reachable release source; the worker serves no pages',
     )
     return None
 
@@ -263,7 +263,7 @@ class Status:
     fallback_version: str | None
     fallback_dir: Path | None
     #: What would serve today, or ``None`` when the cache is empty and
-    #: the worker would run API-only.
+    #: the worker would serve no pages.
     source: Source | None
 
 

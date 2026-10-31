@@ -26,7 +26,7 @@ class UIReleaseConfig(ConfigModel):
     fatal — release tags are immutable, so a bundle downloaded once serves
     from the cache on every later start, offline ones included. There is no
     HTML fallback baked into the package: with nothing cached the worker
-    runs API-only and page requests answer 503 naming how to supply a
+    serves its JSON API and WebSocket without pages, and page requests answer 503 naming how to supply a
     bundle.
     """
 

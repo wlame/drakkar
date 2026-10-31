@@ -930,7 +930,7 @@ async def test_reader_connection_closes_on_stop(tmp_path):
 
 
 async def test_reader_connection_not_opened_when_engine_disabled(tmp_path):
-    """When cache is disabled or db_dir is unresolved, the reader connection
+    """When cache is disabled or storage.dir is unresolved, the reader connection
     stays None — matches the writer's effectively-disabled behavior."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),

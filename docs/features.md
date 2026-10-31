@@ -27,7 +27,7 @@ Every feature is optional. A worker can run its main loop only: no API, no UI, n
 | Flight recorder, durable store | `recorder.enabled`, `recorder.provider` | **on**, `sqlite` | Event history in files in `storage.dir` (`sqlite`) or in a Postgres table (`postgres`) |
 | Own storage | `storage.dir` | `/tmp/drakkar` | Where this worker's event history, cache file and crash marker live |
 | Recorder archiving | `recorder.archive.enabled` | **on** (provider `sqlite`) | Fold sealed recorder files into `.db.gz` window archives, for the whole cluster (with `autodiscover` and `storage.shared_dir`) or for this worker's own files |
-| Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
+| Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker serves its JSON API and WebSocket without pages (page requests answer 503); `ui.enabled: false` turns the UI off |
 | Prometheus panel + links | `ui.prometheus.url` | off (empty) | Dashboard deep-links into a Prometheus instance |
 | Autodiscover (registry + election) | `autodiscover.enabled`, `autodiscover.provider` | **off** | [Workers find each other](fleet.md) and cluster-scope periodic tasks elect one runner; needs `api.enabled`; provider `filesystem` needs `storage.shared_dir`, the other providers need a connection |
 | Cross-worker fleet view | `autodiscover` plus a `storage.shared_dir` every worker mounts | n/a | The workers list, history trace over the cluster's sealed files, cluster-wide database view |
@@ -80,8 +80,8 @@ names the key to change.
    and serves the drakkar-ui release; a fetch failure is non-fatal, and
    release tags are immutable, so a bundle downloaded once serves from the
    shared cache on every later start, offline ones included. There is no
-   HTML fallback in the package: with nothing cached the worker runs
-   API-only and page requests answer **503** naming how to supply a
+   HTML fallback in the package: with nothing cached the worker serves its
+   JSON API and WebSocket without pages, and page requests answer **503** naming how to supply a
    bundle. For an air-gapped deployment, stage one with
    `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
    internal mirror.
@@ -278,5 +278,5 @@ config and the worker serves HTTP only.
 - Air-gapped? Stage the bundle once with
   `drakkar-ui fetch --version=vX.Y.Z` into a cache the workers share, or
   point `ui.release.repo` at an internal mirror. `ui.release.enabled: false`
-  turns the UI off rather than substituting anything: the worker then
-  serves `/api/v1` and the probes only.
+  fetches nothing and substitutes nothing: the worker then serves its JSON
+  API and WebSocket without pages. `ui.enabled: false` turns the UI off.

@@ -37,7 +37,7 @@ NO_BUNDLE_REMEDIES = (
     'check this worker can reach the release source (ui.release.repo, default wlame/drakkar-ui)',
     'or stage a bundle into the shared cache with: drakkar-ui fetch <version>',
     'or point ui.release.repo at an internal mirror that publishes the same release assets',
-    'or set ui.release.enabled: false to run API-only on purpose',
+    'or set ui.enabled: false to turn the UI off',
 )
 
 

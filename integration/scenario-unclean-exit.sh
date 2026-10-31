@@ -119,7 +119,7 @@ HOLDER_DELAY_SECONDS=1
 PLANTED_FILES=50
 PLANTED_EVENTS_PER_FILE=1000
 # Twelve hours back stays clear of the files the workers seal themselves in
-# the first hours of an uptime; retention_days: 1 still covers it.
+# the first hours of an uptime; recorder.archive.retention: 1d still covers it.
 PLANTED_HOURS_AGO=12
 SHARED_DIR="$SCENARIO_DIR/shared"
 # Seconds between two reads of the lock holder.

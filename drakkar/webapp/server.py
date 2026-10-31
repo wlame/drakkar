@@ -854,7 +854,7 @@ class WebApp:
                         duration_ms=duration_ms,
                     )
                     # Recorder: timeout event lives on T2 because that's
-                    # where ``wait_for`` trips. Opt-in via debug.enabled.
+                    # where ``wait_for`` trips. Present when the UI or the recorder is on.
                     recorder = self._app._recorder
                     if recorder is not None:
                         recorder.record_webapp_request_timeout(ctx, duration_ms)

@@ -490,7 +490,7 @@ ui:
                                    # '' = off. Must exist at boot when set. Referenced from
                                    # probe_field(view='custom', renderer=...) / Column(renderer=...).
 
-  # --- drakkar-ui bundle fetching (never fatal; with nothing cached the worker runs API-only) ---
+  # --- drakkar-ui bundle fetching (never fatal; with nothing cached the worker serves no pages) ---
   release:
     enabled: true                    # resolve + serve the drakkar-ui bundle. env: DK_UI__RELEASE__ENABLED
     repo: wlame/drakkar-ui           # "owner/name" GitHub repo publishing UI bundles. env: DK_UI__RELEASE__REPO

@@ -878,7 +878,7 @@ class TestApiV1Identity:
         assert data['ui_source'] == 'release'
 
     async def test_ui_fields_report_api_only_when_no_bundle(self, debug_config, mock_recorder, mock_app):
-        """API-only mode: no bundle served, so ui_source is the empty string.
+        """No bundle served, so ui_source is the empty string.
 
         The contract reserves "" for this state. Reporting "release" with a
         null ui_version claims a bundle is being served that is not, which is

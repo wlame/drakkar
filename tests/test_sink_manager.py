@@ -1154,7 +1154,7 @@ async def test_deliver_all_tolerates_none_recorder_and_none_dlq_sink_on_failure(
     not ``AttributeError`` when a sink fails. The None-tolerance of the
     internal guards (``if self._recorder is not None``, ``if self._dlq_sink
     is not None``) is what lets ``_async_run`` skip recorder wiring when
-    ``debug.enabled=False`` — and lets tests construct a bare manager for
+    ``ui.enabled=False`` — and lets tests construct a bare manager for
     unrelated assertions. Locks in that public constructor contract.
     """
     mgr = SinkManager(recorder=None, dlq_sink=None)

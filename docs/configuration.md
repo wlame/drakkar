@@ -1482,7 +1482,7 @@ anchors that link UI surfaces (a label, a sink, a timeline event type, a declare
 page) into it — covered field-by-field on the dedicated
 [Operator Docs Site](ui-docs.md) page.### UI Release (`ui.release:`)
 
-Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (the separate drakkar-ui repo, published to GitHub Releases); when enabled, the worker resolves that bundle (cache → fetch) and serves it. A fetch failure is never fatal: release tags are immutable, so a bundle downloaded once serves from the shared cache on every later start — including offline ones. When nothing can be resolved at all the worker runs API-only and page requests answer 503 with how to supply a bundle; there is no built-in HTML fallback. See [Managing the UI bundle cache](observability.md#managing-the-ui-bundle-cache).
+Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (the separate drakkar-ui repo, published to GitHub Releases); when enabled, the worker resolves that bundle (cache → fetch) and serves it. A fetch failure is never fatal: release tags are immutable, so a bundle downloaded once serves from the shared cache on every later start — including offline ones. When nothing can be resolved at all the worker serves its JSON API and WebSocket without pages, and page requests answer 503 with how to supply a bundle; there is no built-in HTML fallback. See [Managing the UI bundle cache](observability.md#managing-the-ui-bundle-cache).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

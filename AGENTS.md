@@ -182,7 +182,8 @@ download rather than each keeping their own copy. The concurrency invariant: a v
 deleted or replaced (`fetch.py`); racing workers converge on the first
 installer's copy. Resolution is never fatal, but it can end with nothing:
 the wheel carries no bundle, so a worker with an empty cache and no
-reachable release source runs API-only and answers page requests with 503
+reachable release source serves its JSON API and WebSocket without pages and
+answers page requests with 503
 (`uiserver/routes_spa.py`). For an air-gapped deployment, stage a bundle
 with `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
 internal mirror.

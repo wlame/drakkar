@@ -643,9 +643,9 @@ drakkar-ui fetch --version=v0.2.0   # download a specific release
 
 All subcommands accept `--repo=owner/name`, `--cache-dir=DIR`, and `--api-base=URL` (GitHub Enterprise); a `GITHUB_TOKEN` in the environment raises rate limits and unlocks private repos. Cached versions are never re-downloaded -- release tags are immutable. `just drakkar-ui <args>` wraps the same command for repo-local use.
 
-When neither the cache nor the release source can supply a bundle (an offline host whose cache is still empty), the worker **runs API-only**: `/api/v1/...`, the Kubernetes probes and the event WebSocket are all unaffected, and every page request answers **503** naming the ways to supply a bundle. There is no built-in HTML fallback -- the UI is one versioned artifact, and a single download at any point in a worker's life fills a cache that every later start reads.
+When neither the cache nor the release source can supply a bundle (an offline host whose cache is still empty), the worker **serves its JSON API and WebSocket without pages**: `/api/v1/...`, the Kubernetes probes and the event WebSocket are all unaffected, and every page request answers **503** naming the ways to supply a bundle. There is no built-in HTML fallback -- the UI is one versioned artifact, and a single download at any point in a worker's life fills a cache that every later start reads.
 
-For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --version=vX.Y.Z` (into a cache directory the workers share), or point `ui.release.repo` at an internal mirror that publishes the same release assets. `ui.release.enabled: false` turns the UI off deliberately, leaving the same API-only worker.
+For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --version=vX.Y.Z` (into a cache directory the workers share), or point `ui.release.repo` at an internal mirror that publishes the same release assets. `ui.release.enabled: false` fetches no bundle, which leaves the same worker without pages. `ui.enabled: false` turns the UI off: the worker then serves only `/healthz`, `/readyz` and the peer route.
 
 ---
 
@@ -806,7 +806,7 @@ This table names the worker and cluster that wrote each file, for history, merge
     DB, while an over-matched inheritance-deny pattern would withhold a
     variable a subprocess actually needs.
 
-    This protects operators who add secret-named vars to `expose_env_vars`
+    This protects operators who add secret-named vars to `recorder.capture.env_vars`
     without thinking, DSNs passed through otherwise-innocuous var names
     (`UPSTREAM_URL`, `CACHE_URL`, etc.), and per-task env values that
     handlers assemble from inbound message payloads.

@@ -243,7 +243,8 @@ The gap between high and low prevents rapid pause/resume cycling.
 
 ### Duration thresholds
 
-All four `*_min_duration_ms` thresholds follow the same principle:
+All four duration thresholds (`ui.ws_min_duration`, `logging.min_task_duration`,
+`recorder.capture.min_event_duration`, `recorder.capture.min_output_duration`) follow the same principle:
 **hide noise, preserve signal**. For fast workloads (p80 < 50ms), the
 majority of tasks are routine -- only slow outliers and failures matter.
 For slow workloads (p80 > 500ms), every task is worth observing. The

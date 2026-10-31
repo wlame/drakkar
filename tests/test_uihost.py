@@ -260,7 +260,7 @@ def test_check_update_with_cached_latest_does_not_redownload(stub_github, tmp_pa
     assert bundle.source == 'cache'
     assert bundle.root == tmp_path / 'cache' / 'v1.2.0'
     # Only the update check hits the network: the direct redirect attempt
-    # (404 on this API-only stub) followed by the API fallback — and no
+    # (404 on this stub with no pages) followed by the API fallback — and no
     # asset download at all.
     assert stub_github.requests == [
         '/wlame/drakkar-ui/releases/latest',
@@ -316,7 +316,7 @@ def test_traversal_member_rejected_and_incoming_cleaned(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert not (tmp_path / 'cache' / 'evil.txt').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
@@ -341,7 +341,7 @@ def test_oversize_extraction_rejected(stub_github, tmp_path, monkeypatch):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
 
 
@@ -352,7 +352,7 @@ def test_oversize_download_rejected(stub_github, tmp_path, monkeypatch):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
 
 
 def test_bundle_without_index_rejected(stub_github, tmp_path):
@@ -361,7 +361,7 @@ def test_bundle_without_index_rejected(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
 
@@ -375,7 +375,7 @@ def test_release_without_tarball_asset_rejected(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
 
 
 def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
@@ -383,7 +383,7 @@ def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert stub_github.requests == []
 
 
@@ -393,7 +393,7 @@ def test_nothing_resolvable_returns_none_rather_than_a_baked_in_bundle(tmp_path)
     There is deliberately no bundle baked into the package: one download at
     any point in a worker's life fills a cache that every later start — and
     every co-located worker — reads. Until then the worker
-    runs API-only and the UI server says how to supply a bundle.
+    serves no pages and the UI server says how to supply a bundle.
     """
     assert resolve(ui_config(tmp_path, repo='')) is None
 
@@ -729,7 +729,7 @@ def test_resolve_pinned_fetch_failure_stays_strict(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
 
 
 def test_resolve_pinned_cached_beats_unfetchable_latest(stub_github, tmp_path):
@@ -783,7 +783,7 @@ def test_fetch_rejects_checksum_mismatch(stub_github, tmp_path):
 
     bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
 
 
@@ -793,7 +793,7 @@ def test_fetch_rejects_malformed_checksum_asset(stub_github, tmp_path):
 
     bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
 
-    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
+    assert bundle is None, 'nothing usable resolved — the worker serves no pages'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
 
 
