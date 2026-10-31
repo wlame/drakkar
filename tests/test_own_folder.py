@@ -9,7 +9,12 @@ import pytest
 from drakkar import ownerlock
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig, own_storage_dir
-from drakkar.config.identity import check_worker_name, generated_worker_name, is_valid_worker_name
+from drakkar.config.identity import (
+    check_cluster_name,
+    check_worker_name,
+    generated_worker_name,
+    is_valid_worker_name,
+)
 from drakkar.ownerlock import (
     OWNER_LOCK_NAME,
     FolderInUseError,
@@ -326,3 +331,29 @@ def test_app_worker_name_from_the_config_is_checked(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match=r"worker\.name: 'a\.b'"):
         DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path, worker={'name': 'a.b'}))
+
+
+# --- the cluster name ---
+
+
+@pytest.mark.parametrize('name', ['history', 'merged', 'tasks', 'fleet', 'workers', 'HISTORY', 'Fleet'])
+def test_check_cluster_name_reserved_folder_name_is_refused(name):
+    with pytest.raises(ValueError) as refused:
+        check_cluster_name(name)
+
+    assert str(refused.value) == (
+        f"cluster.name: '{name}' gives the folder name '{name}', which is reserved "
+        '(fleet, history, merged, tasks, workers); choose another cluster name'
+    )
+
+
+@pytest.mark.parametrize('name', ['', 'default', 'search', 'history-hot', 'my.tasks'])
+def test_check_cluster_name_other_names_are_accepted(name):
+    check_cluster_name(name)
+
+
+def test_cluster_config_reserved_name_from_the_variable_fails_the_load(tmp_path, monkeypatch):
+    monkeypatch.setenv('MY_CLUSTER', 'merged')
+
+    with pytest.raises(ValueError, match=r"cluster\.name: 'merged' gives the folder name 'merged'"):
+        _config(tmp_path, cluster={'name_env': 'MY_CLUSTER'})

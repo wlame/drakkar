@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (api, autodiscover, cache exchange, recorder, connections, sinks, threads, the units of single keys and the ranges of values with a unit), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (the reserved cluster folder names, api, autodiscover, cache exchange, recorder, connections, sinks, threads, the units of single keys and the ranges of values with a unit), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -2421,6 +2421,36 @@
         }
       },
       "path": "cache.max_memory_entries"
+    },
+    {
+      "name": "cluster_name_reserved_folder",
+      "yaml": {
+        "cluster": {
+          "name": "history"
+        }
+      },
+      "message": "cluster.name: 'history' gives the folder name 'history', which is reserved (fleet, history, merged, tasks, workers); choose another cluster name"
+    },
+    {
+      "name": "cluster_name_reserved_folder_any_letter_case",
+      "yaml": {
+        "cluster": {
+          "name": "Tasks"
+        }
+      },
+      "message": "cluster.name: 'Tasks' gives the folder name 'Tasks', which is reserved (fleet, history, merged, tasks, workers); choose another cluster name"
+    },
+    {
+      "name": "cluster_name_reserved_folder_from_the_variable",
+      "yaml": {
+        "cluster": {
+          "name_env": "DRAKKAR_TEST_CLUSTER"
+        }
+      },
+      "env": {
+        "DRAKKAR_TEST_CLUSTER": "workers"
+      },
+      "message": "cluster.name: 'workers' gives the folder name 'workers', which is reserved (fleet, history, merged, tasks, workers); choose another cluster name"
     }
   ],
   "load_values": [
@@ -3767,6 +3797,16 @@
       },
       "path": "ui.timeline.max_age",
       "value": 90
+    },
+    {
+      "name": "cluster_name_beside_a_reserved_folder_loads",
+      "yaml": {
+        "cluster": {
+          "name": "history-hot"
+        }
+      },
+      "path": "cluster.name",
+      "value": "history-hot"
     }
   ],
   "sink_policies": [

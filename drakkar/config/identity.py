@@ -9,10 +9,11 @@ import re
 import secrets
 import socket
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from drakkar.config.base import ConfigModel
 from drakkar.fleet.card import sanitize_worker_name
+from drakkar.schedule import sanitize_cluster
 
 # The worker name is a folder name, a file name prefix and the key of the
 # registry card on every provider, so it must be one safe word. A name that
@@ -24,6 +25,30 @@ WORKER_NAME_INVALID = "worker.name: '{name}' must be 1 to 128 letters, digits, '
 # A host name that names no host in particular: two workers would share it.
 _UNSPECIFIC_HOST_NAMES = frozenset({'localhost'})
 GENERATED_NAME_PREFIX = 'drakkar-'
+
+
+# Folder names a cluster cannot take. The own folders live in
+# ``<storage.dir>/<cluster>/``, and with ``storage.shared_dir`` empty the shared
+# folders (``history/``, ``merged/``, ``tasks/``, ``fleet/`` with its
+# ``workers/``) live in ``storage.dir`` too: a cluster of one of these names
+# would put worker folders inside a shared folder. Compared without letter
+# case, because some filesystems ignore it.
+RESERVED_CLUSTER_FOLDERS = ('fleet', 'history', 'merged', 'tasks', 'workers')
+CLUSTER_NAME_RESERVED = (
+    "cluster.name: '{name}' gives the folder name '{folder}', which is reserved "
+    '(fleet, history, merged, tasks, workers); choose another cluster name'
+)
+
+
+def check_cluster_name(name: str) -> None:
+    """Refuse a cluster name whose folder name is one of the shared folders.
+
+    Raises:
+        ValueError: the sanitized name is reserved.
+    """
+    folder = sanitize_cluster(name)
+    if folder.lower() in RESERVED_CLUSTER_FOLDERS:
+        raise ValueError(CLUSTER_NAME_RESERVED.format(name=name, folder=folder))
 
 
 def is_valid_worker_name(name: str) -> bool:
@@ -96,14 +121,24 @@ class ClusterConfig(ConfigModel):
     name: str = Field(
         default='',
         description=(
-            'Literal cluster name. Empty with autodiscover on logs one startup warning naming the scope default.'
+            'Literal cluster name. Empty with autodiscover on logs one startup warning naming the scope default. '
+            'A name whose folder name is fleet, history, merged, tasks or workers (any letter case) fails the load.'
         ),
     )
     name_env: str = Field(
         default='',
-        description='Environment variable that holds the cluster name; set and not empty, it wins over name.',
+        description=(
+            'Environment variable that holds the cluster name; set and not empty, it wins over name. '
+            'Its value follows the same rule as name.'
+        ),
     )
 
     def resolved_name(self) -> str:
         """The cluster name: the variable's value when it is set and not empty, else ``name``."""
         return _name_from(self.name, self.name_env)
+
+    @model_validator(mode='after')
+    def _refuse_reserved_folder(self) -> 'ClusterConfig':
+        """The cluster name, from the variable or the literal, must not give a reserved folder name."""
+        check_cluster_name(self.resolved_name())
+        return self
