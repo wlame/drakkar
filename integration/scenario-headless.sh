@@ -56,7 +56,11 @@ MESSAGE_FILE_PATH=/etc/hostname
 API_LIMIT_SECONDS=180
 # Both workers deliver the messages within this long of the produce.
 DELIVERY_LIMIT_SECONDS=300
+# Longer than executor.drain_timeout (30s) of both services.
 STOP_TIMEOUT_SECONDS=60
+# The events of the shutdown and of the recorder, which tell why a sealed
+# file is missing; the names are the same on every backend.
+SHUTDOWN_EVENTS='recorder_started|recorder_rotated|recorder_sealed|recorder_seal_failed|recorder_leftover_sealed|recorder_final_flush_failed|recorder_stopped|recorder_stop_failed|drakkar_shutting_down|sources_draining|draining_executors|executors_drained|sources_drained|drain_timeout|stop_processor_drain_timeout|background_task_drain_timeout|drakkar_stopped'
 SHARED_DIR="${SCENARIO_DIR}/shared"
 HISTORY_DIR="${SHARED_DIR}/history"
 # The run's marker in the request ids.
@@ -127,9 +131,25 @@ exit_code_of() {
 }
 
 # The sealed recorder files of worker $1 in the shared history folder, one
-# path per line; their meta files are not listed.
+# path per line; their meta files are not listed. Fails when the history
+# folder does not exist.
 sealed_files_of() {
-    find "$HISTORY_DIR" -type f -name "$1-*.db" 2>/dev/null | sort
+    [ -d "$HISTORY_DIR" ] || return 1
+    find "$HISTORY_DIR" -type f -name "$1-*.db" | sort
+}
+
+# What explains a missing sealed file: the shutdown and recorder lines of
+# the log of $1, the recorder files left in the storage folder root, and the
+# work files and folders of the history folder. Read before the exit trap
+# removes the container.
+#   shutdown_diagnostics <service>
+shutdown_diagnostics() {
+    echo "--- shutdown and recorder log lines of $1"
+    "${COMPOSE[@]}" --profile=headless logs --no-color --no-log-prefix "$1" 2>&1 | grep -E "$SHUTDOWN_EVENTS" || echo "(none)"
+    echo "--- recorder files of $1 left in ${SHARED_DIR}"
+    find "$SHARED_DIR" -maxdepth 1 -name "$1-*" | sort
+    echo "--- history folder ${HISTORY_DIR}"
+    find "$HISTORY_DIR" -mindepth 1 2>/dev/null | sort || true
 }
 
 # The number of consumed events in the SQLite file $1, opened read-only.
@@ -140,6 +160,10 @@ conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 print(conn.execute("SELECT count(*) FROM events WHERE event = ?", ("consumed",)).fetchone()[0])
 ' "$1"
 }
+
+# The sealed files of earlier runs stay in the shared folder; only a file
+# that is not in this list was written by this run.
+files_before=$(sealed_files_of "$RECORDER_SERVICE") || files_before=
 
 step "Start the headless workers"
 "${COMPOSE[@]}" --profile=headless up --detach --build "${HEADLESS_SERVICES[@]}" >/dev/null 2>&1 \
@@ -178,8 +202,12 @@ for service in "${HEADLESS_SERVICES[@]}"; do
     [ "$code" = 0 ] || fail "${service} exited with code ${code} after the stop, expected 0"
 done
 ok "both containers exited with code 0"
-sealed=$(sealed_files_of "$RECORDER_SERVICE")
-[ -n "$sealed" ] || fail "no sealed recorder file of ${RECORDER_SERVICE} under ${HISTORY_DIR} after the stop"
+diagnostics=$(shutdown_diagnostics "$RECORDER_SERVICE")
+sealed=$(sealed_files_of "$RECORDER_SERVICE" | grep -vxF -f <(echo "$files_before") || true)
+if [ -z "$sealed" ]; then
+    echo "$diagnostics"
+    fail "no new sealed recorder file of ${RECORDER_SERVICE} under ${HISTORY_DIR} after the stop (the lines above show the shutdown)"
+fi
 sealed_count=0
 consumed_total=0
 while IFS= read -r file; do
@@ -190,7 +218,7 @@ while IFS= read -r file; do
 done <<<"$sealed"
 [ "$consumed_total" -gt 0 ] \
     || fail "the ${sealed_count} sealed file(s) of ${RECORDER_SERVICE} hold no consumed event"
-no_api_files=$(sealed_files_of "$NO_API_SERVICE")
+no_api_files=$(sealed_files_of "$NO_API_SERVICE") || no_api_files=
 [ -z "$no_api_files" ] || fail "${NO_API_SERVICE} has the recorder off, but a recorder file exists: ${no_api_files}"
 ok "${sealed_count} sealed file(s) of ${RECORDER_SERVICE} with meta files hold ${consumed_total} consumed events; ${NO_API_SERVICE} left none"
 

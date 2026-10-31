@@ -10,7 +10,7 @@
 #   WORKER_TOKEN       the SecretID of the workers' token
 #
 # The policy holds exactly the two rules that docs/security.md gives the
-# consul providers, with the harness key_prefix "drakkar".
+# consul providers, with the harness state_prefix "drakkar".
 # ============================================================================
 set -eu
 

@@ -6,7 +6,8 @@
 # DK_RECORDER__PROVIDER: "postgres", the table prefix "fast", an initial
 # retention of 2 hours and an output limit of 1KiB (docker-compose.yml), so
 # their recorder events go to the table drakkar.fast_recorder_events on
-# postgres-fleet. The main cluster keeps its own modes. The scenario checks, in order:
+# postgres-fleet. The main cluster keeps its own modes. The scenario checks,
+# in order:
 #   1. the table exists, its comment is retention_hours=2, and the
 #      partitions of the current hour to 3 hours ahead exist,
 #   2. the rows of cluster 'fast cluster' grow over 30 s, with both worker

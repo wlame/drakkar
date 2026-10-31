@@ -527,6 +527,10 @@ services:
       DK_METRICS__PORT: "9097"
       DK_API__PORT: "8093"
       DK_UI__ENABLED: "false"
+      # The stop gives the recorder only the time the drain leaves, so the
+      # drain gets enough that the sealed file is always moved into the
+      # shared folder.
+      DK_EXECUTOR__DRAIN_TIMEOUT: "30s"
       DK_RECORDER__ENABLED: "true"
       DK_RECORDER__ARCHIVE__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
@@ -556,6 +560,7 @@ services:
       DK_METRICS__PORT: "9098"
       DK_API__ENABLED: "false"
       DK_UI__ENABLED: "false"
+      DK_EXECUTOR__DRAIN_TIMEOUT: "30s"
       DK_RECORDER__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
     ports:

@@ -5,7 +5,8 @@
 #
 # worker-1 runs with DK_RECORDER__ENABLED: "false" and a memory window of
 # 60 s (DK_RECORDER__MEMORY__WINDOW: "1m" in docker-compose.yml); worker-2
-# keeps the recorder file (provider sqlite, the default). The scenario checks, in order:
+# keeps the recorder file (provider sqlite, the default). The scenario checks,
+# in order:
 #   1. worker-1 /api/v1/debug/databases: exactly one `own` row, of kind
 #      memory, and no live row; history.folders is not empty. The workers
 #      seal their own files only at a rotation (hourly), so when the shared
