@@ -248,7 +248,7 @@ uses them.
   `task_locks` (election), and nothing else. A role with these rights can
   publish and delete worker cards and take the lease of any cluster task, so protect the
   schema like the card folder of the `filesystem` provider.
-- **The recorder events table of `persistence: postgres` must be owned by
+- **The recorder events table of `recorder.provider: postgres` must be owned by
   the worker role.** The worker creates and drops the hourly partitions of
   that table itself, in both `manage_schema` modes, and Postgres lets only
   the owner of a table do that. With `manage_schema: false`, an operator
