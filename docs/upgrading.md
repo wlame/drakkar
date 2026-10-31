@@ -1010,6 +1010,10 @@ The file names and the shared folder do not change.
   on and the registry shows the name is not online; with `autodiscover` off they are only
   logged (`recorder_orphan_folder_found`). See [Orphan folders](local-databases.md#orphan-folders).
 
+**Renamed log event:** `recorder_storage_dir_world_writable` is now `storage_folder_unsafe`
+(category `lifecycle`). It checks `storage.dir`, the cluster folder and the own folder, for any
+recorder provider, and also names a folder owned by another user.
+
 **New log events:** `fleet_worker_name_probe_waiting`, `fleet_worker_name_in_use`,
 `fleet_worker_name_probe_skipped`, `recorder_orphan_folder_sealed`,
 `recorder_orphan_folder_found`, `recorder_orphan_folder_failed`,

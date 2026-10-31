@@ -78,7 +78,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
     worker_info,
 )
-from drakkar.ownerlock import OwnerLock, open_own_folder
+from drakkar.ownerlock import OwnerLock, open_own_folder, unsafe_folder_levels
 from drakkar.periodic import STARTUP_NO_AUTODISCOVER, SYSTEM_CLOCK, Clock, run_own_system_task, run_periodic_task
 from drakkar.periodic_roster import RosterTask, resolve_periodic_roster
 from drakkar.providers.connections import Connections
@@ -216,6 +216,14 @@ def watch_periodic_loop(task: asyncio.Task, name: str) -> None:
         logger.error('periodic_loop_ended', category='periodic', name=name, error=str(exc), exc_info=exc)
 
     task.add_done_callback(on_done)
+
+
+# The hint of ``storage_folder_unsafe``: the own files hold task args and subprocess output.
+STORAGE_FOLDER_UNSAFE_HINT = (
+    'the own files hold task arguments and subprocess output, and another local user can replace '
+    'what is in this folder; give storage.dir and the folders below it to the worker user only '
+    '(for example /var/lib/drakkar)'
+)
 
 
 class AppLifecycle:
@@ -449,13 +457,21 @@ class AppLifecycle:
         storage_dir = app._config.storage.dir
         if not storage_dir:
             return
-        # File I/O on a possibly network-mounted path — keep it off the loop.
+        # File I/O — keep it off the loop.
         self._owner_lock = await asyncio.to_thread(
             open_own_folder,
             storage_dir=storage_dir,
             own_dir=app.own_storage_dir,
             worker=app._worker_id,
         )
+        for folder, reason in await asyncio.to_thread(unsafe_folder_levels, storage_dir, app.own_storage_dir):
+            await logger.awarning(
+                'storage_folder_unsafe',
+                category='lifecycle',
+                folder=folder,
+                reason=reason,
+                hint=STORAGE_FOLDER_UNSAFE_HINT,
+            )
 
     async def _release_owner_lock(self) -> None:
         """Drop the owner lock of the own folder, last in the shutdown; nothing to do when none was taken."""

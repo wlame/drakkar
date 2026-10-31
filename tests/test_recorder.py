@@ -5092,40 +5092,6 @@ class TestStorageDirNetworkFsWarning:
         assert captured.warnings == []
 
 
-class TestStorageDirWorldWritableWarning:
-    """Startup warning when other local users can write into storage.dir."""
-
-    async def test_start_warns_when_the_folder_is_world_writable(self, tmp_path):
-        folder = tmp_path / 'shared-tmp'
-        folder.mkdir()
-        folder.chmod(0o777)
-        rec = EventRecorder(
-            make_debug_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(folder)
-        )
-
-        with capture_logs() as cap:
-            await rec.start()
-        await rec.stop()
-
-        warnings = [entry for entry in cap if entry['event'] == 'recorder_storage_dir_world_writable']
-        assert len(warnings) == 1
-        assert warnings[0]['storage_dir'] == str(folder)
-
-    async def test_start_is_silent_when_the_folder_is_owner_only(self, tmp_path):
-        folder = tmp_path / 'private'
-        folder.mkdir()
-        folder.chmod(0o700)
-        rec = EventRecorder(
-            make_debug_config(tmp_path), worker_name=WORKER_NAME, persistence='sqlite', storage_dir=str(folder)
-        )
-
-        with capture_logs() as cap:
-            await rec.start()
-        await rec.stop()
-
-        assert not [entry for entry in cap if entry['event'] == 'recorder_storage_dir_world_writable']
-
-
 class TestLastBreathFlush:
     """The atexit salvage path for buffers a clean stop() never flushed."""
 

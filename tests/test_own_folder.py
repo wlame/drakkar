@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from drakkar import ownerlock
 from drakkar.app import DrakkarApp
@@ -357,3 +358,54 @@ def test_cluster_config_reserved_name_from_the_variable_fails_the_load(tmp_path,
 
     with pytest.raises(ValueError, match=r"cluster\.name: 'merged' gives the folder name 'merged'"):
         _config(tmp_path, cluster={'name_env': 'MY_CLUSTER'})
+
+
+# --- folders another user could change ---
+
+
+@pytest.mark.parametrize('level', ['top', 'cluster', 'own'])
+async def test_prepare_storage_world_writable_level_without_sticky_bit_warns(tmp_path, level):
+    app = DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path), worker_id='w-1')
+    own = Path(app.own_storage_dir)
+    own.mkdir(parents=True)
+    folder = {'top': own.parent.parent, 'cluster': own.parent, 'own': own}[level]
+    folder.chmod(0o777)
+
+    with capture_logs() as logs:
+        await app._lifecycle._prepare_storage()
+    await app._lifecycle._release_owner_lock()
+
+    (unsafe,) = [entry for entry in logs if entry['event'] == 'storage_folder_unsafe']
+    assert unsafe['log_level'] == 'warning'
+    assert (unsafe['folder'], unsafe['reason']) == (str(folder), 'world_writable')
+
+
+async def test_prepare_storage_sticky_world_writable_top_folder_is_silent(tmp_path):
+    app = DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path), worker_id='w-1')
+    top = tmp_path / 'storage'
+    top.mkdir()
+    top.chmod(0o1777)
+
+    with capture_logs() as logs:
+        await app._lifecycle._prepare_storage()
+    await app._lifecycle._release_owner_lock()
+
+    assert not [entry for entry in logs if entry['event'] == 'storage_folder_unsafe']
+
+
+def test_unsafe_folder_levels_folder_of_another_owner_is_named(tmp_path, monkeypatch):
+    own = tmp_path / 'storage' / 'default' / 'w-1'
+    own.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(ownerlock.os, 'geteuid', lambda: os.getuid() + 1)
+
+    levels = ownerlock.unsafe_folder_levels(str(tmp_path / 'storage'), str(own))
+
+    assert levels == [
+        (str(tmp_path / 'storage'), 'other_owner'),
+        (str(own.parent), 'other_owner'),
+        (str(own), 'other_owner'),
+    ]
+
+
+def test_unsafe_folder_levels_missing_level_is_skipped(tmp_path):
+    assert ownerlock.unsafe_folder_levels(str(tmp_path / 'gone'), str(tmp_path / 'gone' / 'c' / 'w')) == []

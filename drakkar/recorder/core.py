@@ -801,7 +801,6 @@ class EventRecorder(EventWriter):
                 raise
             self._memory_store = store
         if self._has_file:
-            await self._warn_if_storage_dir_world_writable()
             await self._warn_if_storage_dir_network_fs()
             # Normalized so it compares equal to the leftover scan's paths
             # however storage.dir is spelled ('./data' or 'data/').
@@ -986,29 +985,6 @@ class EventRecorder(EventWriter):
             )
 
         task.add_done_callback(on_done)
-
-    async def _warn_if_storage_dir_world_writable(self) -> None:
-        """Warn when the own-files folder is world-writable (e.g. /tmp).
-
-        Recorder DBs persist task args and subprocess output. In a
-        world-writable directory other local users can pre-create or
-        symlink-swap files, and (before the post-create chmod) read DB
-        contents. Best-effort: a stat failure is ignored — the directory
-        may not exist yet and ``make_db_path`` / connect handle that.
-        """
-        try:
-            mode = os.stat(self._storage_dir).st_mode
-        except OSError:
-            return
-        if mode & 0o002:
-            await logger.awarning(
-                'recorder_storage_dir_world_writable',
-                category='recorder',
-                storage_dir=self._storage_dir,
-                hint='recorder DBs store task args and subprocess output; '
-                'point storage.dir at a folder owned by the worker user '
-                '(e.g. /var/lib/drakkar) on shared hosts',
-            )
 
     async def _warn_if_storage_dir_network_fs(self) -> None:
         """Warn when the own-files folder sits on a network filesystem.

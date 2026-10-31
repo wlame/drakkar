@@ -21,6 +21,7 @@ import contextlib
 import fcntl
 import os
 import re
+import stat
 
 from drakkar.dbfiles import DB_DIR_MODE
 
@@ -164,3 +165,25 @@ def open_own_folder(storage_dir: str, own_dir: str, worker: str) -> OwnerLock:
         lock.release()
         raise
     return lock
+
+
+def unsafe_folder_levels(storage_dir: str, own_dir: str) -> list[tuple[str, str]]:
+    """The levels from ``storage_dir`` down to ``own_dir`` that another local user could change, with the reason.
+
+    A level is unsafe when it is world-writable without the sticky bit
+    (another user can rename or replace what is in it) or owned by another
+    user. ``O_NOFOLLOW`` guards only the last part of a path, so each level
+    matters. A level that cannot be read is skipped.
+    """
+    levels = (storage_dir, os.path.dirname(own_dir), own_dir)
+    unsafe: list[tuple[str, str]] = []
+    for level in levels:
+        try:
+            info = os.stat(level)
+        except OSError:
+            continue
+        if info.st_uid != os.geteuid():
+            unsafe.append((level, 'other_owner'))
+        elif info.st_mode & stat.S_IWOTH and not info.st_mode & stat.S_ISVTX:
+            unsafe.append((level, 'world_writable'))
+    return unsafe

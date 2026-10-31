@@ -145,8 +145,10 @@ Rules:
   `%Y-%m-%d__%H_%M_%S` (UTC).
 - DB files and meta files are created with `0600` permissions. The worker
   creates `storage.dir`, its cluster folder and its own folder with mode
-  `0700` when they are missing, and logs a warning when its own folder is
-  world-writable. A cluster history folder,
+  `0700` when they are missing. It logs `storage_folder_unsafe` (fields
+  `folder`, `reason`, `hint`) for each of the three levels that another local
+  user could change: `reason` is `world_writable` (world-writable without the
+  sticky bit) or `other_owner` (owned by another user). A cluster history folder,
   a cluster task lock folder `tasks/<cluster>/` and `merged/` are created
   with mode `0700`.
 - `storage.dir` is **disposable**: deleting it (while no worker runs on it)
