@@ -668,10 +668,18 @@ class AppLifecycle:
             memory_max_rows=config.memory_max_rows,
             memory_max_bytes=memory.max_size,
             postgres=recorder_postgres_settings(config),
+            sibling_dir=os.path.dirname(app.own_storage_dir) if app.own_storage_dir else '',
+            # The registry starts after the recorder, so it is looked up at each call.
+            worker_online=self._worker_name_online if config.autodiscover.enabled else None,
         )
         app._recorder.set_state_provider(app._get_worker_state)
         await app._recorder.start()
         await app._recorder.write_config(config)
+
+    def _worker_name_online(self, worker: str) -> bool | None:
+        """Whether the registry lists ``worker`` as online; ``None`` while the registry has not started."""
+        fleet = self._app._fleet
+        return None if fleet is None else fleet.name_online(worker)
 
     def _check_config_after_startup(self) -> None:
         """Check the ``api``, recorder and ``autodiscover`` rules again, and say once when the cluster name is empty.

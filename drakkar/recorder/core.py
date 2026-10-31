@@ -70,6 +70,7 @@ from drakkar.metrics import (
     recorder_seal_failures,
     recorder_unsealed_files,
 )
+from drakkar.ownerlock import try_sibling_lock
 from drakkar.providers.postgres import POSTGRES_PROVIDER, RECORDER_FEATURE
 from drakkar.providers.resilience import RateLimitedLog, ResilientCaller, describe_error
 from drakkar.recorder.archive import observe_archive_footprint, run_archive_pass
@@ -96,6 +97,7 @@ from drakkar.recorder.memstore import (
     is_transient_memory_error,
     run_eviction_pass,
 )
+from drakkar.recorder.orphans import folder_is_idle, remove_orphan_files, sibling_folders
 from drakkar.recorder.postgres import PostgresQueue, QueuedPair, RecorderPostgresSettings
 from drakkar.recorder.postgres_writer import OpenPool, PostgresLoopThread, PostgresWriter
 from drakkar.recorder.queries import EventQueries, QueryContext
@@ -112,6 +114,7 @@ from drakkar.recorder.schema import (
 from drakkar.recorder.sealing import (
     LEFTOVER_FLOOR_SECONDS,
     find_leftovers,
+    own_db_files,
     publish_in_background,
     seal_closed_file,
     seal_connection,
@@ -297,6 +300,8 @@ class EventRecorder(EventWriter):
         memory_max_bytes: int = DEFAULT_MEMORY_MAX_BYTES,
         postgres: RecorderPostgresSettings | None = None,
         postgres_open_pool: OpenPool | None = None,
+        sibling_dir: str = '',
+        worker_online: Callable[[str], bool | None] | None = None,
     ) -> None:
         """Wire a recorder without opening anything.
 
@@ -327,6 +332,14 @@ class EventRecorder(EventWriter):
         (``None``: :func:`drakkar.providers.postgres.open_pool`, looked up
         when the pool opens).
 
+        ``sibling_dir`` is the folder that holds the own folders of every
+        worker of this cluster (the parent of ``storage_dir``); empty, the
+        leftover pass looks at no orphan folder. ``worker_online`` answers
+        whether the registry lists a worker name as online: ``True``,
+        ``False`` (no card, or an offline one), or ``None`` (it cannot tell
+        yet). ``None`` in place of the function means no registry runs, and
+        orphan folders are then only logged.
+
         The archive pass runs as the cluster task
         :meth:`archive_cluster_task` returns, where the worker's election
         decides which worker of the cluster runs each slot, or through
@@ -350,6 +363,10 @@ class EventRecorder(EventWriter):
         self._cluster_name = cluster_name
         self._storage_dir = storage_dir
         self._shared_dir = shared_dir or storage_dir
+        self._sibling_dir = sibling_dir
+        self._worker_online = worker_online
+        # Orphan folders already logged as found, so each is logged once per process.
+        self._reported_orphans: set[str] = set()
         self._instance = instance or secrets.token_hex(8)
         self._archive = config.archive
         self._memory_window_seconds = memory_window_seconds
@@ -2517,6 +2534,113 @@ class EventRecorder(EventWriter):
                     await self._publish(path, meta, event='recorder_leftover_sealed')
             finally:
                 self._in_hand.discard(path)
+        await self._seal_orphans()
+
+    # --- Orphan folders ---
+
+    async def _seal_orphans(self) -> None:
+        """Look at the own folders of the other worker names of this cluster; seal those whose name is dead.
+
+        One folder at a time, each under its owner lock, so no other
+        process can start in it while it is sealed. See
+        :mod:`drakkar.recorder.orphans` for the proof that a name is dead.
+        """
+        if not self._sibling_dir:
+            return
+        folders = await asyncio.to_thread(sibling_folders, self._sibling_dir, self._worker_name)
+        for folder, worker in folders:
+            lock = await asyncio.to_thread(try_sibling_lock, folder)
+            if lock is None:
+                continue
+            try:
+                await self._handle_orphan(folder, worker)
+            finally:
+                await asyncio.to_thread(lock.release)
+
+    async def _handle_orphan(self, folder: str, worker: str) -> None:
+        """Seal the folder of ``worker`` when it is idle and the registry says the name is not online."""
+        idle = await asyncio.to_thread(
+            folder_is_idle, folder, now=time.time(), floor_seconds=self._leftover_floor_seconds
+        )
+        if not idle:
+            return
+        if self._worker_online is None:
+            await self._report_orphan(folder, worker)
+            return
+        if self._worker_online(worker) is not False:
+            return
+        files = 0
+        for path in await asyncio.to_thread(own_db_files, folder, worker):
+            if not await self._seal_orphan_file(path, worker):
+                return
+            files += 1
+        removed = await asyncio.to_thread(remove_orphan_files, folder, worker)
+        self._reported_orphans.discard(folder)
+        await logger.ainfo(
+            'recorder_orphan_folder_sealed',
+            category='recorder',
+            folder=folder,
+            worker=worker,
+            files=files,
+            folder_removed=removed,
+        )
+
+    async def _report_orphan(self, folder: str, worker: str) -> None:
+        """Log an orphan folder once per process: with no registry, no name can be proved dead."""
+        if folder in self._reported_orphans:
+            return
+        self._reported_orphans.add(folder)
+        await logger.awarning(
+            'recorder_orphan_folder_found',
+            category='recorder',
+            folder=folder,
+            worker=worker,
+            hint=(
+                'no process holds this folder and its files are idle, but with autodiscover off '
+                'the worker cannot prove the name is dead; seal or delete the folder by hand'
+            ),
+        )
+
+    async def _seal_orphan_file(self, path: str, worker: str) -> bool:
+        """Seal one recorder file of an orphan folder under its owner's name and publish it; False on failure.
+
+        The meta file names ``worker``, the owner from the folder and file
+        name, not this worker. A failure leaves the file in the orphan folder
+        for a later pass; it never joins this worker's own backlog.
+        """
+        stage = 'seal'
+        try:
+            meta = await seal_closed_file(
+                path, worker=worker, instance=self._instance, cluster=self._cluster_name, sealed_at=datetime.now(UTC)
+            )
+            stage = 'publish'
+            destination, crossed = await publish_in_background(path, meta, self.history_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            recorder_seal_failures.inc()
+            await logger.awarning(
+                'recorder_seal_failed',
+                category='recorder',
+                db_path=path,
+                stage=stage,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                backlog=len(self._backlog),
+                orphan_worker=worker,
+            )
+            return False
+        await logger.ainfo(
+            'recorder_leftover_sealed',
+            category='recorder',
+            db_path=path,
+            destination=destination,
+            crossed_filesystems=crossed,
+            size_bytes=meta['size_bytes'],
+            events=meta['tables'].get('events', 0),
+            orphan_worker=worker,
+        )
+        return True
 
     async def _seal_again(self, path: str) -> None:
         """Seal and move one backlog file; drop it when it is gone."""

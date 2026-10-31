@@ -29,6 +29,9 @@ import structlog
 
 from drakkar.metrics import suspected_oom_kills
 
+# The watchdog file of a worker is ``<worker><WATCHDOG_SUFFIX>`` in its own folder.
+WATCHDOG_SUFFIX = '.watchdog'
+
 logger = structlog.get_logger()
 
 # Sentinel written into the watchdog file by ``mark_clean`` at the end of
@@ -63,7 +66,7 @@ class WatchdogFile:
         # the caller already owns a ``Path``.
         self._data_dir = Path(data_dir)
         self._worker_id = worker_id
-        self._path = self._data_dir / f'{worker_id}.watchdog'
+        self._path = self._data_dir / f'{worker_id}{WATCHDOG_SUFFIX}'
 
     @property
     def path(self) -> Path:

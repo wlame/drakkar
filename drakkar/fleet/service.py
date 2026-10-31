@@ -249,6 +249,25 @@ class FleetRegistry:
             )
         return views
 
+    def name_online(self, worker: str) -> bool | None:
+        """Whether the last refresh lists another worker's name as online.
+
+        ``True`` when a card of the name is online; ``False`` when no card
+        has the name, or every card of it is offline; ``None`` when it cannot
+        tell: no refresh yet, a last refresh older than
+        ``autodiscover.offline_after``, or a card whose liveness is unknown.
+        This worker's own name is never listed as a peer.
+        """
+        refreshed_at = self._snapshot.refreshed_at
+        if refreshed_at is None or self._now_monotonic() - refreshed_at > self._config.offline_after:
+            return None
+        verdicts = {view.online for view in self.peer_views() if view.card['worker'] == worker}
+        if True in verdicts:
+            return True
+        if None in verdicts:
+            return None
+        return False
+
     async def stop(self, deadline_seconds: float | None = None) -> None:
         """Stop the loops, withdraw this worker's card, stop the provider. Safe to call twice.
 

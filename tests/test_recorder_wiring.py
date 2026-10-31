@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
 from drakkar.metrics import provider_calls
@@ -303,6 +305,25 @@ async def test_lifecycle_builds_postgres_settings_from_the_connection_entry(tmp_
         assert settings.resilience.max_retries == 1
         await wait_for(lambda: len(fake.opened) == 1)
         assert (fake.opened[0].pool_min, fake.opened[0].pool_max) == (1, 1)
+    finally:
+        await app._recorder.stop()
+
+
+@pytest.mark.parametrize('autodiscover', [True, False], ids=['registry', 'no-registry'])
+async def test_lifecycle_passes_the_cluster_folder_and_the_registry_to_the_orphan_pass(
+    tmp_path, monkeypatch, autodiscover
+):
+    app = _app(tmp_path, autodiscover={'enabled': autodiscover, 'provider': 'filesystem'})
+    Path(app.own_storage_dir).mkdir(parents=True)
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
+
+    await app._lifecycle._start_recorder_and_api()
+    try:
+        assert app._recorder._sibling_dir == str(tmp_path / 'storage' / 'search')
+        if autodiscover:
+            assert app._recorder._worker_online == app._lifecycle._worker_name_online
+        else:
+            assert app._recorder._worker_online is None
     finally:
         await app._recorder.stop()
 

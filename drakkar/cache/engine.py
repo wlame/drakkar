@@ -71,6 +71,9 @@ logger = structlog.get_logger()
 # flush interval, high enough that a single transient blip stays quiet.
 FLUSH_FAILURE_ESCALATION_THRESHOLD = 5
 
+# The cache file of a worker is ``<worker><CACHE_FILE_SUFFIX>`` in its own folder.
+CACHE_FILE_SUFFIX = '-cache.db'
+
 
 class CacheEngine:
     """Owns the SQLite backing store and periodic loops for a single worker's cache.
@@ -296,7 +299,7 @@ class CacheEngine:
     @staticmethod
     def _cache_db_file_path(db_dir: str, worker_id: str) -> str:
         """Return the cache file path: ``<storage.dir>/<worker>-cache.db``, a plain private file."""
-        return str(Path(db_dir) / f'{worker_id}-cache.db')
+        return str(Path(db_dir) / f'{worker_id}{CACHE_FILE_SUFFIX}')
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.

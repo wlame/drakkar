@@ -342,3 +342,64 @@ async def test_start_fleet_runs_the_name_check_before_the_loops(tmp_path, monkey
     await app._lifecycle._start_fleet()
 
     assert calls == ['check', 'start']
+
+
+# --- whether a name is online, for the orphan pass ---
+
+
+def _peer_card(worker: str) -> dict:
+    return build_card(
+        WorkerIdentity(**{**TWIN.__dict__, 'worker': worker}),
+        state='running',
+        heartbeat_at=datetime(2026, 11, 8, tzinfo=UTC),
+    )
+
+
+async def _refreshed(provider, clock: _Clock) -> FleetRegistry:
+    service = _service(provider, clock, _Pauses(clock))
+    await service._ensure_started()
+    await service._refresh_once()
+    return service
+
+
+async def test_name_online_before_any_refresh_is_unknown():
+    clock = _Clock()
+    service = _service(_Fixed(), clock, _Pauses(clock))
+
+    assert service.name_online('w-old') is None
+
+
+@pytest.mark.parametrize(
+    ('listing', 'expected'),
+    [
+        ([], False),
+        ([PeerCard(card=_peer_card('w-old'), age_seconds=1.0)], True),
+        ([PeerCard(card=_peer_card('w-old'), age_seconds=500.0)], False),
+        ([PeerCard(card=_peer_card('w-old'), age_seconds=None)], None),
+        ([PeerCard(card=_peer_card('w-2'), age_seconds=1.0)], False),
+    ],
+    ids=['no-card', 'online', 'offline', 'unknown', 'other-name'],
+)
+async def test_name_online_follows_the_last_refresh(listing, expected):
+    clock = _Clock()
+    service = await _refreshed(_Fixed(listing), clock)
+
+    assert service.name_online('w-old') is expected
+
+
+async def test_name_online_after_an_old_refresh_is_unknown():
+    clock = _Clock()
+    service = await _refreshed(_Fixed([]), clock)
+    clock.advance(31)
+
+    assert service.name_online('w-old') is None
+
+
+async def test_lifecycle_worker_name_online_asks_the_registry_once_it_runs(tmp_path):
+    app = _app(tmp_path)
+    assert app._lifecycle._worker_name_online('w-old') is None
+
+    clock = _Clock()
+    app._fleet = await _refreshed(_Fixed([]), clock)
+
+    assert app._lifecycle._worker_name_online('w-old') is False
