@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (api, autodiscover, cache exchange, recorder, connections, sinks, threads, and the units of single keys), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (api, autodiscover, cache exchange, recorder, connections, sinks, threads, the units of single keys and the ranges of values with a unit), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -932,6 +932,7 @@
           }
         }
       },
+      "message": "cache.exchange.interval must be at least 1ms, got 0",
       "path": "cache.exchange.interval"
     },
     {
@@ -943,6 +944,7 @@
           }
         }
       },
+      "message": "cache.exchange.timeout must be at least 1ms, got 0",
       "path": "cache.exchange.timeout"
     },
     {
@@ -954,6 +956,7 @@
           }
         }
       },
+      "message": "cache.exchange.cycle_deadline must be at least 100ms, got 50ms",
       "path": "cache.exchange.cycle_deadline"
     },
     {
@@ -987,6 +990,7 @@
           }
         }
       },
+      "message": "recorder.search.timeout must be at least 1ms, got 0",
       "path": "recorder.search.timeout"
     },
     {
@@ -1009,6 +1013,7 @@
           }
         }
       },
+      "message": "recorder.archive.window must be at least 1h, got 0",
       "path": "recorder.archive.window"
     },
     {
@@ -1020,6 +1025,7 @@
           }
         }
       },
+      "message": "recorder.archive.due_after must be at least 1h, got 0",
       "path": "recorder.archive.due_after"
     },
     {
@@ -1040,6 +1046,7 @@
           "heartbeat": 0
         }
       },
+      "message": "autodiscover.heartbeat must be at least 1s, got 0",
       "path": "autodiscover.heartbeat"
     },
     {
@@ -1049,6 +1056,7 @@
           "refresh": 0
         }
       },
+      "message": "autodiscover.refresh must be at least 1s, got 0",
       "path": "autodiscover.refresh"
     },
     {
@@ -1060,6 +1068,7 @@
           }
         }
       },
+      "message": "autodiscover.resilience.timeout must be at least 1ms, got 0",
       "path": "autodiscover.resilience.timeout"
     },
     {
@@ -1442,6 +1451,7 @@
           }
         }
       },
+      "message": "recorder.memory.window must be from 10s to 1d, got 9s",
       "path": "recorder.memory.window"
     },
     {
@@ -1453,6 +1463,7 @@
           }
         }
       },
+      "message": "recorder.memory.window must be from 10s to 1d, got 1d1s",
       "path": "recorder.memory.window"
     },
     {
@@ -1486,6 +1497,7 @@
           }
         }
       },
+      "message": "recorder.memory.max_size must be from 16MiB to 512MiB, got 15MiB",
       "path": "recorder.memory.max_size"
     },
     {
@@ -1497,7 +1509,32 @@
           }
         }
       },
+      "message": "recorder.memory.max_size must be from 16MiB to 512MiB, got 513MiB",
       "path": "recorder.memory.max_size"
+    },
+    {
+      "name": "memory_max_size_600_mebibytes",
+      "yaml": {
+        "recorder": {
+          "memory": {
+            "max_size": "600MiB"
+          }
+        }
+      },
+      "message": "recorder.memory.max_size must be from 16MiB to 512MiB, got 600MiB",
+      "path": "recorder.memory.max_size"
+    },
+    {
+      "name": "memory_window_5_seconds",
+      "yaml": {
+        "recorder": {
+          "memory": {
+            "window": "5s"
+          }
+        }
+      },
+      "message": "recorder.memory.window must be from 10s to 1d, got 5s",
+      "path": "recorder.memory.window"
     },
     {
       "name": "memory_window_fraction",
@@ -1581,6 +1618,7 @@
           }
         }
       },
+      "message": "recorder.postgres.initial_retention must be from 1h to 7d, got 0",
       "path": "recorder.postgres.initial_retention"
     },
     {
@@ -1592,6 +1630,7 @@
           }
         }
       },
+      "message": "recorder.postgres.initial_retention must be from 1h to 7d, got 7d1h",
       "path": "recorder.postgres.initial_retention"
     },
     {
@@ -1625,6 +1664,7 @@
           }
         }
       },
+      "message": "recorder.postgres.max_queue must be from 16MiB to 1GiB, got 15MiB",
       "path": "recorder.postgres.max_queue"
     },
     {
@@ -1636,6 +1676,7 @@
           }
         }
       },
+      "message": "recorder.postgres.max_queue must be from 16MiB to 1GiB, got 1025MiB",
       "path": "recorder.postgres.max_queue"
     },
     {
@@ -1936,6 +1977,7 @@
           }
         }
       },
+      "message": "sinks.defaults.delivery_timeout must be at least 1ms, got 0",
       "path": "sinks.defaults.delivery_timeout"
     },
     {
@@ -1950,6 +1992,7 @@
           }
         }
       },
+      "message": "sinks.kafka.results.delivery_timeout must be at least 1ms, got 0",
       "path": "sinks.kafka.results.delivery_timeout"
     },
     {
@@ -2253,6 +2296,19 @@
           }
         }
       },
+      "message": "ui.timeline.max_age must be from 1m to 1d, got 1d1h",
+      "path": "ui.timeline.max_age"
+    },
+    {
+      "name": "timeline_max_age_2_days",
+      "yaml": {
+        "ui": {
+          "timeline": {
+            "max_age": "2d"
+          }
+        }
+      },
+      "message": "ui.timeline.max_age must be from 1m to 1d, got 2d",
       "path": "ui.timeline.max_age"
     },
     {
@@ -2283,6 +2339,26 @@
       "message": "must be a whole number of seconds, got '2.5s'"
     },
     {
+      "name": "executor_drain_timeout_zero",
+      "yaml": {
+        "executor": {
+          "drain_timeout": 0
+        }
+      },
+      "message": "executor.drain_timeout must be at least 1s, got 0",
+      "path": "executor.drain_timeout"
+    },
+    {
+      "name": "runtime_health_tick_at_least_11_milliseconds",
+      "yaml": {
+        "runtime_health": {
+          "tick": "10ms"
+        }
+      },
+      "message": "runtime_health.tick must be at least 11ms, got 10ms",
+      "path": "runtime_health.tick"
+    },
+    {
       "name": "executor_max_stdout_needs_a_unit",
       "yaml": {
         "executor": {
@@ -2307,6 +2383,7 @@
           "history_window": "59s"
         }
       },
+      "message": "runtime_health.history_window must be at least 1m, got 59s",
       "path": "runtime_health.history_window"
     },
     {

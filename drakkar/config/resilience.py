@@ -15,7 +15,6 @@ class ResilienceConfig(ConfigModel):
 
     timeout: Duration = Field(
         default=5.0,
-        gt=0,
         description='Time limit for one attempt of a provider operation. Retries get their own limit each.',
     )
     max_retries: int = Field(
@@ -28,12 +27,10 @@ class ResilienceConfig(ConfigModel):
     )
     backoff: Duration = Field(
         default=0.2,
-        ge=0.0,
         description='Wait before the first retry. The wait doubles for each further retry, up to max_backoff.',
     )
     max_backoff: Duration = Field(
         default=5.0,
-        ge=0.0,
         description='Longest wait between two attempts. Must be >= backoff.',
     )
     breaker_failures: int = Field(
@@ -45,7 +42,6 @@ class ResilienceConfig(ConfigModel):
     )
     breaker_cooldown: Duration = Field(
         default=30.0,
-        ge=0.0,
         description=(
             'Time the breaker stays open before one probe operation is allowed through; success closes it, '
             'failure reopens it with a fresh cooldown.'

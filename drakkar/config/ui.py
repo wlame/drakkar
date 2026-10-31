@@ -117,7 +117,6 @@ class UIProbeConfig(ConfigModel):
     )
     max_total_size: ByteSize = Field(
         default=5_000_000,
-        ge=1,
         description=(
             'Maximum total serialized size of all probe-details writes per '
             'probe run. Past it, writes are dropped like the max_writes cap.'
@@ -320,8 +319,6 @@ class UITimelineConfig(ConfigModel):
     )
     max_age: WholeMinutes = Field(
         default=60,
-        ge=1,
-        le=1440,
         description='Oldest task age the timeline shows, a whole number of minutes from 1m to 24h.',
     )
     color_rules: list[TimelineColorRule] = Field(
@@ -599,7 +596,6 @@ class UIConfig(ConfigModel):
     )
     ws_min_duration: Duration = Field(
         default=0.5,
-        ge=0,
         description=(
             'Shortest task duration broadcast to the live UI over WebSocket. Failed '
             'tasks always appear. 0 shows all tasks.'

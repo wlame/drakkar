@@ -94,7 +94,6 @@ class SinkDefaults(ConfigModel):
     )
     delivery_timeout: Duration = Field(
         default=30.0,
-        gt=0,
         description=(
             'Budget for one sink delivery, including the framework-internal transient retries. '
             'A sink whose server stops answering while the TCP connection stays open would otherwise '
@@ -114,7 +113,6 @@ class SinkDefaults(ConfigModel):
     )
     breaker_cooldown: Duration = Field(
         default=30.0,
-        ge=0.0,
         description=(
             'Time the circuit stays fully open before the next delivery is allowed through as a '
             'half-open probe. While open, no attempt is made on the sink.'
@@ -141,7 +139,6 @@ class SinkInstanceConfig(ConfigModel):
     )
     delivery_timeout: Duration | None = Field(
         default=None,
-        gt=0,
         description="This sink's delivery_timeout. Not given: sinks.defaults.delivery_timeout.",
     )
     breaker_failures: int | None = Field(
@@ -151,7 +148,6 @@ class SinkInstanceConfig(ConfigModel):
     )
     breaker_cooldown: Duration | None = Field(
         default=None,
-        ge=0.0,
         description="This sink's breaker_cooldown. Not given: sinks.defaults.breaker_cooldown.",
     )
     depends_on: list[str] = Field(
@@ -257,7 +253,6 @@ class KafkaSinkConfig(SinkInstanceConfig):
     )
     flush_timeout: Duration = Field(
         default=30.0,
-        gt=0,
         description=(
             'Bound on the producer flush that ends every delivery. Without '
             'one, librdkafka flushes with no deadline and a wedged broker '
@@ -492,7 +487,7 @@ class HttpSinkConfig(SinkInstanceConfig):
         )
     )
     method: str = Field(default='POST', description='HTTP method to use.')
-    request_timeout: WholeSeconds = Field(default=30, ge=1, description='Request timeout.')
+    request_timeout: WholeSeconds = Field(default=30, description='Request timeout.')
     headers: dict[str, str] = Field(
         default_factory=dict,
         description='Extra request headers. May carry an Authorization value, so treated as secret as a whole.',
@@ -804,7 +799,6 @@ class DLQConfig(ConfigModel):
     )
     flush_timeout: Duration = Field(
         default=30.0,
-        gt=0,
         description=(
             'Bound on the producer flush that ends every DLQ write. Same '
             'rationale as flush_timeout of a Kafka sink, and it '

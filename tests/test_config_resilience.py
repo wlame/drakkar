@@ -29,8 +29,8 @@ def test_max_backoff_equal_to_backoff_is_accepted():
 
 @pytest.mark.parametrize(
     'overrides',
-    [{'breaker_failures': 0}, {'breaker_cooldown': '-1s'}, {'timeout': 0}, {'timeout': 5}, {'max_retries': -1}],
-    ids=['failures', 'cooldown', 'timeout_zero', 'timeout_no_unit', 'retries'],
+    [{'breaker_failures': 0}, {'breaker_cooldown': '-1s'}, {'timeout': 5}, {'max_retries': -1}],
+    ids=['failures', 'cooldown', 'timeout_no_unit', 'retries'],
 )
 def test_resilience_rejects_values_out_of_range(overrides):
     with pytest.raises(ValidationError):

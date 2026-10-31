@@ -63,11 +63,10 @@ class AutodiscoverConfig(ConfigModel):
             'providers use. The filesystem provider ignores it.'
         ),
     )
-    heartbeat: WholeSeconds = Field(default=10, ge=1, description='Time between card publishes.')
-    refresh: WholeSeconds = Field(default=15, ge=1, description='Time between reads of the peer cards.')
+    heartbeat: WholeSeconds = Field(default=10, description='Time between card publishes.')
+    refresh: WholeSeconds = Field(default=15, description='Time between reads of the peer cards.')
     offline_after: WholeSeconds = Field(
         default=60,
-        ge=1,
         description=(
             'A peer whose card is older than this (on the provider clock) is offline. '
             f'Must be at least 2 x heartbeat and at least {seconds_text(MIN_OFFLINE_AFTER_SECONDS)}. '
@@ -76,7 +75,6 @@ class AutodiscoverConfig(ConfigModel):
     )
     prune_after: WholeSeconds = Field(
         default=86_400,
-        ge=1,
         description='Cards older than this are deleted. Must be at least offline_after.',
     )
     resilience: ResilienceConfig = Field(

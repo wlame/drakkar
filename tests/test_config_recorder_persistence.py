@@ -228,9 +228,9 @@ def test_postgres_table_settings_load_with_units():
     [
         ('initial_retention', '90m', "must be a whole number of hours, got '90m'"),
         ('initial_retention', 24, "needs a unit, for example 30s; got '24'"),
-        ('initial_retention', '169h', 'less than or equal to 168'),
+        ('initial_retention', '169h', 'recorder.postgres.initial_retention must be from 1h to 7d, got 7d1h'),
         ('max_queue', 128, "needs a unit, for example 64KiB; got '128'"),
-        ('max_queue', '15MiB', 'greater than or equal to 16777216'),
+        ('max_queue', '15MiB', 'recorder.postgres.max_queue must be from 16MiB to 1GiB, got 15MiB'),
     ],
 )
 def test_postgres_table_settings_refuse_bad_values(key, value, expected):

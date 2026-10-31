@@ -43,8 +43,13 @@ def test_recorder_defaults():
 
 
 def test_recorder_rotation_interval_rejects_below_one_hour():
-    with pytest.raises(ValidationError):
-        RecorderConfig(sqlite={'rotation_interval': 0})
+    with pytest.raises(ValidationError, match=r'recorder\.sqlite\.rotation_interval must be at least 1h, got 0'):
+        DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            connections=kafka_connections(),
+            ui={'release': {'enabled': False}},
+            recorder={'sqlite': {'rotation_interval': 0}},
+        )
 
 
 def test_annotation_defaults():

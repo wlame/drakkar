@@ -23,15 +23,14 @@ class CacheExchangeConfig(ConfigModel):
             'across workers.'
         ),
     )
-    interval: Duration = Field(default=30.0, gt=0, description='Time between exchange cycles.')
+    interval: Duration = Field(default=30.0, description='Time between exchange cycles.')
     page_size: int = Field(default=500, ge=1, le=1000, description='Maximum rows in one page pulled from a peer.')
-    timeout: Duration = Field(default=5.0, gt=0, description='Time limit for one request to a peer.')
+    timeout: Duration = Field(default=5.0, description='Time limit for one request to a peer.')
     # ``None`` means 0.9 x interval, so one cycle always ends before the next
     # one is scheduled. The 100ms floor stops a value so small that no cycle
     # could ever finish.
     cycle_deadline: Duration | None = Field(
         default=None,
-        ge=0.1,
         description='Hard time limit for one exchange cycle, at least 100ms. Null means 0.9 x interval.',
     )
     max_concurrent_peers: int = Field(default=4, ge=1, description='Peers pulled from in parallel.')
@@ -77,12 +76,10 @@ class CacheConfig(ConfigModel):
     )
     flush_interval: Duration = Field(
         default=3.0,
-        gt=0,
         description='Time between write-behind flushes of dirty entries to SQLite.',
     )
     cleanup_interval: Duration = Field(
         default=60.0,
-        gt=0,
         description='Time between cleanup passes deleting expired rows and refreshing DB-size gauges.',
     )
     max_memory_entries: int = Field(

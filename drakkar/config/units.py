@@ -8,12 +8,14 @@ pinned by ``tests/fixtures/config_units.json``.
 """
 
 import re
+import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Annotated, Any
+from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BeforeValidator, PlainSerializer
+from pydantic.fields import FieldInfo
 
 from drakkar.config.base import yaml_text
 
@@ -185,6 +187,22 @@ class UnitKind:
 
     type_name: str
     to_text: Callable[[Any], str]
+
+
+def unit_kind_in(annotation: Any) -> UnitKind | None:
+    """The unit marker of an ``Annotated`` type, directly or in a branch of a union."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return next((item for item in get_args(annotation)[1:] if isinstance(item, UnitKind)), None)
+    if origin is Union or origin is types.UnionType:
+        return next(filter(None, map(unit_kind_in, get_args(annotation))), None)
+    return None
+
+
+def unit_kind_of(field_info: FieldInfo) -> UnitKind | None:
+    """The unit marker of a field: pydantic moves a top-level ``Annotated`` into ``metadata``."""
+    marker = next((item for item in field_info.metadata if isinstance(item, UnitKind)), None)
+    return marker or unit_kind_in(field_info.annotation)
 
 
 DURATION_TYPE = 'duration'

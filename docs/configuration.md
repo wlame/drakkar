@@ -62,7 +62,15 @@ An environment variable takes the same text: `DK_EXECUTOR__TASK_TIMEOUT=5m`. Som
 <path> must be a whole number of seconds, got '1500ms'
 ```
 
-(`hours` and `days` replace `seconds` for the keys that count in them.) The config summary, the `worker_config` table and the reference pages show a value in its canonical form: a duration in descending terms with no zero term (`2h45m`, `500ms`), a size in the unit that gives the smallest whole number (`256MiB`). `ui.prometheus.rate_interval` stays a PromQL text. The code APIs keep their numbers: `@periodic(interval=..., lease_seconds=...)`.
+(`hours`, `minutes` and `days` replace `seconds` for the keys that count in them.) A value outside the range of its key prints the range and the value in the same unit form:
+
+```
+<path> must be from 16MiB to 512MiB, got 600MiB
+<path> must be at least 1s, got 0
+<path> must be at most 1d, got 2d
+```
+
+The config summary, the `worker_config` table and the reference pages show a value in its canonical form: a duration in descending terms with no zero term (`2h45m`, `500ms`), a size in the unit that gives the smallest whole number (`256MiB`). `ui.prometheus.rate_interval` stays a PromQL text. The code APIs keep their numbers: `@periodic(interval=..., lease_seconds=...)`.
 
 ---
 

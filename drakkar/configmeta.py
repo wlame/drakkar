@@ -20,7 +20,7 @@ import enum
 import re
 import types
 from pathlib import Path
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, SecretStr
 from pydantic.fields import FieldInfo
@@ -47,7 +47,7 @@ from drakkar.config import (
     WorkerConfig,
 )
 from drakkar.config.strict import yaml_key
-from drakkar.config.units import UnitKind
+from drakkar.config.units import unit_kind_in, unit_kind_of
 
 # The artifact this module regenerates. Mirrors the vendored-OpenAPI-spec
 # location (``drakkar/uiserver/openapi.yaml``) so both generated contracts
@@ -245,25 +245,9 @@ def _to_jsonable(value: Any) -> Any:
     return value
 
 
-def _unit_kind_in(annotation: Any) -> UnitKind | None:
-    """The unit marker of an ``Annotated`` type, directly or in a branch of a union."""
-    origin = get_origin(annotation)
-    if origin is Annotated:
-        return next((item for item in get_args(annotation)[1:] if isinstance(item, UnitKind)), None)
-    if origin is Union or origin is types.UnionType:
-        return next(filter(None, map(_unit_kind_in, get_args(annotation))), None)
-    return None
-
-
-def _unit_kind(field_info: FieldInfo) -> UnitKind | None:
-    """The unit marker of a field: pydantic moves a top-level ``Annotated`` into ``metadata``."""
-    marker = next((item for item in field_info.metadata if isinstance(item, UnitKind)), None)
-    return marker or _unit_kind_in(field_info.annotation)
-
-
 def _canonical_items(annotation: Any, value: Any) -> Any:
     """A default as the metadata shows it: values with a unit as text, also inside a list."""
-    kind = _unit_kind_in(annotation)
+    kind = unit_kind_in(annotation)
     if kind is not None:
         return None if value is None else kind.to_text(value)
     if get_origin(annotation) is list and isinstance(value, list):
@@ -272,7 +256,7 @@ def _canonical_items(annotation: Any, value: Any) -> Any:
 
 
 def _canonical_default(field_info: FieldInfo, value: Any) -> Any:
-    kind = _unit_kind(field_info)
+    kind = unit_kind_of(field_info)
     if kind is not None:
         return None if value is None else kind.to_text(value)
     return _canonical_items(field_info.annotation, value)
@@ -369,7 +353,7 @@ def _build_leaf(
 
     default_raw = field_info.get_default(call_default_factory=True)
     default = None if default_raw is PydanticUndefined else _canonical_default(field_info, default_raw)
-    kind = _unit_kind(field_info)
+    kind = unit_kind_of(field_info)
 
     return ConfigFieldMeta(
         path=path,

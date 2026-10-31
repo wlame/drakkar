@@ -45,6 +45,7 @@ from drakkar.config.strict import (
     unknown_keys_message,
 )
 from drakkar.config.ui import UIConfig
+from drakkar.config.unit_bounds import check_unit_bounds
 from drakkar.config.webapp import WebAppConfig
 
 SQLITE_WITHOUT_DIR_MESSAGE = (
@@ -145,6 +146,12 @@ class DrakkarConfig(BaseSettings):
             'the framework passes it through unvalidated to the handler-declared model'
         ),
     )
+
+    @model_validator(mode='after')
+    def _validate_unit_bounds(self) -> 'DrakkarConfig':
+        """Every value with a unit is inside its range; runs first, as a check of a single key."""
+        check_unit_bounds(self)
+        return self
 
     @model_validator(mode='after')
     def _require_one_source_enabled(self) -> 'DrakkarConfig':

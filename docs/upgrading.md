@@ -112,9 +112,13 @@ Learn these once. Every section follows them.
     <path> needs a unit, for example 64KiB; got '65536'
     <path> is not a size, got '64kb'; write for example 64KiB or 256MB
     <path> must be a whole number of seconds, got '1500ms'
+    <path> must be from 16MiB to 512MiB, got 600MiB
+    <path> must be at least 1s, got 0
     ```
 
-    (`hours` and `days` replace `seconds` for the keys that count in them.)
+    (`hours`, `minutes` and `days` replace `seconds` for the keys that count in them.)
+    A range message prints the bounds and the value with units, never as bare
+    seconds or bytes.
 8. **One failure vocabulary.** `timeout`, `max_retries` (retries after the first
    attempt), `backoff`, `max_backoff`, `breaker_failures`, `breaker_cooldown`. A sink's
    budget is `delivery_timeout`. A failure event is `on_<event>: <action>`.

@@ -27,12 +27,10 @@ class StartupAlignConfig(ConfigModel):
     )
     min_wait: Duration = Field(
         default=4.0,
-        ge=0.0,
         description='Minimum time to sleep before aligning: a buffer for slow init (DB connects, cache warm-up).',
     )
     interval: WholeSeconds = Field(
         default=10,
-        ge=1,
         description=(
             'Alignment interval. Workers wake at the next Unix-epoch multiple: '
             'the default 10s aligns on :00/:10/:20/:30/:40/:50 of every minute.'

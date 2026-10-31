@@ -81,8 +81,6 @@ class RecorderMemoryConfig(ConfigModel):
 
     window: WholeSeconds = Field(
         default=120,
-        ge=10,
-        le=86400,
         description='Keep recorder events in memory for this long.',
     )
     rows_per_executor: int = Field(
@@ -97,8 +95,6 @@ class RecorderMemoryConfig(ConfigModel):
     )
     max_size: ByteSize = Field(
         default=256 * MIB,
-        ge=16 * MIB,
-        le=512 * MIB,
         description=(
             'Budget for the data in the memory store (pages in use), from 16MiB to 512MiB. It bounds the data, '
             'not the memory the store holds; free pages and one write stage can exceed it. At most 512MiB '
@@ -139,7 +135,6 @@ class RecorderCaptureConfig(ConfigModel):
     )
     max_stdin: ByteSize = Field(
         default=65536,
-        ge=0,
         description=(
             'Size cap for kept stdin content (stdin, and the always-on failed-task capture). 0 = no limit. '
             'A cut is flagged as stdin_truncated in the event metadata.'
@@ -147,12 +142,10 @@ class RecorderCaptureConfig(ConfigModel):
     )
     min_event_duration: Duration = Field(
         default=0,
-        ge=0,
         description='Shortest task duration whose task event is written at all. 0 writes everything.',
     )
     min_output_duration: Duration = Field(
         default=0.5,
-        ge=0,
         description=(
             'Shortest task duration whose args/stdout/stderr go into the written event. '
             'Faster tasks keep their row without output data.'
@@ -183,19 +176,16 @@ class RecorderAnnotationsConfig(ConfigModel):
     )
     max_size: ByteSize = Field(
         default=16_384,
-        ge=0,
         description='Size cap for one annotation payload; larger payloads are dropped whole. 0 = no limit.',
     )
     max_size_per_call: ByteSize = Field(
         default=262_144,
-        ge=0,
         description='Total annotation size one hook invocation may write; further payloads are dropped. 0 = no limit.',
     )
     # Log lines usually ship to a metered aggregator, so an uncapped copy can
     # cost more than the row it replaced.
     max_log_size: ByteSize = Field(
         default=2048,
-        ge=0,
         description='Cap on the payload copy in the warning log when an annotation is dropped. 0 = no limit.',
     )
 
@@ -205,7 +195,6 @@ class RecorderSqliteConfig(ConfigModel):
 
     rotation_interval: WholeHours = Field(
         default=1,
-        ge=1,
         description='How often to roll over to a new SQLite file, a whole number of hours.',
     )
     # On each failure the batch goes back to the front of the file queue so the
@@ -228,7 +217,6 @@ class RecorderSqliteConfig(ConfigModel):
     )
     state_interval: WholeSeconds = Field(
         default=10,
-        ge=1,
         description=(
             'Time between worker_state snapshots and between resource samples, a whole number of seconds; '
             'also the heartbeat cadence worker liveness is judged by. Without provider sqlite, resource '
@@ -250,12 +238,10 @@ class RecorderArchiveConfig(ConfigModel):
     )
     window: WholeHours = Field(
         default=24,
-        ge=1,
         description='Width of one archive window, a whole number of hours; must be >= recorder.sqlite.rotation_interval.',
     )
     due_after: WholeHours = Field(
         default=48,
-        ge=1,
         description=(
             'A window is archived this long after it ends, so late files of that window are '
             'still in it; a whole number of hours, >= recorder.sqlite.rotation_interval.'
@@ -263,7 +249,6 @@ class RecorderArchiveConfig(ConfigModel):
     )
     retention: WholeDays = Field(
         default=DEFAULT_ARCHIVE_RETENTION_DAYS,
-        ge=0,
         description=(
             f'How long archives are kept before deletion, a whole number of days. Defaults to '
             f'{DEFAULT_ARCHIVE_RETENTION_DAYS} days so a worker cannot fill its disk unattended. 0 = keep '
@@ -273,7 +258,6 @@ class RecorderArchiveConfig(ConfigModel):
     )
     merged_retention: WholeDays = Field(
         default=32,
-        ge=0,
         description='The archive pass deletes merge results from the UI older than this. 0 = never.',
     )
     interval: WholeSeconds | None = Field(
@@ -387,8 +371,6 @@ class RecorderPostgresConfig(ConfigModel):
     )
     initial_retention: WholeHours = Field(
         default=24,
-        ge=1,
-        le=168,
         description=(
             'How long the table keeps history, a whole number of hours from 1h to 168h. Read only when this '
             'worker creates the table; after that the value stored with the table rules. At most 168h: one '
@@ -426,8 +408,6 @@ class RecorderPostgresConfig(ConfigModel):
     )
     max_queue: ByteSize = Field(
         default=128 * MIB,
-        ge=16 * MIB,
-        le=1024 * MIB,
         description=(
             'Most text waiting for Postgres, from 16MiB to 1GiB, counted in characters of text. '
             'When full, the oldest rows are dropped and counted.'
@@ -473,7 +453,6 @@ class RecorderSearchConfig(ConfigModel):
     )
     timeout: Duration = Field(
         default=10.0,
-        gt=0,
         description=(
             'Time limit for one history search. With provider sqlite the search stops and returns what it '
             'found. With provider postgres the limit is capped at 1h, and a search past it answers 503 and '
@@ -501,7 +480,6 @@ class RecorderConfig(ConfigModel):
     )
     flush_interval: WholeSeconds = Field(
         default=5,
-        ge=1,
         description=(
             'Time between recorder flushes, a whole number of seconds: the tick of the memory stage and of '
             'the file or Postgres stage.'

@@ -76,7 +76,6 @@ class ExecutorConfig(ConfigModel):
     )
     task_timeout: WholeSeconds = Field(
         default=120,
-        ge=1,
         description=(
             'Wall-clock time limit per subprocess, a whole number of seconds. A process exceeding it is '
             'killed and treated as a failure.'
@@ -84,7 +83,6 @@ class ExecutorConfig(ConfigModel):
     )
     max_stdout: ByteSize = Field(
         default=0,
-        ge=0,
         description=(
             'Most stdout kept per task. 0 (the default) = no limit. When a '
             'process writes more, the kept prefix is cut at a UTF-8 '
@@ -96,7 +94,6 @@ class ExecutorConfig(ConfigModel):
     )
     max_stderr: ByteSize = Field(
         default=0,
-        ge=0,
         description=(
             'Most stderr kept per task. 0 (the default) = no limit. Same '
             'semantics as max_stdout, applied to the stderr stream; sets '
@@ -127,7 +124,6 @@ class ExecutorConfig(ConfigModel):
     )
     drain_timeout: WholeSeconds = Field(
         default=30,
-        ge=1,
         description=(
             'Longest wait for in-flight executor tasks to finish during '
             'graceful shutdown or partition revocation, a whole number of '
@@ -215,7 +211,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     tick: Duration = Field(
         default=0.25,
-        gt=0.01,
         description=(
             'Heartbeat interval. Lag is measured as how late each tick '
             'fires; the sampler thread also checks heartbeat age at this '
@@ -225,7 +220,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     warn_lag: Duration = Field(
         default=0.1,
-        gt=0,
         description=(
             "Lag above this marks the runtime 'degraded'. Recovery to "
             "'healthy' needs several consecutive clean ticks (hysteresis), "
@@ -234,7 +228,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     stall: Duration = Field(
         default=1.0,
-        gt=0,
         description=(
             "Heartbeat age above this marks the runtime 'stalled' and starts "
             'stack sampling: the sampler thread captures what the runtime '
@@ -253,7 +246,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     sample_interval: Duration = Field(
         default=10.0,
-        gt=0,
         description=(
             'Interval between runtime_health sample events written to the '
             'flight recorder for cross-restart history. The fine-grained '
@@ -263,7 +255,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     history_window: WholeSeconds = Field(
         default=900,
-        ge=60,
         description=(
             'Length of the in-memory lag history ring buffer (one max/avg '
             'aggregate per second) served to the debug UI sparkline, a '
@@ -272,7 +263,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     max_episode: Duration = Field(
         default=300.0,
-        ge=10,
         description=(
             'Maximum length of one lag episode, at least 10s. An episode spans the time '
             'the runtime is degraded or stalled; on recovery (or at this '
@@ -293,7 +283,6 @@ class RuntimeHealthConfig(ConfigModel):
     )
     stack_probe_interval: Duration = Field(
         default=1.0,
-        gt=0,
         description='Time between runtime_probe events while stack_probe_enabled is on.',
     )
 
@@ -396,7 +385,6 @@ class LoggingConfig(ConfigModel):
     )
     min_task_duration: Duration = Field(
         default=0.5,
-        ge=0,
         description=(
             'Shortest task duration that emits a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
         ),

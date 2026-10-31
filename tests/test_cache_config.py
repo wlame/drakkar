@@ -19,20 +19,27 @@ from tests.conftest import kafka_connections
 # --- CacheExchangeConfig bounds ---
 
 
+def _config_with_cache(**cache: object) -> DrakkarConfig:
+    return DrakkarConfig(
+        sources={'kafka': {'enabled': True}},
+        connections=kafka_connections(),
+        ui={'release': {'enabled': False}},
+        cache=cache,
+    )
+
+
 def test_cache_exchange_config_rejects_invalid():
-    # interval must be > 0 (gt=0)
-    with pytest.raises(ValidationError):
-        CacheExchangeConfig(interval='0')
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=r'cache\.exchange\.interval must be at least 1ms, got 0'):
+        _config_with_cache(exchange={'interval': '0'})
+    with pytest.raises(ValidationError, match='needs a unit'):
         CacheExchangeConfig(interval=-1.0)
     # page_size must be in 1..1000
     with pytest.raises(ValidationError):
         CacheExchangeConfig(page_size=0)
     with pytest.raises(ValidationError):
         CacheExchangeConfig(page_size=1001)
-    # timeout must be > 0 (gt=0)
-    with pytest.raises(ValidationError):
-        CacheExchangeConfig(timeout='0')
+    with pytest.raises(ValidationError, match=r'cache\.exchange\.timeout must be at least 1ms, got 0'):
+        _config_with_cache(exchange={'timeout': '0'})
 
 
 def test_cache_exchange_deadline_below_interval_is_accepted():
@@ -54,14 +61,12 @@ def test_cache_config_defaults():
 
 
 def test_cache_config_rejects_invalid_intervals():
-    # flush_interval must be > 0 (gt=0)
-    with pytest.raises(ValidationError):
-        CacheConfig(flush_interval='0')
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=r'cache\.flush_interval must be at least 1ms, got 0'):
+        _config_with_cache(flush_interval='0')
+    with pytest.raises(ValidationError, match='needs a unit'):
         CacheConfig(flush_interval=-1.0)
-    # cleanup_interval must be > 0 (gt=0)
-    with pytest.raises(ValidationError):
-        CacheConfig(cleanup_interval='0')
+    with pytest.raises(ValidationError, match=r'cache\.cleanup_interval must be at least 1ms, got 0'):
+        _config_with_cache(cleanup_interval='0')
 
 
 def test_cache_config_rejects_negative_or_null_max_memory_entries():

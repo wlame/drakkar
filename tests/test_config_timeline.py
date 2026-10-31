@@ -9,11 +9,13 @@ import pytest
 from pydantic import ValidationError
 
 from drakkar.config import (
+    DrakkarConfig,
     TimelineColorRule,
     TimelineLabels,
     TimelineRuleCondition,
     UITimelineConfig,
 )
+from tests.conftest import kafka_connections
 
 
 def test_timeline_defaults():
@@ -154,5 +156,9 @@ def test_timeline_history_factor_zero_fails():
 
 
 def test_timeline_max_age_over_cap_fails():
-    with pytest.raises(ValidationError):
-        UITimelineConfig(max_age='1d1m')
+    with pytest.raises(ValidationError, match=r'ui\.timeline\.max_age must be from 1m to 1d, got 1d1m'):
+        DrakkarConfig(
+            sources={'kafka': {'enabled': True}},
+            connections=kafka_connections(),
+            ui={'release': {'enabled': False}, 'timeline': {'max_age': '1d1m'}},
+        )
