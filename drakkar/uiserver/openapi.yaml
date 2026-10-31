@@ -200,7 +200,7 @@ paths:
       operationId: getWorkers
       summary: Known workers (self + peers)
       description: >-
-        Peers discovered via the shared db_dir plus the current worker;
+        Peers listed by the worker registry plus the current worker;
         sorted clustered-first, then by name.
       responses:
         '200':
@@ -1716,7 +1716,7 @@ components:
         # then treat every worker as online. The is_current worker is always
         # online. Since v1.23 the age comes from the worker registry's own
         # clock (autodiscover.offline_after) and online
-        # is null when the registry knows no age (a fixed peer list): unknown,
+        # is null when the provider gives neither an online flag nor an age: unknown,
         # not offline.
         last_seen_ts: {type: [number, 'null']}
         online: {type: [boolean, 'null']}
