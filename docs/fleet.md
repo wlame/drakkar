@@ -82,10 +82,9 @@ heartbeat.
 
 Layout and rules:
 
-- One card per worker: `workers/<worker>.json`. Characters of the worker
-  name outside `[a-zA-Z0-9_-]` become `_` in the file name, so `search.1`
-  is stored as `search_1.json`. Two worker names that differ only in such
-  characters share one file; give workers names that stay distinct.
+- One card per worker: `workers/<worker>.json`. A worker name holds only
+  `[a-zA-Z0-9_-]` (see [Worker names](local-databases.md#worker-names)), so
+  the file name is the worker name as it is.
 - A card is written to `workers/.<worker>.json.<instance>.tmp` and renamed
   over the card, so a reader never sees half a card. A temp file that a
   crashed writer left behind is deleted once it is older than
@@ -164,6 +163,8 @@ What it keeps and does:
   with one name overwrite each other's row: the last writer wins. A worker
   that lists the other instance's row while it is live by the age rule logs
   `fleet_duplicate_worker_name` (see [Duplicate worker names](#duplicate-worker-names)).
+  The [same-name check](#same-name-check) refuses such a twin at its start
+  while the registry answers.
 - **Withdraw.** At a clean stop the worker deletes its row, but only while
   the row still holds this process's `instance`.
 - **A row that does not decode** is skipped with `fleet_card_invalid` and
@@ -324,10 +325,10 @@ What it keeps and does:
   most `offline_after`. No worker's wall clock enters an age, and the
   `prune_after` of the reading worker does not either, so workers with
   different `prune_after` values can share one server.
-- **Duplicate names.** The card key comes from the sanitized worker name, so
-  two processes with one name overwrite each other's card: the last writer
-  wins. Names that differ only in characters outside `[a-zA-Z0-9_-]` share
-  one card too. A worker that lists the other instance's card while it is
+- **Duplicate names.** The card key comes from the worker name, so two
+  processes with one name overwrite each other's card: the last writer
+  wins. The [same-name check](#same-name-check) refuses such a twin at its
+  start while the registry answers. A worker that lists the other instance's card while it is
   live by the age rule logs `fleet_duplicate_worker_name` (see [Duplicate
   worker names](#duplicate-worker-names)).
 - **Withdraw.** At a clean stop the worker deletes its card and its index
@@ -513,11 +514,12 @@ What it keeps and does:
   one name has one card. A worker that restarts under its old name finds the
   key held by its predecessor's session. It knows the session by its name,
   destroys it and takes the card at once, without waiting for the session to
-  end. A live twin does the same at its next heartbeat, so two live processes
-  with one name take the card from each other at every heartbeat, and each
-  logs `fleet_duplicate_worker_name` for the other (see [Duplicate worker
-  names](#duplicate-worker-names)). Names that differ only in characters
-  outside `[a-zA-Z0-9_-]` share one card in the same way. A key that a
+  end. This is why the [same-name check](#same-name-check) runs before the
+  first publish. A live twin that started while the registry was down does
+  the same at its next heartbeat, so two live processes with one name take
+  the card from each other at every heartbeat, and each logs
+  `fleet_duplicate_worker_name` for the other (see [Duplicate worker
+  names](#duplicate-worker-names)). A key that a
   session of any other name holds is never taken: the publish fails with
   `consul registry: the card key of <worker> is held by a session of another worker`.
 - **Withdraw.** At a clean stop the worker destroys its session, which
@@ -931,11 +933,57 @@ value, and by 20 seconds for a value below 20; see [`consul`](#consul)).
 ## Duplicate worker names
 
 Two live processes that publish one worker name overwrite each other's
-card. When a worker lists a card with its own name, another instance, and
-that is live by the [liveness rule](#liveness), it logs `fleet_duplicate_worker_name`
+card, and on one host they would share one [own folder](local-databases.md#the-own-folder).
+Give every worker a unique name. With no name configured, the worker uses
+its host name, which in Kubernetes is the pod name (see
+[Worker names](local-databases.md#worker-names)).
+
+### The same-name check at start {#same-name-check}
+
+Before its first publish, a worker starts the provider and lists the cards.
+It looks for a card with its own name and another instance:
+
+1. No such card: the start goes on.
+2. Such a card is stale when its age is at least two heartbeats
+   (`2 x autodiscover.heartbeat`, the `filesystem`, `postgres` and `redis`
+   providers give an age) or when its provider says it is offline. The
+   start goes on at once, and the first publish replaces the stale card.
+3. Otherwise the worker logs `fleet_worker_name_probe_waiting`, waits one
+   heartbeat plus 2 seconds and lists again. A card whose `heartbeat_at`
+   changed belongs to a live worker: the worker logs
+   `fleet_worker_name_in_use` and does not start, with the error
+   `worker name '<name>' is used by a live worker (instance <i>, <url>); give each worker a unique name`.
+   A card that did not change belongs to a killed process; the start goes on.
+
+The check runs before the first publish because on some providers (the
+`consul` provider destroys an own-named session that holds the key) a
+publish would take the card from a live twin without a trace.
+
+The whole check takes at most two heartbeats plus 5 seconds (25 seconds
+with the defaults). It costs nothing when no card has the name. After a
+quick restart of a killed worker it waits once, about 12 seconds with the
+defaults: always with `consul`, which gives no age, and with `filesystem`,
+which learns the file server's clock only from its own first write, so
+every age is unknown before the first publish.
+
+A provider that does not start or list in that time skips the check with
+`fleet_worker_name_probe_skipped`, and the start goes on: a registry that is
+down never blocks a worker. With `autodiscover` off there is no check; the
+[owner lock](local-databases.md#the-own-folder) of the own folder is then
+the only guard, and it works only on one host.
+
+A refused start stops like any other start failure. It seals the live
+recorder file the worker had already opened into the history folder under
+the same worker name.
+
+### A twin that starts later
+
+When a worker lists a card with its own name, another instance, and that
+is live by the [liveness rule](#liveness), it logs `fleet_duplicate_worker_name`
 (with the other instance and URL) once for that instance and counts it in
-`drakkar_fleet_duplicate_worker_name_total`. Give every worker a unique
-name, for example from the pod name through `worker.name_env`.
+`drakkar_fleet_duplicate_worker_name_total`. This happens when a twin
+started while the registry was down, so the check above could not see it.
+The running worker does not stop: stopping it would stop both twins.
 
 ## Metrics
 
@@ -976,6 +1024,9 @@ also counted by the three provider metrics:
 | `fleet_card_invalid` | warning | A card was skipped; once per file name (a file that is unreadable, not a plain file, too large or not a JSON object) or per worker (field rules). |
 | `fleet_card_schema_unsupported` | warning | A card of another format version was skipped; once per worker. |
 | `fleet_duplicate_worker_name` | warning | Another live process publishes this worker's name; once per instance. |
+| `fleet_worker_name_probe_waiting` | info | The [same-name check](#same-name-check) found a fresh card of this worker's name and waits for a second listing (fields `worker`, `other_instances`, `wait_seconds`). |
+| `fleet_worker_name_in_use` | error | The same-name check found a live worker with this worker's name; the start is refused (fields `worker`, `instance`, `other_instance`, `other_url`). |
+| `fleet_worker_name_probe_skipped` | warning | The provider did not start or list in time; the same-name check is skipped and the start goes on (fields `worker`, `provider`, `error`). |
 | `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
 | `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
 | `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |

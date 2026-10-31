@@ -289,7 +289,7 @@ Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client req
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
 | `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
-| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{storage.dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
+| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `<storage.dir>/<cluster>/<worker>/<worker>.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
 Log events of the start and the stop:
 
@@ -300,7 +300,7 @@ Log events of the start and the stop:
 
 #### OOM / SIGKILL detection
 
-Drakkar writes a small **watchdog file** at `{storage.dir}/{worker_id}.watchdog`
+Drakkar writes a small **watchdog file** at `<storage.dir>/<cluster>/<worker>/<worker>.watchdog`
 during startup and removes it as the last step of a clean shutdown. The
 file's presence and contents at the next startup let the framework
 distinguish three termination modes:

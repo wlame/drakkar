@@ -18,14 +18,16 @@ The name that identifies this worker in logs, metrics, the registry card and the
 
 ```yaml
 worker:
-  name: ''                         # literal worker name; '' and no value from name_env = the generated drakkar-<hex>.
-                                   # env: DK_WORKER__NAME
-  name_env: WORKER_ID              # env var that holds the name; set and not empty, it wins over name.
+  name: ''                         # literal worker name: 1 to 128 of A-Z a-z 0-9 _ -; any other name fails
+                                   # the start. '' and no value from name_env = the host name made safe
+                                   # (drakkar-<8 hex> for an empty host name or localhost). env: DK_WORKER__NAME
+  name_env: WORKER_ID              # env var that holds the name; set and not empty, it wins over name. Same rule.
                                    # env: DK_WORKER__NAME_ENV  · reasonable: WORKER_ID, HOSTNAME, K8S_POD_NAME
 ```
 
-A generated name changes at every start. Give a stable name (`name`, or a variable in
-`name_env`) to a worker that keeps files in `storage.dir`.
+The name is part of the worker's own folder `<storage.dir>/<cluster>/<worker>/`. In Kubernetes
+the host name is the pod name, which a container restart keeps; a Deployment gives a recreated pod
+a new name. See [Worker names](local-databases.md#worker-names).
 
 ---
 
@@ -39,7 +41,8 @@ share the lock scope of cluster tasks and the history folder, and can cross-trac
 ```yaml
 cluster:
   name: ''                         # literal cluster name. '' with autodiscover on logs one startup warning
-                                   # naming the scope default. env: DK_CLUSTER__NAME  · reasonable: search-cluster, prod-east
+                                   # naming the scope default. A folder name fleet, history, merged, tasks or
+                                   # workers fails the load. env: DK_CLUSTER__NAME  · reasonable: search-cluster, prod-east
   name_env: ''                     # env var that holds the cluster name; set and not empty, it wins over name.
                                    # env: DK_CLUSTER__NAME_ENV  · reasonable: K8S_NAMESPACE, DEPLOY_ENV
 ```
@@ -567,12 +570,13 @@ cache:
 
 📚 [Upgrading](upgrading.md) · [Local databases](local-databases.md)
 
-This worker's own files (the live recorder file, the cache file, the crash marker), and the folder every worker of one cluster sees (registry cards, sealed history, archives, merge results).
+The own folders of the workers (each worker's live recorder file, cache file and crash marker, in `<dir>/<cluster>/<worker>/`), and the folder every worker of one cluster sees (registry cards, sealed history, archives, merge results). `dir` must be a local filesystem.
 
 ```yaml
 storage:
-  dir: /tmp/drakkar                # created with mode 0700 when missing; '' = no own files; with
-                                   # recorder.enabled and provider sqlite the load fails. env: DK_STORAGE__DIR
+  dir: /tmp/drakkar                # local disk; holds <cluster>/<worker>/ per worker, created with mode 0700
+                                   # when missing; '' = no own files; with recorder.enabled and provider
+                                   # sqlite the load fails. env: DK_STORAGE__DIR
   shared_dir: ''                   # '' = the same folder as dir (one host). env: DK_STORAGE__SHARED_DIR
 ```
 

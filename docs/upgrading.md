@@ -31,6 +31,8 @@ changes these things:
 - The DLQ record is the original message, and every sink declares a failure policy.
 - The recorder can keep its history in Postgres and recent events in memory.
 - The archive has a cluster scope and an own-files scope.
+- Each worker keeps its own files in its own folder `<storage.dir>/<cluster>/<worker>/`,
+  and a worker name must be a safe word.
 - Plugins, `periodic.tasks`, the throughput feature and the `static` registry are
   removed.
 
@@ -954,9 +956,9 @@ The archive pass now has two scopes. See
 **The own scope needs a stable worker name.** A pass finds its files by the worker name.
 Sealed files and archives of a retired name stay until an operator deletes them. Set the
 variable that `worker.name_env` names (default `WORKER_ID`) to a name that does not change
-across restarts. A worker with no name gets a generated one that changes at each start, and
-it logs `archive_own_scope_unstable_worker_name` at startup in this scope. Its sealed files
-of earlier starts are never archived.
+across restarts. A worker with no name uses its host name, which changes when a Deployment
+recreates its pod, and it logs `archive_own_scope_unstable_worker_name` at startup in this
+scope. Its sealed files of an earlier host name are never archived by the own scope.
 
 **Archives that stay in the folder after a change of scope:** a pass deletes only the
 archives of its own scope. If a worker changes scope, delete its old archives by hand once
@@ -971,6 +973,51 @@ the own scope, `the pass ends after the window in progress`. The help texts of
 `None`. `PeriodicRoster.runs_archive` is `PeriodicRoster.archive_scope`. `run_archive_pass`
 takes `only_worker`, and needs `fence` or `only_worker`: with neither it raises `ValueError`.
 `archive_file_name` takes `worker`.
+
+#### Own folders and worker names {#own-folders}
+
+Each worker keeps its own files in `<storage.dir>/<sanitized cluster>/<worker>/` instead
+of directly in `storage.dir`. See [The own folder](local-databases.md#the-own-folder).
+The file names and the shared folder do not change.
+
+- **Files of the flat layout are not found again.** A backlog file, a leftover
+  recorder file (`<storage.dir>/<worker>-<timestamp>.db`), the cache file
+  (`<worker>-cache.db`) and the watchdog file of an earlier release stay where they are.
+  Stop every worker cleanly before the upgrade: a clean stop seals and moves its recorder
+  files. Then move the remaining recorder files of a worker into its new own folder
+  (the next start seals them as leftovers), or delete them. Delete the old cache and
+  watchdog files: the cache starts empty and is filled again.
+- **The worker name must be 1 to 128 letters, digits, `_` or `-`.** A name with a dot, a
+  slash or a space (for example an FQDN in `WORKER_ID`) fails the start with
+  `worker.name: '<name>' must be 1 to 128 letters, digits, '_' or '-'; use '<safe form>'`.
+  Use the safe form the message gives. Before, such names were changed to `_` only in
+  card keys, so two names could share one card.
+- **The generated name is the host name.** With no configured name, the worker uses its
+  host name made safe (in Kubernetes: the pod name), or `drakkar-<8 hex>` when the host
+  name is empty or `localhost`. It was a value that changed at every start.
+- **A cluster name can no longer be `fleet`, `history`, `merged`, `tasks` or `workers`**
+  (in any letter case, after sanitizing). Such a name fails the load.
+- **`storage.dir` must be a local filesystem.** The own folder carries an owner lock
+  (`flock`), and SQLite's WAL mode needs local file locks. Put the network mount in
+  `storage.shared_dir`.
+- **A second process with the same worker name does not start.** On one host the owner
+  lock refuses it (`storage.dir: the folder <own folder> is in use by another process; ...`).
+  With `autodiscover` on, a worker that finds a live card of its name with another
+  instance does not start (`fleet_worker_name_in_use`). See
+  [The same-name check](fleet.md#same-name-check). After a quick restart of a killed
+  worker the check waits about one heartbeat.
+- **Orphan folders are sealed** by another worker of the cluster when `autodiscover` is
+  on and the registry shows the name is not online; with `autodiscover` off they are only
+  logged (`recorder_orphan_folder_found`). See [Orphan folders](local-databases.md#orphan-folders).
+
+**New log events:** `fleet_worker_name_probe_waiting`, `fleet_worker_name_in_use`,
+`fleet_worker_name_probe_skipped`, `recorder_orphan_folder_sealed`,
+`recorder_orphan_folder_found`. `recorder_leftover_sealed` and `recorder_seal_failed`
+carry `orphan_worker` for a file of an orphan folder.
+
+**In code:** `DrakkarApp(worker_id=...)` follows the same name rule. `EventRecorder`
+takes `sibling_dir` and `worker_online`; its `storage_dir` is the own folder.
+`DrakkarApp.own_storage_dir` gives that folder.
 
 #### Autodiscover {#autodiscover}
 
@@ -1070,7 +1117,7 @@ on. An environment value takes the same text as the YAML value: `DK_EXECUTOR__TA
 
 - `worker.name` is new. The worker name is the value of the variable that
   `worker.name_env` names when that variable is set and not empty, else `worker.name`,
-  else a generated `drakkar-<hex>`. A worker with `worker.name` set has a stable name,
+  else the host name made safe (see [Own folders and worker names](#own-folders)). A worker with `worker.name` set has a stable name,
   so the own archive scope does not log `archive_own_scope_unstable_worker_name` for it.
 - `cluster.name_env` wins over `cluster.name` when its variable is set and not empty, as
   before.
@@ -1247,6 +1294,7 @@ delete:
 | Postgres table `<schema>.archive_locks` | The archive lease of an older election provider. `DROP TABLE IF EXISTS <schema>.archive_locks;`. The provider creates `task_locks`. |
 | `<storage.dir>/<worker>-<timestamp>.db` of a worker whose recorder is now off | Left by an earlier `sqlite` run that did not stop cleanly; stop a worker cleanly before you turn its recorder off. |
 | Sealed files and archives of a retired worker name, in the own archive scope | The own scope matches files by the worker name; see [the archive scope](#archive-scope). |
+| `<storage.dir>/<worker>-cache.db` (with `-wal` and `-shm`), `<storage.dir>/<worker>.watchdog` and `<storage.dir>/<worker>-<timestamp>.db` | Own files of the flat layout. Move a recorder file into the worker's own folder to have it sealed, or delete it; see [Own folders and worker names](#own-folders). |
 
 ## To 2.4.0 from an older release {#to-2-4-0}
 

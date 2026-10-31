@@ -17,25 +17,101 @@ code.
 
 A worker uses two folders:
 
-- **`storage.dir`** holds the worker's own files. The live recorder file
-  and the cache file are opened only by their owner, so this folder does
-  not need to be shared. The recorder file exists only with
+- **`storage.dir`** holds one [own folder](#the-own-folder) per worker,
+  `<storage.dir>/<cluster>/<worker>/`, with that worker's own files. The live
+  recorder file and the cache file are opened only by their owner, so this
+  folder does not need to be shared, and it **must be a local filesystem**:
+  the owner lock and SQLite's WAL mode depend on local file locks. The
+  recorder file exists only with
   `recorder.provider: sqlite`. A worker with the UI on also keeps
   its recent events in an in-memory database, the memory store, which is no
   file. See [Recent Events in Memory](recent-events.md).
 - **`storage.shared_dir`** is the folder every worker of a fleet sees. It holds the
   recorder history of each cluster, the archives, the merge results and the
   [registry cards](fleet.md). When `storage.shared_dir` is empty, the worker uses
-  `storage.dir` for this too.
+  `storage.dir` for this too. This is the folder for a network mount.
 
-### Own files (`storage.dir`)
+### Own files (`<storage.dir>/<cluster>/<worker>/`)
 
 | File | Purpose |
 |---|---|
+| `.owner.lock` | The [owner lock](#the-own-folder). Empty; the lock is an `flock` held for the life of the process. |
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` | Flight recorder: event log + config snapshot + periodic state. The **live file**: WAL mode, opened only by its owner. Rotated. Only with provider `sqlite`. |
 | `<worker>-<YYYY-MM-DD__HH_MM_SS>.db` *(older ones)* | The **backlog**: own files that are closed but not yet moved into the history folder, because a seal or a move failed, or a clean stop had no time left. See [Sealing](#sealing-and-the-history-folder). |
 | `<worker>-cache.db` | LWW key/value cache. A plain file, never rotated, opened only by its owner. Peers get its `cluster` and `global` rows over HTTP; see [Cache exchange](#cache-exchange). |
 | `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). |
+| `.<worker>-<...>.db.<16 hex>.download` | A short-lived copy of the live file or of the memory store for a download from the Databases page, unlinked before it is streamed. A crash can leave one; the next start of the worker deletes it. |
+
+The worker name and the cluster name of the path follow the rules in
+[Worker names](#worker-names). The file names are the same as before the
+folder existed, so the shared history and the archive names do not change.
+
+### The own folder {#the-own-folder}
+
+At start, before anything writes a file, the worker creates
+`<storage.dir>/<cluster>/<worker>/`. `storage.dir`, the cluster folder and
+the own folder are each created with mode `0700` when they are missing; a
+folder that exists keeps its mode. `<cluster>` is the sanitized cluster name
+(an empty name gives `default`, as in the shared folder).
+
+Then the worker opens `.owner.lock` in its own folder and takes an
+exclusive, non-blocking `flock` on it. It keeps the file open until its
+stop ends. The kernel drops the lock when the process ends in any way, also
+on `kill -9` or an OOM kill, so a held lock always means a live process.
+When another process holds the lock, the start fails with:
+
+```text
+storage.dir: the folder <own folder> is in use by another process; give each worker a unique worker name (worker.name or WORKER_ID)
+```
+
+This catches two live processes with one worker name on one host. It
+cannot see a process on another host, and `flock` on a network mount is not
+reliable, which is one reason `storage.dir` must be a local filesystem. The
+[same-name check](fleet.md#same-name-check) of the registry covers workers
+on other hosts.
+
+Once it holds the lock, the worker deletes the download temps
+(`.<worker>-*.download` and their sidecars) that an earlier process of its
+name left in the folder: the lock proves that no download of a live process
+is writing them.
+
+`storage.dir: ""` (memory-only) creates no folder and takes no lock.
+
+### Worker names {#worker-names}
+
+The worker name is part of the own folder's path, of every own file name,
+and of the key of the [registry card](fleet.md) on every provider. A
+configured name (`worker.name`, the variable named by `worker.name_env`, or
+the `worker_id` argument of `DrakkarApp`) must be 1 to 128 letters, digits,
+`_` or `-`. Any other name fails the start, and the message gives the safe
+form:
+
+```text
+worker.name: 'host.example.com' must be 1 to 128 letters, digits, '_' or '-'; use 'host_example_com'
+```
+
+With this rule a name is equal to its sanitized form everywhere, so two
+different names can never share a folder, a card or the own archive scope.
+
+With no name configured, the worker uses its host name, with every
+character outside `[A-Za-z0-9_-]` turned into `_` and cut to 128
+characters. A host name that is empty or `localhost` gives
+`drakkar-<8 random hex>` instead. In Kubernetes the host name is the pod
+name: a container restart in the same pod keeps it, so the restarted worker
+finds its own folder again (see [After a crash](#after-a-crash)). A
+Deployment that recreates a pod gives it a new name; its old folder is then
+an [orphan](#orphan-folders).
+
+A cluster name whose folder name is `fleet`, `history`, `merged`, `tasks` or
+`workers` (in any letter case) fails the load:
+
+```text
+cluster.name: 'history' gives the folder name 'history', which is reserved (fleet, history, merged, tasks, workers); choose another cluster name
+```
+
+With `storage.shared_dir` empty the shared folders live in `storage.dir`
+too, and a cluster of one of these names would put its worker folders inside
+a shared folder.
 
 ### Shared files (`storage.shared_dir`)
 
@@ -68,12 +144,13 @@ Rules:
 - Timestamp format in recorder filenames is exactly
   `%Y-%m-%d__%H_%M_%S` (UTC).
 - DB files and meta files are created with `0600` permissions. The worker
-  creates `storage.dir` with mode `0700` when it is missing, and logs a
-  warning when `storage.dir` is world-writable. A cluster history folder,
+  creates `storage.dir`, its cluster folder and its own folder with mode
+  `0700` when they are missing, and logs a warning when its own folder is
+  world-writable. A cluster history folder,
   a cluster task lock folder `tasks/<cluster>/` and `merged/` are created
   with mode `0700`.
-- `storage.dir` is **disposable**: deleting it loses own history/cache
-  contents but never breaks a worker — fresh files are created on next
+- `storage.dir` is **disposable**: deleting it (while no worker runs on it)
+  loses own history/cache contents but never breaks a worker — fresh files are created on next
   start. This is also the documented upgrade path for schema changes
   (below).
 - The merge tool output (`drakkar-merge` / the merge library) is a derived
@@ -471,7 +548,7 @@ intervals.
 ### Leftovers
 
 A **leftover** is a recorder file of this worker name that an earlier
-process left in `storage.dir`: after a crash, or after a clean stop with no
+process left in the own folder: after a crash, or after a clean stop with no
 time left to move it. A file is a leftover when all of these hold:
 
 - its name is exactly `<worker>-YYYY-MM-DD__HH_MM_SS.db` for this worker
@@ -486,13 +563,83 @@ start, once more after 300 seconds, and then on every rotation tick. It
 opens a leftover normally, so SQLite replays the WAL of a crashed process.
 Then it seals and moves the file like any other.
 
+The meta file of a leftover names the instance of the process that sealed
+it, not of the one that wrote it; the worker and the cluster are right.
+
+A crash in the few milliseconds between the copy and the deletion of the
+source of a move across filesystems leaves the source in the own folder.
+The next start publishes it again under the same name, which replaces an
+identical file. If an archive pass folded the first copy and deleted it in
+between, the rows of that file then exist twice: in the archive and in the
+new sealed file.
+
+### Orphan folders
+
+An **orphan folder** is the own folder of a worker name that never starts
+again: a Deployment recreated a pod under a new host name, or a configured
+name changed. Its recorder files are never sealed by their owner.
+
+Each worker's leftover pass (at start, 300 seconds later, and at each
+rotation tick) also looks at the other worker folders of its own cluster,
+`<storage.dir>/<cluster>/*/`, on the same host. It seals a folder only when
+it can prove that the name is dead:
+
+1. it takes the folder's owner lock (no process on this host holds the
+   folder) and holds it while it works; a folder without a lock file is not
+   a worker folder and is never touched;
+2. no file in the folder changed for 300 seconds;
+3. `autodiscover` is on, and the last registry refresh (not older than
+   `autodiscover.offline_after`) lists no online card of that name: no card,
+   or only offline ones. A card whose liveness is unknown counts as not
+   proved.
+
+Then it seals and publishes every recorder file of the folder into the
+history folder. The meta file names the owner from the file name, not the
+worker that sealed it. It deletes the owner's cache file, watchdog file and
+download temps, and removes the folder when nothing else is left. The cache
+file is deleted, not merged: the cache guarantees nothing, and the peers
+already pulled its `cluster` and `global` rows. A file it cannot seal or
+move stays in the folder for a later pass; it never joins the sealing
+worker's own backlog.
+
+With `autodiscover` off, no worker can prove that a name is dead (the lock
+holds only on one host, and the idle rule fails for a worker that writes
+rarely), so the pass only logs `recorder_orphan_folder_found` once per
+folder and seals nothing. Clean such a folder by hand when no process holds
+its lock: `flock -n <folder>/.owner.lock true` succeeds, then seal or delete
+the folder.
+
+The pass runs only where the recorder writes files (`recorder.provider:
+sqlite`), and only on a host that sees the folder: an own folder on a
+per-pod volume that died with the pod leaves nothing to clean. Sealed files
+of dead names are archived only by the [cluster scope](#archive-scopes);
+the own scope of a living worker never takes another worker's files.
+
+### After a crash {#after-a-crash}
+
+What a `kill -9`, an OOM kill or a host crash leaves in the own folder, and
+what the next start with the same worker name does with it:
+
+| Left behind | Next start | Lost or doubled |
+|---|---|---|
+| `.owner.lock` | The lock went with the process; the new process takes it. | — |
+| `<worker>.watchdog` with an empty body | Logs `previous_run_ended_unexpectedly` and counts `drakkar_suspected_oom_kills_total`. | — |
+| The live recorder file with its `-wal` and `-shm` | A new live file opens. The old one is a [leftover](#leftovers) once it is idle for 300 seconds, so the pass 300 seconds after start seals it; SQLite replays the WAL and rolls back a torn last transaction. | Lost: the events that were still in the memory store or the file queue, at most about one `recorder.flush_interval` plus a backlog. Not doubled. |
+| Closed files that failed to seal or move | Sealed again as leftovers. | Not lost. |
+| `<worker>-cache.db` with its WAL | Opened again; SQLite recovers the WAL. | Lost: cache writes not yet flushed, at most `cache.flush_interval`. Peers keep the rows they already pulled. |
+| Download temps | Deleted at start. | — |
+
+The Kafka side of a crash is in [Deployment](deployment.md#sudden-restart).
+
 ### Log events
 
 | Event | When |
 |---|---|
 | `recorder_sealed` | A sealed file reached the history folder. Fields: `db_path`, `destination`, `crossed_filesystems`, `size_bytes`, `events`. |
-| `recorder_leftover_sealed` | The same, for a leftover. |
-| `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. |
+| `recorder_leftover_sealed` | The same, for a leftover. For a file of an orphan folder it also carries `orphan_worker`. |
+| `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. For a file of an orphan folder it carries `orphan_worker`, and the file stays in that folder instead. |
+| `recorder_orphan_folder_sealed` | info. Every recorder file of an [orphan folder](#orphan-folders) reached the history folder. Fields: `folder`, `worker`, `files`, `folder_removed`. |
+| `recorder_orphan_folder_found` | warning. With `autodiscover` off, an orphan folder that no process holds and whose files are idle; once per folder per process. Fields: `folder`, `worker`, `hint`. |
 | `recorder_background_job_failed` | A background job failed with an unexpected error. Field `job` names it: `sealing`, `leftover_sealing`, `archive` (an archive pass) or `archive_footprint` (the footprint update of an archive slot that this worker did not win). A seal runs again at the next rotation tick, an archive pass at the next archive slot. |
 
 ## The meta file
@@ -1412,10 +1559,11 @@ description. The cache does not use the shared folder: the
 in its worker's own `storage.dir`. Two layouts are common:
 
 - **One host.** The workers of one host share one `storage.dir` and leave
-  `storage.shared_dir` empty. Each file name carries the worker name, and the
-  history folders are created inside `storage.dir`.
-- **A fleet across hosts.** Each worker has its own `storage.dir` on a
-  local disk, and every worker mounts one shared folder as `storage.shared_dir`.
+  `storage.shared_dir` empty. Each worker writes its own files into its own
+  folder `<storage.dir>/<cluster>/<worker>/`, and the history folders are
+  created inside `storage.dir`.
+- **A fleet across hosts.** Each worker has `storage.dir` on a local disk,
+  and every worker mounts one shared folder as `storage.shared_dir`.
   The live file and the cache file stay on the local disk. Only sealed
   files go to the shared mount, in a background job.
 
@@ -1442,7 +1590,7 @@ files that the workers archive and serve. See
 
 ## Watchdog file
 
-`{storage.dir}/{worker_id}.watchdog` is written at startup and marked
+`<storage.dir>/<cluster>/<worker>/<worker>.watchdog` is written at startup and marked
 `CLEAN_EXIT` on graceful shutdown; a worker that finds its own stale
 watchdog without the marker reports the previous run as killed
 (OOM/SIGKILL detection). Disabled (with a log line) when `storage.dir` is empty.

@@ -439,3 +439,62 @@ lease) leaves workers of one cluster with different definitions for a
 while: they log `periodic_cluster_mismatch` and
 `drakkar_periodic_cluster_mismatch_peers` is above zero until the last
 worker restarted. See [Definition hash](periodic-tasks.md#definition-hash).
+
+## Worker names and own folders
+
+Every worker keeps its own files in `<storage.dir>/<cluster>/<worker>/`
+(see [The own folder](local-databases.md#the-own-folder)). `storage.dir`
+must be a local filesystem; put the network mount in `storage.shared_dir`.
+
+With no `worker.name` and no value in the variable named by
+`worker.name_env` (`WORKER_ID` by default), the worker name is the host
+name, made safe (see [Worker names](local-databases.md#worker-names)):
+
+- In Kubernetes the host name is the pod name. A container restart in the
+  same pod (an OOM kill, a crash) keeps the name, and an `emptyDir` volume
+  survives the container restart, so the restarted worker finds its own
+  folder: the watchdog reports the kill, the leftover recorder files are
+  sealed, and the cache file is used again.
+- A StatefulSet keeps the pod name across pod recreation too.
+- A Deployment gives a recreated pod a new name. With a persistent volume
+  the old folder is then an [orphan](local-databases.md#orphan-folders),
+  sealed by another worker of the cluster only when `autodiscover` is on.
+  Sealed files of names that are gone are archived only by the
+  [cluster scope](local-databases.md#archive-scopes), which needs
+  `autodiscover` and `storage.shared_dir`; the own scope of a living
+  worker never takes them.
+- In Docker the host name is the container id, which a restart of the same
+  container keeps.
+
+Two workers on one host with no configured name get the same name. On one
+`storage.dir` the [owner lock](local-databases.md#the-own-folder) refuses
+the second one, and with `autodiscover` on the
+[same-name check](fleet.md#same-name-check) refuses a live twin on any
+host. Set `worker.name_env` to a variable that is unique per worker when
+several workers share a host.
+
+## Sudden restart (kill -9, OOM, host crash) {#sudden-restart}
+
+What happens to the files is in
+[After a crash](local-databases.md#after-a-crash). On the Kafka side:
+
+- The consumer commits manually and has no static group membership. After a
+  `kill -9` the broker keeps the dead member's partitions assigned until
+  `sources.kafka.session_timeout` passes (45 seconds by default); nothing
+  reads them in that time.
+- The restarted process joins as a new member, which starts a rebalance.
+- The new owner of each partition starts at the last committed offset: the
+  highest completed offset of an unbroken run, plus 1. Every message at or
+  above it is read again: messages that waited in the partition queues,
+  messages whose tasks were running, and messages that completed after an
+  older one that had not. With a large fan-out, one incomplete message can
+  hold back many completed ones. Their sink writes happen again
+  (at-least-once). The recorder events of the dead process for those
+  messages stay in its sealed file, so the history shows two runs.
+- The subprocesses of the dead worker run in their own session, so a
+  `kill -9` of the worker does not kill them. In a container they end with
+  the container. On a bare host they run until they finish, and their
+  output goes nowhere.
+- After a quick restart the [same-name check](fleet.md#same-name-check) can
+  hold the start for about one heartbeat (12 seconds with the defaults)
+  while it confirms that the old card stopped moving.

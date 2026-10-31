@@ -188,8 +188,29 @@ the steps of the upgrade and the changes of behaviour.
   `drakkar_recorder_annotations_dropped_total` changed.
 - **The `redis` package must be version 7.2 or later** (it was 5.2.0). The Redis
   sink uses the same package.
+- **One own folder per worker.** A worker keeps its own files in
+  `<storage.dir>/<cluster>/<worker>/` and holds an owner lock (`flock`) on
+  `.owner.lock` there; a second process with the same name on the host does not
+  start. `storage.dir` must be a local filesystem. Own files of the flat layout
+  are not found again; see `docs/upgrading.md`.
+- **Worker and cluster names.** A worker name must be 1 to 128 letters, digits,
+  `_` or `-`; the start fails with the safe form otherwise. With no name, the
+  worker uses its host name made safe, or `drakkar-<8 hex>`. A cluster name whose
+  folder name is `fleet`, `history`, `merged`, `tasks` or `workers` fails the load.
+- **A live twin refuses the start.** With `autodiscover` on, a worker that finds a
+  live card of its name with another instance before its first publish does not
+  start (`fleet_worker_name_in_use`); the check waits at most two heartbeats plus
+  5 s and is skipped when the registry is down.
 
 ### Added
+
+- **Orphan folders.** The leftover pass seals the recorder files of another
+  worker name's own folder in the same cluster when no process holds the folder,
+  its files are idle for 300 s and the registry shows the name is not online, then
+  deletes the folder (`recorder_orphan_folder_sealed`). With `autodiscover` off it
+  only logs the folder (`recorder_orphan_folder_found`).
+- **Download temps are swept.** A worker deletes the download temps an earlier
+  process of its name left in its own folder at start.
 
 - **Recorder memory store.** The recorder keeps its recent events in an
   in-memory SQLite database while the UI is on, bounded by `recorder.memory`

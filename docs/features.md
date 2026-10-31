@@ -75,7 +75,7 @@ names the key to change.
    with `recorder.enabled` and provider `sqlite` fails the load; set
    `recorder.enabled: false` to keep recent events in memory only. With
    provider `postgres`, `storage.dir` may be empty. An empty `storage.dir` also
-   disables the OOM watchdog (`{storage.dir}/{worker}.watchdog`).
+   disables the OOM watchdog (`<storage.dir>/<cluster>/<worker>/<worker>.watchdog`).
 4. **The SPA bundle needs the UI.** `ui.release.enabled` fetches
    and serves the drakkar-ui release; a fetch failure is non-fatal, and
    release tags are immutable, so a bundle downloaded once serves from the

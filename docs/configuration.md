@@ -181,9 +181,9 @@ The `worker` and `cluster` sections name this worker and its cluster.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `worker.name` | `str` | `''` | Literal worker name, used in logs, metrics, the registry card and the operator UI. |
-| `worker.name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. When the variable is set and not empty, it wins over `worker.name`. With neither, the worker uses a generated `drakkar-{hex_id}`, which changes at every start. |
-| `cluster.name` | `str` | `''` | Literal cluster name. Workers with the same cluster name are displayed together, share the lock scope of cluster tasks and the history folder, and can cross-trace messages. Empty with `autodiscover` on logs `cluster_name_empty` once at startup. |
+| `worker.name` | `str` | `''` | Literal worker name, used in logs, metrics, the registry card, the operator UI and the own folder `<storage.dir>/<cluster>/<worker>/`. It must be 1 to 128 letters, digits, `_` or `-`; any other name fails the start with a message that gives the safe form. |
+| `worker.name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. When the variable is set and not empty, it wins over `worker.name`; its value follows the same rule. With neither, the worker uses its host name with every other character turned into `_` (in Kubernetes: the pod name), or `drakkar-<8 hex>` when the host name is empty or `localhost`. See [Worker names](local-databases.md#worker-names). |
+| `cluster.name` | `str` | `''` | Literal cluster name. Workers with the same cluster name are displayed together, share the lock scope of cluster tasks and the history folder, and can cross-trace messages. Empty with `autodiscover` on logs `cluster_name_empty` once at startup. A name whose folder name is `fleet`, `history`, `merged`, `tasks` or `workers` (any letter case) fails the load. |
 | `cluster.name_env` | `str` | `''` | Name of an environment variable that holds the cluster name. When the variable is set and not empty, it wins over `cluster.name`. |
 | `app` | `dict` | `{}` | Reserved section for **user-defined application config**: passed through unvalidated to the handler-declared model and exposed as `self.app_config`, with env overrides under the handler's own prefix (never `DK_APP__*`). See [App Config](app-config.md). |
 
@@ -997,7 +997,7 @@ dlq:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `dir` | `str` | `'/tmp/drakkar'` | This worker's own files: the live recorder file, the cache file, the crash marker. Only this worker opens them. The worker creates the folder with mode `0700` at startup when it is missing; an existing folder keeps its mode. `''`: no own files, no cache file and no cache exchange; an enabled recorder with provider `sqlite` then fails the load. |
+| `dir` | `str` | `'/tmp/drakkar'` | The folder of the own folders: each worker keeps its live recorder file, cache file and crash marker in `<dir>/<sanitized cluster>/<worker>/`, and only that worker opens them. An owner lock in the folder refuses a second process with the same worker name on the host. Must be a **local filesystem**: the lock and SQLite's WAL mode depend on local file locks. The worker creates each missing level with mode `0700` at startup; an existing folder keeps its mode. `''`: no own files, no cache file and no cache exchange; an enabled recorder with provider `sqlite` then fails the load. See [The own folder](local-databases.md#the-own-folder). |
 | `shared_dir` | `str` | `''` | The folder every worker of one cluster sees: registry cards (provider `filesystem`), sealed history, archives, merge results. `''` means the same folder as `dir`, which is right for workers on one host. |
 
 ```yaml
@@ -1165,7 +1165,7 @@ See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and t
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in [`storage.dir`](#storage-and-shared) and is private to the worker; `storage.dir` does not need to be shared for the cache. With `storage.dir: ""` the engine warns (`cache_engine_disabled_no_storage_dir`) and continues without persistence -- in-memory only, and with no cache exchange. |
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. The cache file `<worker_id>-cache.db` lives in the worker's own folder under [`storage.dir`](#storage-and-shared) and is private to the worker; `storage.dir` does not need to be shared for the cache. With `storage.dir: ""` the engine warns (`cache_engine_disabled_no_storage_dir`) and continues without persistence -- in-memory only, and with no cache exchange. |
 | `flush_interval` | duration | `3s` | > 0 | Time between runs of the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
 | `cleanup_interval` | duration | `1m` | > 0 | Time between runs of the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
 | `max_memory_entries` | `int` | `10000` | >= 0 | Cap for the in-memory LRU. `0` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
