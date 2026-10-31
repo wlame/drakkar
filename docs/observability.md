@@ -291,6 +291,13 @@ Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client req
 | `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time an input source's drain exceeded `executor.drain_timeout` before its in-flight work finished — the Kafka source's partition processors or the HTTP source's in-flight requests. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
 | `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{storage.dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
+Log events of the start and the stop:
+
+| Event | Level | When |
+|---|---|---|
+| `ui_disabled_no_probes` | warning | `api.enabled` is `false`, so the worker serves no `/healthz` and `/readyz` for Kubernetes probes. Field `reason`; category `lifecycle`. Once at startup. |
+| `messages_polled_at_stop_dropped` | info | A stop arrived while a Kafka poll was in flight and the poll returned messages. The worker does not hand them to the partitions, whose loops are leaving; their offsets are not committed, so the next owner of each partition reads them again. Fields `count` and `partitions` (a sorted list); category `kafka`. |
+
 #### OOM / SIGKILL detection
 
 Drakkar writes a small **watchdog file** at `{storage.dir}/{worker_id}.watchdog`
