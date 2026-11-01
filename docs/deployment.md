@@ -387,6 +387,13 @@ a deterministic fault: the partition is marked dead, a CRITICAL
 pod leaves the service endpoints and, once replaced, the partition is
 reassigned to a healthy worker.
 
+Until then the poll loop pauses the dead partition in Kafka, once
+(``partition_paused_on_death``; ``partition_death_pause_failed`` if the
+pause call fails), so its queue stops growing. The partition stays paused
+through every backpressure resume and debug resume, and its queue does not
+count toward ``sources.kafka.max_queued_messages``, so it cannot hold the
+other partitions paused.
+
 ``drakkar_partition_processor_deaths_total{partition,outcome}`` counts
 both paths — ``outcome="restarted"`` and ``outcome="dead"``. Alert on any
 non-zero rate: a restart is a warning, a death means that partition is

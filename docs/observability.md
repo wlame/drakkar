@@ -302,6 +302,8 @@ Log events of the start and the stop:
 | Event | Level | When |
 |---|---|---|
 | `ui_disabled_no_probes` | warning | `api.enabled` is `false`, so the worker serves no `/healthz` and `/readyz` for Kubernetes probes. Field `reason`; category `lifecycle`. Once at startup. |
+| `queued_messages_dropped_at_stop` | info | A partition loop stopped (a stop or a revoke) with polled messages that were not in a window. They are dropped, not arranged; their offsets were never registered, so the next owner of the partition reads them again. Fields `partition`, `count`, `first_offset` and `hint`; category `partition`. Counted in `drakkar_queued_messages_dropped_at_stop_total`. |
+| `partition_paused_on_death` | error | The poll loop paused partitions whose processing loop died. They stay paused until a restart or revoke, and their queues do not count toward `sources.kafka.max_queued_messages`. Field `partitions`; category `lifecycle`. `partition_death_pause_failed` (error, with `error`) when the pause call failed. |
 | `messages_polled_at_stop_dropped` | info | A stop arrived while a Kafka poll was in flight and the poll returned messages. The worker does not hand them to the partitions, whose loops are leaving; their offsets are not committed, so the next owner of each partition reads them again. Fields `count` and `partitions` (a sorted list); category `kafka`. |
 
 #### OOM / SIGKILL detection

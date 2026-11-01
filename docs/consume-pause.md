@@ -34,7 +34,7 @@ Three pause actors share the consumer, with strict precedence rules:
 |-----------|----------|
 | Backpressure wants to resume during a debug pause | Blocked — queues draining cannot restart fetching while the operator asked for quiet |
 | Debug resume while backpressure still holds | Partitions stay paused; the backpressure loop resumes them when queues drain |
-| Stall-paused partitions (`dlq.on_send_failure: stall`) | Never touched in either direction — they stay paused until restart/revoke |
+| Stall-paused partitions (`dlq.on_send_failure: stall`) and dead partitions | Never touched in either direction — they stay paused until restart/revoke |
 | Rebalance assigns new partitions during a pause | They arrive paused — a rebalance cannot leak messages past an active pause |
 
 ---
