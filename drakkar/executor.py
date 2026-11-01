@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from drakkar.metrics import (
+    executor_exit_notice,
     executor_priority_fn_errors,
     executor_queue_wait,
     output_truncated,
     tasks_precomputed,
 )
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
+from drakkar.procwatch import EXITED_BEFORE_WATCH, ExitWatch, ExitWatcher, shared_watcher
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -44,6 +46,31 @@ _READ_CHUNK_BYTES = 65536
 # waiting longer gains nothing. Bounded because this sits on the shutdown
 # path, where an unbounded wait hangs the whole worker.
 _KILL_REAP_TIMEOUT_SECONDS = 5.0
+
+
+def measure_run(run_started_mono: float, exit_watch: ExitWatch | None, loop_end: float) -> tuple[float, float | None]:
+    """Run time of an exited process and how late the loop handled its exit.
+
+    ``loop_end`` is the monotonic moment the loop handled the exit. Returns
+    ``(duration_seconds, exit_notice_seconds)``:
+
+    - the watcher stamped the exit: the run ends at the stamp, and the notice
+      is the gap from the stamp to ``loop_end``;
+    - a live watch with no stamp yet: the loop handled the exit no later than
+      the watcher would have, so its own reading is as good, and the notice is 0;
+    - ``exited_before_watch``: the run ends at the watch time (the stamp set
+      then), and the notice is unknown;
+    - no watch, or ``unavailable``: loop timing, notice unknown.
+    """
+    if exit_watch is None:
+        return loop_end - run_started_mono, None
+    stamp = exit_watch.stamp
+    if exit_watch.fallback_reason is not None:
+        end = stamp.monotonic if exit_watch.fallback_reason == EXITED_BEFORE_WATCH and stamp is not None else loop_end
+        return end - run_started_mono, None
+    if stamp is None:
+        return loop_end - run_started_mono, 0.0
+    return stamp.monotonic - run_started_mono, max(0.0, loop_end - stamp.monotonic)
 
 
 def _trim_incomplete_utf8(data: bytes) -> bytes:
@@ -254,6 +281,7 @@ class ExecutorPool:
         priority_fn: PriorityFn | None = None,
         max_stdout_bytes: int = 0,
         max_stderr_bytes: int = 0,
+        exit_watcher: ExitWatcher | None = None,
     ) -> None:
         """Configure the pool.
 
@@ -275,6 +303,9 @@ class ExecutorPool:
             max_stderr_bytes: 0 (the default) = unlimited; positive
                 values cap how many bytes of stderr are retained per
                 task.
+            exit_watcher: the watcher that reads each task's exit time off
+                the event loop. ``None`` (default) uses the process's one
+                shared watcher (:func:`drakkar.procwatch.shared_watcher`).
         """
         self._binary_path = binary_path
         self._max_executors = max_executors
@@ -295,6 +326,7 @@ class ExecutorPool:
         self._priority_fn: PriorityFn = priority_fn or default_priority
         self._max_stdout_bytes = max_stdout_bytes
         self._max_stderr_bytes = max_stderr_bytes
+        self._exit_watcher = exit_watcher if exit_watcher is not None else shared_watcher()
         self._active_count = 0
         self._waiting_count = 0
         # Task ids that currently hold a pool slot, i.e. are between
@@ -328,6 +360,14 @@ class ExecutorPool:
     @property
     def max_executors(self) -> int:
         return self._max_executors
+
+    def start_exit_watcher(self) -> str | None:
+        """Start the exit watcher's thread now; return its backend name, or None when the host cannot watch."""
+        return self._exit_watcher.start()
+
+    def stop_exit_watcher(self) -> None:
+        """Stop the exit watcher's thread; a task started later starts it again."""
+        self._exit_watcher.stop()
 
     async def execute(
         self,
@@ -627,6 +667,10 @@ class ExecutorPool:
         binary = self._resolve_binary(task)
         start = time.monotonic()
         proc = None
+        exit_watch: ExitWatch | None = None
+        # Read again right before the fork; set here so every handler below can read them.
+        run_started_mono = start
+        run_started_at: float | None = None
         subprocess_env = self._build_env(task)
         try:
             # Args passed as a list — no shell injection risk.
@@ -643,11 +687,16 @@ class ExecutorPool:
             # doesn't try to widen ``bool`` to ``int`` to match
             # ``create_subprocess_exec``'s positional-arg signature.
             platform_kwargs: dict[str, Any] = {'start_new_session': True} if _IS_POSIX else {}
-            # Timed separately from the task body: fork/exec runs on the event
-            # loop, so on a congested worker this measures the parent's own
-            # contribution to task wall time — the number that tells "slow
-            # child" apart from "slow orchestrator".
-            spawn_started = time.monotonic()
+            # The run starts here: one monotonic reading for the run time and
+            # one wall reading for the bar, right before the fork. There is no
+            # ``await`` between them and the fork (``create_subprocess_exec``
+            # runs ``Popen`` before its first await). The spawn is also timed
+            # on its own: fork/exec runs on the event loop, so on a congested
+            # worker this measures the parent's own contribution to task wall
+            # time — the number that tells "slow child" apart from "slow
+            # orchestrator".
+            run_started_mono = time.monotonic()
+            run_started_at = time.time()
             proc = await asyncio.create_subprocess_exec(
                 binary,
                 *task.args,
@@ -657,7 +706,11 @@ class ExecutorPool:
                 env=subprocess_env,
                 **platform_kwargs,
             )
-            spawn_seconds = time.monotonic() - spawn_started
+            # Watch the exit on the very next line, with no ``await`` in
+            # between: asyncio reaps the child on this loop, so nothing can
+            # reap it (and free its pid for reuse) before the watch starts.
+            exit_watch = self._exit_watcher.watch(proc)
+            spawn_seconds = time.monotonic() - run_started_mono
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             if self._max_stdout_bytes == 0 and self._max_stderr_bytes == 0:
                 # Unlimited capture: communicate() handles stdin write,
@@ -693,7 +746,7 @@ class ExecutorPool:
                             cap_bytes=cap,
                             total_bytes=total,
                         )
-            duration = time.monotonic() - start
+            duration, exit_notice = self._measured_run(run_started_mono, exit_watch, time.monotonic())
 
             pid = proc.pid
             # After `communicate()` returns normally the process has exited and
@@ -708,6 +761,8 @@ class ExecutorPool:
                 stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else '',
                 duration_seconds=round(duration, 3),
                 spawn_seconds=round(spawn_seconds, 4),
+                run_started_at=run_started_at,
+                exit_notice_seconds=exit_notice,
                 task=task,
                 pid=pid,
                 stdout_truncated=stdout_truncated,
@@ -737,8 +792,19 @@ class ExecutorPool:
             return result
 
         except TimeoutError:
-            duration = time.monotonic() - start
-            timeout_pid = proc.pid if proc else None
+            timed_out_at = time.monotonic()
+            # The timeout wraps only the communication, so the process exists.
+            assert proc is not None
+            timeout_pid = proc.pid
+            exit_notice: float | None = None
+            # Kill first, so the run ends at the killed child's exit.
+            await self._kill_process_tree(proc)
+            if proc.returncode is None:
+                # The child survived SIGKILL (wedged in the kernel): the run is
+                # cut where the timeout fired.
+                duration = timed_out_at - run_started_mono
+            else:
+                duration, exit_notice = self._measured_run(run_started_mono, exit_watch, time.monotonic())
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
@@ -752,12 +818,15 @@ class ExecutorPool:
                     stdout='',
                     stderr='task timed out',
                     duration_seconds=round(duration, 3),
+                    run_started_at=run_started_at,
+                    exit_notice_seconds=exit_notice,
                     task=task,
                     pid=timeout_pid,
                 ),
             )
 
         except OSError as e:
+            # No process: no exit to time, so the duration is measured on the loop.
             duration = time.monotonic() - start
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
@@ -777,6 +846,16 @@ class ExecutorPool:
         finally:
             if proc and proc.returncode is None:
                 await self._kill_process_tree(proc)
+
+    @staticmethod
+    def _measured_run(
+        run_started_mono: float, exit_watch: ExitWatch | None, loop_end: float
+    ) -> tuple[float, float | None]:
+        """:func:`measure_run`, plus the exit-notice histogram when the notice is known."""
+        duration, exit_notice = measure_run(run_started_mono, exit_watch, loop_end)
+        if exit_notice is not None:
+            executor_exit_notice.observe(exit_notice)
+        return duration, exit_notice
 
     @staticmethod
     async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:

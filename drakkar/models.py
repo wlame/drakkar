@@ -308,7 +308,31 @@ class ExecutorResult(BaseModel):
     stdout: str = Field(description='Captured stdout from the process, decoded as UTF-8 (errors replaced).')
     stderr: str = Field(description='Captured stderr from the process, decoded as UTF-8 (errors replaced).')
     duration_seconds: float = Field(
-        description='Wall-clock time from process start to completion, rounded to 3 decimal places.'
+        description=(
+            'Run time of the subprocess in seconds, from just before the spawn to its exit, '
+            'rounded to 3 decimal places. The exit time is read when the kernel reports the '
+            'exit, not when the event loop handles it, so a busy loop does not stretch it '
+            '(on platforms without an exit watcher it is measured on the loop). For a launch '
+            'failure it is the time until the failure; for a precomputed result it is the '
+            "handler's value."
+        )
+    )
+    run_started_at: float | None = Field(
+        default=None,
+        description=(
+            'Unix seconds of the subprocess spawn, read right before it. The run spans '
+            'run_started_at to run_started_at + duration_seconds. None for a launch failure '
+            'and for a precomputed result.'
+        ),
+    )
+    exit_notice_seconds: float | None = Field(
+        default=None,
+        description=(
+            'Seconds from the subprocess exit to the moment the worker handled it: a few '
+            'milliseconds on a healthy worker, more when the event loop is busy. 0 when the '
+            'worker handled the exit before the exit watcher reported it. None when the exit '
+            'could not be timed off the loop, for a launch failure and for a precomputed result.'
+        ),
     )
     spawn_seconds: float | None = Field(
         default=None,

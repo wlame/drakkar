@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -560,6 +561,17 @@ class AppLifecycle:
         app._pending_budget = PendingBudget(
             max_tasks=app._config.executor.max_pending_tasks,
             max_bytes=app._config.executor.max_pending_bytes,
+        )
+        # Start the exit watcher now rather than at the first task, so a host
+        # that cannot watch says so at startup (a backend the kernel refused
+        # has also logged its reason). Without a watcher, task run times are
+        # measured on the event loop.
+        exit_watch_backend = app._executor_pool.start_exit_watcher()
+        logger.info(
+            'exit_watcher_started' if exit_watch_backend else 'exit_watcher_off',
+            category='executor',
+            backend=exit_watch_backend,
+            platform=sys.platform,
         )
 
     async def _start_observability(self) -> None:
@@ -1358,6 +1370,12 @@ class AppLifecycle:
             # consumer, and the sinks only have to outlive the in-flight
             # deliveries the drain above settled.
             await self._stop_sources(deadline, sources)
+
+            # Every task has settled once the sources stopped, so the exit
+            # watcher has nothing left to time. Its thread wakes and ends at
+            # once; a task that still runs is timed on the loop.
+            if app._executor_pool is not None:
+                app._executor_pool.stop_exit_watcher()
 
             # Shut the offload pool down first among the observability-
             # adjacent subsystems: hooks have finished draining by now, so

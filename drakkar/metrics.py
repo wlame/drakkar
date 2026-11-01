@@ -102,8 +102,27 @@ executor_tasks = Counter(
 # histogram_quantile useless exactly where most tasks live.
 executor_duration = Histogram(
     'drakkar_executor_duration_seconds',
-    'Executor task duration in seconds',
+    'Task subprocess run time in seconds, from spawn to exit, measured off the event loop',
     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300),
+)
+
+# The exit watcher (drakkar/procwatch.py) reads the clock when the kernel
+# reports a task subprocess exit. The gap between that and the moment the
+# worker's event loop handled the exit is a direct read of loop stalls: a
+# healthy loop handles an exit within a few milliseconds.
+executor_exit_notice = Histogram(
+    'drakkar_executor_exit_notice_seconds',
+    'Time from a task subprocess exit to the moment the worker handled it; grows when the event loop is busy',
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
+)
+
+# reason: exited_before_watch (the child exited and was reaped before the
+# watch started — a busy loop) or unavailable (the host cannot watch: no
+# backend for the platform, or the kernel refused the watch).
+executor_exit_watch_fallbacks = Counter(
+    'drakkar_executor_exit_watch_fallbacks_total',
+    'Task exits timed on the event loop because the exit watcher could not watch the process',
+    ['reason'],
 )
 
 # Numeric task-label distributions (metrics.task_label_histograms). One
