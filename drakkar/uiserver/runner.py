@@ -934,6 +934,13 @@ class DebugRunner:
                 all_scheduled_tasks=all_scheduled_tasks,
             )
 
+        # Every task has reached its last outcome, and the Tasks section
+        # already holds a copy of each stdin. Free the stdin as the worker
+        # does, so the message and window hooks see the same ``None`` here as
+        # in production.
+        for scheduled in all_scheduled_tasks:
+            scheduled.stdin = None
+
         # --- on_message_complete --------------------------------------------
         # on_message_complete is non-blocking for on_window_complete: even
         # if it raises, we still invoke on_window_complete so the operator

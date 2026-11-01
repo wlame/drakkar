@@ -1173,6 +1173,28 @@ async def test_runner_happy_path_runs_full_sequence():
     assert 'total_wallclock' in report.timing
 
 
+async def test_runner_message_and_window_hooks_see_tasks_without_stdin_as_in_production():
+    seen: list[str | None] = []
+
+    class Recording(_HappyPathHandler):
+        async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+            seen.extend(task.stdin for task in group.tasks)
+            return None
+
+        async def on_window_complete(self, results, source_messages) -> CollectResult | None:
+            seen.extend(result.task.stdin for result in results)
+            return None
+
+    runner = DebugRunner(
+        handler=Recording(task_count=2), executor_pool=_make_executor_pool(), app_config=_make_config()
+    )
+
+    report = await runner.run(ProbeInput(value='{"hello": "world"}', key='k-1', partition=3, offset=42, topic='in'))
+
+    assert seen == [None, None, None, None]
+    assert [t.stdin for t in report.tasks] == ['stdin-0', 'stdin-1']
+
+
 async def test_runner_populates_all_report_sections():
     """Spot-check every stage's output landed in the final DebugReport.
 
