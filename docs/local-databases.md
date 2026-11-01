@@ -395,9 +395,8 @@ The connection discipline is:
   SQLite's default is `FULL`, which fsyncs the WAL on **every commit**.
   These stores commit often — the recorder on its flush interval, on each
   state sync and on any UI poll that forces a flush; the cache on its own
-  flush interval — and a `storage.dir` can be a network mount, where one
-  fsync costs tens of milliseconds and reads on the same connection queue
-  behind it. `NORMAL` is the level SQLite's own documentation recommends
+  flush interval — and on a slow disk one fsync costs tens of milliseconds,
+  and reads on the same connection queue behind it. `NORMAL` is the level SQLite's own documentation recommends
   under WAL: the WAL is synced at checkpoints instead.
 
   What you give up: `NORMAL` remains **fully safe across an application

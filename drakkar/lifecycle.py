@@ -516,7 +516,7 @@ class AppLifecycle:
             # True when no suspect-OOM signature was found; logging that
             # at info level lets operators confirm the watchdog ran
             # without grepping the warn-only suspect path.
-            # File I/O on storage.dir (possibly network-mounted) — keep it off the event loop.
+            # File I/O in the own folder — keep it off the event loop.
             previous_run_clean = await asyncio.to_thread(self._watchdog.check_previous)
             if previous_run_clean:
                 await log.ainfo(
@@ -1227,7 +1227,7 @@ class AppLifecycle:
         if self._watchdog is None:
             return
         try:
-            # File I/O on storage.dir (possibly network-mounted) — keep it off the event loop.
+            # File I/O in the own folder — keep it off the event loop.
             await asyncio.to_thread(self._watchdog.write)
         except OSError as exc:
             await logger.awarning(
@@ -1335,7 +1335,7 @@ class AppLifecycle:
             # availability would be the wrong tradeoff at this layer.
             if self._watchdog is not None:
                 try:
-                    # File I/O on storage.dir (possibly network-mounted) — keep it off the loop.
+                    # File I/O in the own folder — keep it off the loop.
                     await asyncio.to_thread(self._watchdog.mark_clean)
                 except OSError as exc:
                     await log.awarning(

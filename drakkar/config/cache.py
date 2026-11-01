@@ -53,7 +53,7 @@ class CacheConfig(ConfigModel):
     When ``enabled=true``, every handler gains a ``self.cache`` attribute for
     sync ``set``/``peek``/``delete``/``__contains__`` and async ``get`` with
     DB fallback. Entries are periodically flushed to this worker's cache file
-    in ``storage.dir``; ``exchange`` decides how ``cluster`` and ``global``
+    in its own folder ``<storage.dir>/<cluster>/<worker>/``; ``exchange`` decides how ``cluster`` and ``global``
     rows reach the other workers.
 
     ``max_memory_entries`` defaults to ``10_000`` to prevent unbounded

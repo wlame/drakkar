@@ -150,7 +150,6 @@ parametrize).
    (`drakkar/periodic_roster.py`) is built before the recorder, the
    registry and any sink start, so the registry card carries the definition
    hash from its first publish.
-
 8. Each worker keeps its own files in `<storage.dir>/<sanitized cluster>/<worker>/`
    and holds an `flock` on `.owner.lock` there until its stop ends
    (`drakkar/ownerlock.py`); `storage.dir` must be a local filesystem. The

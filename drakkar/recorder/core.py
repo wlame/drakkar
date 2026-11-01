@@ -312,7 +312,7 @@ class EventRecorder(EventWriter):
         ``api_public_url`` fill the ``worker_config`` row. ``ws_min_duration_ms``
         and ``log_min_duration_ms`` are the shortest task the live stream shows
         and the shortest task that gets a slow-task log line. ``storage_dir`` is
-        the worker's own folder (``storage.dir``); ``'sqlite'`` needs it.
+        the worker's own folder (``<storage.dir>/<cluster>/<worker>``); ``'sqlite'`` needs it.
         ``shared_dir`` is the folder every worker of the cluster sees
         (``storage.shared_dir``); sealed files go to its ``history/<cluster>/``,
         and it falls back to ``storage_dir``. Both folders resolve the same way
@@ -567,7 +567,7 @@ class EventRecorder(EventWriter):
 
     @property
     def storage_dir(self) -> str:
-        """The worker's own folder (``storage.dir``); ``''`` when none is set, which persistence ``none`` allows."""
+        """The worker's own folder (``<storage.dir>/<cluster>/<worker>``); ``''`` without one, which persistence ``none`` allows."""
         return self._storage_dir
 
     @property
@@ -1261,7 +1261,7 @@ class EventRecorder(EventWriter):
         itself (journal mode, meta, close) is fast and always runs; the move
         into the history folder runs only while time remains, so a slow
         network mount cannot hold the stop past the deadline. A file that
-        is not moved stays in ``storage.dir`` and the next start with the
+        is not moved stays in the own folder and the next start with the
         same worker name seals it. Last, the stop waits for an archive pass
         still running in its thread, keeping ``reserve_seconds`` of the time
         left for the shutdown steps after the recorder (the election stop and

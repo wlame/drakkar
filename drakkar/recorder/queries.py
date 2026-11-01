@@ -321,7 +321,7 @@ class QueryContext:
     db_path: Callable[[], str]
     flush: Callable[[], Awaitable[None]]
     flush_memory: Callable[[], Awaitable[None]]
-    # The worker's own folder (``storage.dir``); ``''`` without a recorder file.
+    # The worker's own folder (``<storage.dir>/<cluster>/<worker>``); ``''`` without a recorder file.
     storage_dir: str = ''
 
 

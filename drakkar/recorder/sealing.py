@@ -8,12 +8,12 @@ with it (rotation, clean stop) it seals the file:
 2. compute the meta file content on that same connection, then close it;
 3. publish: write ``<name>.db.meta.json`` into
    ``<shared>/history/<cluster>/``, then move the file next to it. A rename
-   that crosses filesystems (``EXDEV``: a per-pod ``storage.dir`` and a
+   that crosses filesystems (``EXDEV``: an own folder on a local disk and a
    shared network mount — the usual fleet layout) becomes a copy into a
    dot-prefixed ``.incoming`` file, fsync, rename, fsync of the folder, and
    only then the deletion of the source.
 
-A file that fails any step stays in ``storage.dir``, closed, and is sealed
+A file that fails any step stays in the own folder, closed, and is sealed
 again later. Steps 1-2 run on the database driver's own thread; step 3 is
 blocking file work on a daemon thread (:func:`publish_in_background`).
 """
@@ -139,7 +139,7 @@ def publish_in_background(db_path: str, meta: dict[str, Any], folder: str) -> as
     executor is joined at interpreter exit, so a copy to a hung network
     mount would hold the process past its shutdown budget. A daemon thread
     cut off at exit leaves at most a dot-prefixed ``.incoming`` file (the
-    archive pass sweeps it) and the source in ``storage.dir`` (sealed again
+    archive pass sweeps it) and the source in the own folder (sealed again
     at the next start). A caller that stops waiting (a timeout) cancels the
     future; the thread's late result is then dropped.
     """
@@ -176,7 +176,7 @@ def publish_sealed(db_path: str, meta: dict[str, Any], folder: str) -> tuple[str
     Returns ``(destination, crossed_filesystems)``. The meta file goes first:
     a crash between the two leaves a meta file without its database, which
     readers ignore and the archive pass sweeps, while the database stays in
-    ``storage.dir`` to be sealed again.
+    the own folder to be sealed again.
     """
     os.makedirs(folder, mode=DB_DIR_MODE, exist_ok=True)
     destination = os.path.join(folder, os.path.basename(db_path))

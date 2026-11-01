@@ -504,8 +504,13 @@ writes without touching consumers.
 ### Cold cache on worker restart
 
 When a worker restarts, its in-memory dict is empty. The DB file
-(`<worker>-cache.db`) still has all the entries, so `get()` will
-lazily warm memory on first access per key. There is **no eager
+(`<worker>-cache.db` in its own folder `<storage.dir>/<cluster>/<worker>/`)
+still has all the entries, so `get()` will lazily warm memory on first
+access per key. This holds when the worker comes back under the same name.
+A worker that stays stopped for more than about 300 seconds on a host where
+other workers of its cluster share `storage.dir`, with `autodiscover` on,
+can have its folder sealed as an [orphan](local-databases.md#orphan-folders);
+its cache file is then deleted and it starts with an empty cache. There is **no eager
 preload** on startup — adding it would stall startup and race with
 normal traffic. This is deliberate (YAGNI: normal traffic warms the
 cache within one flush cycle).

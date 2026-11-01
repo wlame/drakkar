@@ -2,9 +2,10 @@
 
 The databases page lists two kinds of files. Sealed files in the shared
 history folder carry their statistics in a meta file written once at seal
-time, so nothing here touches them. This worker's own files in
-``storage.dir`` — the live file and files closed but not sealed into the
-history folder yet — have no meta file, so they are measured on request.
+time, so nothing here touches them. This worker's own files in its own
+folder ``<storage.dir>/<cluster>/<worker>/`` — the live file and files
+closed but not sealed into the history folder yet — have no meta file, so
+they are measured on request.
 
 The live file grows, so measuring it again on every page load would
 re-run ``COUNT(*)`` / ``GROUP BY`` over the whole events table. Instead

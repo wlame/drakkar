@@ -108,7 +108,7 @@ class CacheEngine:
             config: cache-specific settings (enabled flag, intervals,
                 memory cap, and ``exchange``: whether and how often
                 ``cluster``/``global`` rows are pulled from peers).
-            storage_dir: the worker's own folder (``storage.dir``); the
+            storage_dir: the worker's own folder (``<storage.dir>/<cluster>/<worker>``); the
                 cache file lives here. Empty means memory-only: the engine
                 warns at start and stays disabled.
             worker_id: stable identifier for this worker — used for the
@@ -298,7 +298,7 @@ class CacheEngine:
 
     @staticmethod
     def _cache_db_file_path(db_dir: str, worker_id: str) -> str:
-        """Return the cache file path: ``<storage.dir>/<worker>-cache.db``, a plain private file."""
+        """Return the cache file path: ``<own folder>/<worker>-cache.db``, a plain private file."""
         return str(Path(db_dir) / f'{worker_id}{CACHE_FILE_SUFFIX}')
 
     def attach_cache(self, cache: Cache) -> None:
@@ -324,7 +324,7 @@ class CacheEngine:
             cache.disable_pending_writes()
 
     def _resolve_db_dir(self) -> str:
-        """Return the folder the cache DB lives in (``storage.dir``), or ``''`` for memory-only."""
+        """Return the folder the cache DB lives in (the own folder), or ``''`` for memory-only."""
         return self._storage_dir
 
     async def _create_schema(self) -> None:

@@ -40,9 +40,9 @@ _WAL_SUFFIXES = ('-wal', '-shm')
 # SQLite defaults to ``synchronous=FULL``, which fsyncs the WAL on every
 # single commit. These stores commit often — the recorder on its flush
 # interval, on each state sync and on any UI poll that forces a flush; the
-# handler cache on its own flush interval — and a ``storage.dir`` is routinely a
-# network mount, where one fsync is tens of milliseconds during which reads
-# on the same connection queue behind it.
+# handler cache on its own flush interval — and on a slow disk one fsync is
+# tens of milliseconds during which reads on the same connection queue
+# behind it.
 #
 # NORMAL is the standard choice for WAL and the one SQLite's own
 # documentation recommends there: the WAL is synced at checkpoints rather
