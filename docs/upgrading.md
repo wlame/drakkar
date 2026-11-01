@@ -1049,7 +1049,8 @@ Now there are two stages (see [Backpressure](performance.md#backpressure)):
    `executor.max_pending_bytes` (default `1GiB`). The window size adapts to the
    free room; the first window of a partition takes one message. The limits
    are soft: a window reserves its estimate when it is taken, so they are
-   passed by about one message for the whole worker.
+   passed by the admitted window's fan-out beyond its estimate: normally one
+   message, more when the tasks per message jump.
 2. **Kafka fetch.** The fetch pauses when the queues of the live partitions
    hold `sources.kafka.max_queued_messages` messages (default `1000`) and
    resumes at half of it.

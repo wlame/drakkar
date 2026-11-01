@@ -497,25 +497,36 @@ As the window fans out, its tasks are charged out of the reservation; what
 is left is given back when the fan-out ends (also when `arrange()` raises or
 returns no tasks).
 
-A limit is passed only by the error of the estimate:
+A limit is passed only by the error of the estimate. The peak is at most the
+cap plus the actual fan-out of the window being admitted beyond its estimate:
 
-- With a steady fan-out the overshoot is about one message, for the whole
-  worker — not one window per partition.
-- With a fan-out that jumps — one message of 100 000 tasks after messages of
-  10 — the overshoot is that one message. The framework cannot bound one
-  message: `arrange()` builds its list before the framework sees it.
-- Before the worker has measured any window there is no estimate, so only one
-  window with no estimate is arranged at a time; it takes one message.
+- With a steady fan-out that is normally one message, for the whole worker —
+  not one window per partition.
+- A sudden jump in tasks per message passes the cap by that jump. One message
+  of 100 000 tasks after messages of 10 passes it by about that one message.
+  When every message of a window jumps (10 tasks each before, 1000 now), it
+  passes it by the whole window's excess: messages x (1000 - 10). The
+  framework cannot bound this: `arrange()` builds its list before the
+  framework sees it. A smaller `executor.window_size` makes the worst case
+  smaller.
+- Before the worker has measured a window that created tasks there is no
+  estimate, so only one window with no estimate is arranged at a time; it
+  takes one message.
 
 The reservation is not shown by the gauges: `drakkar_pending_tasks` and
 `drakkar_pending_bytes` show the tasks and bytes that exist.
 
 ### Window size adapts to the room
 
-Each partition keeps moving averages (weight 0.3 for the newest sample) of
-what one message costs: tasks, stdin bytes, and the output bytes the message
-and window hooks keep. The worker keeps the same averages over all
-partitions. The next window takes
+Each partition keeps moving averages of what one message costs: tasks, stdin
+bytes, and the output bytes the message and window hooks keep. The worker
+keeps the same averages over all partitions. The averages rise fast and fall
+slowly: a larger sample gets weight 0.5, a smaller one weight 0.05 (about 14
+smaller windows to lose half of the gap), because an estimate that is too high
+only makes a window wait, while one that is too low lets windows pass the
+limits. A window whose `arrange()` created no tasks is not measured at all:
+its messages would pull the averages to 0, and a zero estimate reserves no
+room. The next window takes
 
 ```
 n = clamp(min(free_tasks / avg_tasks, free_bytes / avg_bytes), 1, window_size)
@@ -532,7 +543,10 @@ release that makes room wakes the oldest waiter, which checks the room again
 and queues again at the front if another loop took it. The wait is cut every
 second, so the loop still retries an outstanding commit and sees a stop. The time spent waiting
 goes to `drakkar_window_admission_wait_seconds_total{limit}` (`tasks` or
-`bytes`, the limit that was reached; `tasks` when both were).
+`bytes`, the limit that was reached; `tasks` when both were). A loop that
+queues behind other waiters while there is room counts its wait under the
+limit that last blocked a loop, and a wait for the one unmeasured window at
+worker start counts under `tasks`.
 
 ### Memory per task
 
@@ -555,7 +569,8 @@ delivery, or after `on_error` with no retry — the framework sets
 `task.stdin` to `None`. A message or window hook that keeps the task no
 longer keeps its stdin. `arrange()`, `on_error`, `on_task_complete` and the
 retry run still see the stdin; `on_message_complete`, `on_window_complete`
-and `on_http_request_complete` see `None`.
+and `on_http_request_complete` see `None`. A task object scheduled more than
+once keeps its stdin, and its charge, until its last run settles.
 
 ### Sizing
 

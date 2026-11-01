@@ -391,7 +391,10 @@ async def on_window_complete(self, results, source_messages):
     `task.stdin` to `None`. `arrange()`, `on_error` (a replacement can be
     built from `task.stdin`), the retry run and `on_task_complete` still
     see the stdin; `on_message_complete` and `on_window_complete` see
-    `None`. Keep what you need from the stdin in `task.metadata`.
+    `None`. Keep what you need from the stdin in `task.metadata`. A task
+    object scheduled more than once (returned twice by `arrange()`, or
+    returned by `on_error` as its own replacement) keeps its stdin until its
+    last run settles.
 
 !!! info "Why omit the replaced original?"
     Semantically, an `on_error` list-return says "this invocation
@@ -416,9 +419,13 @@ fan-out charges the real tasks out of the reservation.
 
 The framework sees a message's tasks only after `arrange()` has returned
 them, so it cannot bound one message. A limit is passed only by the error of
-the estimate: with a steady fan-out by about one message for the whole
-worker, and with a fan-out that jumps (one message of 100 000 tasks after
-messages of 10) by that one message. The `drakkar_pending_tasks` and
+the estimate: the peak is at most the cap plus the actual fan-out of the
+window being admitted beyond its estimate. With a steady fan-out that is
+normally one message for the whole worker. A sudden jump in tasks per
+message passes the cap by that jump: one message of 100 000 tasks after
+messages of 10 by about that message, a window whose every message jumps by
+the whole window's excess. A window whose `arrange()` created no tasks does
+not change the estimate. The `drakkar_pending_tasks` and
 `drakkar_pending_bytes` gauges show the real counts. See
 [Performance: Backpressure](performance.md#backpressure).
 

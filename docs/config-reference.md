@@ -129,7 +129,8 @@ executor:
 
   # Window admission: a partition loop takes a new arrange() window only while
   # both pending counts are below their limits, and reserves its estimate at once.
-  # Soft limits: passed by about one message for the whole worker;
+  # Soft limits: passed by the admitted window's fan-out beyond its estimate
+  # (normally one message; a jump in tasks per message passes them by that jump);
   # drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
   max_pending_tasks: 2000          # unsettled tasks (waiting, running, in on_task_complete). env: DK_EXECUTOR__MAX_PENDING_TASKS  · >= max_executors
   max_pending_bytes: 1GiB          # task stdin + output kept for on_message_complete / on_window_complete.

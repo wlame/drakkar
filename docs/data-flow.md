@@ -249,15 +249,17 @@ The processor waits for messages from its queue:
 2. **Wait for room in the pending budget**: one budget per worker counts the pending tasks (created and not settled) and pending bytes (their stdin plus the output kept for `on_message_complete` and `on_window_complete`). While either reaches its limit (`executor.max_pending_tasks`, `executor.max_pending_bytes`), the loop waits in a first-in, first-out list; a release that makes room wakes the oldest waiter. Each wait lasts at most 1 second, then the loop retries a commit and comes back with its place kept. A stop ends the wait at once.
 3. **Non-blocking drain**: calls `queue.get_nowait()` in a tight loop until:
    - The queue is empty, OR
-   - The window reaches the admitted size: `min(free tasks / average tasks per message, free bytes / average bytes per message)`, clamped to 1 .. `executor.window_size`. The averages are moving averages (weight 0.3) of tasks, stdin bytes and kept output bytes per message, from the partition's earlier windows or, for its first window, from the whole worker; before the worker measured any window, one window of one message is arranged at a time. The free room excludes what other windows reserved.
+   - The window reaches the admitted size: `min(free tasks / average tasks per message, free bytes / average bytes per message)`, clamped to 1 .. `executor.window_size`. The averages are moving averages of tasks, stdin bytes and kept output bytes per message (weight 0.5 for a larger sample, 0.05 for a smaller one), from the partition's earlier windows or, for its first window, from the whole worker. A window whose `arrange()` created no tasks is not measured. Before the worker measured a window with tasks, one window of one message is arranged at a time. The free room excludes what other windows reserved.
 4. Updates the `partition_queue_size` gauge and observes `drakkar_window_messages`.
 
 The resulting list of 1 to `window_size` messages forms a **window**. Right
 after it is taken, with no await in between, the window **reserves** its
 estimated tasks and bytes in the budget; the fan-out charges the real tasks
 out of the reservation, and the rest is given back when the fan-out ends. A
-limit is therefore passed only by the error of the estimate: about one
-message for the whole worker.
+limit is therefore passed only by the error of the estimate: the peak is at
+most the cap plus the actual fan-out of the admitted window beyond its
+estimate, normally one message for the whole worker. A sudden jump in tasks
+per message passes it by that jump.
 
 ### 3.2 Processing a Window
 
