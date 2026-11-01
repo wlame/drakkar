@@ -607,26 +607,31 @@ it can prove that the name is dead:
    or only offline ones. A card whose liveness is unknown counts as not
    proved.
 
-Then, still holding the folder's lock, it moves the recorder files (with
-their sidecars) by rename into a staging folder
-`<storage.dir>/<cluster>/.orphan-<worker>-<16 hex>/`, which it creates with
-mode `0700` and locks first. It deletes the owner's cache file, watchdog
-file and download temps, removes the folder when nothing else is left, and
-releases the folder's lock. The lock is held only for these renames, so a
-worker of that name that starts again meanwhile gets its folder; the slow
-part, the seal and the copy to the shared history, runs from the staging
-folder under the staging folder's lock. The cache file is deleted, not
-merged: the cache guarantees nothing, and the peers already pulled its
-`cluster` and `global` rows.
+Then, still holding the folder's lock, it renames the whole folder in one
+step to a staging name, `<storage.dir>/<cluster>/.orphan-<worker>-<16 hex>/`.
+A recorder file and its `-wal` and `-shm` therefore always move together,
+and the lock file moves with the folder, so the lock stays held on the
+staging folder. A worker of that name that starts again from this moment
+creates a new folder and is never refused; the slow part, the seal and the
+copy to the shared history, runs from the staging folder.
 
 Each recorder file is sealed and published into the history folder. The
 meta file names the owner from the file name, not the worker that sealed
-it. A file it cannot seal or move stays in the staging folder; a later
+it. Then the pass deletes the owner's cache file, watchdog file and download
+temps, and removes the staging folder when nothing else is left. The cache
+file is deleted, not merged: the cache guarantees nothing, and the peers
+already pulled its `cluster` and `global` rows. A file that is not one of
+these stays in the staging folder, with the lock file, for an operator.
+
+A file the pass cannot seal or move stays in the staging folder. A later
 pass of any worker of the cluster on this host finishes a staging folder
-whose lock is free, so a staging folder left by a crash is not lost. Such a
-file never joins the sealing worker's own backlog. An own folder that is a
-mount point of its own cannot be staged (a rename cannot cross
-filesystems): the move fails and the folder stays as it is.
+that no pass holds, also one that has no lock file, so a staging folder
+left by a crash is not lost; one that held no recorder file is removed
+without a log line. Such a file never joins the sealing worker's own
+backlog. An own folder that is a mount point of its own cannot be renamed:
+the rename fails, nothing is created, the folder stays as it is, and the
+attempt (and its `recorder_orphan_folder_failed` line, at most once a
+minute) repeats at each pass.
 
 Each folder is handled on its own. An error in one folder (a folder of
 another OS user that cannot be opened, a failed seal or move) is logged as
@@ -676,9 +681,9 @@ The Kafka side of a crash is in [Deployment](deployment.md#sudden-restart).
 | `recorder_sealed` | A sealed file reached the history folder. Fields: `db_path`, `destination`, `crossed_filesystems`, `size_bytes`, `events`. |
 | `recorder_leftover_sealed` | The same, for a leftover. For a file of an orphan folder it also carries `orphan_worker`. |
 | `recorder_seal_failed` | A seal or a move failed. Field `stage` is `seal` or `publish`. The file stays in the backlog. |
-| `recorder_orphan_folder_sealed` | info. Every recorder file of an [orphan folder](#orphan-folders) (or of a staging folder a dead sealer left) reached the history folder. Fields: `folder`, `worker`, `files`, `folder_removed`. |
+| `recorder_orphan_folder_sealed` | info. Every recorder file of an [orphan folder](#orphan-folders) (or of a staging folder a dead sealer left, when it held at least one) reached the history folder. Fields: `folder`, `worker`, `files`, `folder_removed`. |
 | `recorder_orphan_folder_found` | warning. An orphan folder that no process holds and whose files are idle, but that cannot be sealed; once per folder and reason per process. Fields: `folder`, `worker`, `reason` (`no_registry`: `autodiscover` is off; `registry_unknown`: the registry has not judged the name for an hour), `hint`. |
-| `recorder_orphan_folder_failed` | warning. An orphan folder or a staging folder failed at one step; at most once a minute per folder. Fields: `folder`, `worker`, `stage` (`list`, `lock`, `idle`, `stage`, `cleanup`, `seal`, `publish`), `error`, `error_type`, `suppressed`. The pass goes on with the next folder. |
+| `recorder_orphan_folder_failed` | warning. An orphan folder or a staging folder failed at one step; at most once a minute per folder. Fields: `folder`, `worker`, `stage` (`list`, `lock`, `idle`, `stage` (the rename), `seal`, `publish`, `cleanup`), `error`, `error_type`, `suppressed`. The pass goes on with the next folder. |
 | `recorder_orphan_folder_clock_ahead` | warning. A file of an orphan folder has a modification time ahead of the local clock, so the folder never looks idle; once per folder. Fields: `folder`, `worker`, `file`, `seconds_ahead`. |
 | `recorder_background_job_failed` | A background job failed with an unexpected error. Field `job` names it: `sealing`, `leftover_sealing`, `archive` (an archive pass) or `archive_footprint` (the footprint update of an archive slot that this worker did not win). A seal runs again at the next rotation tick, an archive pass at the next archive slot. |
 

@@ -13,13 +13,14 @@ this host holds the folder), every file in it is idle for the leftover
 floor, and the registry lists the name as not online. With no registry
 nothing can prove that, so the folder is only logged.
 
-The folder lock is held only for a few renames: the recorder files move into
-a staging folder ``<cluster folder>/.orphan-<worker>-<16 hex>/`` on the same
-filesystem, the rest of the folder is deleted, and the lock is released.
-The slow part (the seal, and the copy to the shared history on a network
-mount) runs from the staging folder under its own lock, so a worker of that
-name that starts again meanwhile is never refused. A staging folder whose
-lock is free (its sealer died) is finished by a later pass.
+Under the folder's lock the whole folder is renamed, in one step, to a
+staging name ``<cluster folder>/.orphan-<worker>-<16 hex>/``. A recorder file
+and its sidecars therefore always move together, and the lock file moves
+with the folder, so the lock that is open holds the staging folder from
+then on. The slow part (the seal, and the copy to the shared history on a
+network mount) runs from the staging folder, and a worker of that name that
+starts again meanwhile creates a new folder and is never refused. A staging
+folder whose lock is free (its sealer died) is finished by a later pass.
 
 Each folder is handled on its own: an error in one is logged (at most once
 a minute per folder), counted in ``drakkar_recorder_orphan_failures_total``,
@@ -46,14 +47,13 @@ import structlog
 
 from drakkar.cache.engine import CACHE_FILE_SUFFIX
 from drakkar.config.identity import is_valid_worker_name
-from drakkar.dbfiles import DB_DIR_MODE
 from drakkar.metrics import recorder_orphan_failures
 from drakkar.ownerlock import (
     OWNER_LOCK_NAME,
     OwnerLock,
     remove_download_temps,
-    take_own_lock,
     try_sibling_lock,
+    try_staging_lock,
 )
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder.sealing import own_db_files, publish_in_background, seal_closed_file
@@ -152,37 +152,21 @@ def check_idle(folder: str, *, now: float, floor_seconds: float) -> IdleCheck:
     return IdleCheck(idle=True)
 
 
-def move_to_staging(folder: str, worker: str, cluster_dir: str) -> tuple[str, OwnerLock] | None:
-    """Move the recorder files of ``worker`` (with their sidecars) into a new staging folder; ``None`` when it has none.
+def staging_path(cluster_dir: str, worker: str) -> str:
+    """A new staging folder name for ``worker``: ``<cluster_dir>/.orphan-<worker>-<16 hex>``."""
+    return os.path.join(cluster_dir, f'{STAGING_PREFIX}{worker}-{secrets.token_hex(8)}')
 
-    Call it while holding the folder's owner lock. The staging folder is
-    created with mode 0700 and locked before anything moves into it, so no
-    other pass takes it; the caller gets its lock. The moves are renames on
-    one filesystem. A failure leaves the files moved so far in the staging
-    folder (a later pass finishes it) and raises.
-    """
-    files = own_db_files(folder, worker)
-    if not files:
-        return None
-    staging = os.path.join(cluster_dir, f'{STAGING_PREFIX}{worker}-{secrets.token_hex(8)}')
-    os.mkdir(staging, DB_DIR_MODE)
-    lock = take_own_lock(staging)
-    try:
-        for path in files:
-            for suffix in _SQLITE_SIDECARS:
-                with contextlib.suppress(FileNotFoundError):
-                    os.rename(f'{path}{suffix}', os.path.join(staging, f'{os.path.basename(path)}{suffix}'))
-    except BaseException:
-        lock.release()
-        raise
-    return staging, lock
+
+def rename_folder(source: str, destination: str) -> None:
+    """Rename a folder in one step; a module function so tests can hold it."""
+    os.rename(source, destination)
 
 
 def remove_orphan_files(folder: str, worker: str) -> bool:
     """Delete the cache file, the watchdog file and the download temps of ``worker``; remove the folder when empty.
 
-    Call it after the recorder files left the folder, while holding the
-    folder's owner lock. The lock file goes last, and only when nothing else
+    Call it after the recorder files were sealed, while holding the folder's
+    owner lock. The lock file goes last, and only when nothing else
     is left, so a folder that keeps an unknown file keeps its lock file too
     and is looked at again. Returns whether the folder is gone.
     """
@@ -239,6 +223,31 @@ async def _locking_call(func: Callable[..., Any], *args: Any) -> Any:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
         task.add_done_callback(_release_unclaimed)
+        raise
+
+
+# How long a cancelled pass waits for a folder rename it started before it
+# releases the folder's lock. A rename on one local filesystem takes
+# microseconds; the bound only keeps a hung disk from holding the stop.
+RENAME_WAIT_SECONDS = 5.0
+
+
+async def _rename_before_release(source: str, destination: str) -> None:
+    """Rename ``source`` in a thread; when cancelled, wait for the rename before the caller releases the lock.
+
+    The caller releases the folder's lock in its ``finally``. Released while
+    the rename still runs, a worker of that name could take the lock of the
+    folder that is about to move away under it. So a cancelled caller waits
+    for the thread (at most :data:`RENAME_WAIT_SECONDS`) and only then lets
+    the cancellation go on. After a hung rename that outlives the bound,
+    that race is left; the stop of a worker is the only caller that cancels.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(rename_folder, source, destination))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), RENAME_WAIT_SECONDS)
         raise
 
 
@@ -326,12 +335,19 @@ class OrphanSealer:
         )
 
     async def _visit(self, folder: str, worker: str, floor_seconds: float, step: _Step) -> None:
-        """Seal the folder of ``worker`` when no process holds it, it is idle, and the name is not online."""
+        """Seal the folder of ``worker`` when no process holds it, it is idle, and the name is not running.
+
+        The folder moves to a staging name in one rename, under its lock: a
+        recorder file and its sidecars always move together, nothing is
+        created before the rename succeeds, and the lock file moves with the
+        folder, so the open lock now holds the staging folder. A worker of
+        that name that starts afterwards creates a new folder and is never
+        refused.
+        """
         step.name = 'lock'
         lock = await _locking_call(try_sibling_lock, folder)
         if lock is None:
             return
-        staged: tuple[str, OwnerLock] | None = None
         try:
             step.name = 'idle'
             check = await asyncio.to_thread(check_idle, folder, now=time.time(), floor_seconds=floor_seconds)
@@ -340,40 +356,37 @@ class OrphanSealer:
             if not check.idle or not await self._name_proved_not_running(folder, worker):
                 return
             step.name = 'stage'
-            staged = await _locking_call(move_to_staging, folder, worker, self._cluster_dir)
-            step.name = 'cleanup'
-            removed = await asyncio.to_thread(remove_orphan_files, folder, worker)
-        except BaseException:
-            # The staged files wait for a later pass, which needs the staging lock free.
-            if staged is not None:
-                await asyncio.to_thread(staged[1].release)
-            raise
+            staging = staging_path(self._cluster_dir, worker)
+            await _rename_before_release(folder, staging)
+            files, removed = await self._seal_and_clean(staging, worker, step)
         finally:
             await asyncio.to_thread(lock.release)
-        files = 0
-        if staged is not None:
-            staging, staging_lock = staged
-            try:
-                files = await self._seal_staged(staging, worker, step)
-                step.name = 'cleanup'
-                await asyncio.to_thread(_remove_if_only_lock_left, staging)
-            finally:
-                await asyncio.to_thread(staging_lock.release)
         await self._log_sealed(folder, worker, files, removed)
 
     async def _finish_staging(self, staging: str, worker: str, step: _Step) -> None:
-        """Seal what a staging folder still holds when its lock is free (its sealer died), then remove it."""
+        """Seal what a staging folder still holds when no pass works on it (its sealer died), then remove it.
+
+        The lock file is created when it is missing, so a staging folder in
+        any state is finished. A staging folder that held no recorder file
+        is removed without a log line.
+        """
         step.name = 'lock'
-        lock = await _locking_call(try_sibling_lock, staging)
+        lock = await _locking_call(try_staging_lock, staging)
         if lock is None:
             return
         try:
-            files = await self._seal_staged(staging, worker, step)
-            step.name = 'cleanup'
-            removed = await asyncio.to_thread(_remove_if_only_lock_left, staging)
+            files, removed = await self._seal_and_clean(staging, worker, step)
         finally:
             await asyncio.to_thread(lock.release)
-        await self._log_sealed(staging, worker, files, removed)
+        if files:
+            await self._log_sealed(staging, worker, files, removed)
+
+    async def _seal_and_clean(self, staging: str, worker: str, step: _Step) -> tuple[int, bool]:
+        """Seal the recorder files of a staging folder, then delete the rest; return the count and whether it is gone."""
+        files = await self._seal_staged(staging, worker, step)
+        step.name = 'cleanup'
+        removed = await asyncio.to_thread(remove_orphan_files, staging, worker)
+        return files, removed
 
     async def _seal_staged(self, staging: str, worker: str, step: _Step) -> int:
         """Seal every recorder file of ``worker`` in ``staging`` and publish it; return how many.

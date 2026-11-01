@@ -114,6 +114,15 @@ def try_sibling_lock(folder: str) -> OwnerLock | None:
     return None
 
 
+def try_staging_lock(folder: str) -> OwnerLock | None:
+    """Take the lock of an orphan staging folder, creating the lock file when it is missing; ``None`` when held.
+
+    A staging folder belongs to the orphan pass by its name, so a lock file
+    may be written into it.
+    """
+    return _try_lock(folder, create=True)
+
+
 def _make_folder(path: str) -> None:
     """Create one folder with mode 0700; an existing folder keeps its mode."""
     with contextlib.suppress(FileExistsError):

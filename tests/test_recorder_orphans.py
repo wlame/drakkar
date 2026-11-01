@@ -11,14 +11,13 @@ from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
 from drakkar.config import RecorderConfig
-from drakkar.ownerlock import OWNER_LOCK_NAME, open_own_folder, take_own_lock, try_sibling_lock
+from drakkar.ownerlock import OWNER_LOCK_NAME, open_own_folder, take_own_lock, try_sibling_lock, try_staging_lock
 from drakkar.recorder import EventRecorder, orphans
 from drakkar.recorder.history import read_meta
 from drakkar.recorder.orphans import (
     UNKNOWN_VERDICT_REPORT_SECONDS,
     OrphanSealer,
     check_idle,
-    move_to_staging,
     remove_orphan_files,
     sibling_folders,
     staging_folders,
@@ -204,7 +203,7 @@ async def test_seal_orphans_without_a_registry_only_logs_the_folder_once(tmp_pat
     assert (found['folder'], found['worker'], found['reason']) == (str(folder), ORPHAN, 'no_registry')
 
 
-async def test_seal_orphans_unknown_file_keeps_the_folder_and_its_lock_file(tmp_path, cluster_dir):
+async def test_seal_orphans_unknown_file_stays_in_the_staging_folder_with_its_lock_file(tmp_path, cluster_dir):
     folder = _orphan_folder(cluster_dir)
     (folder / 'notes.txt').write_text('')
     _age(folder / 'notes.txt')
@@ -212,10 +211,13 @@ async def test_seal_orphans_unknown_file_keeps_the_folder_and_its_lock_file(tmp_
 
     with capture_logs() as logs:
         await rec._seal_orphans()
+        await rec._seal_orphans()
 
-    assert sorted(path.name for path in folder.iterdir()) == [OWNER_LOCK_NAME, 'notes.txt']
+    assert not folder.exists()
+    ((staging, _worker),) = staging_folders(str(cluster_dir))
+    assert sorted(path.name for path in Path(staging).iterdir()) == [OWNER_LOCK_NAME, 'notes.txt']
     (sealed,) = _events(logs, 'recorder_orphan_folder_sealed')
-    assert sealed['folder_removed'] is False
+    assert (sealed['files'], sealed['folder_removed']) == (1, False)
 
 
 async def test_seal_orphans_never_touches_the_own_folder(tmp_path, cluster_dir):
@@ -390,35 +392,91 @@ async def test_run_leaves_a_staging_folder_whose_sealer_still_works(tmp_path, cl
     assert (staging / ORPHAN_FILE).exists()
 
 
-def test_move_to_staging_rename_failure_releases_the_staging_lock(tmp_path, monkeypatch):
-    cluster_dir = tmp_path / 'search'
-    folder = cluster_dir / ORPHAN
-    folder.mkdir(parents=True)
-    _leftover(folder, ORPHAN_FILE, 1, age_seconds=OLD_ENOUGH_SECONDS)
-    real_rename = os.rename
-    calls = {'count': 0}
+async def test_seal_orphans_rename_failure_creates_nothing_and_logs_no_sealed_line(tmp_path, cluster_dir, monkeypatch):
+    folder = _orphan_folder(cluster_dir)
 
-    def failing_second_rename(source, destination):
-        calls['count'] += 1
-        if calls['count'] == 2:
-            raise OSError(18, 'Invalid cross-device link')
+    def cross_device(source, destination):
+        raise OSError(18, 'Invalid cross-device link')
+
+    monkeypatch.setattr(orphans, 'rename_folder', cross_device)
+    sealer = _sealer(tmp_path, cluster_dir)
+    failures_before = _orphan_failures()
+
+    with capture_logs() as logs:
+        await sealer.run(OLD_ENOUGH_SECONDS / 3)
+        await sealer.run(OLD_ENOUGH_SECONDS / 3)
+
+    assert sorted(path.name for path in cluster_dir.iterdir()) == [WORKER, ORPHAN]
+    assert (folder / ORPHAN_FILE).exists()
+    (failed,) = _events(logs, 'recorder_orphan_folder_failed')
+    assert failed['stage'] == 'stage'
+    assert _orphan_failures() == failures_before + 2
+    assert not _events(logs, 'recorder_orphan_folder_sealed')
+    take_own_lock(str(folder)).release()
+
+
+async def test_run_crash_after_the_rename_keeps_the_wal_with_its_database(tmp_path, cluster_dir):
+    """The staging folder of a sealer that died after the rename still holds the file and its WAL."""
+    folder = _orphan_folder(cluster_dir, events=4)
+    staging = cluster_dir / STAGING
+    os.rename(folder, staging)
+    assert (staging / f'{ORPHAN_FILE}-wal').exists()
+
+    await _sealer(tmp_path, cluster_dir).run(OLD_ENOUGH_SECONDS / 3)
+
+    meta = read_meta(str(_history(tmp_path) / f'{ORPHAN_FILE}.meta.json'))
+    assert meta['tables']['events'] == 4
+    assert not staging.exists()
+
+
+async def test_run_finishes_a_staging_folder_without_a_lock_file(tmp_path, cluster_dir):
+    staging = cluster_dir / STAGING
+    staging.mkdir()
+    _leftover(staging, ORPHAN_FILE, 1, age_seconds=OLD_ENOUGH_SECONDS)
+
+    await _sealer(tmp_path, cluster_dir).run(OLD_ENOUGH_SECONDS / 3)
+
+    assert (_history(tmp_path) / ORPHAN_FILE).exists()
+    assert not staging.exists()
+
+
+async def test_run_empty_staging_folder_is_removed_without_a_sealed_line(tmp_path, cluster_dir):
+    staging = cluster_dir / STAGING
+    staging.mkdir()
+
+    with capture_logs() as logs:
+        await _sealer(tmp_path, cluster_dir).run(OLD_ENOUGH_SECONDS / 3)
+
+    assert not staging.exists()
+    assert not _events(logs, 'recorder_orphan_folder_sealed')
+
+
+async def test_run_cancelled_during_the_rename_keeps_the_lock_until_the_rename_ends(tmp_path, cluster_dir, monkeypatch):
+    folder = _orphan_folder(cluster_dir)
+    started = threading.Event()
+    go_on = threading.Event()
+    real_rename = orphans.rename_folder
+
+    def slow_rename(source, destination):
+        started.set()
+        go_on.wait(5)
         real_rename(source, destination)
 
-    monkeypatch.setattr(orphans.os, 'rename', failing_second_rename)
+    monkeypatch.setattr(orphans, 'rename_folder', slow_rename)
+    task = asyncio.create_task(_sealer(tmp_path, cluster_dir).run(OLD_ENOUGH_SECONDS / 3))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
 
-    with pytest.raises(OSError, match='cross-device'):
-        move_to_staging(str(folder), ORPHAN, str(cluster_dir))
-
+    assert not task.done()
+    assert try_sibling_lock(str(folder)) is None
+    go_on.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     ((staging, _worker),) = staging_folders(str(cluster_dir))
-    take_own_lock(staging).release()
-
-
-def test_move_to_staging_folder_without_recorder_files_stages_nothing(tmp_path):
-    folder = tmp_path / ORPHAN
-    folder.mkdir()
-
-    assert move_to_staging(str(folder), ORPHAN, str(tmp_path)) is None
-    assert staging_folders(str(tmp_path)) == []
+    lock = try_staging_lock(staging)
+    assert lock is not None
+    lock.release()
 
 
 # --- what the pass reports ---
