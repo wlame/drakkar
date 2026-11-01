@@ -1080,10 +1080,11 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
         await proc.stop()
 
 
-async def test_poll_loop_pauses_on_high_watermark(test_config):
-    """Consumer is paused when total_queued >= high_watermark."""
+async def test_poll_loop_pauses_on_max_queued_messages(test_config):
+    """Consumer is paused when queued messages reach sources.kafka.max_queued_messages."""
     from drakkar.executor import ExecutorPool
 
+    test_config.sources.kafka.max_queued_messages = 64
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     wire_kafka_source(app, AsyncMock())
@@ -1100,7 +1101,7 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
     app._processors[0] = proc
     # Do NOT call proc.start() — queue won't drain
 
-    # high_watermark = 2 * 32 = 64. Fill queue past that.
+    # Fill the queue past max_queued_messages.
     for i in range(70):
         proc._queue.put_nowait(SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0))
 

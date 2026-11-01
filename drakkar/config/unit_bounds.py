@@ -47,6 +47,7 @@ UNIT_BOUNDS: tuple[UnitBound, ...] = (
     UnitBound('sources.kafka.startup_align.interval', 1, None),
     UnitBound('executor.task_timeout', 1, None),
     UnitBound('executor.drain_timeout', 1, None),
+    UnitBound('executor.max_pending_bytes', 16 * MIB, None),
     UnitBound('sinks.defaults.delivery_timeout', ONE_MILLISECOND, None),
     *(UnitBound(f'sinks.{sink_type}.*.delivery_timeout', ONE_MILLISECOND, None) for sink_type in _SINK_TYPES),
     UnitBound('sinks.kafka.*.flush_timeout', ONE_MILLISECOND, None),

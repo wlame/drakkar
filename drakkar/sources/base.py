@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from drakkar.budget import PendingBudget
     from drakkar.config import DrakkarConfig
     from drakkar.executor import ExecutorPool
     from drakkar.handler import BaseDrakkarHandler
@@ -39,6 +40,8 @@ class SourceContext:
     on_collect: CollectCallback
     # Composed worker readiness (all sources ready, not stopping); the HTTP gate reads it.
     is_worker_ready: Callable[[], bool]
+    # The worker's budget of pending tasks and bytes; None leaves windows unbounded by it.
+    pending_budget: PendingBudget | None = None
 
 
 class Source(Protocol):

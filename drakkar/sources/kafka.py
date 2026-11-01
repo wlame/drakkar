@@ -75,6 +75,10 @@ class KafkaSource:
         # dlq.on_send_failure=stall. Excluded from backpressure resume;
         # cleared on revoke so a reassignment starts fresh.
         self.stalled_partitions: set[int] = set()
+        # Partitions paused because their processing loop died. Nothing reads
+        # their queue any more, so fetching more for them only grows it; they
+        # stay out of every resume. Cleared on revoke.
+        self.dead_partitions_paused: set[int] = set()
         self.consumer: KafkaConsumer | None = None
         self.background_tasks: set[asyncio.Task] = set()
         self._ready = False
@@ -127,14 +131,21 @@ class KafkaSource:
         await self.consumer.subscribe()
 
     async def run(self) -> None:
-        """Main polling loop with backpressure via Kafka pause/resume."""
+        """Main polling loop with backpressure via Kafka pause/resume.
+
+        Fetching pauses when the messages waiting in the queues of live
+        partitions reach ``sources.kafka.max_queued_messages`` and resumes at
+        half of it. The queues fill because partition loops take new windows
+        only while the pending budget has room, so a full budget pauses the
+        fetch by itself. ``poll_batch`` runs on every turn, paused or not:
+        a consumer that stops polling for ``max_poll_interval`` is evicted.
+        """
         ctx = self._context()
         assert self.consumer is not None
         consumer = self.consumer
-        executor = ctx.config.executor
-        max_executors = executor.max_executors
-        high_watermark = max_executors * executor.backpressure_high_multiplier
-        low_watermark = max(1, max_executors * executor.backpressure_low_multiplier)
+        max_executors = ctx.config.executor.max_executors
+        high_watermark = ctx.config.sources.kafka.max_queued_messages
+        low_watermark = high_watermark // 2
         last_tick = time.monotonic()
 
         while not self._stop_requested:
@@ -144,6 +155,8 @@ class KafkaSource:
 
             total = self.total_queued()
             total_queued.set(total)
+            await self._pause_dead_partitions(consumer)
+            queued = self.queued_messages()
 
             # Executor idle waste: slots sitting free while messages wait in queues.
             # Uses queue_size only (not inflight) — inflight tasks ARE using slots.
@@ -158,16 +171,21 @@ class KafkaSource:
             # must not restart fetching while the operator asked for quiet.
             # The debug resume hands control back here — if backpressure is
             # still holding, this branch resumes once queues drain.
-            if self.paused and total <= low_watermark and not self._consume_pause.active:
-                # Never resume partitions paused by a delivery stall — they
-                # stay paused until restart/revoke regardless of backpressure.
-                partition_ids = [p for p in self.processors if p not in self.stalled_partitions]
+            if self.paused and queued <= low_watermark and not self._consume_pause.active:
+                # Never resume partitions paused by a delivery stall or a dead
+                # loop — they stay paused until restart/revoke regardless of
+                # backpressure.
+                partition_ids = [
+                    p
+                    for p in self.processors
+                    if p not in self.stalled_partitions and p not in self.dead_partitions_paused
+                ]
                 if partition_ids:
                     await consumer.resume(partition_ids)
                     self.paused = False
                     backpressure_active.set(0)
 
-            if not self.paused and total >= high_watermark:
+            if not self.paused and queued >= high_watermark:
                 partition_ids = list(self.processors.keys())
                 if partition_ids:
                     await consumer.pause(partition_ids)
@@ -432,6 +450,7 @@ class KafkaSource:
                     on_stall=self.pause_stalled_partition,
                     execute_dlq=ctx.sink_manager.send_execute_dlq,
                     executor_on_failure=config.executor.on_failure,
+                    budget=ctx.pending_budget,
                 )
                 self.processors[pid] = processor
                 processor.start()
@@ -509,6 +528,7 @@ class KafkaSource:
             # A revoked partition is no longer ours — clear any stall-pause
             # bookkeeping so a future reassignment starts fresh.
             self.stalled_partitions.discard(pid)
+            self.dead_partitions_paused.discard(pid)
             processor = self.processors.pop(pid, None)
             if processor:
                 to_stop.append(processor)
@@ -582,6 +602,33 @@ class KafkaSource:
                     error=str(e),
                     exc_info=True,
                 )
+
+    async def _pause_dead_partitions(self, consumer: KafkaConsumer) -> None:
+        """Pause, once, each partition whose processing loop died.
+
+        A dead loop never empties its queue, so its messages are left out of
+        the pause rule and the partition stays paused, like a stalled one.
+        """
+        newly_dead = [pid for pid, p in self.processors.items() if p.is_dead and pid not in self.dead_partitions_paused]
+        if not newly_dead:
+            return
+        self.dead_partitions_paused.update(newly_dead)
+        try:
+            await consumer.pause(newly_dead)
+            logger.error(
+                'partition_paused_on_death',
+                category='lifecycle',
+                partitions=newly_dead,
+                hint='the partition loop died; the partition stays paused until restart or revoke',
+            )
+        except Exception as e:
+            logger.error(
+                'partition_death_pause_failed',
+                category='lifecycle',
+                partitions=newly_dead,
+                error=str(e),
+                exc_info=True,
+            )
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
         """Drain in-flight tasks, commit final offsets, then stop.
@@ -690,6 +737,10 @@ class KafkaSource:
     def total_queued(self) -> int:
         """Total messages buffered across all partition queues + in-flight tasks."""
         return sum(p.queue_size + p.inflight_count for p in self.processors.values())
+
+    def queued_messages(self) -> int:
+        """Messages waiting in the queues of live partitions: the input of the pause rule."""
+        return sum(p.queue_size for p in self.processors.values() if not p.is_dead)
 
     def total_waiting(self) -> int:
         """Messages waiting in partition queues, not yet dispatched to executors."""

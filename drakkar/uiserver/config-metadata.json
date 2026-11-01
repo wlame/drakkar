@@ -367,6 +367,16 @@
           "group": "sources"
         },
         {
+          "path": "sources.kafka.max_queued_messages",
+          "env": "DK_SOURCES__KAFKA__MAX_QUEUED_MESSAGES",
+          "description": "Kafka fetching pauses when this many polled messages wait in partition queues, and resumes at half of it.",
+          "full_description": "Kafka fetching pauses when this many polled messages wait in partition queues, and resumes at half of it. Must be at least max_poll_records. Messages of a dead partition do not count; a dead or stalled partition stays paused.",
+          "type": "integer",
+          "default": 1000,
+          "secret": false,
+          "group": "sources"
+        },
+        {
           "path": "sources.kafka.max_poll_interval",
           "env": "DK_SOURCES__KAFKA__MAX_POLL_INTERVAL",
           "description": "Maximum time between poll calls before Kafka considers the consumer dead and triggers a rebalance.",
@@ -670,22 +680,22 @@
           "group": "executor"
         },
         {
-          "path": "executor.backpressure_high_multiplier",
-          "env": "DK_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER",
-          "description": "Pause threshold multiplier: Kafka consumption pauses when total queued messages reach max_executors * this value.",
-          "full_description": "Pause threshold multiplier: Kafka consumption pauses when total queued messages reach max_executors * this value.",
+          "path": "executor.max_pending_tasks",
+          "env": "DK_EXECUTOR__MAX_PENDING_TASKS",
+          "description": "New windows wait while this many tasks are created and not settled (waiting for an executor slot, running, or in on_task_complete and its delivery).",
+          "full_description": "New windows wait while this many tasks are created and not settled (waiting for an executor slot, running, or in on_task_complete and its delivery). Must be at least max_executors. A soft limit: a window that has room takes at least one message, and one window's fan-out can pass it.",
           "type": "integer",
-          "default": 32,
+          "default": 2000,
           "secret": false,
           "group": "executor"
         },
         {
-          "path": "executor.backpressure_low_multiplier",
-          "env": "DK_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER",
-          "description": "Resume threshold multiplier: Kafka consumption resumes when total queued messages drop to max(1, max_executors * this value).",
-          "full_description": "Resume threshold multiplier: Kafka consumption resumes when total queued messages drop to max(1, max_executors * this value).",
-          "type": "integer",
-          "default": 4,
+          "path": "executor.max_pending_bytes",
+          "env": "DK_EXECUTOR__MAX_PENDING_BYTES",
+          "description": "New windows wait while task stdin plus kept task output reach this size, at least 16MiB.",
+          "full_description": "New windows wait while task stdin plus kept task output reach this size, at least 16MiB. Counts the stdin of pending tasks and the stdout and stderr of results kept for on_message_complete and on_window_complete. A soft limit, like max_pending_tasks. Size it to about a quarter of the container memory.",
+          "type": "size",
+          "default": "1GiB",
           "secret": false,
           "group": "executor"
         }

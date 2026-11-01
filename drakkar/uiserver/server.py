@@ -550,6 +550,8 @@ class UIDeps:
                     ('Consumer lag', _graph_url(f'drakkar_offset_lag{{{wf}}}')),
                     ('Queue sizes', _graph_url(f'drakkar_partition_queue_size{{{wf}}}')),
                     ('Backpressure', _graph_url(f'drakkar_backpressure_active{{{wf}}}')),
+                    ('Pending tasks', _graph_url(f'drakkar_pending_tasks{{{wf}}}')),
+                    ('Pending bytes', _graph_url(f'drakkar_pending_bytes{{{wf}}}')),
                     ('Pool active', _graph_url(f'drakkar_executor_pool_active{{{wf}}}')),
                 ],
             },

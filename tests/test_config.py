@@ -53,8 +53,8 @@ def test_executor_config_defaults():
     # finishing in-flight subprocess tasks rather than hard-killing them and
     # relying on at-least-once replay.
     assert cfg.drain_timeout == 30
-    assert cfg.backpressure_high_multiplier == 32
-    assert cfg.backpressure_low_multiplier == 4
+    assert cfg.max_pending_tasks == 2000
+    assert cfg.max_pending_bytes == 1024**3
     assert cfg.max_stdout == 0
     assert cfg.max_stderr == 0
 

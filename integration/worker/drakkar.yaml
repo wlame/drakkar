@@ -59,8 +59,8 @@ executor:
   window_size: 10
   max_retries: 3
   drain_timeout: 5s
-  backpressure_high_multiplier: 32
-  backpressure_low_multiplier: 4
+  max_pending_tasks: 2000
+  max_pending_bytes: 1GiB
 
 # --- Thread pools ---
 #

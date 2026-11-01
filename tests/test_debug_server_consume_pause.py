@@ -12,6 +12,7 @@ no Kafka, no sockets.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from httpx import ASGITransport, AsyncClient
@@ -44,7 +45,7 @@ def _mock_app(*, enabled: bool = True, consumer: AsyncMock | None = None) -> Mag
     app.config = cfg
     # The real controller against the mock app: it reads these attributes.
     app._consumer = consumer if consumer is not None else AsyncMock()
-    app._processors = {0: object(), 1: object()}
+    app._processors = {0: SimpleNamespace(is_dead=False), 1: SimpleNamespace(is_dead=False)}
     app._stalled_partitions = set()
     app._paused = False
     app._background_tasks = set()

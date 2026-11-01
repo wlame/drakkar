@@ -69,6 +69,7 @@ import structlog
 from pydantic import BaseModel
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
+from drakkar.budget import BudgetAccount, output_bytes, text_bytes
 from drakkar.config import WebAppConfig
 from drakkar.executor import ExecutorTaskError
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -212,12 +213,19 @@ class WebappRunner:
         # the count. Operators alert on a runaway gauge to spot bugs that
         # leak the increment (e.g., an early ``raise`` before this point).
         webapp_inflight.inc()
+        # The request's share of the pending budget: its tasks while they
+        # run, and the output of their results until the request ends. HTTP
+        # requests never wait for room; they only count.
+        budget = self._app._pending_budget
+        account = BudgetAccount(budget) if budget is not None else None
         try:
-            return await self._run_body(ctx)
+            return await self._run_body(ctx, account)
         finally:
+            if account is not None:
+                account.close()
             webapp_inflight.dec()
 
-    async def _run_body(self, ctx: WebRequestContext) -> WebReport:
+    async def _run_body(self, ctx: WebRequestContext, account: BudgetAccount | None = None) -> WebReport:
         """The actual pipeline-side work; wrapped by ``run`` for inflight."""
         self._request_seq += 1
         offset = self._request_seq
@@ -321,7 +329,7 @@ class WebappRunner:
         # concurrency control. ``return_exceptions=True`` keeps a
         # single failing task from cancelling siblings — outcome
         # classification (successes / group errors) happens below.
-        results = await self._submit_tasks(tasks)
+        results = await self._submit_tasks(tasks, account)
         timeline.append(StageTiming(stage='execute', duration_ms=(time.monotonic() - execute_started) * 1000.0))
 
         # Classify gathered outcomes. Terminal task failures surface into
@@ -526,7 +534,7 @@ class WebappRunner:
         # for the synthetic path; production always sees a BaseModel.
         return str(request).encode('utf-8')
 
-    async def _submit_tasks(self, tasks: list[ExecutorTask]) -> list[Any]:
+    async def _submit_tasks(self, tasks: list[ExecutorTask], account: BudgetAccount | None = None) -> list[Any]:
         """Run ``tasks`` through the executor pool and gather outcomes.
 
         Mirrors the partition processor's submission pattern but without
@@ -550,11 +558,22 @@ class WebappRunner:
                 'executor pool is not initialised; webapp.run cannot submit tasks before AppLifecycle starts the pool'
             )
         pool = self._app._executor_pool
-        coros = [self._execute_and_record(pool, task) for task in tasks]
+        coros = [self._execute_and_record(pool, task, account) for task in tasks]
         return await asyncio.gather(*coros, return_exceptions=True)
 
-    async def _execute_and_record(self, pool: ExecutorPool, task: ExecutorTask) -> ExecutorResult | ExecutorError:
-        """Run one task and record its terminal event as soon as it ends.
+    async def _execute_and_record(
+        self,
+        pool: ExecutorPool,
+        task: ExecutorTask,
+        account: BudgetAccount | None = None,
+    ) -> ExecutorResult | ExecutorError:
+        """Run one task, record its terminal event as soon as it ends, and release its stdin.
+
+        There is no retry over HTTP, so the first outcome is the last one:
+        ``task.stdin`` is set to None and its charge released, and
+        ``on_http_request_complete`` sees the task without its stdin. The
+        output of the outcome stays charged to ``account`` until the request
+        ends.
 
         The pool records only ``task_started``; the terminal
         ``task_completed`` / ``task_failed`` row is the caller's job (the
@@ -573,6 +592,28 @@ class WebappRunner:
         # ``partition_id=-1`` matches the synthetic SourceMessage.partition
         # so recorder rows for HTTP-origin tasks all key on -1. The
         # recorder treats partition_id as opaque.
+        held = text_bytes(task.stdin)
+        if account is not None:
+            account.charge(1, held)
+        try:
+            outcome = await self._execute_task(pool, task, recorder, records_outcome=records_outcome)
+        finally:
+            task.stdin = None
+            if account is not None:
+                account.release(1, held)
+        if account is not None:
+            account.charge(0, output_bytes(outcome))
+        return outcome
+
+    @staticmethod
+    async def _execute_task(
+        pool: ExecutorPool,
+        task: ExecutorTask,
+        recorder: Any,
+        *,
+        records_outcome: bool,
+    ) -> ExecutorResult | ExecutorError:
+        """Run one task through the pool; write its terminal row when ``records_outcome``."""
         try:
             result = await pool.execute(task, recorder, partition_id=-1)
         except ExecutorTaskError as exc:

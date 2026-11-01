@@ -135,6 +135,8 @@ def _make_stub_app(
     app._handler = handler
     app._executor_pool = pool
     app._recorder = recorder
+    # No pending budget: the runner counts nothing (tests/test_backpressure.py covers the budget).
+    app._pending_budget = None
     app.is_ready = is_ready
     # ``main_loop`` is read by the server's route handler, not the runner.
     # The runner-only tests await ``run()`` directly so the loop attr is

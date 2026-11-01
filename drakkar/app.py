@@ -25,6 +25,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
 from drakkar.appconfig import load_app_config
+from drakkar.budget import PendingBudget
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
 from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config, own_storage_dir
@@ -338,6 +339,8 @@ class DrakkarApp:
         self._api_url: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
+        # Pending tasks and bytes of every source; built with the pool.
+        self._pending_budget: PendingBudget | None = None
         self._sink_manager: SinkManager = SinkManager()
         # Each sink's policy, resolved once, here. The sinks are built later
         # (``_build_sinks``, after ``on_startup``); a change of a policy key in

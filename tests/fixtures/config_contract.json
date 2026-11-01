@@ -192,6 +192,15 @@
         }
       },
       "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  sources.http.clients.bogus"
+    },
+    {
+      "name": "removed_backpressure_multiplier",
+      "yaml": {
+        "executor": {
+          "backpressure_high_multiplier": 32
+        }
+      },
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  executor.backpressure_high_multiplier"
     }
   ],
   "summary": [
@@ -1846,6 +1855,38 @@
       "message": "executor.on_failure must be skip or dlq, got 'retry'"
     },
     {
+      "name": "executor_max_pending_tasks_below_max_executors",
+      "yaml": {
+        "executor": {
+          "max_executors": 8,
+          "max_pending_tasks": 4
+        }
+      },
+      "message": "executor.max_pending_tasks (4) must be >= executor.max_executors (8)"
+    },
+    {
+      "name": "executor_max_pending_bytes_below_16_mebibytes",
+      "yaml": {
+        "executor": {
+          "max_pending_bytes": "1MiB"
+        }
+      },
+      "message": "executor.max_pending_bytes must be at least 16MiB, got 1MiB",
+      "path": "executor.max_pending_bytes"
+    },
+    {
+      "name": "kafka_max_queued_messages_below_max_poll_records",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "max_poll_records": 200,
+            "max_queued_messages": 100
+          }
+        }
+      },
+      "message": "sources.kafka.max_queued_messages (100) must be >= sources.kafka.max_poll_records (200)"
+    },
+    {
       "name": "env_segment_matches_two_names",
       "yaml": {
         "sinks": {
@@ -2746,6 +2787,24 @@
       "yaml": {},
       "path": "executor.on_failure",
       "value": "skip"
+    },
+    {
+      "name": "executor_max_pending_tasks_default",
+      "yaml": {},
+      "path": "executor.max_pending_tasks",
+      "value": 2000
+    },
+    {
+      "name": "executor_max_pending_bytes_default_1_gibibyte",
+      "yaml": {},
+      "path": "executor.max_pending_bytes",
+      "value": 1073741824
+    },
+    {
+      "name": "kafka_max_queued_messages_default",
+      "yaml": {},
+      "path": "sources.kafka.max_queued_messages",
+      "value": 1000
     },
     {
       "name": "env_segment_takes_the_hyphenated_sink_name",

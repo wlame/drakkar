@@ -84,9 +84,9 @@ class ConsumePauseController:
         }
 
     def _pausable_partitions(self) -> list[int]:
-        """Assigned partitions minus the stall-paused set (never touched)."""
+        """Assigned partitions minus the stalled and dead ones (never touched)."""
         app = self._app
-        return [p for p in app._processors if p not in app._stalled_partitions]
+        return [p for p, proc in app._processors.items() if p not in app._stalled_partitions and not proc.is_dead]
 
     async def pause(self, duration_seconds: int) -> dict[str, Any]:
         """Pause consuming for ``duration_seconds``, replacing any active pause.

@@ -59,6 +59,15 @@ class KafkaSourceConfig(ConfigModel):
         default=100,
         description='Maximum messages returned per poll batch. Higher improves throughput; lower reduces latency.',
     )
+    max_queued_messages: int = Field(
+        default=1000,
+        ge=1,
+        description=(
+            'Kafka fetching pauses when this many polled messages wait in partition queues, and '
+            'resumes at half of it. Must be at least max_poll_records. Messages of a dead partition '
+            'do not count; a dead or stalled partition stays paused.'
+        ),
+    )
     max_poll_interval: Duration = Field(
         default=300.0,
         description=(
@@ -96,6 +105,11 @@ class KafkaSourceConfig(ConfigModel):
             errors.append('sources.kafka.topic must be a non-empty string')
         if not self.consumer_group.strip():
             errors.append('sources.kafka.consumer_group must be a non-empty string')
+        if self.max_queued_messages < self.max_poll_records:
+            errors.append(
+                f'sources.kafka.max_queued_messages ({self.max_queued_messages}) must be >= '
+                f'sources.kafka.max_poll_records ({self.max_poll_records})'
+            )
         return errors
 
     @model_validator(mode='after')

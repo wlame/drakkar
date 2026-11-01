@@ -1,0 +1,720 @@
+"""Backpressure: the pending budget, window admission, stdin release, and the Kafka pause rule.
+
+Hermetic: tasks carry precomputed results, so the executor pool never spawns
+a subprocess, and the Kafka consumer is an ``AsyncMock``.
+"""
+
+import asyncio
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+import drakkar.partition as partition_module
+from drakkar.app import DrakkarApp
+from drakkar.budget import BudgetAccount, PendingBudget, output_bytes, text_bytes
+from drakkar.config import DrakkarConfig
+from drakkar.executor import ExecutorPool
+from drakkar.handler import BaseDrakkarHandler
+from drakkar.metrics import (
+    pending_bytes,
+    pending_tasks,
+    queued_messages_dropped_at_stop,
+    window_admission_wait,
+    window_messages,
+)
+from drakkar.models import (
+    ErrorAction,
+    ExecutorTask,
+    PrecomputedResult,
+    SourceMessage,
+)
+from drakkar.partition import PartitionProcessor
+from drakkar.webapp.runner import WebappRunner
+from tests.conftest import kafka_connections, wait_for, wire_kafka_source
+from tests.test_app import SimpleHandler
+from tests.test_webapp_runner import _make_config, _make_ctx, _make_stub_app, _RecordingHandler
+
+STDIN = 'x' * 1000
+STDOUT = 'y' * 500
+
+
+def make_msg(offset: int, partition: int = 0) -> SourceMessage:
+    return SourceMessage(topic='t', partition=partition, offset=offset, value=b'{}', timestamp=0)
+
+
+def make_task(task_id: str, offset: int, *, exit_code: int = 0, stdin: str | None = STDIN) -> ExecutorTask:
+    return ExecutorTask(
+        task_id=task_id,
+        source_offsets=[offset],
+        stdin=stdin,
+        precomputed=PrecomputedResult(stdout=STDOUT, exit_code=exit_code),
+    )
+
+
+@pytest.fixture
+def pool() -> ExecutorPool:
+    return ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
+
+
+def big_budget() -> PendingBudget:
+    return PendingBudget(max_tasks=10_000, max_bytes=1 << 40)
+
+
+async def collect_next_window(proc: PartitionProcessor) -> list[SourceMessage]:
+    """Call ``_collect_window`` as ``_run`` does until it returns a window."""
+    while True:
+        messages = await proc._collect_window()
+        if messages:
+            return messages
+
+
+def idle_processor(budget: PendingBudget | None, window_size: int = 10) -> PartitionProcessor:
+    """A processor whose loop is not started; tests call ``_collect_window`` themselves."""
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SimpleHandler(),
+        executor_pool=MagicMock(),
+        window_size=window_size,
+        budget=budget,
+    )
+    proc._running = True
+    return proc
+
+
+# --------------------------------------------------------------- the budget
+
+
+def test_budget_charge_and_release_move_counts_and_gauges():
+    budget = PendingBudget(max_tasks=10, max_bytes=1000)
+
+    budget.charge(3, 300)
+    assert (budget.tasks, budget.bytes) == (3, 300)
+    assert pending_tasks._value.get() == 3
+    assert pending_bytes._value.get() == 300
+
+    budget.release(3, 300)
+    assert (budget.tasks, budget.bytes) == (0, 0)
+    assert pending_tasks._value.get() == 0
+
+
+@pytest.mark.parametrize(
+    ('tasks', 'held', 'expected'),
+    [(9, 999, None), (10, 0, 'tasks'), (0, 1000, 'bytes'), (10, 1000, 'tasks')],
+)
+def test_budget_full_limit_names_the_reached_limit_tasks_first(tasks, held, expected):
+    budget = PendingBudget(max_tasks=10, max_bytes=1000)
+    budget.charge(tasks, held)
+
+    assert budget.full_limit() == expected
+
+
+async def test_budget_release_wakes_waiters_oldest_first():
+    budget = PendingBudget(max_tasks=1, max_bytes=1000)
+    budget.charge(1, 0)
+    first = budget.add_waiter()
+    second = budget.add_waiter()
+
+    budget.release(1, 0)
+
+    assert first.result() is True
+    assert not second.done()
+    budget.wake_next()
+    assert second.result() is True
+
+
+async def test_budget_wake_next_skips_waiters_that_left():
+    budget = PendingBudget(max_tasks=1, max_bytes=1000)
+    left = budget.add_waiter()
+    left.cancel()
+    waiting = budget.add_waiter()
+
+    budget.wake_next()
+
+    assert waiting.result() is True
+
+
+async def test_budget_wake_next_without_room_wakes_nobody():
+    budget = PendingBudget(max_tasks=1, max_bytes=1000)
+    budget.charge(1, 0)
+    waiter = budget.add_waiter()
+
+    budget.wake_next()
+
+    assert not waiter.done()
+
+
+def test_budget_account_close_releases_what_it_still_holds_once():
+    budget = PendingBudget(max_tasks=10, max_bytes=1000)
+    account = BudgetAccount(budget)
+    account.charge(4, 400)
+    account.release(1, 100)
+
+    account.close()
+    account.close()
+
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+def test_text_bytes_and_output_bytes_measure_the_strings():
+    assert text_bytes(None) == 0
+    assert text_bytes(STDIN) == sys.getsizeof(STDIN)
+    assert output_bytes(MagicMock(stdout='a', stderr='bb')) == sys.getsizeof('a') + sys.getsizeof('bb')
+    assert output_bytes(object()) == 0
+
+
+# ------------------------------------------------------- window admission
+
+
+async def test_collect_window_waits_at_the_task_limit_until_a_release():
+    budget = PendingBudget(max_tasks=2, max_bytes=1 << 30)
+    budget.charge(2, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+
+    collecting = asyncio.create_task(collect_next_window(proc))
+    await asyncio.sleep(0.05)
+    assert not collecting.done()
+
+    budget.release(1, 0)
+
+    assert [m.offset for m in await collecting] == [0]
+
+
+async def test_collect_window_waits_at_the_byte_limit_until_a_release():
+    budget = PendingBudget(max_tasks=100, max_bytes=1000)
+    budget.charge(0, 1000)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+
+    collecting = asyncio.create_task(collect_next_window(proc))
+    await asyncio.sleep(0.05)
+    assert not collecting.done()
+
+    budget.release(0, 1)
+
+    assert [m.offset for m in await collecting] == [0]
+
+
+async def test_collect_window_without_room_returns_empty_after_the_idle_bound_and_keeps_its_place(monkeypatch):
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 0.05)
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+    waited_before = window_admission_wait.labels(limit='tasks')._value.get()
+
+    assert await proc._collect_window() == []
+    waiter = proc._room_waiter
+    assert await proc._collect_window() == []
+
+    assert proc._room_waiter is waiter
+    assert proc.queue_size == 1
+    assert window_admission_wait.labels(limit='tasks')._value.get() > waited_before
+
+
+async def test_collect_window_leaves_at_once_on_stop():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+
+    collecting = asyncio.create_task(proc._collect_window())
+    await asyncio.sleep(0.01)
+    proc.signal_stop()
+
+    assert await asyncio.wait_for(collecting, timeout=0.5) == []
+
+
+async def test_stop_while_a_message_is_held_drops_it_and_takes_no_window():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+    assert await proc._collect_window() == []
+    dropped_before = queued_messages_dropped_at_stop._value.get()
+
+    proc.signal_stop()
+    assert await proc._collect_window() == []
+    await proc.stop()
+    proc._drop_queued_messages()
+
+    assert proc.queue_size == 0
+    assert queued_messages_dropped_at_stop._value.get() - dropped_before == 1
+
+
+async def test_collect_window_leaves_the_fifo_list_when_room_opens_without_a_wake_up():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+    assert await proc._collect_window() == []
+    waiter = proc._room_waiter
+
+    budget.max_tasks = 10
+    messages = await proc._collect_window()
+
+    assert len(messages) == 1
+    assert waiter.cancelled()
+    assert proc._room_waiter is None
+
+
+async def test_collect_window_wakes_waiting_partitions_in_fifo_order(monkeypatch):
+    # Long enough that no wait ends on the time bound and re-checks the room.
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    first, second = idle_processor(budget), idle_processor(budget)
+    first.enqueue(make_msg(0))
+    second.enqueue(make_msg(0))
+    first_collect = asyncio.create_task(collect_next_window(first))
+    await asyncio.sleep(0.01)
+    second_collect = asyncio.create_task(collect_next_window(second))
+    await asyncio.sleep(0.01)
+
+    budget.release(1, 0)
+    await asyncio.sleep(0.01)
+
+    assert first_collect.done()
+    assert not second_collect.done()
+    budget.wake_next()
+    assert len(await second_collect) == 1
+
+
+async def test_collect_window_first_window_of_a_partition_takes_one_message():
+    proc = idle_processor(big_budget())
+    for offset in range(5):
+        proc.enqueue(make_msg(offset))
+    observed_before = window_messages._sum.get()
+
+    messages = await proc._collect_window()
+
+    assert [m.offset for m in messages] == [0]
+    assert window_messages._sum.get() - observed_before == 1
+
+
+def test_admitted_window_size_follows_the_moving_averages():
+    budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
+    proc = idle_processor(budget, window_size=50)
+
+    proc._note_window_shape(message_count=1, task_count=10, stdin_bytes=0)
+    assert proc._admitted_window_size() == 10
+
+    proc._note_window_shape(message_count=1, task_count=20, stdin_bytes=0)
+    assert proc._avg_tasks_per_message == pytest.approx(13.0)
+    assert proc._admitted_window_size() == 7
+
+
+def test_admitted_window_size_is_bound_by_free_bytes_and_window_size():
+    budget = PendingBudget(max_tasks=10_000, max_bytes=10_000)
+    proc = idle_processor(budget, window_size=5)
+
+    proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=1000)
+    assert proc._admitted_window_size() == 5
+
+    budget.charge(0, 8000)
+    assert proc._admitted_window_size() == 2
+
+
+def test_admitted_window_size_ignores_an_average_of_zero_tasks():
+    proc = idle_processor(PendingBudget(max_tasks=10, max_bytes=1 << 30), window_size=6)
+    proc._note_window_shape(message_count=3, task_count=0, stdin_bytes=0)
+
+    assert proc._admitted_window_size() == 6
+
+
+def test_admitted_window_size_takes_at_least_one_message_with_no_room():
+    budget = PendingBudget(max_tasks=10, max_bytes=1 << 30)
+    proc = idle_processor(budget)
+    proc._note_window_shape(message_count=1, task_count=5, stdin_bytes=0)
+    budget.charge(10, 0)
+
+    assert proc._admitted_window_size() == 1
+
+
+def test_admitted_window_size_without_a_budget_is_window_size():
+    proc = idle_processor(None, window_size=7)
+
+    assert proc._admitted_window_size() == 7
+
+
+class FanOutHandler(BaseDrakkarHandler):
+    """Each message becomes ``fan_out`` tasks; message and window hooks record what they see."""
+
+    def __init__(self, fan_out: int = 1, exit_code: int = 0) -> None:
+        super().__init__()
+        self.fan_out = fan_out
+        self.exit_code = exit_code
+        self.budget: PendingBudget | None = None
+        self.stdin_in_on_task_complete: list[str | None] = []
+        self.stdin_in_message_hook: list[str | None] = []
+        self.stdin_in_window_hook: list[str | None] = []
+        self.bytes_in_message_hook: list[int] = []
+
+    async def arrange(self, messages, pending):
+        return [
+            make_task(f'm{msg.offset}-t{i}', msg.offset, exit_code=self.exit_code)
+            for msg in messages
+            for i in range(self.fan_out)
+        ]
+
+    async def on_task_complete(self, result):
+        self.stdin_in_on_task_complete.append(result.task.stdin)
+        return None
+
+    async def on_message_complete(self, group):
+        self.stdin_in_message_hook.extend(task.stdin for task in group.tasks)
+        if self.budget is not None:
+            self.bytes_in_message_hook.append(self.budget.bytes)
+        return None
+
+    async def on_window_complete(self, results, source_messages):
+        self.stdin_in_window_hook.extend(result.task.stdin for result in results)
+        return None
+
+
+async def run_until_settled(proc: PartitionProcessor) -> None:
+    proc.start()
+    await wait_for(lambda: proc.queue_size == 0 and not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
+    await proc.stop()
+
+
+async def test_admission_lets_one_message_fan_out_past_the_task_limit(pool):
+    """The limit is soft: a window with room takes a message whatever its fan-out."""
+    budget = PendingBudget(max_tasks=5, max_bytes=1 << 30)
+    peak: list[int] = []
+
+    class Peak(FanOutHandler):
+        async def on_task_complete(self, result):
+            peak.append(budget.tasks)
+            return None
+
+    proc = PartitionProcessor(
+        partition_id=0, handler=Peak(fan_out=20), executor_pool=pool, window_size=10, budget=budget
+    )
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert max(peak) > budget.max_tasks
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+# ------------------------------------------------------------ stdin release
+
+
+async def test_stdin_is_released_after_success_and_message_hooks_see_none(pool):
+    handler = FanOutHandler(fan_out=2)
+    budget = big_budget()
+    handler.budget = budget
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert handler.stdin_in_on_task_complete == [STDIN, STDIN]
+    assert handler.stdin_in_message_hook == [None, None]
+    assert handler.stdin_in_window_hook == [None, None]
+
+
+async def test_stdin_is_released_after_a_terminal_failure_but_kept_for_on_error_and_the_retry(pool):
+    seen_in_on_error: list[str | None] = []
+
+    class RetryOnce(FanOutHandler):
+        async def on_error(self, task, error):
+            seen_in_on_error.append(task.stdin)
+            return ErrorAction.RETRY if len(seen_in_on_error) == 1 else ErrorAction.SKIP
+
+    handler = RetryOnce(fan_out=1, exit_code=1)
+    proc = PartitionProcessor(
+        partition_id=0, handler=handler, executor_pool=pool, window_size=10, max_retries=3, budget=big_budget()
+    )
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert seen_in_on_error == [STDIN, STDIN]
+    assert handler.stdin_in_message_hook == [None]
+
+
+async def test_stdin_is_released_from_a_replaced_task_and_its_replacement(pool):
+    replacements: list[ExecutorTask] = []
+
+    class ReplaceOnce(FanOutHandler):
+        async def arrange(self, messages, pending):
+            return [make_task('orig', messages[0].offset, exit_code=1)]
+
+        async def on_error(self, task, error):
+            replacement = make_task('repl', task.source_offsets[0], stdin=task.stdin + '!')
+            replacements.append(replacement)
+            return [replacement]
+
+    budget = big_budget()
+    handler = ReplaceOnce()
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert handler.stdin_in_on_task_complete == [STDIN + '!']
+    assert handler.stdin_in_message_hook == [None, None]
+    assert replacements[0].stdin is None
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+# ------------------------------------------------------------ pending bytes
+
+
+async def test_pending_bytes_count_stdin_and_kept_output_and_return_to_zero(pool):
+    budget = big_budget()
+    stdin_seen: list[int] = []
+
+    class Measure(FanOutHandler):
+        async def on_task_complete(self, result):
+            stdin_seen.append(budget.bytes)
+            return None
+
+    handler = Measure(fan_out=3)
+    handler.budget = budget
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert max(stdin_seen) >= sys.getsizeof(STDIN)
+    # In on_message_complete the stdin is released, the kept output is not:
+    # three results kept by the message tracker and by the window.
+    assert handler.bytes_in_message_hook == [2 * 3 * output_bytes(MagicMock(stdout=STDOUT, stderr=''))]
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+async def test_stalled_tracker_gives_back_its_kept_bytes(pool):
+    budget = big_budget()
+
+    class Stall(FanOutHandler):
+        async def on_task_complete(self, result):
+            # As a failed sink delivery of the task's result does.
+            proc._mark_offsets_delivery_failed(result.task.source_offsets)
+            return None
+
+    proc = PartitionProcessor(
+        partition_id=0, handler=Stall(fan_out=1), executor_pool=pool, window_size=10, budget=budget
+    )
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: 0 in proc._stalled_offsets)
+    await proc.stop()
+
+    assert proc._message_trackers[0].results == []
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+async def test_stop_gives_back_the_budget_of_cancelled_work(pool):
+    budget = big_budget()
+    proc = idle_processor(budget)
+    proc._account.charge(3, 300)
+
+    await proc.stop()
+
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+# ------------------------------------------------------- Kafka pause rule
+
+
+async def run_poll_turns(source, turns: int) -> None:
+    calls = 0
+
+    async def poll(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= turns:
+            source.signal_stop()
+        return []
+
+    source.consumer.poll_batch = poll
+    await source.run()
+    assert calls == turns
+
+
+@pytest.fixture
+def kafka_config(tmp_path) -> DrakkarConfig:
+    return DrakkarConfig(
+        connections=kafka_connections(),
+        storage={'dir': str(tmp_path / 'storage')},
+        sources={'kafka': {'enabled': True}},
+        executor={'binary_path': '/bin/echo', 'max_executors': 2},
+        metrics={'enabled': False},
+    )
+
+
+def kafka_app(config: DrakkarConfig, max_queued_messages: int) -> DrakkarApp:
+    config.sources.kafka.max_queued_messages = max_queued_messages
+    config.ui.release.enabled = False
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    wire_kafka_source(app, AsyncMock())
+    return app
+
+
+def add_processor(app: DrakkarApp, pid: int, queued: int) -> PartitionProcessor:
+    proc = idle_processor(None)
+    proc._partition_id = pid
+    for offset in range(queued):
+        proc._queue.put_nowait(make_msg(offset, partition=pid))
+    app._processors[pid] = proc
+    return proc
+
+
+async def test_poll_loop_pauses_at_max_queued_messages_and_keeps_polling(kafka_config):
+    app = kafka_app(kafka_config, max_queued_messages=10)
+    add_processor(app, 0, queued=10)
+
+    await run_poll_turns(app.kafka_source, turns=3)
+
+    app._consumer.pause.assert_awaited_once_with([0])
+    assert app._paused
+
+
+async def test_poll_loop_resumes_at_half_but_not_above_it(kafka_config):
+    app = kafka_app(kafka_config, max_queued_messages=10)
+    proc = add_processor(app, 0, queued=6)
+    app._paused = True
+
+    await run_poll_turns(app.kafka_source, turns=1)
+    assert app._paused
+    app._consumer.resume.assert_not_awaited()
+
+    proc._queue.get_nowait()
+    app.kafka_source._stop_requested = False
+    await run_poll_turns(app.kafka_source, turns=1)
+
+    app._consumer.resume.assert_awaited_once_with([0])
+    assert not app._paused
+
+
+async def test_poll_loop_never_resumes_a_stalled_or_dead_partition(kafka_config):
+    app = kafka_app(kafka_config, max_queued_messages=10)
+    add_processor(app, 0, queued=0)
+    add_processor(app, 1, queued=0)
+    dead = add_processor(app, 2, queued=0)
+    dead._dead = True
+    app._stalled_partitions.add(1)
+    app._paused = True
+
+    await run_poll_turns(app.kafka_source, turns=1)
+
+    app._consumer.pause.assert_awaited_once_with([2])
+    app._consumer.resume.assert_awaited_once_with([0])
+
+
+async def test_poll_loop_does_not_count_a_dead_partition_queue(kafka_config):
+    app = kafka_app(kafka_config, max_queued_messages=10)
+    dead = add_processor(app, 0, queued=50)
+    dead._dead = True
+
+    await run_poll_turns(app.kafka_source, turns=2)
+
+    assert app.kafka_source.queued_messages() == 0
+    assert not app._paused
+    # Paused once for its death, never for backpressure.
+    app._consumer.pause.assert_awaited_once_with([0])
+
+
+async def test_dead_partition_pause_failure_is_logged_not_raised(kafka_config):
+    app = kafka_app(kafka_config, max_queued_messages=10)
+    dead = add_processor(app, 0, queued=0)
+    dead._dead = True
+    app._consumer.pause.side_effect = RuntimeError('broker gone')
+
+    await run_poll_turns(app.kafka_source, turns=1)
+
+    assert app.kafka_source.dead_partitions_paused == {0}
+
+
+# ------------------------------------------------------------ HTTP source
+
+
+async def test_http_request_counts_its_tasks_and_releases_stdin_and_budget(pool):
+    budget = big_budget()
+    handler = _RecordingHandler()
+    seen_running: list[int] = []
+    seen_stdin: list[str | None] = []
+
+    async def arrange_impl(req, pending):
+        return [make_task('h1', 0), make_task('h2', 0)]
+
+    async def complete_impl(group):
+        seen_running.append(budget.tasks)
+        seen_stdin.extend(task.stdin for task in group.tasks)
+        return None
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+    app = _make_stub_app(handler, pool=pool)
+    app._pending_budget = budget
+    runner = WebappRunner(app, _make_config())
+
+    await runner.run(_make_ctx())
+
+    assert seen_running == [0]
+    assert seen_stdin == [None, None]
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+# ------------------------------------------------------------------ metrics
+
+
+def test_backpressure_metrics_names_and_help_texts():
+    from prometheus_client import Counter, Gauge, Histogram
+
+    from drakkar.metrics import backpressure_active, queued_messages_dropped_at_stop
+
+    expected = [
+        (
+            pending_tasks,
+            Gauge,
+            'drakkar_pending_tasks',
+            (),
+            'Tasks created and not yet settled: waiting for an executor slot, running, '
+            'or in on_task_complete and its delivery',
+        ),
+        (
+            pending_bytes,
+            Gauge,
+            'drakkar_pending_bytes',
+            (),
+            'Bytes held for pending tasks and kept results: task stdin plus stdout and stderr '
+            'kept for on_message_complete and on_window_complete',
+        ),
+        (
+            window_admission_wait,
+            Counter,
+            'drakkar_window_admission_wait_seconds',
+            ('limit',),
+            'Seconds partition loops waited for room under executor.max_pending_tasks or '
+            'executor.max_pending_bytes before taking a window',
+        ),
+        (window_messages, Histogram, 'drakkar_window_messages', (), 'Messages taken into one arrange() window'),
+        (
+            queued_messages_dropped_at_stop,
+            Counter,
+            'drakkar_queued_messages_dropped_at_stop',
+            (),
+            'Polled messages left unarranged at stop or revoke; the next owner reads them again',
+        ),
+        (
+            backpressure_active,
+            Gauge,
+            'drakkar_backpressure_active',
+            (),
+            'Whether Kafka fetching is paused because queued messages reached sources.kafka.max_queued_messages '
+            '(1=paused, 0=flowing)',
+        ),
+    ]
+    for metric, kind, name, labels, help_text in expected:
+        assert isinstance(metric, kind)
+        assert metric._name == name
+        assert metric._labelnames == labels
+        assert metric._documentation == help_text
+    assert window_messages._upper_bounds[:-1] == [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]

@@ -10,6 +10,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import taskflow
+from drakkar.budget import BudgetAccount, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -29,8 +30,11 @@ from drakkar.metrics import (
     offset_lag,
     partition_processor_deaths,
     partition_queue_size,
+    queued_messages_dropped_at_stop,
     suppressed_zombie_deliveries,
     task_retries,
+    window_admission_wait,
+    window_messages,
 )
 from drakkar.models import (
     ErrorAction,
@@ -117,6 +121,12 @@ COMMIT_BATCH_MAX_DELAY_SECONDS = 0.5
 # an endless error stream instead of surfacing it on /readyz.
 PARTITION_RESTART_LIMIT = 1
 
+# Weight of the newest window in the moving averages of tasks and bytes per
+# message that size the next window under the pending budget. 0.3 follows a
+# change of message shape within a few windows without letting one odd window
+# swing the size.
+WINDOW_AVERAGE_WEIGHT = 0.3
+
 
 @dataclass
 class Window:
@@ -180,6 +190,9 @@ class Window:
     completed_count: int = 0
     total_tasks: int = 0
     start_time: float = 0.0
+    # Bytes of the stdout and stderr in ``results``, charged to the pending
+    # budget until on_window_complete has run.
+    kept_bytes: int = 0
 
     @property
     def is_complete(self) -> bool:
@@ -242,6 +255,9 @@ class MessageTracker:
     # Shared by every task result and the message result of this message:
     # once its DLQ record is written, no later delivery of it starts.
     dlq: MessageDLQState = field(default_factory=MessageDLQState)
+    # Bytes of the stdout and stderr in ``results`` and ``errors``, charged to
+    # the pending budget until on_message_complete has run.
+    kept_bytes: int = 0
 
 
 class PartitionProcessor:
@@ -269,6 +285,7 @@ class PartitionProcessor:
         on_stall: StallCallback | None = None,
         execute_dlq: ExecuteDLQCallback | None = None,
         executor_on_failure: str = 'skip',
+        budget: PendingBudget | None = None,
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
@@ -290,6 +307,23 @@ class PartitionProcessor:
         # executor.on_failure: what a spent retry budget and a raising
         # on_error become (skip, or dlq through execute_dlq).
         self._executor_on_failure = ErrorAction(executor_on_failure)
+        # The worker's pending budget. Without one (a processor built on its
+        # own) windows take up to window_size messages and nothing is counted.
+        self._account = BudgetAccount(budget) if budget is not None else None
+        # The waiter this loop holds in the budget's FIFO list while it waits
+        # for room; kept across the one-second wake-ups so the loop keeps its
+        # place in the list.
+        self._room_waiter: asyncio.Future[bool] | None = None
+        # The stdin size each pending task was charged, by task id.
+        self._held_stdin_bytes: dict[str, int] = {}
+        # The first message of the next window, taken off the queue before the
+        # loop waits for room. It still counts as queued.
+        self._held_message: SourceMessage | None = None
+        # Moving averages per message, from the windows this partition took.
+        # None until the first window: that window takes one message, so the
+        # averages start from a measurement and not from a guess.
+        self._avg_tasks_per_message: float | None = None
+        self._avg_bytes_per_message = 0.0
 
         # Whether anything will ever read the outcomes the window and the
         # message trackers would collect. Both lists cost the payload of
@@ -364,7 +398,8 @@ class PartitionProcessor:
 
     @property
     def queue_size(self) -> int:
-        return self._queue.qsize()
+        """Messages polled and not yet taken into a window, the held first message included."""
+        return self._queue.qsize() + (self._held_message is not None)
 
     @property
     def offset_tracker(self) -> OffsetTracker:
@@ -404,6 +439,9 @@ class PartitionProcessor:
         Pair with :meth:`stop` for full shutdown.
         """
         self._running = False
+        # A loop waiting for room in the pending budget leaves at once.
+        if self._room_waiter is not None and not self._room_waiter.done():
+            self._room_waiter.set_result(False)
 
     async def stop(self, timeout: float = DEFAULT_STOP_TIMEOUT) -> None:
         """Stop the partition processor and wait for completion.
@@ -450,6 +488,9 @@ class PartitionProcessor:
         # so it cannot outlive the processor.
         await self._commit_now()
         await self._cancel_commit_flush()
+        # Give back what cancelled tasks and unfinished windows still hold.
+        if self._account is not None:
+            self._account.close()
 
     async def _cancel_commit_flush(self) -> None:
         """Stop the pending coalescing timer and wait for it to unwind."""
@@ -552,7 +593,7 @@ class PartitionProcessor:
             await self._commit_now()
             return
         while (
-            self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0
+            self.queue_size > 0 or self._has_drainable_pending() or self._inflight_count > 0
         ) and not self._loop_ended:
             await asyncio.sleep(DRAIN_POLL_INTERVAL)
         await self._commit_now()
@@ -575,20 +616,15 @@ class PartitionProcessor:
                     continue
 
                 await self._process_window(messages)
+                if self._account is not None:
+                    # Room this window left goes to the next waiting loop.
+                    self._account.budget.wake_next()
 
-            # Drain remaining queued messages after _running becomes False,
-            # in window_size chunks. One unbounded window here would hand
-            # arrange() the whole backlog at every shutdown/rebalance —
-            # a memory spike, and quadratic pain for O(n²) arrange hooks.
-            while self._queue.qsize() > 0 and not self._deliveries_suppressed:
-                messages = []
-                while len(messages) < self._window_size:
-                    try:
-                        messages.append(self._queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-                if messages:
-                    await self._process_window(messages)
+            # Queued messages that are not in a window are dropped, not
+            # arranged: only in-flight work drains. Their offsets were never
+            # registered, so the final commit stays below them and the next
+            # owner of the partition reads them again.
+            self._drop_queued_messages()
 
             # wait for any in-flight tasks to complete (stalled offsets are
             # excluded — they never complete in this process by design).
@@ -690,25 +726,138 @@ class PartitionProcessor:
                     exc_info=True,
                 )
 
-    async def _collect_window(self) -> list[SourceMessage]:
-        """Collect up to window_size messages from the queue."""
-        messages: list[SourceMessage] = []
+    def _drop_queued_messages(self) -> None:
+        """Empty the queue at stop, counting the messages that were never arranged."""
+        dropped: list[SourceMessage] = []
+        if self._held_message is not None:
+            dropped.append(self._held_message)
+            self._held_message = None
+        while True:
+            try:
+                dropped.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        partition_queue_size.labels(partition=str(self._partition_id)).set(0)
+        if not dropped:
+            return
+        queued_messages_dropped_at_stop.inc(len(dropped))
+        logger.info(
+            'queued_messages_dropped_at_stop',
+            category='partition',
+            partition=self._partition_id,
+            count=len(dropped),
+            first_offset=min(msg.offset for msg in dropped),
+            hint='never arranged; the next owner of the partition reads them again',
+        )
 
-        try:
-            first = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
-            messages.append(first)
-        except TimeoutError:
+    async def _collect_window(self) -> list[SourceMessage]:
+        """Take the next window: up to the admitted number of messages, at most window_size.
+
+        The first message is taken off the queue and held while the loop
+        waits for room in the pending budget, so only loops that have work
+        wait. Every wait is bounded by ``IDLE_POLL_TIMEOUT``: an empty list
+        lets ``_run`` retry a commit and see a stop.
+        """
+        if self._held_message is None:
+            try:
+                self._held_message = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
+            except TimeoutError:
+                return []
+        if self._account is not None and not await self._wait_for_room():
             return []
 
-        while len(messages) < self._window_size:
+        limit = self._admitted_window_size()
+        messages = [self._held_message]
+        self._held_message = None
+        while len(messages) < limit:
             try:
-                msg = self._queue.get_nowait()
-                messages.append(msg)
+                messages.append(self._queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
 
         partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
+        window_messages.observe(len(messages))
         return messages
+
+    async def _wait_for_room(self) -> bool:
+        """Wait, at most ``IDLE_POLL_TIMEOUT``, until the pending budget has room.
+
+        True when there is room. False after the time bound or a stop; the
+        loop's place in the budget's FIFO list is kept across the time bound
+        and given up on a stop.
+        """
+        assert self._account is not None
+        budget = self._account.budget
+        if not self._running:
+            return False
+        limit = budget.full_limit()
+        if limit is None:
+            # Room opened without a wake-up for this loop: leave the list, so
+            # the waiter does not take a later wake-up meant for another loop.
+            if self._room_waiter is not None:
+                self._room_waiter.cancel()
+                self._room_waiter = None
+            return True
+        if self._room_waiter is None:
+            self._room_waiter = budget.add_waiter()
+        waiter = self._room_waiter
+        started = time.monotonic()
+        # ``asyncio.wait`` does not cancel the waiter on the time bound, so the
+        # same waiter keeps its place for the next call.
+        done, _ = await asyncio.wait({waiter}, timeout=IDLE_POLL_TIMEOUT)
+        window_admission_wait.labels(limit=limit).inc(time.monotonic() - started)
+        if not done:
+            return False
+        self._room_waiter = None
+        return waiter.result()
+
+    def _admitted_window_size(self) -> int:
+        """How many messages the next window may take.
+
+        ``min(free tasks / average tasks per message, free bytes / average
+        bytes per message)``, clamped to 1 .. window_size. The first window of
+        a partition takes one message. A window takes at least one message, so
+        a loop never waits for ever; the cost is that the limits are soft by
+        one window's fan-out.
+        """
+        if self._account is None:
+            return self._window_size
+        if self._avg_tasks_per_message is None:
+            return 1
+        budget = self._account.budget
+        fit = float(self._window_size)
+        if self._avg_tasks_per_message > 0:
+            fit = min(fit, budget.free_tasks / self._avg_tasks_per_message)
+        if self._avg_bytes_per_message > 0:
+            fit = min(fit, budget.free_bytes / self._avg_bytes_per_message)
+        return max(1, min(self._window_size, int(fit)))
+
+    def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
+        """Fold one window into the moving averages per message."""
+        tasks_per_message = task_count / message_count
+        bytes_per_message = stdin_bytes / message_count
+        if self._avg_tasks_per_message is None:
+            self._avg_tasks_per_message = tasks_per_message
+            self._avg_bytes_per_message = bytes_per_message
+            return
+        keep = 1.0 - WINDOW_AVERAGE_WEIGHT
+        self._avg_tasks_per_message = keep * self._avg_tasks_per_message + WINDOW_AVERAGE_WEIGHT * tasks_per_message
+        self._avg_bytes_per_message = keep * self._avg_bytes_per_message + WINDOW_AVERAGE_WEIGHT * bytes_per_message
+
+    def _keep_bytes(self, holder: Window | MessageTracker, outcome: Any) -> None:
+        """Charge the output of a kept result or error to the budget, on the holder that keeps it."""
+        if self._account is None:
+            return
+        held = output_bytes(outcome)
+        holder.kept_bytes += held
+        self._account.charge(0, held)
+
+    def _release_kept_bytes(self, holder: Window | MessageTracker) -> None:
+        """Give back the output bytes a window or tracker kept, once its hook has run."""
+        if self._account is None or not holder.kept_bytes:
+            return
+        self._account.release(0, holder.kept_bytes)
+        holder.kept_bytes = 0
 
     async def _process_window(self, messages: list[SourceMessage]) -> None:
         self._window_counter += 1
@@ -812,6 +961,7 @@ class PartitionProcessor:
                 await self._finalize_message_tracker(tracker)
 
         if not tasks:
+            self._note_window_shape(len(messages), 0, 0)
             await self._note_commit_due()
             return
 
@@ -836,8 +986,18 @@ class PartitionProcessor:
         # ``window.total_tasks`` and every tracker's ``remaining`` were set for
         # the whole list above, so neither the window nor a message group can
         # reach a completed state early.
+        #
+        # Each task is charged to the pending budget here, by the size of its
+        # stdin at this moment. The size is kept by task id until the last
+        # outcome, so the release gives back exactly what was charged even if
+        # on_error rewrites ``task.stdin`` before a retry.
+        window_stdin_bytes = 0
         for start in range(0, len(tasks), FANOUT_CHUNK_TASKS):
-            for task in tasks[start : start + FANOUT_CHUNK_TASKS]:
+            chunk = tasks[start : start + FANOUT_CHUNK_TASKS]
+            chunk_stdin_bytes = 0
+            for task in chunk:
+                held = text_bytes(task.stdin)
+                chunk_stdin_bytes += held
                 if task.task_id in self._pending_tasks:
                     logger.warning(
                         'duplicate_task_id_in_pending',
@@ -847,11 +1007,17 @@ class PartitionProcessor:
                     )
                 self._pending_tasks[task.task_id] = task
                 self._inflight_count += 1
+                if self._account is not None:
+                    self._held_stdin_bytes[task.task_id] = held
                 t = asyncio.create_task(self._execute_and_track(task, window))
                 self._active_tasks.add(t)
                 t.add_done_callback(self._active_tasks.discard)
+            if self._account is not None:
+                self._account.charge(len(chunk), chunk_stdin_bytes)
+            window_stdin_bytes += chunk_stdin_bytes
             if start + FANOUT_CHUNK_TASKS < len(tasks):
                 await asyncio.sleep(0)
+        self._note_window_shape(len(messages), len(tasks), window_stdin_bytes)
 
     async def _signal_stall(self) -> None:
         """Notify the lifecycle (once) that this partition has stalled.
@@ -1055,6 +1221,12 @@ class PartitionProcessor:
             await self._note_commit_due()
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
+        """Run one task to its last outcome: hooks, delivery, trackers, window.
+
+        The last outcome releases what the fan-out charged to the pending
+        budget for this task's stdin, and sets ``task.stdin`` to None so the
+        string is freed even while a message or window hook keeps the task.
+        """
         # Bind partition context for this async task — inherited by all user hooks called within
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
         log = logger.bind(
@@ -1177,6 +1349,7 @@ class PartitionProcessor:
 
             if self._keep_window_results:
                 window.results.append(result)
+                self._keep_bytes(window, result)
             task_result = result
 
         except ExecutorTaskError as e:
@@ -1254,6 +1427,10 @@ class PartitionProcessor:
                 # terminal failure of the group). Decrement its contribution
                 # to every message tracker; add the replacements.
                 for new_task in taskflow.link_replacements(task, list(decision.replacements)):
+                    if self._account is not None:
+                        new_held = text_bytes(new_task.stdin)
+                        self._account.charge(1, new_held)
+                        self._held_stdin_bytes[new_task.task_id] = new_held
                     self._pending_tasks[new_task.task_id] = new_task
                     window.task_ids.append(new_task.task_id)
                     window.total_tasks += 1
@@ -1298,6 +1475,7 @@ class PartitionProcessor:
                     await self._send_execute_dlq(task, e.error, attempts=retry_count + 1)
                 if self._keep_window_results:
                     window.results.append(e.result)
+                    self._keep_bytes(window, e.result)
                 task_error = e.error
 
         except Exception as e:
@@ -1309,12 +1487,19 @@ class PartitionProcessor:
             synthesized_result, task_error = taskflow.synthesize_internal_failure(task, e)
             if self._keep_window_results:
                 window.results.append(synthesized_result)
+                self._keep_bytes(window, synthesized_result)
 
         finally:
             if not handed_off_to_retry:
                 removed = self._pending_tasks.pop(task.task_id, None)
                 self._inflight_count -= 1
                 executor_pool_active.set(self._executor_pool.active_count)
+                # The task's last outcome: no retry runs it again, and on_error
+                # already built any replacement from it. Message and window
+                # hooks see the task without its stdin.
+                task.stdin = None
+                if self._account is not None:
+                    self._account.release(1, self._held_stdin_bytes.pop(task.task_id, 0))
                 if removed is None:
                     await log.awarning(
                         'task_not_in_pending_on_cleanup',
@@ -1342,10 +1527,12 @@ class PartitionProcessor:
                 tracker.succeeded_count += 1
                 if self._keep_message_details:
                     tracker.results.append(task_result)
+                    self._keep_bytes(tracker, task_result)
             elif task_error is not None:
                 tracker.failed_count += 1
                 if self._keep_message_details:
                     tracker.errors.append(task_error)
+                    self._keep_bytes(tracker, task_error)
             # replaced_by path: neither results nor errors is appended.
             # The replacements will eventually report their own outcomes
             # through this same loop and settle the tracker.
@@ -1434,6 +1621,7 @@ class PartitionProcessor:
                         error=str(e),
                         exc_info=True,
                     )
+            self._release_kept_bytes(window)
 
             # Per-message offsets were already marked complete individually
             # by _finalize_message_tracker as each message's tasks finished.
@@ -1567,6 +1755,13 @@ class PartitionProcessor:
                     offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
                     exc_info=True,
                 )
+
+        # The hook has run, so the kept outcomes have no reader left. A stalled
+        # tracker stays registered below; dropping its outcomes too keeps a
+        # stall from holding pending bytes for the life of the process.
+        self._release_kept_bytes(tracker)
+        tracker.results.clear()
+        tracker.errors.clear()
 
         if delivery_failed:
             # Do NOT complete the offset: the watermark stalls at this

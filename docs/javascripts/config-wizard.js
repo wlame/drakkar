@@ -68,11 +68,10 @@
     // max_poll_records: fill one window cycle
     c.pollRecords = Math.max(50, Math.min(1000, c.windowSize * Math.min(c.partPerWorker, 10)));
 
-    // backpressure multipliers
-    if (p80s < 0.1) { c.highMult = 8; c.lowMult = 2; }
-    else if (p80s < 1) { c.highMult = 16; c.lowMult = 4; }
-    else if (p80s < 10) { c.highMult = 32; c.lowMult = 4; }
-    else { c.highMult = 8; c.lowMult = 2; }
+    // backpressure: the framework defaults, not printed in the YAML
+    c.pendingTasks = 2000;
+    c.pendingMb = 1024;
+    c.queuedMessages = 1000;
 
     // drain_timeout: 2x p80 (floor 30s to match framework default, cap 120s)
     c.drainTimeout = Math.max(30, Math.min(120, Math.ceil(p80s * 2)));
@@ -101,7 +100,7 @@
 
     // estimates
     c.perTaskMb = (5 + stdoutKb) / 1024;
-    c.peakQueuedMb = maxWorkers * c.highMult * c.perTaskMb;
+    c.peakQueuedMb = Math.min(c.pendingMb, c.pendingTasks * c.perTaskMb);
     c.recorderBufferMb = 50000 * 0.5 / 1024;
     c.baseMb = 150;
     c.totalEstMb = c.baseMb + c.peakQueuedMb + c.recorderBufferMb;
@@ -142,9 +141,7 @@
         window_size: c.windowSize,
         task_timeout: durationText(c.taskTimeout * 1000),
         max_retries: c.maxRetries,
-        drain_timeout: durationText(c.drainTimeout * 1000),
-        backpressure_high_multiplier: c.highMult,
-        backpressure_low_multiplier: c.lowMult
+        drain_timeout: durationText(c.drainTimeout * 1000)
       },
       logging: {
         min_task_duration: minDuration(c.logMin)
@@ -174,8 +171,7 @@
     add('window_size: ' + c.windowSize, 'Target ' + c.windowTargetSec + 's of work per window. At p80=' + p80 + 'ms, that is ' + c.windowTargetSec + '/' + p80s.toFixed(3) + ' = ' + c.windowSize + ' messages. Larger windows reduce arrange() call overhead and enable batching. Smaller windows reduce commit latency — offsets commit only when the slowest task in the window finishes.');
     add('task_timeout: ' + durationText(c.taskTimeout * 1000), '10x p80 = ' + Math.round(p80s * 10) + 's (floor 30s, cap 600s). Tasks exceeding this are killed. Set above p99 to avoid killing valid tasks, but low enough to detect stuck processes.');
     add('max_poll_records: ' + c.pollRecords, 'window_size * min(partitions/worker, 10) = ' + c.windowSize + ' * ' + Math.min(c.partPerWorker, 10) + '. Enough messages per poll to keep partition queues fed for one window cycle. Too low starves the pipeline; too high wastes memory.');
-    var bpText = p80s < 0.1 ? 'Fast tasks drain quickly — small buffer sufficient.' : p80s < 10 ? 'Moderate tasks need room to queue while in-flight work completes.' : 'Long tasks: small buffer prevents over-fetching messages that sit for minutes.';
-    add('backpressure high/low: ' + c.highMult + '/' + c.lowMult, 'High watermark = max_executors * ' + c.highMult + ' = ' + (maxWorkers * c.highMult) + '. Low = max_executors * ' + c.lowMult + ' = ' + Math.max(1, maxWorkers * c.lowMult) + '. ' + bpText + ' The gap prevents pause/resume flapping.');
+    add('max_pending_tasks / max_pending_bytes: defaults', 'New windows wait while ' + c.pendingTasks + ' tasks are pending or 1GiB of task stdin and kept output is held. The defaults keep ' + maxWorkers + ' slots busy for about ' + Math.round(c.pendingTasks / maxWorkers) + ' rounds. Lower max_pending_bytes when tasks carry large stdin: about a quarter of the container memory.');
     add('drain_timeout: ' + durationText(c.drainTimeout * 1000), '2x p80 = ' + c.drainTimeout + 's. On shutdown, in-flight tasks get this long to finish. If exceeded, their offsets remain uncommitted and Kafka redelivers after restart.');
     var stText = p80s < 1 ? 'Fast tasks: 10s for quick dead-worker detection.' : p80s < 10 ? 'Moderate: 45s balances detection speed vs false positives.' : 'Slow tasks: 60s prevents spurious rebalances.';
     add('session_timeout: ' + durationText(c.sessionTimeout), stText + ' Heartbeat every ' + durationText(c.heartbeatInterval) + ' (session/5). Kafka declares consumer dead if no heartbeat for this duration.');
@@ -187,9 +183,9 @@
     var estimates = [
       { term: 'Throughput', text: '~' + c.tasksPerSec.toFixed(1) + ' tasks/sec per worker, ~' + c.tasksPerSecCluster.toFixed(1) + ' tasks/sec cluster (' + c.workers + ' workers * ' + maxWorkers + ' slots / ' + p80s.toFixed(3) + 's)'
         + (c.loopCapped ? ' Per-worker rate sits at the ~' + LOOP_CEILING_TASKS_PER_SEC + ' tasks/sec event-loop ceiling — to go faster, add workers, not slots.' : '') },
-      { term: 'Memory (per worker)', text: '~' + Math.round(c.totalEstMb) + ' MB (' + c.baseMb + ' MB runtime + ' + Math.round(c.peakQueuedMb) + ' MB peak queue + ' + Math.round(c.recorderBufferMb) + ' MB recorder buffer)' },
+      { term: 'Memory (per worker)', text: '~' + Math.round(c.totalEstMb) + ' MB (' + c.baseMb + ' MB runtime + ' + Math.round(c.peakQueuedMb) + ' MB pending tasks without stdin + ' + Math.round(c.recorderBufferMb) + ' MB recorder buffer)' },
       { term: 'Commit latency', text: '~' + (c.windowSize * p80s).toFixed(1) + 's worst case (' + c.windowSize + ' tasks * ' + p80 + 'ms each)' },
-      { term: 'Backpressure threshold', text: 'Pauses at ' + (maxWorkers * c.highMult) + ' queued, resumes at ' + Math.max(1, maxWorkers * c.lowMult) }
+      { term: 'Backpressure threshold', text: 'Kafka fetching pauses at ' + c.queuedMessages + ' queued messages, resumes at ' + (c.queuedMessages / 2) }
     ];
     return [
       { title: 'How each parameter was calculated', items: items },

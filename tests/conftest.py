@@ -172,8 +172,8 @@ def full_config_dict() -> dict:
             'window_size': 100,
             'max_retries': 5,
             'drain_timeout': '10s',
-            'backpressure_high_multiplier': 16,
-            'backpressure_low_multiplier': 2,
+            'max_pending_tasks': 500,
+            'max_pending_bytes': '256MiB',
         },
         'sinks': {
             'kafka': {'results': {'topic': 'output-results'}},

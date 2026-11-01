@@ -530,6 +530,9 @@ async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
     app._processors[4] = proc
     proc.start()
     proc.enqueue(make_msg(offset=7))
+    # Queued messages that are not in a window are dropped at a revoke, so
+    # wait until the loop has taken the message into a window.
+    await wait_for(lambda: proc.queue_size == 0)
 
     # Revoke with the message still unprocessed: the drain inside
     # _stop_processor must finish it AND commit before _on_revoke returns.

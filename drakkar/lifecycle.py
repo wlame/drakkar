@@ -50,6 +50,7 @@ from drakkar.app import (
     snapshot_consumed_settings,
 )
 from drakkar.app_security import warn_if_ui_unauthenticated
+from drakkar.budget import PendingBudget
 from drakkar.cache import Cache, CacheEngine
 from drakkar.cluster_tasks import (
     ARCHIVE_SCOPE_CLUSTER,
@@ -533,10 +534,11 @@ class AppLifecycle:
             )
 
     async def _build_executor_pool(self) -> None:
-        """Construct the subprocess pool from executor config.
+        """Construct the subprocess pool and the pending budget from executor config.
 
         Extracted from ``_async_run`` so the boot sequence is testable step by
-        step; the body is unchanged.
+        step. The budget is built here because every source charges it: the
+        partition loops wait on it before a window, the HTTP source only counts.
         """
         app = self._app
         app._executor_pool = ExecutorPool(
@@ -554,6 +556,10 @@ class AppLifecycle:
             priority_fn=app._handler.task_priority,
             max_stdout_bytes=app._config.executor.max_stdout,
             max_stderr_bytes=app._config.executor.max_stderr,
+        )
+        app._pending_budget = PendingBudget(
+            max_tasks=app._config.executor.max_pending_tasks,
+            max_bytes=app._config.executor.max_pending_bytes,
         )
 
     async def _start_observability(self) -> None:
@@ -1153,6 +1159,7 @@ class AppLifecycle:
             # A late-bound lambda, not the current value: readiness is
             # composed across every source and flips during shutdown.
             is_worker_ready=lambda: app.is_ready,
+            pending_budget=app._pending_budget,
         )
         for source in app.sources:
             source.bind(ctx)

@@ -268,7 +268,39 @@ partition_processor_deaths = Counter(
 
 backpressure_active = Gauge(
     'drakkar_backpressure_active',
-    'Whether consumer is paused due to backpressure (1=paused, 0=flowing)',
+    'Whether Kafka fetching is paused because queued messages reached sources.kafka.max_queued_messages '
+    '(1=paused, 0=flowing)',
+)
+
+# --- Pending work: window admission in tasks and bytes ---
+
+pending_tasks = Gauge(
+    'drakkar_pending_tasks',
+    'Tasks created and not yet settled: waiting for an executor slot, running, or in on_task_complete and its delivery',
+)
+
+pending_bytes = Gauge(
+    'drakkar_pending_bytes',
+    'Bytes held for pending tasks and kept results: task stdin plus stdout and stderr '
+    'kept for on_message_complete and on_window_complete',
+)
+
+window_admission_wait = Counter(
+    'drakkar_window_admission_wait_seconds_total',
+    'Seconds partition loops waited for room under executor.max_pending_tasks or '
+    'executor.max_pending_bytes before taking a window',
+    ['limit'],
+)
+
+window_messages = Histogram(
+    'drakkar_window_messages',
+    'Messages taken into one arrange() window',
+    buckets=(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000),
+)
+
+queued_messages_dropped_at_stop = Counter(
+    'drakkar_queued_messages_dropped_at_stop_total',
+    'Polled messages left unarranged at stop or revoke; the next owner reads them again',
 )
 
 consume_pause_active = Gauge(

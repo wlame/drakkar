@@ -11,7 +11,7 @@ from structlog.contextvars import get_contextvars
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import current_hook_context
-from drakkar.metrics import executor_timeouts
+from drakkar.metrics import executor_timeouts, queued_messages_dropped_at_stop
 from drakkar.models import (
     CollectResult,
     ErrorAction,
@@ -205,7 +205,7 @@ async def test_partition_processor_error_handling(failing_pool):
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
+    await wait_for(lambda: proc.queue_size == 0 and not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
     await proc.stop()
 
 
@@ -2970,7 +2970,7 @@ async def run_annotating_processor(handler, pool, partition_id=2, offsets=(0, 1)
     for offset in offsets:
         proc.enqueue(make_msg(partition=partition_id, offset=offset))
     proc.start()
-    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
+    await wait_for(lambda: proc.queue_size == 0 and not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
     await proc.stop()
     return annotator
 
@@ -3141,37 +3141,39 @@ async def test_raising_on_window_complete_still_records_and_commits(echo_pool):
     assert any(c[1] == 2 for c in committed)
 
 
-# --- shutdown drain must respect window_size ---
+# --- stop leaves queued messages unarranged ---
 
 
-async def test_shutdown_drain_chunks_backlog_into_window_size(echo_pool):
-    """Stopping with a full queue drains it in window_size chunks.
-
-    Before the fix the drain emptied the whole queue into a single window,
-    handing arrange() an unbounded batch at every shutdown/rebalance.
-    """
+async def test_stop_with_queued_messages_drops_them_unarranged_and_counts_them(echo_pool):
+    """Queued messages that are not in a window are dropped at stop, not arranged."""
     handler = EchoHandler()
+    committed: list[int] = []
+
+    async def on_commit(_partition: int, offset: int) -> None:
+        committed.append(offset)
+
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
         executor_pool=echo_pool,
         window_size=5,
+        on_commit=on_commit,
     )
-
-    for i in range(15):  # 3x window_size
+    for i in range(15):
         proc.enqueue(make_msg(offset=i))
+    before = queued_messages_dropped_at_stop._value.get()
 
     proc.start()
     # signal_stop before the loop's first await point: _running goes False
-    # before the main loop ever checks it, so the whole backlog goes
-    # through the shutdown drain path.
+    # before the main loop ever checks it, so no window is taken.
     proc.signal_stop()
     await proc.stop()
 
-    assert handler.arrange_calls, 'drain did not process the queued messages'
-    window_sizes = [n for n, _ in handler.arrange_calls]
-    assert all(n <= 5 for n in window_sizes), f'drain exceeded window_size: {window_sizes}'
-    assert sum(window_sizes) == 15
+    assert handler.arrange_calls == []
+    assert proc.queue_size == 0
+    assert queued_messages_dropped_at_stop._value.get() - before == 15
+    # Nothing was registered, so nothing is committed past the dropped messages.
+    assert committed == []
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ comes from (``sources``) or goes (``sinks``).
 
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
 from drakkar.config.units import ByteSize, Duration, WholeSeconds
@@ -136,20 +136,23 @@ class ExecutorConfig(ConfigModel):
             'messages will replay on restart — at-least-once).'
         ),
     )
-    backpressure_high_multiplier: int = Field(
-        default=32,
+    max_pending_tasks: int = Field(
+        default=2000,
         ge=1,
         description=(
-            'Pause threshold multiplier: Kafka consumption pauses when total queued messages '
-            'reach max_executors * this value.'
+            'New windows wait while this many tasks are created and not settled (waiting for an '
+            'executor slot, running, or in on_task_complete and its delivery). Must be at least '
+            'max_executors. A soft limit: a window that has room takes at least one message, and '
+            "one window's fan-out can pass it."
         ),
     )
-    backpressure_low_multiplier: int = Field(
-        default=4,
-        ge=1,
+    max_pending_bytes: ByteSize = Field(
+        default=1024**3,
         description=(
-            'Resume threshold multiplier: Kafka consumption resumes when total queued messages '
-            'drop to max(1, max_executors * this value).'
+            'New windows wait while task stdin plus kept task output reach this size, at least 16MiB. '
+            'Counts the stdin of pending tasks and the stdout and stderr of results kept for '
+            'on_message_complete and on_window_complete. A soft limit, like max_pending_tasks. '
+            'Size it to about a quarter of the container memory.'
         ),
     )
 
@@ -160,6 +163,16 @@ class ExecutorConfig(ConfigModel):
         if value not in EXECUTOR_ON_FAILURE_CHOICES:
             raise ValueError(f"executor.on_failure must be skip or dlq, got '{value}'")
         return value
+
+    @model_validator(mode='after')
+    def _check_pending_tasks(self) -> 'ExecutorConfig':
+        """A task limit below the slot count would leave slots idle while windows wait."""
+        if self.max_pending_tasks < self.max_executors:
+            raise ValueError(
+                f'executor.max_pending_tasks ({self.max_pending_tasks}) must be >= '
+                f'executor.max_executors ({self.max_executors})'
+            )
+        return self
 
 
 class MetricsConfig(ConfigModel):
