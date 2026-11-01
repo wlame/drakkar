@@ -243,7 +243,7 @@ async def test_stop_while_a_message_is_held_drops_it_and_takes_no_window():
     assert queued_messages_dropped_at_stop._value.get() - dropped_before == 1
 
 
-async def test_collect_window_leaves_the_fifo_list_when_room_opens_without_a_wake_up():
+async def test_collect_window_takes_its_turn_when_room_opens_without_a_release():
     budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
     budget.charge(1, 0)
     proc = idle_processor(budget)
@@ -255,15 +255,40 @@ async def test_collect_window_leaves_the_fifo_list_when_room_opens_without_a_wak
     messages = await proc._collect_window()
 
     assert len(messages) == 1
-    assert waiter.cancelled()
+    assert waiter.result() is True
     assert proc._room_waiter is None
 
 
-async def test_collect_window_wakes_waiting_partitions_in_fifo_order(monkeypatch):
+async def test_collect_window_new_loop_queues_behind_waiters_even_with_room(monkeypatch):
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
+    budget = PendingBudget(max_tasks=10, max_bytes=1 << 30)
+    budget.shape.note_window(message_count=1, task_count=5, stdin_bytes=0)
+    budget.charge(10, 0)
+    waiting, newcomer = idle_processor(budget), idle_processor(budget)
+    waiting.enqueue(make_msg(0))
+    newcomer.enqueue(make_msg(0))
+    waiting_collect = asyncio.create_task(collect_next_window(waiting))
+    await asyncio.sleep(0.01)
+
+    budget._tasks = 5  # room for one message of five tasks opens without a release
+    newcomer_collect = asyncio.create_task(collect_next_window(newcomer))
+    await asyncio.sleep(0.01)
+
+    assert waiting_collect.done()
+    assert not newcomer_collect.done()
+    waiting._end_window_reservation()
+    budget.release(5, 0)
+    assert len(await newcomer_collect) == 1
+
+
+async def test_collect_window_wakes_waiting_partitions_in_fifo_order_and_the_reservation_holds_the_room(
+    monkeypatch,
+):
     # Long enough that no wait ends on the time bound and re-checks the room.
     monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
-    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
-    budget.charge(1, 0)
+    budget = PendingBudget(max_tasks=3, max_bytes=1 << 30)
+    budget.shape.note_window(message_count=1, task_count=1, stdin_bytes=0)
+    budget.charge(3, 0)
     first, second = idle_processor(budget), idle_processor(budget)
     first.enqueue(make_msg(0))
     second.enqueue(make_msg(0))
@@ -276,9 +301,68 @@ async def test_collect_window_wakes_waiting_partitions_in_fifo_order(monkeypatch
     await asyncio.sleep(0.01)
 
     assert first_collect.done()
+    assert budget.reserved_tasks == 1
     assert not second_collect.done()
-    budget.wake_next()
+    first._end_window_reservation()
     assert len(await second_collect) == 1
+
+
+async def test_woken_loop_queues_again_at_the_front_when_the_room_is_gone():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+    assert await proc._collect_window() == []
+    proc._room_waiter.set_result(True)  # woken just after its time bound ended
+
+    assert await proc._collect_window() == []
+
+    assert proc._room_waiter is not None
+    assert not proc._room_waiter.done()
+
+
+async def test_woken_loop_takes_no_window_after_a_stop():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    proc = idle_processor(budget)
+    proc.enqueue(make_msg(0))
+    assert await proc._collect_window() == []
+    budget.release(1, 0)  # wakes the waiter
+    proc._running = False  # a stop flag set without resolving the waiter
+
+    assert await proc._wait_for_room() is False
+
+
+async def test_second_unmeasured_window_waits_for_the_first_to_fan_out(monkeypatch):
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
+    budget = big_budget()
+    first, second = idle_processor(budget), idle_processor(budget)
+    first.enqueue(make_msg(0))
+    second.enqueue(make_msg(0))
+
+    assert len(await first._collect_window()) == 1
+    assert budget.unmeasured_window_open
+    second_collect = asyncio.create_task(collect_next_window(second))
+    await asyncio.sleep(0.01)
+    assert not second_collect.done()
+
+    first._end_window_reservation()
+
+    assert len(await second_collect) == 1
+
+
+async def test_first_window_of_a_partition_uses_the_worker_wide_average():
+    budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
+    budget.shape.note_window(message_count=1, task_count=10, stdin_bytes=0)
+    proc = idle_processor(budget, window_size=50)
+    for offset in range(20):
+        proc.enqueue(make_msg(offset))
+
+    messages = await proc._collect_window()
+
+    assert len(messages) == 10
+    assert budget.reserved_tasks == 100
+    assert not budget.unmeasured_window_open
 
 
 async def test_collect_window_first_window_of_a_partition_takes_one_message():
@@ -301,7 +385,7 @@ def test_admitted_window_size_follows_the_moving_averages():
     assert proc._admitted_window_size() == 10
 
     proc._note_window_shape(message_count=1, task_count=20, stdin_bytes=0)
-    assert proc._avg_tasks_per_message == pytest.approx(13.0)
+    assert proc._shape.tasks == pytest.approx(13.0)
     assert proc._admitted_window_size() == 7
 
 
@@ -400,6 +484,86 @@ async def test_admission_lets_one_message_fan_out_past_the_task_limit(pool):
     assert (budget.tasks, budget.bytes) == (0, 0)
 
 
+class PeakBudget(PendingBudget):
+    """Records the highest charged tasks and bytes."""
+
+    def __init__(self, **kwargs) -> None:
+        self.peak_tasks = 0
+        self.peak_bytes = 0
+        super().__init__(**kwargs)
+
+    def charge(self, tasks: int, held_bytes: int) -> None:
+        super().charge(tasks, held_bytes)
+        self.peak_tasks = max(self.peak_tasks, self.tasks)
+        self.peak_bytes = max(self.peak_bytes, self.bytes)
+
+
+class SlowArrangeHandler(BaseDrakkarHandler):
+    """``arrange`` awaits before it returns; each task is held a while in on_task_complete."""
+
+    def __init__(self, fan_out: int) -> None:
+        super().__init__()
+        self.fan_out = fan_out
+
+    async def arrange(self, messages, pending):
+        await asyncio.sleep(0.01)
+        return [make_task(f'm{msg.offset}-t{i}', msg.offset) for msg in messages for i in range(self.fan_out)]
+
+    async def on_task_complete(self, result):
+        await asyncio.sleep(0.02)
+        return None
+
+
+async def test_admission_across_partitions_stays_within_the_cap_plus_one_message(pool):
+    """Several loops share one budget; arrange awaits, so they all check it while windows are arranged."""
+    fan_out = 10
+    task_bytes = sys.getsizeof(STDIN)
+    budget = PeakBudget(max_tasks=25, max_bytes=25 * task_bytes)
+    processors = [
+        PartitionProcessor(
+            partition_id=pid,
+            handler=SlowArrangeHandler(fan_out),
+            executor_pool=pool,
+            window_size=10,
+            budget=budget,
+        )
+        for pid in range(8)
+    ]
+    for proc in processors:
+        for offset in range(5):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+        proc.start()
+
+    await wait_for(
+        lambda: all(
+            p.queue_size == 0 and not p.offset_tracker.has_pending() and p.inflight_count == 0 for p in processors
+        )
+    )
+    for proc in processors:
+        await proc.stop()
+
+    assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert budget.peak_bytes <= budget.max_bytes + fan_out * task_bytes
+    assert (budget.tasks, budget.bytes, budget.reserved_tasks, budget.reserved_bytes) == (0, 0, 0, 0)
+
+
+async def test_a_raising_arrange_gives_back_its_reservation(pool):
+    class Raising(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            raise RuntimeError('arrange broke')
+
+    budget = big_budget()
+    budget.shape.note_window(message_count=1, task_count=10, stdin_bytes=1000)
+    proc = PartitionProcessor(partition_id=0, handler=Raising(), executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: proc.queue_size == 0 and proc._shape.tasks is None and budget.reserved_tasks == 0)
+    # The offset of the failed window stays pending by design, so stop does not wait for it.
+    await proc.stop(timeout=0.1)
+
+    assert (budget.reserved_tasks, budget.reserved_bytes) == (0, 0)
+
+
 # ------------------------------------------------------------ stdin release
 
 
@@ -462,6 +626,41 @@ async def test_stdin_is_released_from_a_replaced_task_and_its_replacement(pool):
     assert (budget.tasks, budget.bytes) == (0, 0)
 
 
+async def test_duplicate_task_ids_give_back_each_charge(pool):
+    class Duplicates(FanOutHandler):
+        async def arrange(self, messages, pending):
+            return [make_task('same', messages[0].offset), make_task('same', messages[0].offset, stdin='z' * 10)]
+
+    budget = big_budget()
+    proc = PartitionProcessor(partition_id=0, handler=Duplicates(), executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert proc._held_stdin_bytes == {}
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+async def test_replacement_that_keeps_its_parent_id_gives_back_each_charge(pool):
+    class ReplaceWithSameId(FanOutHandler):
+        async def arrange(self, messages, pending):
+            return [make_task('orig', messages[0].offset, exit_code=1)]
+
+        async def on_error(self, task, error):
+            return [make_task('orig', task.source_offsets[0], stdin='small')]
+
+    budget = big_budget()
+    proc = PartitionProcessor(
+        partition_id=0, handler=ReplaceWithSameId(), executor_pool=pool, window_size=10, budget=budget
+    )
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert proc._held_stdin_bytes == {}
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
 # ------------------------------------------------------------ pending bytes
 
 
@@ -486,6 +685,25 @@ async def test_pending_bytes_count_stdin_and_kept_output_and_return_to_zero(pool
     # three results kept by the message tracker and by the window.
     assert handler.bytes_in_message_hook == [2 * 3 * output_bytes(MagicMock(stdout=STDOUT, stderr=''))]
     assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+def test_released_kept_output_feeds_the_byte_estimate_per_message():
+    budget = PendingBudget(max_tasks=100, max_bytes=10_000)
+    proc = idle_processor(budget, window_size=50)
+    proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=100)
+    window = partition_module.Window(window_id=1, source_messages=[make_msg(0), make_msg(1)])
+    tracker = partition_module.MessageTracker(source_message=make_msg(0))
+    proc._account.charge(0, 1300)
+    window.kept_bytes = 1000
+    tracker.kept_bytes = 300
+
+    proc._release_kept_bytes(window)
+    proc._release_kept_bytes(tracker)
+
+    assert proc._shape.held_bytes == pytest.approx(100 + 500 + 300)
+    assert budget.shape.held_bytes == pytest.approx(100 + 500 + 300)
+    assert proc._admitted_window_size() == 11
+    assert budget.bytes == 0
 
 
 async def test_stalled_tracker_gives_back_its_kept_bytes(pool):
@@ -621,14 +839,15 @@ async def test_poll_loop_does_not_count_a_dead_partition_queue(kafka_config):
     app._consumer.pause.assert_awaited_once_with([0])
 
 
-async def test_dead_partition_pause_failure_is_logged_not_raised(kafka_config):
+async def test_dead_partition_pause_failure_is_retried_on_the_next_turn(kafka_config):
     app = kafka_app(kafka_config, max_queued_messages=10)
     dead = add_processor(app, 0, queued=0)
     dead._dead = True
-    app._consumer.pause.side_effect = RuntimeError('broker gone')
+    app._consumer.pause.side_effect = [RuntimeError('broker gone'), None]
 
-    await run_poll_turns(app.kafka_source, turns=1)
+    await run_poll_turns(app.kafka_source, turns=2)
 
+    assert app._consumer.pause.await_count == 2
     assert app.kafka_source.dead_partitions_paused == {0}
 
 

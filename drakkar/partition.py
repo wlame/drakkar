@@ -10,7 +10,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import taskflow
-from drakkar.budget import BudgetAccount, PendingBudget, output_bytes, text_bytes
+from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -120,12 +120,6 @@ COMMIT_BATCH_MAX_DELAY_SECONDS = 0.5
 # deterministically, and restarting it forever would bury the fault under
 # an endless error stream instead of surfacing it on /readyz.
 PARTITION_RESTART_LIMIT = 1
-
-# Weight of the newest window in the moving averages of tasks and bytes per
-# message that size the next window under the pending budget. 0.3 follows a
-# change of message shape within a few windows without letting one odd window
-# swing the size.
-WINDOW_AVERAGE_WEIGHT = 0.3
 
 
 @dataclass
@@ -314,16 +308,22 @@ class PartitionProcessor:
         # for room; kept across the one-second wake-ups so the loop keeps its
         # place in the list.
         self._room_waiter: asyncio.Future[bool] | None = None
-        # The stdin size each pending task was charged, by task id.
-        self._held_stdin_bytes: dict[str, int] = {}
+        # The stdin size each pending task was charged, keyed by the task
+        # object (``id``), not its task_id: two pending tasks may share a
+        # task_id (a duplicate in arrange, a replacement that keeps its
+        # parent's id), and each must give back its own charge. Sizes add up
+        # when the same object is scheduled twice, so nothing leaks either way.
+        self._held_stdin_bytes: dict[int, int] = {}
         # The first message of the next window, taken off the queue before the
         # loop waits for room. It still counts as queued.
         self._held_message: SourceMessage | None = None
         # Moving averages per message, from the windows this partition took.
-        # None until the first window: that window takes one message, so the
-        # averages start from a measurement and not from a guess.
-        self._avg_tasks_per_message: float | None = None
-        self._avg_bytes_per_message = 0.0
+        # Until the first window is measured, the worker-wide averages of the
+        # budget size the window.
+        self._shape = MessageShape()
+        # Whether the window being arranged holds the budget's one slot for a
+        # window with no estimate.
+        self._holds_unmeasured_window = False
 
         # Whether anything will ever read the outcomes the window and the
         # message trackers would collect. Both lists cost the payload of
@@ -615,10 +615,13 @@ class PartitionProcessor:
                     await self._note_commit_due()
                     continue
 
-                await self._process_window(messages)
-                if self._account is not None:
-                    # Room this window left goes to the next waiting loop.
-                    self._account.budget.wake_next()
+                try:
+                    await self._process_window(messages)
+                finally:
+                    # The window has fanned out (or failed): what it reserved
+                    # and did not charge goes back, and the next waiting loop
+                    # may take the room.
+                    self._end_window_reservation()
 
             # Queued messages that are not in a window are dropped, not
             # arranged: only in-flight work drains. Their offsets were never
@@ -766,6 +769,8 @@ class PartitionProcessor:
         if self._account is not None and not await self._wait_for_room():
             return []
 
+        # From the room check to the reservation there is no await, so no
+        # other loop can pass on the same room.
         limit = self._admitted_window_size()
         messages = [self._held_message]
         self._held_message = None
@@ -774,75 +779,124 @@ class PartitionProcessor:
                 messages.append(self._queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        self._reserve_window(len(messages))
 
         partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
         window_messages.observe(len(messages))
         return messages
 
-    async def _wait_for_room(self) -> bool:
-        """Wait, at most ``IDLE_POLL_TIMEOUT``, until the pending budget has room.
+    def _estimate(self) -> MessageShape | None:
+        """The averages that size this partition's next window, or ``None`` before any window was measured."""
+        assert self._account is not None
+        if self._shape.measured:
+            return self._shape
+        worker_shape = self._account.budget.shape
+        return worker_shape if worker_shape.measured else None
 
-        True when there is room. False after the time bound or a stop; the
-        loop's place in the budget's FIFO list is kept across the time bound
-        and given up on a stop.
+    def _blocking_limit(self) -> str | None:
+        """Why this loop may not take a window now, or ``None`` when it may.
+
+        The budget must have room. A loop with no estimate also needs the
+        budget's one slot for an unmeasured window; while another loop holds
+        it, the wait is counted under ``tasks`` (the counter has no third
+        label, and it lasts only until the first window of the worker is
+        measured).
+        """
+        assert self._account is not None
+        budget = self._account.budget
+        limit = budget.full_limit()
+        if limit is None and self._estimate() is None and budget.unmeasured_window_open:
+            return TASKS_LIMIT
+        return limit
+
+    async def _wait_for_room(self) -> bool:
+        """Wait, at most ``IDLE_POLL_TIMEOUT``, until this loop may take a window.
+
+        True when it may. False after the time bound or a stop; the loop's
+        place in the budget's FIFO list is kept across the time bound and
+        given up on a stop. A loop that is not waiting yet queues behind the
+        waiters even when there is room, and a woken loop checks the room
+        again: when another loop took it first, it queues again at the front.
         """
         assert self._account is not None
         budget = self._account.budget
         if not self._running:
             return False
-        limit = budget.full_limit()
-        if limit is None:
-            # Room opened without a wake-up for this loop: leave the list, so
-            # the waiter does not take a later wake-up meant for another loop.
-            if self._room_waiter is not None:
-                self._room_waiter.cancel()
-                self._room_waiter = None
-            return True
+        limit = self._blocking_limit()
         if self._room_waiter is None:
+            if limit is None and not budget.has_waiters():
+                return True
             self._room_waiter = budget.add_waiter()
+        if limit is None:
+            # Room exists, but older waiters come first; the oldest is woken now.
+            budget.wake_next()
         waiter = self._room_waiter
         started = time.monotonic()
         # ``asyncio.wait`` does not cancel the waiter on the time bound, so the
         # same waiter keeps its place for the next call.
         done, _ = await asyncio.wait({waiter}, timeout=IDLE_POLL_TIMEOUT)
-        window_admission_wait.labels(limit=limit).inc(time.monotonic() - started)
+        window_admission_wait.labels(limit=limit or TASKS_LIMIT).inc(time.monotonic() - started)
         if not done:
             return False
         self._room_waiter = None
-        return waiter.result()
+        if not waiter.result() or not self._running:
+            return False
+        if self._blocking_limit() is not None:
+            self._room_waiter = budget.add_waiter(front=True)
+            return False
+        return True
 
     def _admitted_window_size(self) -> int:
         """How many messages the next window may take.
 
         ``min(free tasks / average tasks per message, free bytes / average
-        bytes per message)``, clamped to 1 .. window_size. The first window of
-        a partition takes one message. A window takes at least one message, so
-        a loop never waits for ever; the cost is that the limits are soft by
-        one window's fan-out.
+        bytes per message)``, clamped to 1 .. window_size, where the free room
+        already excludes what other windows reserved. With no estimate yet the
+        window takes one message. A window takes at least one message, so a
+        loop never waits for ever; the cost is that the limits are passed by
+        the error of the estimate, about one message.
         """
         if self._account is None:
             return self._window_size
-        if self._avg_tasks_per_message is None:
+        shape = self._estimate()
+        if shape is None:
             return 1
         budget = self._account.budget
         fit = float(self._window_size)
-        if self._avg_tasks_per_message > 0:
-            fit = min(fit, budget.free_tasks / self._avg_tasks_per_message)
-        if self._avg_bytes_per_message > 0:
-            fit = min(fit, budget.free_bytes / self._avg_bytes_per_message)
+        if shape.tasks:
+            fit = min(fit, budget.free_tasks / shape.tasks)
+        if shape.held_bytes > 0:
+            fit = min(fit, budget.free_bytes / shape.held_bytes)
         return max(1, min(self._window_size, int(fit)))
 
-    def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
-        """Fold one window into the moving averages per message."""
-        tasks_per_message = task_count / message_count
-        bytes_per_message = stdin_bytes / message_count
-        if self._avg_tasks_per_message is None:
-            self._avg_tasks_per_message = tasks_per_message
-            self._avg_bytes_per_message = bytes_per_message
+    def _reserve_window(self, message_count: int) -> None:
+        """Reserve the estimated tasks and bytes of a window just taken, or the one unmeasured slot."""
+        if self._account is None:
             return
-        keep = 1.0 - WINDOW_AVERAGE_WEIGHT
-        self._avg_tasks_per_message = keep * self._avg_tasks_per_message + WINDOW_AVERAGE_WEIGHT * tasks_per_message
-        self._avg_bytes_per_message = keep * self._avg_bytes_per_message + WINDOW_AVERAGE_WEIGHT * bytes_per_message
+        shape = self._estimate()
+        if shape is None:
+            self._account.budget.open_unmeasured_window()
+            self._holds_unmeasured_window = True
+            return
+        assert shape.tasks is not None
+        self._account.reserve(message_count * shape.tasks, message_count * shape.held_bytes)
+
+    def _end_window_reservation(self) -> None:
+        """Give back what the window reserved and did not charge, and its unmeasured slot."""
+        if self._account is None:
+            return
+        self._account.end_reservation()
+        if self._holds_unmeasured_window:
+            self._holds_unmeasured_window = False
+            self._account.budget.close_unmeasured_window()
+        else:
+            self._account.budget.wake_next()
+
+    def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
+        """Fold one window's fan-out into this partition's averages and the worker's."""
+        self._shape.note_window(message_count, task_count, stdin_bytes)
+        if self._account is not None:
+            self._account.budget.shape.note_window(message_count, task_count, stdin_bytes)
 
     def _keep_bytes(self, holder: Window | MessageTracker, outcome: Any) -> None:
         """Charge the output of a kept result or error to the budget, on the holder that keeps it."""
@@ -853,9 +907,21 @@ class PartitionProcessor:
         self._account.charge(0, held)
 
     def _release_kept_bytes(self, holder: Window | MessageTracker) -> None:
-        """Give back the output bytes a window or tracker kept, once its hook has run."""
+        """Give back the output bytes a window or tracker kept, once its hook has run.
+
+        The amount also feeds the averages of kept output per message, so the
+        next windows are sized for the output the hooks will keep.
+        """
         if self._account is None or not holder.kept_bytes:
             return
+        worker_shape = self._account.budget.shape
+        if isinstance(holder, Window):
+            message_count = max(1, len(holder.source_messages))
+            self._shape.note_window_kept(message_count, holder.kept_bytes)
+            worker_shape.note_window_kept(message_count, holder.kept_bytes)
+        else:
+            self._shape.note_message_kept(holder.kept_bytes)
+            worker_shape.note_message_kept(holder.kept_bytes)
         self._account.release(0, holder.kept_bytes)
         holder.kept_bytes = 0
 
@@ -988,9 +1054,10 @@ class PartitionProcessor:
         # reach a completed state early.
         #
         # Each task is charged to the pending budget here, by the size of its
-        # stdin at this moment. The size is kept by task id until the last
-        # outcome, so the release gives back exactly what was charged even if
-        # on_error rewrites ``task.stdin`` before a retry.
+        # stdin at this moment, out of the window's reservation. The size is
+        # kept per task object until the last outcome, so the release gives
+        # back exactly what was charged even if on_error rewrites
+        # ``task.stdin`` before a retry.
         window_stdin_bytes = 0
         for start in range(0, len(tasks), FANOUT_CHUNK_TASKS):
             chunk = tasks[start : start + FANOUT_CHUNK_TASKS]
@@ -1008,12 +1075,13 @@ class PartitionProcessor:
                 self._pending_tasks[task.task_id] = task
                 self._inflight_count += 1
                 if self._account is not None:
-                    self._held_stdin_bytes[task.task_id] = held
+                    key = id(task)
+                    self._held_stdin_bytes[key] = self._held_stdin_bytes.get(key, 0) + held
                 t = asyncio.create_task(self._execute_and_track(task, window))
                 self._active_tasks.add(t)
                 t.add_done_callback(self._active_tasks.discard)
             if self._account is not None:
-                self._account.charge(len(chunk), chunk_stdin_bytes)
+                self._account.charge_reserved(len(chunk), chunk_stdin_bytes)
             window_stdin_bytes += chunk_stdin_bytes
             if start + FANOUT_CHUNK_TASKS < len(tasks):
                 await asyncio.sleep(0)
@@ -1430,7 +1498,8 @@ class PartitionProcessor:
                     if self._account is not None:
                         new_held = text_bytes(new_task.stdin)
                         self._account.charge(1, new_held)
-                        self._held_stdin_bytes[new_task.task_id] = new_held
+                        key = id(new_task)
+                        self._held_stdin_bytes[key] = self._held_stdin_bytes.get(key, 0) + new_held
                     self._pending_tasks[new_task.task_id] = new_task
                     window.task_ids.append(new_task.task_id)
                     window.total_tasks += 1
@@ -1499,7 +1568,7 @@ class PartitionProcessor:
                 # hooks see the task without its stdin.
                 task.stdin = None
                 if self._account is not None:
-                    self._account.release(1, self._held_stdin_bytes.pop(task.task_id, 0))
+                    self._account.release(1, self._held_stdin_bytes.pop(id(task), 0))
                 if removed is None:
                     await log.awarning(
                         'task_not_in_pending_on_cleanup',

@@ -10,23 +10,34 @@ HTTP source. It counts two things:
   results kept for ``on_message_complete`` and ``on_window_complete``.
 
 A partition loop takes a new window only while both counts are below their
-limits (``executor.max_pending_tasks``, ``executor.max_pending_bytes``). The
-limits are soft: a loop that has room takes at least one message, and the
-framework sees a message's tasks only after ``arrange`` returned them, so one
-window's fan-out can pass a limit. The HTTP source charges its tasks too (they
-hold the same memory) but never waits here: a budget full of Kafka work must
-not refuse HTTP requests.
+limits (``executor.max_pending_tasks``, ``executor.max_pending_bytes``). When
+it takes one, it **reserves** the window's estimated tasks and bytes at once,
+before it awaits anything: the framework sees a window's tasks only after
+``arrange`` returns them, and without the reservation every loop that checked
+the budget in the meantime would pass on the same room. The fan-out turns the
+reservation into real charges, and what is left is given back when the window
+has fanned out. So the limits are passed only by the error of the estimate,
+about one message for the whole worker.
 
-Every operation is a few integer updates and two gauge writes, cheap enough
-to run once per task at the target rate. Sizes come from ``sys.getsizeof``,
-which is O(1) and is the real memory of a string.
+The estimate comes from moving averages of tasks and bytes per message. Before
+any window of the worker was measured there is no estimate, so only one
+unmeasured window is admitted at a time.
+
+The HTTP source charges its tasks too (they hold the same memory) but never
+waits here: a budget full of Kafka work must not refuse HTTP requests.
+
+Every operation is a few integer updates and two gauge writes, cheap enough to
+run once per task at the target rate. Sizes come from ``sys.getsizeof``, which
+is O(1) and is the real memory of a string.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 from drakkar.metrics import pending_bytes, pending_tasks
@@ -34,6 +45,11 @@ from drakkar.metrics import pending_bytes, pending_tasks
 # The ``limit`` label values of drakkar_window_admission_wait_seconds_total.
 TASKS_LIMIT = 'tasks'
 BYTES_LIMIT = 'bytes'
+
+# Weight of the newest sample in the moving averages per message. 0.3 follows a
+# change of message shape within a few windows without letting one odd window
+# swing the estimate.
+SHAPE_AVERAGE_WEIGHT = 0.3
 
 
 def text_bytes(text: str | None) -> int:
@@ -46,13 +62,63 @@ def output_bytes(outcome: Any) -> int:
     return text_bytes(getattr(outcome, 'stdout', None)) + text_bytes(getattr(outcome, 'stderr', None))
 
 
+def _moving_average(current: float | None, sample: float) -> float:
+    """Fold ``sample`` into ``current``; the first sample is the average."""
+    if current is None:
+        return sample
+    return (1.0 - SHAPE_AVERAGE_WEIGHT) * current + SHAPE_AVERAGE_WEIGHT * sample
+
+
+@dataclass
+class MessageShape:
+    """Moving averages of what one message costs: tasks, stdin bytes and kept output bytes.
+
+    Kept output is averaged in two parts, because a window and a message
+    tracker keep their results apart and a result kept by both counts twice.
+    """
+
+    tasks: float | None = None
+    stdin_bytes: float = 0.0
+    window_kept_bytes: float | None = None
+    message_kept_bytes: float | None = None
+
+    @property
+    def measured(self) -> bool:
+        """Whether a window was measured, so there is an estimate."""
+        return self.tasks is not None
+
+    @property
+    def held_bytes(self) -> float:
+        """Estimated pending bytes of one message: stdin plus the output the hooks keep."""
+        return self.stdin_bytes + (self.window_kept_bytes or 0.0) + (self.message_kept_bytes or 0.0)
+
+    def note_window(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
+        """Fold the fan-out of one window into the averages."""
+        previous_stdin = self.stdin_bytes if self.measured else None
+        self.tasks = _moving_average(self.tasks, task_count / message_count)
+        self.stdin_bytes = _moving_average(previous_stdin, stdin_bytes / message_count)
+
+    def note_window_kept(self, message_count: int, kept_bytes: int) -> None:
+        """Fold the output a window kept for on_window_complete into the averages."""
+        self.window_kept_bytes = _moving_average(self.window_kept_bytes, kept_bytes / message_count)
+
+    def note_message_kept(self, kept_bytes: int) -> None:
+        """Fold the output a message tracker kept for on_message_complete into the averages."""
+        self.message_kept_bytes = _moving_average(self.message_kept_bytes, kept_bytes)
+
+
 class PendingBudget:
     """Counts pending tasks and held bytes against two limits, and queues loops that wait for room.
 
+    ``tasks`` and ``bytes`` are what is charged now (the gauges show them).
+    Reservations count against the limits too (``full_limit``, ``free_tasks``,
+    ``free_bytes``), so a window that is being arranged takes its room before
+    its tasks exist.
+
     Waiters are futures in a FIFO list. A release that leaves room wakes the
-    oldest waiter that is still waiting; a loop that took a window calls
-    :meth:`wake_next` so that room left after its window goes to the next
-    waiter rather than staying idle.
+    oldest waiter that is still waiting; a woken loop checks the room again
+    before it takes a window, and queues again at the front if the room is
+    gone.
     """
 
     def __init__(self, *, max_tasks: int, max_bytes: int) -> None:
@@ -60,40 +126,70 @@ class PendingBudget:
         self.max_bytes = max_bytes
         self._tasks = 0
         self._bytes = 0
+        self._reserved_tasks = 0
+        self._reserved_bytes = 0
+        # The worker-wide averages: a partition's first window is sized by them.
+        self.shape = MessageShape()
+        self._unmeasured_window_open = False
         self._waiters: deque[asyncio.Future[bool]] = deque()
         self._publish()
 
     @property
     def tasks(self) -> int:
-        """Pending tasks now."""
+        """Pending tasks charged now."""
         return self._tasks
 
     @property
     def bytes(self) -> int:
-        """Pending bytes now."""
+        """Pending bytes charged now."""
         return self._bytes
 
     @property
+    def reserved_tasks(self) -> int:
+        """Tasks reserved for windows that are being arranged."""
+        return self._reserved_tasks
+
+    @property
+    def reserved_bytes(self) -> int:
+        """Bytes reserved for windows that are being arranged."""
+        return self._reserved_bytes
+
+    @property
     def free_tasks(self) -> int:
-        """Tasks that fit under the task limit now, never below 0."""
-        return max(0, self.max_tasks - self._tasks)
+        """Tasks that fit under the task limit now, reservations included, never below 0."""
+        return max(0, self.max_tasks - self._tasks - self._reserved_tasks)
 
     @property
     def free_bytes(self) -> int:
-        """Bytes that fit under the byte limit now, never below 0."""
-        return max(0, self.max_bytes - self._bytes)
+        """Bytes that fit under the byte limit now, reservations included, never below 0."""
+        return max(0, self.max_bytes - self._bytes - self._reserved_bytes)
 
     def full_limit(self) -> str | None:
-        """The limit that is reached, or ``None`` when there is room.
+        """The limit that is reached, reservations included, or ``None`` when there is room.
 
         The task limit is named first when both are reached: one label per
         wait keeps the wait counter a plain sum of seconds.
         """
-        if self._tasks >= self.max_tasks:
+        if self._tasks + self._reserved_tasks >= self.max_tasks:
             return TASKS_LIMIT
-        if self._bytes >= self.max_bytes:
+        if self._bytes + self._reserved_bytes >= self.max_bytes:
             return BYTES_LIMIT
         return None
+
+    @property
+    def unmeasured_window_open(self) -> bool:
+        """Whether a window with no estimate is being arranged; a second one waits."""
+        return self._unmeasured_window_open
+
+    def open_unmeasured_window(self) -> None:
+        """Mark the one window with no estimate as taken."""
+        self._unmeasured_window_open = True
+
+    def close_unmeasured_window(self) -> None:
+        """The window with no estimate has fanned out; the next one may go."""
+        self._unmeasured_window_open = False
+        if self._waiters:
+            self.wake_next()
 
     def charge(self, tasks: int, held_bytes: int) -> None:
         """Count ``tasks`` more pending tasks and ``held_bytes`` more held bytes."""
@@ -109,16 +205,43 @@ class PendingBudget:
         if self._waiters:
             self.wake_next()
 
-    def add_waiter(self) -> asyncio.Future[bool]:
-        """Queue a waiter at the end of the FIFO list.
+    def reserve(self, tasks: int, held_bytes: int) -> None:
+        """Hold room for a window whose tasks do not exist yet."""
+        self._reserved_tasks += tasks
+        self._reserved_bytes += held_bytes
+
+    def unreserve(self, tasks: int, held_bytes: int) -> None:
+        """Give back reserved room; wake a waiter when room opens."""
+        self._reserved_tasks -= tasks
+        self._reserved_bytes -= held_bytes
+        if self._waiters:
+            self.wake_next()
+
+    def convert(self, reserved_tasks: int, reserved_bytes: int, tasks: int, held_bytes: int) -> None:
+        """Turn part of a reservation into charges: the room taken never shrinks in between, so nobody is woken."""
+        self._reserved_tasks -= reserved_tasks
+        self._reserved_bytes -= reserved_bytes
+        self.charge(tasks, held_bytes)
+
+    def add_waiter(self, *, front: bool = False) -> asyncio.Future[bool]:
+        """Queue a waiter, at the end of the FIFO list or, for a loop that lost its room, at the front.
 
         The future resolves ``True`` when room opens for it. Its owner may
-        resolve it ``False`` to leave (a stop), or cancel it when it no longer
-        waits; either way the budget skips it.
+        resolve it ``False`` to leave (a stop), or cancel it; either way the
+        budget skips it.
         """
         waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._waiters.append(waiter)
+        if front:
+            self._waiters.appendleft(waiter)
+        else:
+            self._waiters.append(waiter)
         return waiter
+
+    def has_waiters(self) -> bool:
+        """Whether a loop still waits in the FIFO list."""
+        while self._waiters and self._waiters[0].done():
+            self._waiters.popleft()
+        return bool(self._waiters)
 
     def wake_next(self) -> None:
         """Wake the oldest waiter that still waits, when there is room."""
@@ -138,17 +261,19 @@ class PendingBudget:
 class BudgetAccount:
     """One holder's share of a :class:`PendingBudget`: a partition processor, or one HTTP request.
 
-    Every charge and release goes through the account, so the holder can give
-    back what it still holds in one call (:meth:`close`) when it stops. A task
-    cancelled before its coroutine ever ran settles nothing, and a cancelled
-    window never finishes; without the account their counts would stay in the
-    budget for the life of the worker.
+    Every charge, release and reservation goes through the account, so the
+    holder can give back what it still holds in one call (:meth:`close`) when
+    it stops. A task cancelled before its coroutine ever ran settles nothing,
+    and a cancelled window never finishes; without the account their counts
+    would stay in the budget for the life of the worker.
     """
 
     def __init__(self, budget: PendingBudget) -> None:
         self.budget = budget
         self._tasks = 0
         self._bytes = 0
+        self._reserved_tasks = 0
+        self._reserved_bytes = 0
 
     def charge(self, tasks: int, held_bytes: int) -> None:
         """Charge the budget and remember the share."""
@@ -162,8 +287,35 @@ class BudgetAccount:
         self._bytes -= held_bytes
         self.budget.release(tasks, held_bytes)
 
+    def reserve(self, estimated_tasks: float, estimated_bytes: float) -> None:
+        """Reserve the estimate of a window, rounded up."""
+        tasks = math.ceil(estimated_tasks)
+        held_bytes = math.ceil(estimated_bytes)
+        self._reserved_tasks += tasks
+        self._reserved_bytes += held_bytes
+        self.budget.reserve(tasks, held_bytes)
+
+    def charge_reserved(self, tasks: int, held_bytes: int) -> None:
+        """Charge tasks of a reserved window: the reservation shrinks by as much, never below 0."""
+        from_tasks = min(self._reserved_tasks, tasks)
+        from_bytes = min(self._reserved_bytes, held_bytes)
+        self._reserved_tasks -= from_tasks
+        self._reserved_bytes -= from_bytes
+        self._tasks += tasks
+        self._bytes += held_bytes
+        self.budget.convert(from_tasks, from_bytes, tasks, held_bytes)
+
+    def end_reservation(self) -> None:
+        """Give back what is left of the reservation once the window has fanned out (or failed)."""
+        tasks, held_bytes = self._reserved_tasks, self._reserved_bytes
+        if tasks or held_bytes:
+            self._reserved_tasks = 0
+            self._reserved_bytes = 0
+            self.budget.unreserve(tasks, held_bytes)
+
     def close(self) -> None:
-        """Release everything the account still holds. Idempotent."""
+        """Release everything the account still holds, reservations included. Idempotent."""
+        self.end_reservation()
         tasks, held_bytes = self._tasks, self._bytes
         if tasks or held_bytes:
             self.release(tasks, held_bytes)

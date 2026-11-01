@@ -622,6 +622,9 @@ class KafkaSource:
                 hint='the partition loop died; the partition stays paused until restart or revoke',
             )
         except Exception as e:
+            # Not marked as paused, so the next poll turn tries again: a dead
+            # partition left fetching fills a queue that nothing reads.
+            self.dead_partitions_paused.difference_update(newly_dead)
             logger.error(
                 'partition_death_pause_failed',
                 category='lifecycle',
