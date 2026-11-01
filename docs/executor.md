@@ -228,8 +228,10 @@ and sizing.
 - A partition loop takes a new window only while both pending counts are
   below their limits. Otherwise it waits; a release that makes room wakes the
   oldest waiting loop first.
-- The limits are soft: a loop with room takes at least one message, and one
-  window's fan-out can pass a limit. The `drakkar_pending_tasks` and
+- A loop that takes a window reserves its estimated tasks and bytes at once,
+  so other loops see the room as taken while `arrange()` runs. The limits are
+  passed only by the error of the estimate: about one message for the whole
+  worker. The `drakkar_pending_tasks` and
   `drakkar_pending_bytes` gauges show the real counts.
 - The Kafka fetch pauses when the queues of the live partitions hold
   `max_queued_messages` messages and resumes at half of it. Stalled and dead
@@ -258,7 +260,7 @@ Messages are collected into windows before being passed to [arrange()](handler.m
 
 1. The partition processor waits for the first message (blocks up to 1 second).
 2. It waits until the worker has room under `max_pending_tasks` and `max_pending_bytes` (each wait at most 1 second, then the loop retries a commit and comes back).
-3. It drains more messages from the queue without blocking, up to the admitted size: `min(free tasks / average tasks per message, free bytes / average stdin bytes per message)`, at least 1 and at most `window_size`. The first window of a partition takes one message.
+3. It drains more messages from the queue without blocking, up to the admitted size: `min(free tasks / average tasks per message, free bytes / average bytes per message)` (bytes = stdin plus the output the hooks keep; the free room excludes other windows' reservations), at least 1 and at most `window_size`. The estimate is reserved at once. A partition's first window uses the worker's averages; the worker's first window takes one message.
 4. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
 5. All tasks in the window are launched concurrently.
 6. The window tracks `completed_count` vs `total_tasks` to know when it is done.
@@ -542,7 +544,7 @@ executor:
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
 | `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns, and what a spent retry budget and a raising `on_error` become. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `executor.drain_timeout` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
-| `max_pending_tasks` | `int` | `2000` | `max_executors` | New windows wait while this many tasks are created and not settled. A soft limit: one window's fan-out can pass it. Below `max_executors` the load fails: `executor.max_pending_tasks (<n>) must be >= executor.max_executors (<m>)`. |
+| `max_pending_tasks` | `int` | `2000` | `max_executors` | New windows wait while this many tasks are created and not settled. A soft limit: it can be passed by about one message for the whole worker. Below `max_executors` the load fails: `executor.max_pending_tasks (<n>) must be >= executor.max_executors (<m>)`. |
 | `max_pending_bytes` | size | `1GiB` | `16MiB` | New windows wait while task stdin plus kept task output reach this size. A soft limit, like `max_pending_tasks`. |
 
 Environment variable overrides use the `DK_EXECUTOR__` prefix:

@@ -486,37 +486,51 @@ budget full of Kafka work must not refuse HTTP requests.
 The `drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the
 actual numbers, not the limits.
 
-### The limits are soft
+### Reservation, and how far a limit can be passed
 
-A loop that has room always takes at least one message, and the framework
-sees a message's tasks only after `arrange()` has returned them. So one
-window's fan-out can pass a limit:
+The framework sees a window's tasks only after `arrange()` has returned
+them. So when a loop takes a window, it **reserves** the window's estimated
+tasks and bytes at once, before `arrange()` runs: the number of messages
+times the moving averages per message. The reservation counts against the
+limits, so other loops see the room as taken while the window is arranged.
+As the window fans out, its tasks are charged out of the reservation; what
+is left is given back when the fan-out ends (also when `arrange()` raises or
+returns no tasks).
 
-- With a steady fan-out the overshoot is about one message's tasks.
+A limit is passed only by the error of the estimate:
+
+- With a steady fan-out the overshoot is about one message, for the whole
+  worker — not one window per partition.
 - With a fan-out that jumps — one message of 100 000 tasks after messages of
-  10 — the overshoot is that one message.
+  10 — the overshoot is that one message. The framework cannot bound one
+  message: `arrange()` builds its list before the framework sees it.
+- Before the worker has measured any window there is no estimate, so only one
+  window with no estimate is arranged at a time; it takes one message.
 
-Each partition loop can overshoot by one window, so with many partitions the
-peak is the limit plus one window per partition that found room at the same
-moment. Watch `drakkar_pending_tasks` and `drakkar_pending_bytes` for the
-real peak; size the limits with that margin.
+The reservation is not shown by the gauges: `drakkar_pending_tasks` and
+`drakkar_pending_bytes` show the tasks and bytes that exist.
 
 ### Window size adapts to the room
 
-Each partition keeps a moving average (weight 0.3 for the newest window) of
-tasks per message and of stdin bytes per message. The next window takes
+Each partition keeps moving averages (weight 0.3 for the newest sample) of
+what one message costs: tasks, stdin bytes, and the output bytes the message
+and window hooks keep. The worker keeps the same averages over all
+partitions. The next window takes
 
 ```
 n = clamp(min(free_tasks / avg_tasks, free_bytes / avg_bytes), 1, window_size)
 ```
 
-messages. The first window of a partition takes one message, so the averages
-start from a measurement. `drakkar_window_messages` shows the window sizes
-that were taken.
+messages, where `avg_bytes` is stdin plus kept output per message and the
+free room excludes what other windows reserved. A partition's first window
+uses the worker's averages; the worker's first window takes one message.
+`drakkar_window_messages` shows the window sizes that were taken.
 
-A loop that has no room waits in a first-in, first-out list. A release that
-makes room wakes the oldest waiter. The wait is cut every second, so the loop
-still retries an outstanding commit and sees a stop. The time spent waiting
+A loop that has no room waits in a first-in, first-out list; a loop that
+arrives while others wait queues behind them even if there is room. A
+release that makes room wakes the oldest waiter, which checks the room again
+and queues again at the front if another loop took it. The wait is cut every
+second, so the loop still retries an outstanding commit and sees a stop. The time spent waiting
 goes to `drakkar_window_admission_wait_seconds_total{limit}` (`tasks` or
 `bytes`, the limit that was reached; `tasks` when both were).
 
@@ -551,8 +565,11 @@ and `on_http_request_complete` see `None`.
 | `executor.max_pending_bytes` | `1GiB` | About a quarter of the container memory. With 700 KB of stdin per task, 1 GiB stops admission at about 1 500 tasks, so the byte limit is the one that binds. |
 | `sources.kafka.max_queued_messages` | `1000` | At least `max_poll_records`. Polled messages cost only their Kafka payload; this bounds how many wait for a window. |
 
-A worker with the defaults holds about 1 GiB of stdin and kept output, plus
-about 2 MB per running task.
+A worker with the defaults holds at most about 1 GiB of stdin and kept
+output plus one message's worth (with 1000 tasks of 700 KB per message, one
+message is about 700 MB, so the peak is about 1.7 GB), plus about 2 MB per
+running task for the copies a running task makes. Size the container for
+that peak, not for the limit alone.
 
 ### The Kafka pause
 

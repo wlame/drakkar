@@ -408,7 +408,7 @@ Revoked partitions' `PartitionProcessor`s drain their in-flight windows then sto
 
 ### How does backpressure work?
 
-In two stages. A partition loop takes a new `arrange()` window only while the worker's pending tasks are below `executor.max_pending_tasks` and the pending bytes (task stdin plus output kept for the message and window hooks) below `executor.max_pending_bytes`. When loops stop taking windows, the partition queues fill, and the poll loop pauses the Kafka consumer once `sources.kafka.max_queued_messages` messages wait; it resumes at half of that. The limits are soft by one window's fan-out. See [Backpressure](performance.md#backpressure).
+In two stages. A partition loop takes a new `arrange()` window only while the worker's pending tasks are below `executor.max_pending_tasks` and the pending bytes (task stdin plus output kept for the message and window hooks) below `executor.max_pending_bytes`. When loops stop taking windows, the partition queues fill, and the poll loop pauses the Kafka consumer once `sources.kafka.max_queued_messages` messages wait; it resumes at half of that. A window reserves its estimate when it is taken, so the limits are passed by about one message for the whole worker. See [Backpressure](performance.md#backpressure).
 
 ### What's the difference between the recorder DB and the cache DB?
 

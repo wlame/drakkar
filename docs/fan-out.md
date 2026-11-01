@@ -408,16 +408,17 @@ async def on_window_complete(self, results, source_messages):
 
 A partition loop takes a new window only while the worker has room under
 `executor.max_pending_tasks` and `executor.max_pending_bytes`. The window
-size adapts: each partition keeps a moving average of tasks and stdin bytes
-per message and takes as many messages as fit in the free room (at least
-one, at most `window_size`; the first window takes one).
+size adapts: moving averages of tasks, stdin bytes and kept output bytes per
+message give how many messages fit in the free room (at least one, at most
+`window_size`). When the loop takes the window, it reserves the estimate at
+once, so other loops see that room as taken while `arrange()` runs; the
+fan-out charges the real tasks out of the reservation.
 
 The framework sees a message's tasks only after `arrange()` has returned
-them, so it cannot bound one message. A window that had room is taken
-whole, and its fan-out can pass the limits: with a steady fan-out by about
-one message's tasks, and with a fan-out that jumps (one message of 100 000
-tasks after messages of 10) by that one message. Each partition loop can
-overshoot by one window. The `drakkar_pending_tasks` and
+them, so it cannot bound one message. A limit is passed only by the error of
+the estimate: with a steady fan-out by about one message for the whole
+worker, and with a fan-out that jumps (one message of 100 000 tasks after
+messages of 10) by that one message. The `drakkar_pending_tasks` and
 `drakkar_pending_bytes` gauges show the real counts. See
 [Performance: Backpressure](performance.md#backpressure).
 

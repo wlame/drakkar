@@ -128,8 +128,9 @@ executor:
   drain_timeout: 30s               # graceful-shutdown wait for in-flight tasks, whole seconds. env: DK_EXECUTOR__DRAIN_TIMEOUT
 
   # Window admission: a partition loop takes a new arrange() window only while
-  # both pending counts are below their limits. Soft limits: one window's fan-out
-  # can pass them; drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
+  # both pending counts are below their limits, and reserves its estimate at once.
+  # Soft limits: passed by about one message for the whole worker;
+  # drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
   max_pending_tasks: 2000          # unsettled tasks (waiting, running, in on_task_complete). env: DK_EXECUTOR__MAX_PENDING_TASKS  · >= max_executors
   max_pending_bytes: 1GiB          # task stdin + output kept for on_message_complete / on_window_complete.
                                    #   env: DK_EXECUTOR__MAX_PENDING_BYTES  · >= 16MiB; about a quarter of container memory
