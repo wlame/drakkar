@@ -213,29 +213,39 @@ If `task_priority` raises, the framework logs a warning, ticks `drakkar_executor
 
 Tasks with `precomputed` set bypass the gate entirely (no slot, no priority) -- they were already shaped by the handler at `arrange()` time and run instantly.
 
-### Kafka Consumer Backpressure
+### Window admission and Kafka backpressure
 
-The framework pauses and resumes the Kafka consumer based on total queued work across all partition processors. See [Performance Tuning](performance.md#backpressure) for tuning recommendations. Two watermarks control the behavior:
+Two limits keep the work a worker holds bounded. See
+[Performance: Backpressure](performance.md#backpressure) for the memory model
+and sizing.
 
-| Watermark | Formula | Default (max_executors=4) |
-|-----------|---------|-------------------------|
-| **High** (pause) | `max_executors` x `backpressure_high_multiplier` | 4 x 32 = **128** |
-| **Low** (resume) | max(1, `max_executors` x `backpressure_low_multiplier`) | max(1, 4 x 4) = **16** |
+| Key | Default | What it bounds |
+|-----|---------|----------------|
+| `executor.max_pending_tasks` | `2000` | Tasks created and not yet settled (waiting for a slot, running, or in `on_task_complete` and its delivery). Must be at least `max_executors`. |
+| `executor.max_pending_bytes` | `1GiB` | The stdin of those tasks plus the stdout and stderr kept for `on_message_complete` and `on_window_complete`. At least `16MiB`. |
+| `sources.kafka.max_queued_messages` | `1000` | Polled messages waiting in partition queues. Must be at least `max_poll_records`. |
 
-The total queued count is the sum of `queue_size + inflight_count` across all active partition processors.
-
-- **When total queued >= high watermark**: the consumer is paused (all assigned partitions stop receiving messages).
-- **When total queued <= low watermark**: the consumer is resumed.
-
-The gap between high and low watermarks (hysteresis) prevents rapid pause/resume oscillation. Pause and resume always operate on all assigned partitions simultaneously.
+- A partition loop takes a new window only while both pending counts are
+  below their limits. Otherwise it waits; a release that makes room wakes the
+  oldest waiting loop first.
+- The limits are soft: a loop with room takes at least one message, and one
+  window's fan-out can pass a limit. The `drakkar_pending_tasks` and
+  `drakkar_pending_bytes` gauges show the real counts.
+- The Kafka fetch pauses when the queues of the live partitions hold
+  `max_queued_messages` messages and resumes at half of it. Stalled and dead
+  partitions stay paused.
+- HTTP requests count in the pending budget but never wait for it.
 
 ### Configuration
 
 ```yaml
 executor:
   max_executors: 8
-  backpressure_high_multiplier: 32   # pause at 8 * 32 = 256 queued
-  backpressure_low_multiplier: 4     # resume at 8 * 4 = 32 queued
+  max_pending_tasks: 2000      # new windows wait at 2000 unsettled tasks
+  max_pending_bytes: 1GiB      # ... or at 1 GiB of stdin and kept output
+sources:
+  kafka:
+    max_queued_messages: 1000  # pause the fetch at 1000 queued messages, resume at 500
 ```
 
 ---
@@ -247,11 +257,12 @@ Messages are collected into windows before being passed to [arrange()](handler.m
 ### Window Lifecycle
 
 1. The partition processor waits for the first message (blocks up to 1 second).
-2. It drains any additional messages from the queue without blocking, up to `window_size`.
-3. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
-4. All tasks in the window are launched concurrently.
-5. The window tracks `completed_count` vs `total_tasks` to know when it is done.
-6. As each source message's tasks all reach a terminal state, [on_message_complete()](handler.md#on_message_complete) is called for that message, the offset is marked complete, and a [commit is attempted](handler.md#offset-commit-logic). When every task in the window has finished, [on_window_complete()](handler.md#on_window_complete) fires once for the whole batch.
+2. It waits until the worker has room under `max_pending_tasks` and `max_pending_bytes` (each wait at most 1 second, then the loop retries a commit and comes back).
+3. It drains more messages from the queue without blocking, up to the admitted size: `min(free tasks / average tasks per message, free bytes / average stdin bytes per message)`, at least 1 and at most `window_size`. The first window of a partition takes one message.
+4. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
+5. All tasks in the window are launched concurrently.
+6. The window tracks `completed_count` vs `total_tasks` to know when it is done.
+7. As each source message's tasks all reach a terminal state, [on_message_complete()](handler.md#on_message_complete) is called for that message, the offset is marked complete, and a [commit is attempted](handler.md#offset-commit-logic). When every task in the window has finished, [on_window_complete()](handler.md#on_window_complete) fires once for the whole batch.
 
 ### Concurrent Windows
 
@@ -516,8 +527,8 @@ executor:
   max_retries: 3                           # retry limit per failed task
   on_failure: skip                         # skip | dlq: what the default on_error returns
   drain_timeout: 30s                       # max wait for in-flight tasks on shutdown
-  backpressure_high_multiplier: 32         # pause consumer at max_executors * this
-  backpressure_low_multiplier: 4           # resume consumer at max_executors * this
+  max_pending_tasks: 2000                  # new windows wait while this many tasks are unsettled
+  max_pending_bytes: 1GiB                  # ... or while this much stdin and kept output is held
 ```
 
 | Field | Type | Default | Min | Description |
@@ -531,8 +542,8 @@ executor:
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
 | `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns, and what a spent retry budget and a raising `on_error` become. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `executor.drain_timeout` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
-| `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
-| `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
+| `max_pending_tasks` | `int` | `2000` | `max_executors` | New windows wait while this many tasks are created and not settled. A soft limit: one window's fan-out can pass it. Below `max_executors` the load fails: `executor.max_pending_tasks (<n>) must be >= executor.max_executors (<m>)`. |
+| `max_pending_bytes` | size | `1GiB` | `16MiB` | New windows wait while task stdin plus kept task output reach this size. A soft limit, like `max_pending_tasks`. |
 
 Environment variable overrides use the `DK_EXECUTOR__` prefix:
 

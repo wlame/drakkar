@@ -83,8 +83,13 @@ Prometheus needed for a quick read.
 | `drakkar_partition_queue_size` | Gauge | `partition` | Messages waiting in the partition's internal queue |
 | `drakkar_offset_lag` | Gauge | `partition` | Pending (uncommitted) offsets per partition |
 | `drakkar_partition_processor_deaths_total` | Counter | `partition`, `outcome` | Partition loops that exited on an unexpected error. `outcome="restarted"` came back; `outcome="dead"` gave up and now fails `/readyz`. Alert on any non-zero rate — see [Deployment](deployment.md#dead-partition-loops) |
-| `drakkar_backpressure_active` | Gauge | -- | Whether the consumer is paused due to [backpressure](performance.md#backpressure). `1` = paused, `0` = flowing |
+| `drakkar_backpressure_active` | Gauge | -- | Whether Kafka fetching is paused because queued messages reached `sources.kafka.max_queued_messages` (see [backpressure](performance.md#backpressure)). `1` = paused, `0` = flowing |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
+| `drakkar_pending_tasks` | Gauge | -- | Tasks created and not yet settled: waiting for an executor slot, running, or in `on_task_complete` and its delivery. The actual count; new windows wait while it is at `executor.max_pending_tasks`, and one window's fan-out can take it past the limit |
+| `drakkar_pending_bytes` | Gauge | -- | Bytes held for pending tasks and kept results: task stdin plus stdout and stderr kept for `on_message_complete` and `on_window_complete`. The actual count; new windows wait while it is at `executor.max_pending_bytes` |
+| `drakkar_window_admission_wait_seconds_total` | Counter | `limit` | Seconds partition loops waited for room under `executor.max_pending_tasks` (`limit="tasks"`) or `executor.max_pending_bytes` (`limit="bytes"`) before taking a window. `tasks` when both were reached |
+| `drakkar_window_messages` | Histogram | -- | Messages taken into one `arrange()` window. Buckets 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000 |
+| `drakkar_queued_messages_dropped_at_stop_total` | Counter | -- | Polled messages left unarranged at stop or revoke; the next owner of the partition reads them again |
 | `drakkar_assigned_partitions` | Gauge | -- | Number of partitions currently assigned to this worker |
 | `drakkar_executor_idle_slot_seconds_total` | Counter | -- | Accumulated slot-seconds of executor idle time while messages are waiting in queues. If 2 slots sit idle for 3 seconds while messages are queued, this increments by 6. Only counts when messages are in queues (not yet dispatched), not when the worker has nothing to do. |
 | `drakkar_consumer_idle_seconds_total` | Counter | -- | Accumulated seconds with no messages available from Kafka and nothing in queues. Measures time the worker has genuinely nothing to do (consumer lag is zero). Does not count time when the consumer is paused due to backpressure. |

@@ -235,11 +235,12 @@ kicks the consumer out of the group and triggers rebalance.
 
 ### Backpressure
 
-**`backpressure_high_multiplier`** and **`low_multiplier`** control the
-pause/resume hysteresis. `high_watermark = max_executors * high_mult`.
-Fast tasks drain quickly and need less buffer. Slow tasks need more
-buffer but should not over-fetch (each message is minutes of work).
-The gap between high and low prevents rapid pause/resume cycling.
+The calculator leaves the backpressure keys at their defaults.
+`executor.max_pending_tasks` (2000) and `executor.max_pending_bytes`
+(1GiB) bound the tasks a worker holds; `sources.kafka.max_queued_messages`
+(1000) bounds the polled messages that wait for a window. Lower
+`max_pending_bytes` when tasks carry large stdin: about a quarter of the
+container memory. See [Performance](performance.md#backpressure).
 
 ### Duration thresholds
 

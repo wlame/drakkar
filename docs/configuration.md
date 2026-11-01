@@ -503,6 +503,7 @@ that entry.
 | `topic` | `str` | `'input-events'` | The Kafka topic to consume messages from. |
 | `consumer_group` | `str` | `'drakkar-workers'` | Consumer group ID. All workers in the same group share partition assignments. |
 | `max_poll_records` | `int` | `100` | Maximum number of messages returned per poll batch. Higher values improve throughput; lower values reduce latency. |
+| `max_queued_messages` | `int` | `1000` | Kafka fetching pauses when this many polled messages wait in the queues of live partitions, and resumes at half of it. Must be at least `max_poll_records`: the load fails with `sources.kafka.max_queued_messages (<n>) must be >= sources.kafka.max_poll_records (<m>)` when the source is enabled. A dead or stalled partition stays paused, and a dead partition's queue does not count. |
 | `max_poll_interval` | duration | `5m` | Maximum time between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
 | `session_timeout` | duration | `45s` | Session timeout for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
 | `heartbeat_interval` | duration | `3s` | Interval between heartbeats sent to the broker. Should be less than `session_timeout / 3`. |
@@ -638,24 +639,17 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
 | `on_failure` | `'skip'` \| `'dlq'` | `'skip'` | | What the default [on_error()](handler.md#on_error) returns for a failed task. `dlq` writes the task's source messages to the DLQ (`dk-stage: execute`), and no later delivery of those messages starts. Any other value fails the load with `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `drain_timeout` | duration | `30s` | whole seconds, >= `1s` | Longest wait for in-flight tasks during shutdown or partition revocation. When drain times out, the still-running tasks are cancelled (their subprocess process group is killed) and their offsets are **not** committed — those messages replay on restart (at-least-once). Tune together with `task_timeout`. |
-| `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
-| `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
+| `max_pending_tasks` | `int` | `2000` | >= `max_executors` | New windows wait while this many tasks are created and not settled (waiting for a slot, running, or in `on_task_complete` and its delivery). Below `max_executors` the load fails with `executor.max_pending_tasks (<n>) must be >= executor.max_executors (<m>)`. A soft limit: one window's fan-out can pass it. |
+| `max_pending_bytes` | size | `1GiB` | >= `16MiB` | New windows wait while task stdin plus the stdout and stderr kept for `on_message_complete` and `on_window_complete` reach this size. A soft limit, like `max_pending_tasks`. Size it to about a quarter of the container memory. |
 
-### Backpressure Formula
+### Backpressure
 
-[Backpressure](performance.md#backpressure) prevents unbounded memory growth by pausing Kafka consumption when too many messages are buffered:
-
-```
-high_watermark = max_executors * backpressure_high_multiplier
-low_watermark  = max(1, max_executors * backpressure_low_multiplier)
-```
-
-With defaults (`max_executors=4`):
-
-- **High watermark** = 4 * 32 = **128** -- pause consumption
-- **Low watermark** = max(1, 4 * 4) = **16** -- resume consumption
-
-The gap between high and low watermarks prevents rapid pause/resume oscillation (hysteresis).
+[Backpressure](performance.md#backpressure) bounds the work a worker holds in
+two stages. A partition loop takes a new window only while the pending tasks
+are below `max_pending_tasks` and the pending bytes below
+`max_pending_bytes`. When loops stop taking windows, the partition queues
+fill; the Kafka fetch pauses when the queues of the live partitions hold
+`sources.kafka.max_queued_messages` messages and resumes at half of it.
 
 ```yaml
 executor:
@@ -665,8 +659,8 @@ executor:
   window_size: 50
   max_retries: 5
   drain_timeout: 10s
-  backpressure_high_multiplier: 16
-  backpressure_low_multiplier: 2
+  max_pending_tasks: 1000
+  max_pending_bytes: 512MiB
 ```
 
 ---

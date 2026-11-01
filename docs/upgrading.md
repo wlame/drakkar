@@ -35,6 +35,10 @@ changes these things:
   and a worker name must be a safe word.
 - Plugins, `periodic.tasks`, the throughput feature and the `static` registry are
   removed.
+- Backpressure counts tasks and bytes: new windows wait for room under
+  `executor.max_pending_tasks` and `executor.max_pending_bytes`, and the Kafka
+  fetch pauses at `sources.kafka.max_queued_messages`. The two
+  `executor.backpressure_*_multiplier` keys are removed.
 
 ### 1. Plan the upgrade {#plan}
 
@@ -197,7 +201,8 @@ what is left.
 7. **Delete the removed keys:** `sinks.custom`, `throughput`, `periodic`,
    `fleet.registry.static`, `fleet.registry.filesystem.dir`, `fleet.registry.consul.mode`,
    `fleet.registry.consul.service_name`, `fleet.registry.redis`,
-   `fleet.registry.postgres`, every `plugin_options`, and the top-level `webapp:` section
+   `fleet.registry.postgres`, every `plugin_options`, `executor.backpressure_high_multiplier`,
+   `executor.backpressure_low_multiplier`, and the top-level `webapp:` section
    (it is `sources.http`).
 8. **Start a worker.** Read the message, fix the keys it lists, start again. Then read
    [Check the result](#check).
@@ -290,8 +295,8 @@ that says "unchanged" keeps its path, its default and its meaning.
 | `executor.max_retries` | unchanged |  |
 | `executor.on_failure` | unchanged |  |
 | `executor.drain_timeout_seconds` | `executor.drain_timeout` | `30` is `30s`; whole seconds |
-| `executor.backpressure_high_multiplier` | unchanged |  |
-| `executor.backpressure_low_multiplier` | unchanged |  |
+| `executor.backpressure_high_multiplier` | removed | The Kafka fetch pauses at `sources.kafka.max_queued_messages` queued messages (default `1000`); windows wait at `executor.max_pending_tasks` and `executor.max_pending_bytes`. See [Backpressure in tasks and bytes](#backpressure). |
+| `executor.backpressure_low_multiplier` | removed | The fetch resumes at half of `sources.kafka.max_queued_messages`. Delete the key. |
 | `sinks.kafka.*.on_failure` | unchanged | also takes `delivery_timeout`, `breaker_failures` and `breaker_cooldown` on the instance |
 | `sinks.kafka.*.max_retries` | unchanged |  |
 | `sinks.kafka.*.depends_on` | unchanged |  |
@@ -596,6 +601,9 @@ These keys have no old key. The defaults work for most deployments.
 | `recorder.postgres.max_output`, `recorder.postgres.max_size` | `64KiB`, `0` | Limits of the Postgres history: one output value, and the whole table. |
 | `autodiscover.enabled` | `false` | Turns on the registry and the election. |
 | `api.enabled` | `true` | Runs the HTTP server. |
+| `executor.max_pending_tasks` | `2000` | New windows wait while this many tasks are created and not settled. At least `executor.max_executors`. |
+| `executor.max_pending_bytes` | `1GiB` | New windows wait while task stdin plus kept task output reach this size. At least `16MiB`. |
+| `sources.kafka.max_queued_messages` | `1000` | The Kafka fetch pauses at this many queued messages and resumes at half. At least `sources.kafka.max_poll_records`. |
 
 ### 5. What changes in behaviour {#behaviour}
 
@@ -1025,6 +1033,49 @@ for a file of an orphan folder. **New metric:** `drakkar_recorder_orphan_failure
 takes `sibling_dir` and `worker_online`; its `storage_dir` is the own folder.
 `DrakkarApp.own_storage_dir` gives that folder.
 
+#### Backpressure in tasks and bytes {#backpressure}
+
+Before this release the poll loop added queued messages and in-flight tasks
+into one number and paused at `max_executors x backpressure_high_multiplier`
+(128 by default). One message with a fan-out of 1000 tasks passed it, and one
+window of 100 messages could hold 100 000 tasks with all their stdin.
+
+Now there are two stages (see [Backpressure](performance.md#backpressure)):
+
+1. **Window admission.** A partition loop takes a new `arrange()` window only
+   while the pending tasks are below `executor.max_pending_tasks` (default
+   `2000`) and the pending bytes — task stdin plus the stdout and stderr kept
+   for `on_message_complete` and `on_window_complete` — are below
+   `executor.max_pending_bytes` (default `1GiB`). The window size adapts to the
+   free room; the first window of a partition takes one message. The limits
+   are soft: one window's fan-out can pass them.
+2. **Kafka fetch.** The fetch pauses when the queues of the live partitions
+   hold `sources.kafka.max_queued_messages` messages (default `1000`) and
+   resumes at half of it.
+
+What to do and what to expect:
+
+1. **Delete `executor.backpressure_high_multiplier` and
+   `executor.backpressure_low_multiplier`.** Size `executor.max_pending_bytes`
+   to about a quarter of the container memory, and keep
+   `sources.kafka.max_queued_messages` at least `sources.kafka.max_poll_records`
+   (the load fails otherwise).
+2. **Queued messages are not arranged at stop or revoke.** Before, the
+   partition loop arranged every queued message at a stop. Now the messages
+   that are not in a window are dropped; their offsets were never registered,
+   so the final commit stays below them and the next owner reads them again.
+   Only in-flight work drains, so a stop is shorter.
+   `drakkar_queued_messages_dropped_at_stop_total` counts them.
+3. **A dead partition is paused.** A partition whose loop died twice is
+   paused in Kafka and stays paused until a restart or revoke; its queue no
+   longer counts toward the pause.
+4. **New metrics:** `drakkar_pending_tasks`, `drakkar_pending_bytes`,
+   `drakkar_window_admission_wait_seconds_total{limit}`,
+   `drakkar_window_messages` and `drakkar_queued_messages_dropped_at_stop_total`.
+   The help text of `drakkar_backpressure_active` changed.
+5. **`task.stdin` is `None` in the message and window hooks** (see the
+   handler changes).
+
 #### Autodiscover {#autodiscover}
 
 The worker registry and the election of cluster tasks are one optional
@@ -1263,6 +1314,13 @@ changes are in [the table](#path-table).
    is logged as `on_startup_config_change_ignored` and does nothing; set them in the
    config file. A change of `sources.kafka.enabled`, `sources.http.enabled` or `storage.dir`
    in `on_startup` is ignored the same way.
+10. **`task.stdin` is freed after a task's last outcome.** The framework sets
+    `task.stdin = None` after `on_task_complete` and its delivery, or after
+    `on_error` with no retry. `arrange()`, `on_error`, the retry run and
+    `on_task_complete` still see it; `on_message_complete`, `on_window_complete`
+    and `on_http_request_complete` see `None` (on `group.tasks` and on
+    `result.task`). A hook that read the stdin there must keep what it needs in
+    `task.metadata` instead.
 
 ### 7. Check the result {#check}
 

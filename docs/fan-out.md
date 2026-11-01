@@ -376,13 +376,22 @@ async def on_window_complete(self, results, source_messages):
 
 !!! note "Collected only when the hook is implemented"
     Both collections cost real memory — a result holds the subprocess
-    output, a task holds its stdin — and a window holds them until its
-    last task settles. The framework therefore fills `window.results`
-    only for a handler that implements `on_window_complete`, and a
-    `MessageGroup`'s `tasks` / `results` / `errors` only for one that
-    implements `on_message_complete`. Counters, metrics and the recorder
-    events are unaffected either way. See
+    output — and a window holds them until its last task settles. The
+    framework therefore fills `window.results` only for a handler that
+    implements `on_window_complete`, and a `MessageGroup`'s `tasks` /
+    `results` / `errors` only for one that implements
+    `on_message_complete`. Counters, metrics and the recorder events are
+    unaffected either way. The kept output counts in
+    `executor.max_pending_bytes` until the hook has run. See
     [Performance](performance.md#what-the-completion-hooks-cost).
+
+!!! note "The message and window hooks see tasks without stdin"
+    When a task reaches its last outcome — after `on_task_complete` and
+    its delivery, or after `on_error` with no retry — the framework sets
+    `task.stdin` to `None`. `arrange()`, `on_error` (a replacement can be
+    built from `task.stdin`), the retry run and `on_task_complete` still
+    see the stdin; `on_message_complete` and `on_window_complete` see
+    `None`. Keep what you need from the stdin in `task.metadata`.
 
 !!! info "Why omit the replaced original?"
     Semantically, an `on_error` list-return says "this invocation
@@ -392,6 +401,25 @@ async def on_window_complete(self, results, source_messages):
     `results` for summary aggregation). The trade-off: when
     replacements occur, `len(window.results) < total_tasks`, which is
     what the accounting table above captures.
+
+---
+
+## Window admission and the one-message overshoot
+
+A partition loop takes a new window only while the worker has room under
+`executor.max_pending_tasks` and `executor.max_pending_bytes`. The window
+size adapts: each partition keeps a moving average of tasks and stdin bytes
+per message and takes as many messages as fit in the free room (at least
+one, at most `window_size`; the first window takes one).
+
+The framework sees a message's tasks only after `arrange()` has returned
+them, so it cannot bound one message. A window that had room is taken
+whole, and its fan-out can pass the limits: with a steady fan-out by about
+one message's tasks, and with a fan-out that jumps (one message of 100 000
+tasks after messages of 10) by that one message. Each partition loop can
+overshoot by one window. The `drakkar_pending_tasks` and
+`drakkar_pending_bytes` gauges show the real counts. See
+[Performance: Backpressure](performance.md#backpressure).
 
 ---
 

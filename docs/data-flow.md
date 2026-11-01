@@ -107,24 +107,25 @@ The main poll loop runs continuously while `_running` is True. Each iteration:
 
 ### 1.1 Check Backpressure
 
-The framework calculates the **total queued count** as the sum of `queue_size + inflight_count` across all active partition processors.
+The framework counts the **queued messages**: the messages waiting in the
+queues of live partition processors. A dead processor's queue is left out,
+because nothing will empty it. Partition loops take windows only while the
+[pending budget](#31-collecting-a-window) has room, so a full budget fills
+the queues and the fetch pauses by itself.
 
-Two watermarks control backpressure:
+- First, each partition whose loop died is paused in Kafka, once, and stays
+  paused.
+- **Pause condition**: not paused AND queued messages >=
+  `sources.kafka.max_queued_messages` (default `1000`): calls
+  `consumer.pause(all_assigned_partition_ids)`, sets the
+  `drakkar_backpressure_active` gauge to `1` and `_paused = True`.
+- **Resume condition**: paused AND queued messages <= half of
+  `max_queued_messages` AND no operator debug pause: calls
+  `consumer.resume(...)` for every partition that is neither stalled nor
+  dead, sets the gauge to `0` and `_paused = False`.
 
-- **High watermark** = `executor.max_executors` (default: `4`) x `executor.backpressure_high_multiplier` (default: `32`) = **128** by default.
-- **Low watermark** = max(1, `executor.max_executors` x `executor.backpressure_low_multiplier` (default: `4`)) = **16** by default.
-
-**Pause condition**: If not currently paused AND total queued >= high watermark:
-- Calls `consumer.pause(all_assigned_partition_ids)` -- Kafka stops delivering messages from all partitions.
-- Sets `backpressure_active` Prometheus gauge to `1`.
-- Sets `_paused = True`.
-
-**Resume condition**: If currently paused AND total queued <= low watermark:
-- Calls `consumer.resume(all_assigned_partition_ids)` -- Kafka resumes delivery.
-- Sets `backpressure_active` gauge to `0`.
-- Sets `_paused = False`.
-
-The hysteresis between high and low watermarks prevents rapid pause/resume oscillation. Pause and resume always operate on ALL assigned partitions, not individual ones.
+The poll below runs on every turn, paused or not, so Kafka's
+`max.poll.interval` never expires.
 
 ### 1.2 Poll a Batch
 
@@ -244,13 +245,16 @@ The processor waits for messages from its queue:
 
 1. **Blocking wait for the first message**: `await asyncio.wait_for(queue.get(), timeout=1.0)`.
    - **If timeout (1 second, no messages)**: returns an empty list. The processor then attempts an offset commit for any previously completed work and loops back.
-   - **If a message arrives**: becomes the first message in this window.
-2. **Non-blocking drain**: calls `queue.get_nowait()` in a tight loop until:
+   - **If a message arrives**: it is held as the first message of the next window (it still counts as queued).
+2. **Wait for room in the pending budget**: one budget per worker counts the pending tasks (created and not settled) and pending bytes (their stdin plus the output kept for `on_message_complete` and `on_window_complete`). While either reaches its limit (`executor.max_pending_tasks`, `executor.max_pending_bytes`), the loop waits in a first-in, first-out list; a release that makes room wakes the oldest waiter. Each wait lasts at most 1 second, then the loop retries a commit and comes back with its place kept. A stop ends the wait at once.
+3. **Non-blocking drain**: calls `queue.get_nowait()` in a tight loop until:
    - The queue is empty, OR
-   - The window reaches `executor.window_size` (default: `100`) messages.
-3. Updates the `partition_queue_size` gauge after collection.
+   - The window reaches the admitted size: `min(free tasks / average tasks per message, free bytes / average stdin bytes per message)`, clamped to 1 .. `executor.window_size`. The averages are moving averages (weight 0.3) from the partition's earlier windows; the first window of a partition takes one message.
+4. Updates the `partition_queue_size` gauge and observes `drakkar_window_messages`.
 
-The resulting list of 1 to `window_size` messages forms a **window**.
+The resulting list of 1 to `window_size` messages forms a **window**. The
+limits are soft: a window that had room is taken whole, so its fan-out can
+pass them.
 
 ### 3.2 Processing a Window
 
@@ -716,7 +720,7 @@ follow describe what the **Kafka** source does inside its share of it.
   - In-flight tasks
 
   to finish their work.
-- Each processor drains by: processing remaining queued messages into windows, waiting for in-flight tasks to complete, then doing a final commit.
+- Each processor drains by: dropping the queued messages that are not in a window (never arranged; their offsets were never registered, so the next owner reads them again; counted in `drakkar_queued_messages_dropped_at_stop_total`), waiting for in-flight tasks to complete, then doing a final commit.
 - If the timeout expires, logs a warning but continues shutdown. The flag that tracks a clean drain is used by the next step to decide whether committing final offsets is safe. The still-running tasks are suppressed and then cancelled, so they release their executor slots and subprocesses rather than holding them for the rest of the pod's grace period.
 - Processors whose loop has died are excluded: nothing will empty their queue or settle their pending offsets, so waiting on one would spend the whole budget and suppress every other partition's final commit with it.
 
@@ -767,7 +771,7 @@ follow describe what the **Kafka** source does inside its share of it.
 - **One processing loop per partition** collects windows and launches tasks.
 - **Multiple windows per partition** can be in-flight concurrently -- the processor does not wait for window N to complete before starting window N+1.
 - **All partitions share a single ExecutorPool** with a semaphore of size `executor.max_executors`. Tasks from any partition compete for the same slots.
-- **Backpressure operates globally** -- pause/resume applies to all partitions simultaneously based on the total queued count across all processors.
+- **Backpressure operates globally** -- one pending budget bounds the tasks and bytes of every partition and the HTTP source, and the Kafka pause/resume applies to all partitions at once, based on the queued messages of the live partitions.
 - **Periodic tasks** run as independent async tasks in the same event loop.
 - **Sink delivery** happens inline within the task's async context (not batched across partitions).
 

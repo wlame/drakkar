@@ -39,7 +39,7 @@ flowchart LR
 - **Per-partition pipelines** with watermark offset tracking — commits happen only after every sink confirmed
 - **Sinks** — Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; multiple named instances per type
 - **Dead letter queue** of original messages with replay tooling; each sink declares its failure policy (`dlq` or `skip`, a retry budget, `depends_on`), and `on_delivery_error()` decides per failure
-- **Backpressure** via Kafka pause/resume — memory stays bounded regardless of lag
+- **Backpressure** in tasks and bytes — new windows wait for room under a worker-wide budget of pending tasks and held stdin, and the Kafka fetch pauses when queues fill, so memory stays bounded regardless of lag
 - **Typed messages** — Pydantic models as type parameters, auto de/serialization
 - **Operator UI** — live executor timeline, partition lag, message tracing, and a Message Probe that runs a pasted message through the full pipeline with zero footprint on production state
 - **UI customization** — handler-defined probe tabs, links/badges/formats on any field, declared dashboard pages — all server-side, no client code

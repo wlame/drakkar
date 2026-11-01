@@ -137,21 +137,23 @@ hundred.
 
 `on_window_complete` receives every result of its window, and
 `on_message_complete` receives every task, result and error of its message.
-A result carries the subprocess output; a task carries the stdin it was
-given. Holding them is what the hooks are for — but the window only releases
-them when its **last** task settles, so a handler that implements
-`on_window_complete` keeps the payload of a whole window resident.
+A result carries the subprocess output. Holding it is what the hooks are
+for — but the window only releases it when its **last** task settles, so a
+handler that implements `on_window_complete` keeps the output of a whole
+window resident. The stdin is not kept: when a task reaches its last outcome
+the framework sets `task.stdin` to `None`, so these hooks see the tasks
+without their stdin.
 
 The framework therefore collects them only for the hooks a handler actually
 implements. A handler that leaves both inherited pays nothing: the counters
 still move, the recorder still reports how many tasks succeeded and failed,
 and resident memory tracks the tasks in flight instead of the window.
 
-If you implement one of them, size the window for it: at a thousand tasks
-per message with 300 kB of input and output each, `window_size: 100` is
-60 GB of retained payload. Read what you need in `on_task_complete` — which
-is handed one result at a time and retains nothing — and keep the aggregate
-hooks for counts and summaries.
+If you implement one of them, the kept output counts in
+`executor.max_pending_bytes` until the hook has run, so new windows wait
+while it is held (see [Backpressure](#backpressure)). Read what you need in
+`on_task_complete` — which is handed one result at a time and retains
+nothing — and keep the aggregate hooks for counts and summaries.
 
 Your task rate follows from the pool size: roughly
 `max_executors / average task duration` — 8 slots at 20ms tasks is
@@ -450,52 +452,135 @@ there.
 
 ## Backpressure
 
-Drakkar uses Kafka consumer pause/resume to prevent unbounded memory
-growth when the executor pool can't keep up with incoming messages.
+Backpressure keeps a worker's memory bounded when the executor pool cannot
+keep up with the input. It works in two stages, each in its own unit:
 
-### How it works
+1. **Window admission, in tasks and bytes.** A partition loop takes a new
+   `arrange()` window only while the worker has room under both
+   `executor.max_pending_tasks` and `executor.max_pending_bytes`.
+2. **Kafka fetch, in messages.** The poll loop pauses all partitions when
+   the messages waiting in partition queues reach
+   `sources.kafka.max_queued_messages`, and resumes them at half of it.
 
-On every poll loop iteration, the framework calculates `total_queued` --
-the sum of all partition queue sizes plus all in-flight task counts. Two
-thresholds control the hysteresis:
+The two stages chain: when the budget is full, loops stop taking windows,
+the queues fill, and the fetch pauses by itself.
+
+### Pending tasks and pending bytes
+
+**Pending tasks** are the tasks created by `arrange()` or by an `on_error`
+replacement and not yet settled: waiting for an executor slot, running, or
+in `on_task_complete` and its sink delivery. A retry is the same task and
+counts once.
+
+**Pending bytes** are the stdin of those tasks, plus the stdout and stderr of
+results kept for `on_message_complete` and `on_window_complete`. Results are
+kept only when the handler overrides one of those hooks, and they count from
+the moment a task settles until the hook has run. A result kept by both hooks
+counts twice; that overestimates and pauses earlier, which is safe. Sizes
+come from `sys.getsizeof`, the real memory of a Python string.
+
+One budget serves the whole worker: every partition loop and the HTTP
+source charge it. HTTP requests count in it, but never wait for it — a
+budget full of Kafka work must not refuse HTTP requests.
+
+The `drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the
+actual numbers, not the limits.
+
+### The limits are soft
+
+A loop that has room always takes at least one message, and the framework
+sees a message's tasks only after `arrange()` has returned them. So one
+window's fan-out can pass a limit:
+
+- With a steady fan-out the overshoot is about one message's tasks.
+- With a fan-out that jumps — one message of 100 000 tasks after messages of
+  10 — the overshoot is that one message.
+
+Each partition loop can overshoot by one window, so with many partitions the
+peak is the limit plus one window per partition that found room at the same
+moment. Watch `drakkar_pending_tasks` and `drakkar_pending_bytes` for the
+real peak; size the limits with that margin.
+
+### Window size adapts to the room
+
+Each partition keeps a moving average (weight 0.3 for the newest window) of
+tasks per message and of stdin bytes per message. The next window takes
 
 ```
-high_watermark = max_executors x backpressure_high_multiplier
-low_watermark  = max(1, max_executors x backpressure_low_multiplier)
+n = clamp(min(free_tasks / avg_tasks, free_bytes / avg_bytes), 1, window_size)
 ```
 
-With defaults (`max_executors: 4`, `high_multiplier: 32`,
-`low_multiplier: 4`):
+messages. The first window of a partition takes one message, so the averages
+start from a measurement. `drakkar_window_messages` shows the window sizes
+that were taken.
 
-```
-high_watermark = 4 x 32 = 128
-low_watermark  = 4 x 4  = 16
-```
+A loop that has no room waits in a first-in, first-out list. A release that
+makes room wakes the oldest waiter. The wait is cut every second, so the loop
+still retries an outstanding commit and sees a stop. The time spent waiting
+goes to `drakkar_window_admission_wait_seconds_total{limit}` (`tasks` or
+`bytes`, the limit that was reached; `tasks` when both were).
 
-**When `total_queued >= high_watermark`:** the consumer pauses all
-assigned partitions (stops fetching new messages) and sets the
-`drakkar_backpressure_active` metric to **1**.
+### Memory per task
 
-**When `total_queued <= low_watermark`:** the consumer resumes all
-partitions and sets `drakkar_backpressure_active` back to **0**.
+Measured with `tracemalloc` on Python 3.13:
 
-The gap between high and low prevents rapid pause/resume flapping.
-Messages already in partition queues continue processing while paused --
-only new fetches from Kafka are stopped.
+| Object | Bytes |
+|---|---|
+| `ExecutorTask` without stdin (4 args, 1 label, 1 metadata key) | about 1 900 |
+| stdin of 7 000 lines of 100 bytes | 700 041 |
+| The task's coroutine chain and its slot in the priority gate | about 2 500 |
+| `ExecutorResult` with 2 000 bytes of stdout | about 1 100 plus the stdout |
 
-### Tuning
+So a task costs about 4-5 KB without its stdin, and stdin is often 100 times
+more. That is why the budget counts bytes as well as tasks. While a task
+runs, its stdin exists up to three times (the string, the encoded bytes, and
+the part the pipe still buffers): about 2 MB at peak for a 700 KB stdin.
 
-For high core count machines, the defaults may be too conservative:
+When a task reaches its last outcome — after `on_task_complete` and its
+delivery, or after `on_error` with no retry — the framework sets
+`task.stdin` to `None`. A message or window hook that keeps the task no
+longer keeps its stdin. `arrange()`, `on_error`, `on_task_complete` and the
+retry run still see the stdin; `on_message_complete`, `on_window_complete`
+and `on_http_request_complete` see `None`.
 
-| Scenario | Suggested values |
-|----------|-----------------|
-| 80 workers, 30ms tasks | `high_multiplier: 16`, `low_multiplier: 4` -- high=1280, low=320 |
-| 80 workers, 5ms tasks | `high_multiplier: 8`, `low_multiplier: 2` -- high=640, low=160 |
-| 4 workers, 10s tasks | `high_multiplier: 32`, `low_multiplier: 4` -- high=128, low=16 (defaults are fine) |
+### Sizing
+
+| Key | Default | Sizing |
+|---|---|---|
+| `executor.max_pending_tasks` | `2000` | At least `max_executors`. 2000 waiting tasks keep 64 slots busy for about 31 rounds, 256 slots for about 8. |
+| `executor.max_pending_bytes` | `1GiB` | About a quarter of the container memory. With 700 KB of stdin per task, 1 GiB stops admission at about 1 500 tasks, so the byte limit is the one that binds. |
+| `sources.kafka.max_queued_messages` | `1000` | At least `max_poll_records`. Polled messages cost only their Kafka payload; this bounds how many wait for a window. |
+
+A worker with the defaults holds about 1 GiB of stdin and kept output, plus
+about 2 MB per running task.
+
+### The Kafka pause
+
+On every poll loop turn the framework counts the messages waiting in the
+queues of live partitions. When that count reaches `max_queued_messages`, it
+pauses all assigned partitions (no new fetches) and sets
+`drakkar_backpressure_active` to **1**. When the count falls to half of it,
+it resumes them and sets the gauge back to **0**. The poll loop keeps calling
+the consumer while paused, so Kafka's `max.poll.interval` never expires.
+
+- A **stalled** partition (`dlq.on_send_failure: stall`) and a **dead**
+  partition (its loop died twice) stay paused through every resume. A dead
+  partition's queue is not counted: nothing empties it.
+- An operator [debug pause](consume-pause.md) blocks the resume while it is
+  on.
+
+### Stop and revoke
+
+At stop or revoke, polled messages that are not in a window are dropped, not
+arranged. Their offsets were never registered, so the final commit stays
+below them and the next owner of the partition reads them again. Only
+in-flight work drains. `drakkar_queued_messages_dropped_at_stop_total`
+counts them.
 
 If `drakkar_backpressure_active == 1` is persistent, either increase
-`max_executors`, add more horizontal workers, or increase the multipliers
-to buffer more in memory.
+`max_executors` or add horizontal workers. If
+`drakkar_window_admission_wait_seconds_total` grows while executor slots are
+idle, the pending limits are too small for the pool.
 
 ---
 
@@ -508,8 +593,6 @@ executor:
   max_executors: 16              # the ~400 tasks/sec loop ceiling binds before core count
   window_size: 200             # larger windows for batching opportunity
   task_timeout: 30s            # short timeout for fast tasks
-  backpressure_high_multiplier: 16
-  backpressure_low_multiplier: 4
 
 sources:
   kafka:
@@ -569,8 +652,6 @@ executor:
   task_timeout: 2m             # generous timeout, but not infinite
   max_retries: 2               # retry on transient failures
   drain_timeout: 30s           # allow time for in-flight tasks on shutdown
-  backpressure_high_multiplier: 8
-  backpressure_low_multiplier: 2
 
 sources:
   kafka:
@@ -636,6 +717,13 @@ rate(drakkar_executor_tasks_total{status="completed"}[1m])
 
 # Backpressure (1 = consumer paused, 0 = flowing)
 drakkar_backpressure_active
+
+# Pending tasks and bytes against executor.max_pending_tasks / max_pending_bytes
+drakkar_pending_tasks
+drakkar_pending_bytes
+
+# Seconds partition loops waited for room, by the limit that was reached
+rate(drakkar_window_admission_wait_seconds_total[5m])
 
 # Queue depth (growing = can't keep up)
 drakkar_total_queued

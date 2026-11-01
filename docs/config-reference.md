@@ -64,6 +64,7 @@ sources:
     consumer_group: drakkar-workers  # consumer-group ID; workers sharing it split partitions. env: DK_SOURCES__KAFKA__CONSUMER_GROUP
 
     max_poll_records: 100            # messages per poll batch; ↑ throughput / ↓ latency. env: DK_SOURCES__KAFKA__MAX_POLL_RECORDS  · reasonable: 50–500
+    max_queued_messages: 1000        # pause fetching at this many queued messages, resume at half. env: DK_SOURCES__KAFKA__MAX_QUEUED_MESSAGES  · >= max_poll_records
     max_poll_interval: 5m            # max time between polls before broker kicks us out. env: DK_SOURCES__KAFKA__MAX_POLL_INTERVAL  · raise for slow tasks
     session_timeout: 45s             # group-membership heartbeat window. env: DK_SOURCES__KAFKA__SESSION_TIMEOUT
     heartbeat_interval: 3s           # heartbeat frequency; should be ≤ session_timeout / 3. env: DK_SOURCES__KAFKA__HEARTBEAT_INTERVAL
@@ -109,7 +110,7 @@ When `sources.http.enabled=true`, the handler must declare `HttpRequestT` / `Htt
 
 ## Executor pool (`executor:`)
 
-📚 [Deep details](configuration.md#executor-pool-executor) · [Backpressure formula](configuration.md#backpressure-formula)
+📚 [Deep details](configuration.md#executor-pool-executor) · [Backpressure](performance.md#backpressure)
 
 Subprocess pool that runs user binaries. Tune `max_executors` and `task_timeout` first; everything else has good defaults.
 
@@ -126,10 +127,12 @@ executor:
                                    #   messages of a failed task go to the DLQ). env: DK_EXECUTOR__ON_FAILURE
   drain_timeout: 30s               # graceful-shutdown wait for in-flight tasks, whole seconds. env: DK_EXECUTOR__DRAIN_TIMEOUT
 
-  # Backpressure: pause Kafka consumption when in-flight messages reach
-  # max_executors * high_multiplier; resume when down to max_executors * low_multiplier.
-  backpressure_high_multiplier: 32 # env: DK_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER  · default 32 = pause at 4*32=128 queued
-  backpressure_low_multiplier: 4   # env: DK_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER  · default 4 = resume at max(1,4*4)=16 queued
+  # Window admission: a partition loop takes a new arrange() window only while
+  # both pending counts are below their limits. Soft limits: one window's fan-out
+  # can pass them; drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
+  max_pending_tasks: 2000          # unsettled tasks (waiting, running, in on_task_complete). env: DK_EXECUTOR__MAX_PENDING_TASKS  · >= max_executors
+  max_pending_bytes: 1GiB          # task stdin + output kept for on_message_complete / on_window_complete.
+                                   #   env: DK_EXECUTOR__MAX_PENDING_BYTES  · >= 16MiB; about a quarter of container memory
 
   # Subprocess environment.
   env: {}                          # env vars passed to all subprocesses. env: DK_EXECUTOR__ENV (JSON)

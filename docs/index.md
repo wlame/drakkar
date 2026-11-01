@@ -103,7 +103,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Per-partition pipelines](data-flow.md#phase-3-window-collection-and-arrangement)** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
 - **[Sinks](sinks.md)** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- a message that fails to parse, execute or deliver goes to a DLQ topic as the original message, with `dk-` headers that say where and why; each sink declares its [failure policy](sinks.md#failure-policy) and [dependencies](sinks.md#sink-dependencies-depends_on)
-- **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
+- **[Backpressure](performance.md#backpressure)** -- a worker-wide budget of pending tasks and bytes gates new windows, and Kafka pause/resume keeps the queues bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
 - **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + an eventually-consistent exchange between workers over HTTP
 - **[Operator UI](observability.md#operator-ui)** -- the versioned [drakkar-ui](https://github.com/wlame/drakkar-ui) SPA (fetched from GitHub Releases at startup, one cache shared by co-located workers) with executor timeline, partition lag, message tracing. There is no HTML fallback in the package: with nothing cached the worker serves its JSON API and WebSocket without pages, and page requests answer 503

@@ -388,6 +388,12 @@ Offsets are committed **after** this hook fires — any sink emissions
 here are guaranteed delivered-or-failed before the consumer offset
 advances for this message.
 
+The tasks in `group.tasks` (and in `result.task`) have `stdin` set to
+`None`: the framework frees a task's stdin when the task reaches its last
+outcome. Keep what you need from it in `task.metadata`. The stdout and
+stderr of the kept results count in `executor.max_pending_bytes` until this
+hook has run (see [Backpressure](performance.md#backpressure)).
+
 ```python
 async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult | None:
     req: SearchRequest = group.source_message.payload
@@ -514,6 +520,9 @@ partition and the same window that was passed to `arrange()`. Use for
 cross-task aggregation or batch-level outputs. Returns a [CollectResult](sinks.md#collectresult)
 or `None`.
 
+As in `on_message_complete`, `result.task.stdin` is `None` here, and the
+kept results count in `executor.max_pending_bytes` until the hook has run.
+
 ```python
 async def on_window_complete(self, results, source_messages):
     succeeded = [r for r in results if r.exit_code == 0]
@@ -543,7 +552,9 @@ async def on_error(
 Called when a subprocess task fails (non-zero exit, timeout, or launch
 error). Runs in the context of the partition that owns the task.
 Replacement tasks returned here are added to the same window and
-partition. Return one of:
+partition, and count in `executor.max_pending_tasks`. `task.stdin` is still
+set here, so a replacement can be built from it; after the task's last
+outcome the framework sets it to `None`. Return one of:
 
 | Return value            | Behavior                                      |
 |-------------------------|-----------------------------------------------|

@@ -257,7 +257,11 @@ same `ExecutorError` objects the Kafka path delivers, so shared hook
 code behaves identically on both paths. There is no retry machinery
 over HTTP (a failure is terminal on its first attempt), and
 cancellation aborts the request rather than being recorded as a task
-failure.
+failure. As on the Kafka path, the tasks in `group.tasks` have `stdin` set
+to `None`: each task's stdin is freed when its outcome arrives. A request's
+tasks count in `executor.max_pending_tasks` and `executor.max_pending_bytes`
+while they run, but a request never waits for room
+(see [Backpressure](performance.md#backpressure)).
 
 ```python
 async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse:

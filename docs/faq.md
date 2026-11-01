@@ -404,11 +404,11 @@ Two: the **main loop** (Kafka consumer + partition processors + executor pool + 
 
 ### What happens during a Kafka rebalance?
 
-Revoked partitions' `PartitionProcessor`s drain their in-flight windows then stop; newly-assigned partitions spawn fresh processors. `on_revoke` / `on_assign` hooks fire so handler code can flush partition-scoped state. See [Partition Assignment and Revocation](data-flow.md#phase-2-partition-assignment-and-revocation).
+Revoked partitions' `PartitionProcessor`s drain their in-flight windows then stop (polled messages not yet in a window are dropped and read again by the next owner); newly-assigned partitions spawn fresh processors. `on_revoke` / `on_assign` hooks fire so handler code can flush partition-scoped state. See [Partition Assignment and Revocation](data-flow.md#phase-2-partition-assignment-and-revocation).
 
 ### How does backpressure work?
 
-The poll loop compares in-flight message count to high/low watermarks (multiples of `max_executors`). Above high-watermark: pause the Kafka consumer so no new batch is polled. Below low-watermark: resume. See [Backpressure Formula](configuration.md#backpressure-formula) and [Backpressure deep-dive](performance.md#backpressure).
+In two stages. A partition loop takes a new `arrange()` window only while the worker's pending tasks are below `executor.max_pending_tasks` and the pending bytes (task stdin plus output kept for the message and window hooks) below `executor.max_pending_bytes`. When loops stop taking windows, the partition queues fill, and the poll loop pauses the Kafka consumer once `sources.kafka.max_queued_messages` messages wait; it resumes at half of that. The limits are soft by one window's fan-out. See [Backpressure](performance.md#backpressure).
 
 ### What's the difference between the recorder DB and the cache DB?
 

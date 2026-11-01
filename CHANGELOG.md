@@ -201,6 +201,20 @@ the steps of the upgrade and the changes of behaviour.
   live card of its name with another instance before its first publish does not
   start (`fleet_worker_name_in_use`); the check waits at most two heartbeats plus
   5 s and is skipped when the registry is down.
+- **Backpressure in tasks and bytes.** A partition loop takes a new window only
+  while the worker has room under `executor.max_pending_tasks` (default 2000)
+  and `executor.max_pending_bytes` (default 1GiB: task stdin plus output kept
+  for the message and window hooks); the window size adapts to the room. The
+  Kafka fetch pauses at `sources.kafka.max_queued_messages` (default 1000) and
+  resumes at half. The limits are soft by one window's fan-out.
+  `executor.backpressure_high_multiplier` and `backpressure_low_multiplier` are
+  removed. Queued messages are no longer arranged at stop or revoke: they are
+  dropped and read again by the next owner. A dead partition is paused and its
+  queue does not count.
+- **`task.stdin` is `None` in the message and window hooks.** The framework
+  frees a task's stdin at its last outcome, so `on_message_complete`,
+  `on_window_complete` and `on_http_request_complete` see `None`; `arrange`,
+  `on_error`, the retry run and `on_task_complete` still see it.
 
 ### Added
 
@@ -313,6 +327,9 @@ the steps of the upgrade and the changes of behaviour.
   a separate service and pauses it; new scenarios check the archive takeover
   after a killed holder, cluster tasks, the memory store, the Postgres recorder,
   the DLQ record and a worker with the UI off.
+- **Backpressure metrics:** `drakkar_pending_tasks`, `drakkar_pending_bytes`,
+  `drakkar_window_admission_wait_seconds_total{limit}`,
+  `drakkar_window_messages` and `drakkar_queued_messages_dropped_at_stop_total`.
 
 ### Changed
 
@@ -322,6 +339,8 @@ the steps of the upgrade and the changes of behaviour.
 - **New help texts for four DLQ and sink metrics:**
   `drakkar_sink_deliveries_skipped_total`, `drakkar_sink_dlq_messages_total`,
   `drakkar_dlq_dropped_payloads_total` and `drakkar_dlq_unconfigured_drops_total`.
+- **New help text for `drakkar_backpressure_active`:** it names
+  `sources.kafka.max_queued_messages`.
 
 ### Fixed
 
