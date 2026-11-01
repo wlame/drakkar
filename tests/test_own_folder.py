@@ -417,3 +417,20 @@ def test_unsafe_folder_levels_folder_of_another_owner_is_named(tmp_path, monkeyp
 
 def test_unsafe_folder_levels_missing_level_is_skipped(tmp_path):
     assert ownerlock.unsafe_folder_levels(str(tmp_path / 'gone'), str(tmp_path / 'gone' / 'c' / 'w')) == []
+
+
+async def test_start_cache_writes_the_cache_file_into_the_own_folder(tmp_path):
+    app = DrakkarApp(
+        handler=SimpleHandler(),
+        config=_config(tmp_path, cluster={'name': 'search'}, cache={'enabled': True}),
+        worker_id='w-1',
+    )
+
+    await app._lifecycle._start_cache()
+    try:
+        own = tmp_path / 'storage' / 'search' / 'w-1'
+        assert app._cache_engine._resolve_db_dir() == str(own)
+        assert (own / 'w-1-cache.db').is_file()
+        assert not (tmp_path / 'storage' / 'w-1-cache.db').exists()
+    finally:
+        await app._cache_engine.stop()
