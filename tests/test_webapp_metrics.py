@@ -130,6 +130,8 @@ def _histogram_sample_count(metric: MetricWrapperBase, labels: dict[str, str]) -
 def _make_app_stub(handler: BaseDrakkarHandler, *, is_ready: bool = True, pool: Any = None) -> Any:
     """Build a minimal DrakkarApp substitute for runner / route tests."""
     app = MagicMock()
+    # No pending budget: the runner counts nothing.
+    app._pending_budget = None
     app._handler = handler
     app._executor_pool = pool
     app._recorder = None

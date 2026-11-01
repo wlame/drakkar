@@ -100,6 +100,8 @@ def _make_stub_app(
 ) -> Any:
     """Construct a minimal ``DrakkarApp`` stand-in for dispatch tests."""
     app = MagicMock()
+    # No pending budget: the runner counts nothing.
+    app._pending_budget = None
     app._handler = handler
     app._executor_pool = pool
     app._recorder = None

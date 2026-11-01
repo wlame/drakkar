@@ -67,6 +67,8 @@ def make_ctx() -> WebRequestContext:
 
 def make_runner(handler: BaseDrakkarHandler, manager: SinkManager, *, recorder: Any = None) -> WebappRunner:
     app = MagicMock()
+    # No pending budget: the runner counts nothing.
+    app._pending_budget = None
     app._handler = handler
     app._executor_pool = MagicMock()
     app._recorder = recorder
