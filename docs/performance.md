@@ -497,24 +497,35 @@ As the window fans out, its tasks are charged out of the reservation; what
 is left is given back when the fan-out ends (also when `arrange()` raises or
 returns no tasks).
 
-A limit is passed only by the error of the estimate. The peak is at most the
-cap plus the actual fan-out of the window being admitted beyond its estimate:
+Three rules keep the estimate from being low for several windows at once:
 
-- With a steady fan-out that is normally one message, for the whole worker —
-  not one window per partition.
-- A sudden jump in tasks per message passes the cap by that jump. One message
-  of 100 000 tasks after messages of 10 passes it by about that one message.
-  When every message of a window jumps (10 tasks each before, 1000 now), it
-  passes it by the whole window's excess: messages x (1000 - 10). The
-  framework cannot bound this: `arrange()` builds its list before the
-  framework sees it. A smaller `executor.window_size` makes the worst case
-  smaller.
-- Before the worker has measured a window that created tasks there is no
-  estimate, so only one window with no estimate is arranged at a time; it
-  takes one message.
+- **No estimate:** before the worker has measured a window that created
+  tasks, only one window with no estimate is arranged at a time, and it takes
+  one message.
+- **Warm-up:** a partition takes one message per window until it has measured
+  3 windows of its own that created tasks. A warm-up window reserves at least
+  all the free room, so no other window is admitted until its fan-out has
+  landed.
+- **Floor:** after the warm-up a message never reserves less than
+  `max_pending_tasks / window_size` tasks and `max_pending_bytes /
+  window_size` bytes, so a full window always reserves the whole cap.
 
-The reservation is not shown by the gauges: `drakkar_pending_tasks` and
-`drakkar_pending_bytes` show the tasks and bytes that exist.
+What is left, stated plainly:
+
+- With a steady message shape the peak is about the cap plus one message,
+  for the whole worker. The window that crosses the cap is admitted while any
+  room is left, so the peak can sit slightly above the cap plus one message.
+- **After the warm-up, a sudden jump in tasks per message can pass the cap by
+  the size of that jump**, because the fan-out is known only after
+  `arrange()` returns. One message of 100 000 tasks after messages of 10
+  passes it by about that message. When every message of a window jumps (10
+  tasks each before, 1000 now), it passes it by the whole window's excess:
+  messages x (1000 - 10), at most one window thanks to the floor. A smaller
+  `executor.window_size` makes this worst case smaller.
+
+The `drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the real
+numbers — the tasks and bytes that exist, reservations not included — so a
+peak above the limits is visible there.
 
 ### Window size adapts to the room
 
@@ -532,9 +543,11 @@ room. The next window takes
 n = clamp(min(free_tasks / avg_tasks, free_bytes / avg_bytes), 1, window_size)
 ```
 
-messages, where `avg_bytes` is stdin plus kept output per message and the
-free room excludes what other windows reserved. A partition's first window
-uses the worker's averages; the worker's first window takes one message.
+messages, where `avg_bytes` is stdin plus kept output per message, both
+averages are raised to the floor above, and the free room excludes what
+other windows reserved. During its warm-up a partition takes one message per
+window; until it has a measurement of its own, it uses the worker's averages.
+The worker's first window takes one message.
 `drakkar_window_messages` shows the window sizes that were taken.
 
 A loop that has no room waits in a first-in, first-out list; a loop that

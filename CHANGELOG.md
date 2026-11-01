@@ -207,8 +207,11 @@ the steps of the upgrade and the changes of behaviour.
   for the message and window hooks); the window size adapts to the room. The
   Kafka fetch pauses at `sources.kafka.max_queued_messages` (default 1000) and
   resumes at half. A window reserves its estimated tasks and bytes when it is
-  taken, so the limits are passed only by its fan-out beyond the estimate:
-  normally one message, more when the tasks per message jump.
+  taken; a partition takes one message per window until it has measured 3
+  windows of its own, and a message never reserves less than
+  `max_pending_tasks / window_size`. With a steady message shape the limits are
+  passed by about one message; after the warm-up a sudden jump in tasks per
+  message can pass them by that jump.
   `executor.backpressure_high_multiplier` and `backpressure_low_multiplier` are
   removed. Queued messages are no longer arranged at stop or revoke: they are
   dropped and read again by the next owner. A dead partition is paused and its

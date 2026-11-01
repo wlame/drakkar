@@ -229,10 +229,12 @@ and sizing.
   below their limits. Otherwise it waits; a release that makes room wakes the
   oldest waiting loop first.
 - A loop that takes a window reserves its estimated tasks and bytes at once,
-  so other loops see the room as taken while `arrange()` runs. The peak is at
-  most the cap plus the actual fan-out of the admitted window beyond its
-  estimate: normally one message for the whole worker. A sudden jump in tasks
-  per message passes it by that jump. The `drakkar_pending_tasks` and
+  so other loops see the room as taken while `arrange()` runs. A partition
+  takes one message per window during its warm-up (3 measured windows of its
+  own), and after it a message never reserves less than
+  `max_pending_tasks / window_size`. With a steady message shape the peak is
+  about the cap plus one message for the whole worker. After the warm-up, a
+  sudden jump in tasks per message can pass the cap by the size of that jump. The `drakkar_pending_tasks` and
   `drakkar_pending_bytes` gauges show the real counts.
 - The Kafka fetch pauses when the queues of the live partitions hold
   `max_queued_messages` messages and resumes at half of it. Stalled and dead
@@ -261,7 +263,7 @@ Messages are collected into windows before being passed to [arrange()](handler.m
 
 1. The partition processor waits for the first message (blocks up to 1 second).
 2. It waits until the worker has room under `max_pending_tasks` and `max_pending_bytes` (each wait at most 1 second, then the loop retries a commit and comes back).
-3. It drains more messages from the queue without blocking, up to the admitted size: `min(free tasks / average tasks per message, free bytes / average bytes per message)` (bytes = stdin plus the output the hooks keep; the free room excludes other windows' reservations), at least 1 and at most `window_size`. The estimate is reserved at once. A partition's first window uses the worker's averages; the worker's first window takes one message.
+3. It drains more messages from the queue without blocking, up to the admitted size. During the partition's warm-up (until it has measured 3 windows of its own that created tasks) that is one message, and the window reserves all the free room. After it: `min(free tasks / tasks per message, free bytes / bytes per message)`, at least 1 and at most `window_size`, where the per-message numbers are the moving averages (bytes = stdin plus the output the hooks keep) raised to a floor of `max_pending_tasks / window_size` tasks and `max_pending_bytes / window_size` bytes, and the free room excludes other windows' reservations. The estimate is reserved at once. The worker's first window takes one message.
 4. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
 5. All tasks in the window are launched concurrently.
 6. The window tracks `completed_count` vs `total_tasks` to know when it is done.

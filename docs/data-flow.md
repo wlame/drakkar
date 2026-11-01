@@ -249,17 +249,19 @@ The processor waits for messages from its queue:
 2. **Wait for room in the pending budget**: one budget per worker counts the pending tasks (created and not settled) and pending bytes (their stdin plus the output kept for `on_message_complete` and `on_window_complete`). While either reaches its limit (`executor.max_pending_tasks`, `executor.max_pending_bytes`), the loop waits in a first-in, first-out list; a release that makes room wakes the oldest waiter. Each wait lasts at most 1 second, then the loop retries a commit and comes back with its place kept. A stop ends the wait at once.
 3. **Non-blocking drain**: calls `queue.get_nowait()` in a tight loop until:
    - The queue is empty, OR
-   - The window reaches the admitted size: `min(free tasks / average tasks per message, free bytes / average bytes per message)`, clamped to 1 .. `executor.window_size`. The averages are moving averages of tasks, stdin bytes and kept output bytes per message (weight 0.5 for a larger sample, 0.05 for a smaller one), from the partition's earlier windows or, for its first window, from the whole worker. A window whose `arrange()` created no tasks is not measured. Before the worker measured a window with tasks, one window of one message is arranged at a time. The free room excludes what other windows reserved.
+   - The window reaches the admitted size. During the partition's warm-up (until it has measured 3 windows of its own that created tasks) that is one message, and the window reserves all the free room. After it: `min(free tasks / tasks per message, free bytes / bytes per message)`, clamped to 1 .. `executor.window_size`. The per-message numbers are moving averages of tasks, stdin bytes and kept output bytes (weight 0.5 for a larger sample, 0.05 for a smaller one), from the partition's own windows or, before it has one, from the whole worker, raised to a floor of `max_pending_tasks / window_size` tasks and `max_pending_bytes / window_size` bytes. A window whose `arrange()` created no tasks is not measured. Before the worker measured a window with tasks, one window of one message is arranged at a time. The free room excludes what other windows reserved.
 4. Updates the `partition_queue_size` gauge and observes `drakkar_window_messages`.
 
 The resulting list of 1 to `window_size` messages forms a **window**. Right
 after it is taken, with no await in between, the window **reserves** its
 estimated tasks and bytes in the budget; the fan-out charges the real tasks
-out of the reservation, and the rest is given back when the fan-out ends. A
-limit is therefore passed only by the error of the estimate: the peak is at
-most the cap plus the actual fan-out of the admitted window beyond its
-estimate, normally one message for the whole worker. A sudden jump in tasks
-per message passes it by that jump.
+out of the reservation, and the rest is given back when the fan-out ends. With a
+steady message shape the peak is therefore about the cap plus one message for
+the whole worker. After the warm-up, a sudden jump in tasks per message can
+pass the cap by the size of that jump (at most one window's excess), because
+the fan-out is known only after `arrange()` returns. The
+`drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the real
+numbers.
 
 ### 3.2 Processing a Window
 
