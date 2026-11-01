@@ -308,12 +308,12 @@ class PartitionProcessor:
         # for room; kept across the one-second wake-ups so the loop keeps its
         # place in the list.
         self._room_waiter: asyncio.Future[bool] | None = None
-        # The stdin size each pending task was charged, keyed by the task
-        # object (``id``), not its task_id: two pending tasks may share a
-        # task_id (a duplicate in arrange, a replacement that keeps its
-        # parent's id), and each must give back its own charge. Sizes add up
-        # when the same object is scheduled twice, so nothing leaks either way.
-        self._held_stdin_bytes: dict[int, int] = {}
+        # Per pending task object (``id``, not task_id: two pending tasks may
+        # share a task_id): [pending runs, stdin bytes charged]. A task object
+        # can be scheduled more than once (arrange returns it twice, on_error
+        # returns it as its own replacement); its stdin and its charge are
+        # freed when its LAST run settles, so no run starts without its input.
+        self._task_holds: dict[int, list[int]] = {}
         # The first message of the next window, taken off the queue before the
         # loop waits for room. It still counts as queued.
         self._held_message: SourceMessage | None = None
@@ -835,11 +835,17 @@ class PartitionProcessor:
         # ``asyncio.wait`` does not cancel the waiter on the time bound, so the
         # same waiter keeps its place for the next call.
         done, _ = await asyncio.wait({waiter}, timeout=IDLE_POLL_TIMEOUT)
-        window_admission_wait.labels(limit=limit or TASKS_LIMIT).inc(time.monotonic() - started)
+        # A loop that queued behind other waiters while there was room counts
+        # its wait under the limit that last blocked a loop.
+        window_admission_wait.labels(limit=limit or budget.last_reached_limit).inc(time.monotonic() - started)
         if not done:
             return False
         self._room_waiter = None
-        if not waiter.result() or not self._running:
+        if not waiter.result():
+            return False
+        if not self._running:
+            # The wake-up was meant for a loop that takes a window: pass it on.
+            budget.wake_next()
             return False
         if self._blocking_limit() is not None:
             self._room_waiter = budget.add_waiter(front=True)
@@ -854,7 +860,8 @@ class PartitionProcessor:
         already excludes what other windows reserved. With no estimate yet the
         window takes one message. A window takes at least one message, so a
         loop never waits for ever; the cost is that the limits are passed by
-        the error of the estimate, about one message.
+        the error of the estimate: normally one message, more when the tasks
+        per message jump.
         """
         if self._account is None:
             return self._window_size
@@ -891,6 +898,35 @@ class PartitionProcessor:
             self._account.budget.close_unmeasured_window()
         else:
             self._account.budget.wake_next()
+
+    def _hold_task(self, task: ExecutorTask, held_bytes: int) -> None:
+        """Count one more pending run of ``task`` and the stdin bytes charged for it."""
+        hold = self._task_holds.get(id(task))
+        if hold is None:
+            self._task_holds[id(task)] = [1, held_bytes]
+        else:
+            hold[0] += 1
+            hold[1] += held_bytes
+
+    def _settle_task(self, task: ExecutorTask) -> None:
+        """One run of ``task`` settled; at its last pending run, free its stdin and give back the charge."""
+        hold = self._task_holds.get(id(task))
+        if hold is None:
+            # A run that was never held (a task scheduled outside the fan-out
+            # paths, as some tests do): free the stdin, nothing to give back.
+            task.stdin = None
+            if self._account is not None:
+                self._account.release(1, 0)
+            return
+        hold[0] -= 1
+        if hold[0] > 0:
+            if self._account is not None:
+                self._account.release(1, 0)
+            return
+        del self._task_holds[id(task)]
+        task.stdin = None
+        if self._account is not None:
+            self._account.release(1, hold[1])
 
     def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
         """Fold one window's fan-out into this partition's averages and the worker's."""
@@ -1027,7 +1063,9 @@ class PartitionProcessor:
                 await self._finalize_message_tracker(tracker)
 
         if not tasks:
-            self._note_window_shape(len(messages), 0, 0)
+            # A window with no tasks measures nothing: its messages leave the
+            # averages. Counted as zeros they would drive the estimate to 0,
+            # and a zero estimate reserves no room.
             await self._note_commit_due()
             return
 
@@ -1074,9 +1112,7 @@ class PartitionProcessor:
                     )
                 self._pending_tasks[task.task_id] = task
                 self._inflight_count += 1
-                if self._account is not None:
-                    key = id(task)
-                    self._held_stdin_bytes[key] = self._held_stdin_bytes.get(key, 0) + held
+                self._hold_task(task, held)
                 t = asyncio.create_task(self._execute_and_track(task, window))
                 self._active_tasks.add(t)
                 t.add_done_callback(self._active_tasks.discard)
@@ -1495,11 +1531,10 @@ class PartitionProcessor:
                 # terminal failure of the group). Decrement its contribution
                 # to every message tracker; add the replacements.
                 for new_task in taskflow.link_replacements(task, list(decision.replacements)):
+                    new_held = text_bytes(new_task.stdin)
                     if self._account is not None:
-                        new_held = text_bytes(new_task.stdin)
                         self._account.charge(1, new_held)
-                        key = id(new_task)
-                        self._held_stdin_bytes[key] = self._held_stdin_bytes.get(key, 0) + new_held
+                    self._hold_task(new_task, new_held)
                     self._pending_tasks[new_task.task_id] = new_task
                     window.task_ids.append(new_task.task_id)
                     window.total_tasks += 1
@@ -1563,12 +1598,11 @@ class PartitionProcessor:
                 removed = self._pending_tasks.pop(task.task_id, None)
                 self._inflight_count -= 1
                 executor_pool_active.set(self._executor_pool.active_count)
-                # The task's last outcome: no retry runs it again, and on_error
+                # This run's last outcome: no retry runs it again, and on_error
                 # already built any replacement from it. Message and window
-                # hooks see the task without its stdin.
-                task.stdin = None
-                if self._account is not None:
-                    self._account.release(1, self._held_stdin_bytes.pop(id(task), 0))
+                # hooks see the task without its stdin once no other run of
+                # the same object is pending.
+                self._settle_task(task)
                 if removed is None:
                     await log.awarning(
                         'task_not_in_pending_on_cleanup',

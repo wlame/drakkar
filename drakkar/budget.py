@@ -17,11 +17,14 @@ before it awaits anything: the framework sees a window's tasks only after
 the budget in the meantime would pass on the same room. The fan-out turns the
 reservation into real charges, and what is left is given back when the window
 has fanned out. So the limits are passed only by the error of the estimate,
-about one message for the whole worker.
+by at most the actual fan-out of the admitted window beyond its estimate:
+normally about one message for the whole worker, more when the tasks per
+message jump.
 
-The estimate comes from moving averages of tasks and bytes per message. Before
-any window of the worker was measured there is no estimate, so only one
-unmeasured window is admitted at a time.
+The estimate comes from moving averages of tasks and bytes per message, which
+rise fast and fall slowly, fed only by windows that created tasks. Before any
+such window of the worker was measured there is no estimate, so only one
+unmeasured window (of one message) is admitted at a time.
 
 The HTTP source charges its tasks too (they hold the same memory) but never
 waits here: a budget full of Kafka work must not refuse HTTP requests.
@@ -46,10 +49,13 @@ from drakkar.metrics import pending_bytes, pending_tasks
 TASKS_LIMIT = 'tasks'
 BYTES_LIMIT = 'bytes'
 
-# Weight of the newest sample in the moving averages per message. 0.3 follows a
-# change of message shape within a few windows without letting one odd window
-# swing the estimate.
-SHAPE_AVERAGE_WEIGHT = 0.3
+# Weights of the newest sample in the moving averages per message. The average
+# rises fast and falls slowly: an estimate that is too high costs only
+# throughput (a window waits a little longer), one that is too low lets windows
+# pass the limits. 0.5 upward takes half of a larger sample at once; 0.05
+# downward needs about 14 smaller windows to lose half of the gap.
+SHAPE_RISE_WEIGHT = 0.5
+SHAPE_FALL_WEIGHT = 0.05
 
 
 def text_bytes(text: str | None) -> int:
@@ -63,10 +69,11 @@ def output_bytes(outcome: Any) -> int:
 
 
 def _moving_average(current: float | None, sample: float) -> float:
-    """Fold ``sample`` into ``current``; the first sample is the average."""
+    """Fold ``sample`` into ``current``, fast upward and slowly downward; the first sample is the average."""
     if current is None:
         return sample
-    return (1.0 - SHAPE_AVERAGE_WEIGHT) * current + SHAPE_AVERAGE_WEIGHT * sample
+    weight = SHAPE_RISE_WEIGHT if sample > current else SHAPE_FALL_WEIGHT
+    return (1.0 - weight) * current + weight * sample
 
 
 @dataclass
@@ -84,7 +91,11 @@ class MessageShape:
 
     @property
     def measured(self) -> bool:
-        """Whether a window was measured, so there is an estimate."""
+        """Whether a window that created tasks was measured, so there is an estimate.
+
+        A window with no tasks is never noted: counted as zeros its messages
+        would drive the estimate to 0, and a zero estimate reserves no room.
+        """
         return self.tasks is not None
 
     @property
@@ -93,7 +104,7 @@ class MessageShape:
         return self.stdin_bytes + (self.window_kept_bytes or 0.0) + (self.message_kept_bytes or 0.0)
 
     def note_window(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
-        """Fold the fan-out of one window into the averages."""
+        """Fold the fan-out of one window that created tasks into the averages."""
         previous_stdin = self.stdin_bytes if self.measured else None
         self.tasks = _moving_average(self.tasks, task_count / message_count)
         self.stdin_bytes = _moving_average(previous_stdin, stdin_bytes / message_count)
@@ -131,6 +142,9 @@ class PendingBudget:
         # The worker-wide averages: a partition's first window is sized by them.
         self.shape = MessageShape()
         self._unmeasured_window_open = False
+        # The limit that last blocked a loop: the label of a wait behind
+        # other waiters while there is room.
+        self.last_reached_limit = TASKS_LIMIT
         self._waiters: deque[asyncio.Future[bool]] = deque()
         self._publish()
 
@@ -171,8 +185,10 @@ class PendingBudget:
         wait keeps the wait counter a plain sum of seconds.
         """
         if self._tasks + self._reserved_tasks >= self.max_tasks:
+            self.last_reached_limit = TASKS_LIMIT
             return TASKS_LIMIT
         if self._bytes + self._reserved_bytes >= self.max_bytes:
+            self.last_reached_limit = BYTES_LIMIT
             return BYTES_LIMIT
         return None
 

@@ -143,7 +143,8 @@ class ExecutorConfig(ConfigModel):
             'New windows wait while this many tasks are created and not settled (waiting for an '
             'executor slot, running, or in on_task_complete and its delivery). Must be at least '
             'max_executors. A soft limit: a window reserves its estimated tasks when it is taken, '
-            'so the limit is passed by about one message for the whole worker.'
+            'so the limit is passed only by its fan-out beyond the estimate: normally one message, '
+            'more when the tasks per message jump.'
         ),
     )
     max_pending_bytes: ByteSize = Field(

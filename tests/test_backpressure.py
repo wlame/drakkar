@@ -12,7 +12,7 @@ import pytest
 
 import drakkar.partition as partition_module
 from drakkar.app import DrakkarApp
-from drakkar.budget import BudgetAccount, PendingBudget, output_bytes, text_bytes
+from drakkar.budget import BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.config import DrakkarConfig
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
@@ -321,6 +321,41 @@ async def test_woken_loop_queues_again_at_the_front_when_the_room_is_gone():
     assert not proc._room_waiter.done()
 
 
+async def test_woken_loop_that_is_stopping_passes_the_wake_up_on(monkeypatch):
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
+    budget.charge(1, 0)
+    stopping, next_loop = idle_processor(budget), idle_processor(budget)
+    stopping.enqueue(make_msg(0))
+    next_loop.enqueue(make_msg(0))
+    stopping_collect = asyncio.create_task(stopping._collect_window())
+    await asyncio.sleep(0.01)
+    next_collect = asyncio.create_task(next_loop._collect_window())
+    await asyncio.sleep(0.01)
+
+    budget.release(1, 0)  # wakes the oldest waiter: the stopping loop
+    stopping._running = False  # the stop lands before the woken loop runs
+
+    assert await stopping_collect == []
+    assert len(await asyncio.wait_for(next_collect, timeout=1.0)) == 1
+
+
+async def test_wait_behind_other_waiters_counts_under_the_limit_that_last_blocked(monkeypatch):
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 0.02)
+    budget = PendingBudget(max_tasks=100, max_bytes=1000)
+    budget.charge(0, 1000)
+    assert budget.full_limit() == 'bytes'
+    budget.release(0, 1000)
+    budget.add_waiter()  # an older waiter; the wake-up the newcomer triggers goes to it
+    newcomer = idle_processor(budget)
+    newcomer.enqueue(make_msg(0))
+    before = window_admission_wait.labels(limit='bytes')._value.get()
+
+    assert await newcomer._collect_window() == []
+
+    assert window_admission_wait.labels(limit='bytes')._value.get() > before
+
+
 async def test_woken_loop_takes_no_window_after_a_stop():
     budget = PendingBudget(max_tasks=1, max_bytes=1 << 30)
     budget.charge(1, 0)
@@ -385,8 +420,8 @@ def test_admitted_window_size_follows_the_moving_averages():
     assert proc._admitted_window_size() == 10
 
     proc._note_window_shape(message_count=1, task_count=20, stdin_bytes=0)
-    assert proc._shape.tasks == pytest.approx(13.0)
-    assert proc._admitted_window_size() == 7
+    assert proc._shape.tasks == pytest.approx(15.0)
+    assert proc._admitted_window_size() == 6
 
 
 def test_admitted_window_size_is_bound_by_free_bytes_and_window_size():
@@ -547,6 +582,106 @@ async def test_admission_across_partitions_stays_within_the_cap_plus_one_message
     assert (budget.tasks, budget.bytes, budget.reserved_tasks, budget.reserved_bytes) == (0, 0, 0, 0)
 
 
+class SkipFirstHandler(SlowArrangeHandler):
+    """``arrange`` returns no tasks for the offsets in ``skipped``; the others fan out."""
+
+    def __init__(self, fan_out: int, skipped: set[tuple[int, int]]) -> None:
+        super().__init__(fan_out)
+        self.skipped = skipped
+
+    async def arrange(self, messages, pending):
+        await asyncio.sleep(0.01)
+        return [
+            make_task(f'p{msg.partition}-m{msg.offset}-t{i}', msg.offset)
+            for msg in messages
+            if (msg.partition, msg.offset) not in self.skipped
+            for i in range(self.fan_out)
+        ]
+
+
+def build_processors(budget: PendingBudget, handler: BaseDrakkarHandler, pool, pids) -> list[PartitionProcessor]:
+    return [
+        PartitionProcessor(partition_id=pid, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+        for pid in pids
+    ]
+
+
+async def settle_all(processors: list[PartitionProcessor]) -> None:
+    await wait_for(
+        lambda: all(
+            p.queue_size == 0 and not p.offset_tracker.has_pending() and p.inflight_count == 0 for p in processors
+        )
+    )
+    for proc in processors:
+        await proc.stop()
+
+
+async def test_worker_first_message_skipped_by_arrange_keeps_the_others_within_the_cap_plus_one_message(pool):
+    fan_out = 100
+    budget = PeakBudget(max_tasks=100, max_bytes=1 << 40)
+    handler = SkipFirstHandler(fan_out, skipped={(0, 0)})
+    first = build_processors(budget, handler, pool, [0])[0]
+    first.enqueue(make_msg(0, partition=0))
+    first.start()
+    await wait_for(lambda: first.queue_size == 0 and not first.offset_tracker.has_pending())
+    assert not budget.shape.measured
+
+    others = build_processors(budget, handler, pool, range(1, 16))
+    for proc in others:
+        for offset in range(3):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+        proc.start()
+    await settle_all([first, *others])
+
+    assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert (budget.tasks, budget.reserved_tasks) == (0, 0)
+
+
+async def test_every_partition_first_window_without_tasks_stays_within_the_cap_plus_one_message(pool):
+    fan_out = 100
+    budget = PeakBudget(max_tasks=100, max_bytes=1 << 40)
+    handler = SkipFirstHandler(fan_out, skipped={(pid, 0) for pid in range(16)})
+    processors = build_processors(budget, handler, pool, range(16))
+    for proc in processors:
+        for offset in range(3):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+        proc.start()
+    await settle_all(processors)
+
+    assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert (budget.tasks, budget.reserved_tasks) == (0, 0)
+
+
+def test_message_shape_average_stays_high_after_a_run_of_small_windows():
+    shape = MessageShape()
+    shape.note_window(message_count=1, task_count=1000, stdin_bytes=0)
+    for _ in range(10):
+        shape.note_window(message_count=1, task_count=1, stdin_bytes=0)
+
+    assert shape.tasks > 500
+
+
+def test_message_shape_average_rises_fast_on_a_larger_window():
+    shape = MessageShape()
+    shape.note_window(message_count=1, task_count=10, stdin_bytes=0)
+    shape.note_window(message_count=1, task_count=1000, stdin_bytes=0)
+
+    assert shape.tasks == pytest.approx(505.0)
+
+
+async def test_window_without_tasks_does_not_measure_the_averages(pool):
+    budget = big_budget()
+    handler = SkipFirstHandler(fan_out=1, skipped={(0, 0)})
+    proc = build_processors(budget, handler, pool, [0])[0]
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert not proc._shape.measured
+    assert not budget.shape.measured
+    assert not budget.unmeasured_window_open
+
+
 async def test_a_raising_arrange_gives_back_its_reservation(pool):
     class Raising(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
@@ -637,7 +772,7 @@ async def test_duplicate_task_ids_give_back_each_charge(pool):
 
     await run_until_settled(proc)
 
-    assert proc._held_stdin_bytes == {}
+    assert proc._task_holds == {}
     assert (budget.tasks, budget.bytes) == (0, 0)
 
 
@@ -657,7 +792,48 @@ async def test_replacement_that_keeps_its_parent_id_gives_back_each_charge(pool)
 
     await run_until_settled(proc)
 
-    assert proc._held_stdin_bytes == {}
+    assert proc._task_holds == {}
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+async def test_task_object_scheduled_twice_by_arrange_keeps_its_stdin_for_both_runs(pool):
+    class Twice(FanOutHandler):
+        async def arrange(self, messages, pending):
+            task = make_task('twice', messages[0].offset)
+            return [task, task]
+
+    budget = big_budget()
+    handler = Twice()
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert handler.stdin_in_on_task_complete == [STDIN, STDIN]
+    assert handler.stdin_in_message_hook == [None, None]
+    assert proc._task_holds == {}
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
+async def test_task_object_returned_by_on_error_as_its_own_replacement_keeps_its_stdin(pool):
+    class FixAndResubmit(FanOutHandler):
+        async def arrange(self, messages, pending):
+            return [make_task('fixable', messages[0].offset, exit_code=1)]
+
+        async def on_error(self, task, error):
+            task.precomputed = PrecomputedResult(stdout=STDOUT, exit_code=0)
+            return [task]
+
+    budget = big_budget()
+    handler = FixAndResubmit()
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=pool, window_size=10, budget=budget)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert handler.stdin_in_on_task_complete == [STDIN]
+    assert handler.stdin_in_message_hook == [None, None]
+    assert proc._task_holds == {}
     assert (budget.tasks, budget.bytes) == (0, 0)
 
 
