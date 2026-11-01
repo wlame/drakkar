@@ -989,12 +989,13 @@ The file names and the shared folder do not change.
   watchdog files: the cache starts empty and is filled again.
 - **The worker name must be 1 to 128 letters, digits, `_` or `-`.** A name with a dot, a
   slash or a space (for example an FQDN in `WORKER_ID`) fails the start with
-  `worker.name: '<name>' must be 1 to 128 letters, digits, '_' or '-'; use '<safe form>'`.
+  `<source>: '<name>' must be 1 to 128 letters, digits, '_' or '-'; use '<safe form>'`, where
+  `<source>` is `worker.name`, `the variable <NAME>` or `the worker_id argument`.
   Use the safe form the message gives. Before, such names were changed to `_` only in
   card keys, so two names could share one card.
 - **The generated name is the host name.** With no configured name, the worker uses its
   host name made safe (in Kubernetes: the pod name), or `drakkar-<8 hex>` when the host
-  name is empty or `localhost`. It was a value that changed at every start.
+  name is empty or a localhost name such as `localhost.localdomain`. It was a value that changed at every start.
 - **A cluster name can no longer be `fleet`, `history`, `merged`, `tasks` or `workers`**
   (in any letter case, after sanitizing). Such a name fails the load.
 - **`storage.dir` must be a local filesystem.** The own folder carries an owner lock

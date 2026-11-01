@@ -304,7 +304,11 @@ def test_generated_worker_name_host_name_made_safe(monkeypatch, host, expected):
     assert generated_worker_name() == expected
 
 
-@pytest.mark.parametrize('host', ['', 'localhost', 'LOCALHOST'], ids=['empty', 'localhost', 'upper'])
+@pytest.mark.parametrize(
+    'host',
+    ['', 'localhost', 'LOCALHOST', 'localhost.localdomain', 'localhost6.localdomain6'],
+    ids=['empty', 'localhost', 'upper', 'localdomain', 'localhost6'],
+)
 def test_generated_worker_name_unspecific_host_gives_a_random_name(monkeypatch, host):
     monkeypatch.setattr('socket.gethostname', lambda: host)
 
@@ -315,22 +319,26 @@ def test_generated_worker_name_unspecific_host_gives_a_random_name(monkeypatch, 
     assert is_valid_worker_name(name)
 
 
-def test_app_worker_name_from_the_environment_is_checked(tmp_path, monkeypatch):
+def test_app_worker_name_from_the_environment_is_checked_and_names_the_variable(tmp_path, monkeypatch):
     monkeypatch.setenv('WORKER_ID', 'node.example')
 
-    with pytest.raises(ValueError, match="use 'node_example'"):
+    with pytest.raises(ValueError) as refused:
         DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path))
 
+    assert str(refused.value) == (
+        "the variable WORKER_ID: 'node.example' must be 1 to 128 letters, digits, '_' or '-'; use 'node_example'"
+    )
 
-def test_app_worker_name_from_the_argument_is_checked(tmp_path):
-    with pytest.raises(ValueError, match=r"worker\.name: 'a/b'"):
+
+def test_app_worker_name_from_the_argument_is_checked_and_names_the_argument(tmp_path):
+    with pytest.raises(ValueError, match=r"^the worker_id argument: 'a/b'"):
         DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path), worker_id='a/b')
 
 
 def test_app_worker_name_from_the_config_is_checked(tmp_path, monkeypatch):
     monkeypatch.delenv('WORKER_ID', raising=False)
 
-    with pytest.raises(ValueError, match=r"worker\.name: 'a\.b'"):
+    with pytest.raises(ValueError, match=r"^worker\.name: 'a\.b'"):
         DrakkarApp(handler=SimpleHandler(), config=_config(tmp_path, worker={'name': 'a.b'}))
 
 

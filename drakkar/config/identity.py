@@ -20,10 +20,15 @@ from drakkar.schedule import sanitize_cluster
 # passes is equal to its sanitized form everywhere.
 WORKER_NAME_MAX_LENGTH = 128
 _WORKER_NAME = re.compile(rf'[A-Za-z0-9_-]{{1,{WORKER_NAME_MAX_LENGTH}}}')
-WORKER_NAME_INVALID = "worker.name: '{name}' must be 1 to 128 letters, digits, '_' or '-'; use '{suggestion}'"
+WORKER_NAME_INVALID = "{source}: '{name}' must be 1 to 128 letters, digits, '_' or '-'; use '{suggestion}'"
+# Where a configured worker name came from, named in the refusal so the operator looks in the right place.
+WORKER_NAME_FROM_CONFIG = 'worker.name'
+WORKER_NAME_FROM_ARGUMENT = 'the worker_id argument'
+WORKER_NAME_FROM_VARIABLE = 'the variable {variable}'
 
-# A host name that names no host in particular: two workers would share it.
-_UNSPECIFIC_HOST_NAMES = frozenset({'localhost'})
+# Host names that name no host in particular (common defaults of an unnamed
+# host): two workers would share them. Compared without letter case.
+_UNSPECIFIC_HOST_NAMES = frozenset({'localhost', 'localhost.localdomain', 'localhost6', 'localhost6.localdomain6'})
 GENERATED_NAME_PREFIX = 'drakkar-'
 
 
@@ -61,14 +66,17 @@ def safe_worker_name(text: str) -> str:
     return sanitize_worker_name(text)[:WORKER_NAME_MAX_LENGTH]
 
 
-def check_worker_name(name: str) -> None:
+def check_worker_name(name: str, source: str = WORKER_NAME_FROM_CONFIG) -> None:
     """Refuse a configured worker name that is not equal to its safe form.
+
+    ``source`` says where the name came from (``worker.name``, a variable or
+    the constructor argument); the message starts with it.
 
     Raises:
         ValueError: the name breaks the rule; the message suggests the safe form.
     """
     if not is_valid_worker_name(name):
-        raise ValueError(WORKER_NAME_INVALID.format(name=name, suggestion=safe_worker_name(name)))
+        raise ValueError(WORKER_NAME_INVALID.format(source=source, name=name, suggestion=safe_worker_name(name)))
 
 
 def generated_worker_name() -> str:
@@ -76,11 +84,13 @@ def generated_worker_name() -> str:
 
     In Kubernetes the host name is the pod name, which a container restart
     keeps, so a restarted worker finds its own folder again. A host name
-    that is empty or ``localhost`` names no host in particular; a random
-    name is used then.
+    that is empty or a localhost name (``localhost``,
+    ``localhost.localdomain``) names no host in particular; a random name is
+    used then.
     """
-    host = safe_worker_name(socket.gethostname())
-    if host and host.lower() not in _UNSPECIFIC_HOST_NAMES:
+    raw_host = socket.gethostname()
+    host = safe_worker_name(raw_host)
+    if host and raw_host.lower() not in _UNSPECIFIC_HOST_NAMES:
         return host
     return f'{GENERATED_NAME_PREFIX}{secrets.token_hex(4)}'
 
@@ -99,7 +109,7 @@ class WorkerConfig(ConfigModel):
         description=(
             "Literal worker name: 1 to 128 letters, digits, '_' or '-', unique in the fleet. "
             'Empty, and no value from name_env: the host name with every other character turned '
-            'into _, or drakkar-<8 hex> when the host name is empty or localhost.'
+            'into _, or drakkar-<8 hex> when the host name is empty or a localhost name.'
         ),
     )
     name_env: str = Field(
@@ -113,6 +123,13 @@ class WorkerConfig(ConfigModel):
     def resolved_name(self) -> str:
         """The configured name, or ``''`` when neither the variable nor ``name`` gives one."""
         return _name_from(self.name, self.name_env)
+
+    def resolved_name_and_source(self) -> tuple[str, str]:
+        """The configured name and where it came from: the variable named by ``name_env``, or ``worker.name``."""
+        from_env = os.environ.get(self.name_env, '') if self.name_env else ''
+        if from_env:
+            return from_env, WORKER_NAME_FROM_VARIABLE.format(variable=self.name_env)
+        return self.name, WORKER_NAME_FROM_CONFIG
 
 
 class ClusterConfig(ConfigModel):

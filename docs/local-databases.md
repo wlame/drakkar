@@ -83,8 +83,9 @@ The worker name is part of the own folder's path, of every own file name,
 and of the key of the [registry card](fleet.md) on every provider. A
 configured name (`worker.name`, the variable named by `worker.name_env`, or
 the `worker_id` argument of `DrakkarApp`) must be 1 to 128 letters, digits,
-`_` or `-`. Any other name fails the start, and the message gives the safe
-form:
+`_` or `-`. Any other name fails the start. The message starts with where
+the name came from (`worker.name`, `the variable <NAME>` or
+`the worker_id argument`) and gives the safe form:
 
 ```text
 worker.name: 'host.example.com' must be 1 to 128 letters, digits, '_' or '-'; use 'host_example_com'
@@ -95,7 +96,8 @@ different names can never share a folder, a card or the own archive scope.
 
 With no name configured, the worker uses its host name, with every
 character outside `[A-Za-z0-9_-]` turned into `_` and cut to 128
-characters. A host name that is empty or `localhost` gives
+characters. A host name that is empty or a localhost name (`localhost`,
+`localhost.localdomain`, `localhost6`, `localhost6.localdomain6`) gives
 `drakkar-<8 random hex>` instead. In Kubernetes the host name is the pod
 name: a container restart in the same pod keeps it, so the restarted worker
 finds its own folder again (see [After a crash](#after-a-crash)). A

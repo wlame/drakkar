@@ -28,7 +28,7 @@ from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
 from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config, own_storage_dir
-from drakkar.config.identity import check_worker_name, generated_worker_name
+from drakkar.config.identity import WORKER_NAME_FROM_ARGUMENT, check_worker_name, generated_worker_name
 from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
@@ -301,11 +301,14 @@ class DrakkarApp:
         # every hook, on_startup included.
         self._wire_app_config()
         self._wire_executor_on_failure()
-        configured_worker_id = worker_id or self._config.worker.resolved_name()
+        if worker_id:
+            configured_worker_id, name_source = worker_id, WORKER_NAME_FROM_ARGUMENT
+        else:
+            configured_worker_id, name_source = self._config.worker.resolved_name_and_source()
         if configured_worker_id:
             # Here and not at the config load: the name may come from a
             # variable or an argument that the load never reads.
-            check_worker_name(configured_worker_id)
+            check_worker_name(configured_worker_id, source=name_source)
         self._worker_id = configured_worker_id or generated_worker_name()
         # A generated name can change with the host (a recreated pod); the own archive scope warns about it.
         self._worker_id_is_generated = not configured_worker_id

@@ -9,7 +9,7 @@
           "path": "worker.name",
           "env": "DK_WORKER__NAME",
           "description": "Literal worker name: 1 to 128 letters, digits, '_' or '-', unique in the fleet.",
-          "full_description": "Literal worker name: 1 to 128 letters, digits, '_' or '-', unique in the fleet. Empty, and no value from name_env: the host name with every other character turned into _, or drakkar-<8 hex> when the host name is empty or localhost.",
+          "full_description": "Literal worker name: 1 to 128 letters, digits, '_' or '-', unique in the fleet. Empty, and no value from name_env: the host name with every other character turned into _, or drakkar-<8 hex> when the host name is empty or a localhost name.",
           "type": "string",
           "default": "",
           "secret": false,

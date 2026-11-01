@@ -20,7 +20,7 @@ The name that identifies this worker in logs, metrics, the registry card and the
 worker:
   name: ''                         # literal worker name: 1 to 128 of A-Z a-z 0-9 _ -; any other name fails
                                    # the start. '' and no value from name_env = the host name made safe
-                                   # (drakkar-<8 hex> for an empty host name or localhost). env: DK_WORKER__NAME
+                                   # (drakkar-<8 hex> for an empty or a localhost host name). env: DK_WORKER__NAME
   name_env: WORKER_ID              # env var that holds the name; set and not empty, it wins over name. Same rule.
                                    # env: DK_WORKER__NAME_ENV  · reasonable: WORKER_ID, HOSTNAME, K8S_POD_NAME
 ```
