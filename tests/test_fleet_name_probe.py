@@ -437,3 +437,23 @@ async def test_name_online_slow_refresh_trusts_two_refresh_intervals():
     assert service.name_online('w-old') is False
     clock.advance(50)
     assert service.name_online('w-old') is None
+
+
+def _card_of(instance: str, second: int) -> dict:
+    identity = WorkerIdentity(**{**TWIN.__dict__, 'instance': instance})
+    return build_card(identity, state='starting', heartbeat_at=datetime(2026, 11, 8, 10, 0, second, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(('age', 'refused'), [(0.5, True), (2 * HEARTBEAT, False)], ids=['fresh', 'stale'])
+async def test_check_name_free_card_of_a_new_instance_in_the_second_listing(age, refused):
+    clock = _Clock()
+    pauses = _Pauses(clock)
+    still = PeerCard(card=_twin_card(0), age_seconds=1.0)
+    newcomer = PeerCard(card=_card_of('8888888888888888', 5), age_seconds=age)
+    service = _service(_Fixed([still], [still, newcomer]), clock, pauses)
+
+    if refused:
+        with pytest.raises(WorkerNameInUseError, match='instance 8888888888888888'):
+            await service.check_name_free()
+    else:
+        await service.check_name_free()

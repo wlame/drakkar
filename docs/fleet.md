@@ -950,7 +950,9 @@ It looks for a card with its own name and another instance:
    start goes on at once, and the first publish replaces the stale card.
 3. Otherwise the worker logs `fleet_worker_name_probe_waiting`, waits one
    heartbeat plus 2 seconds and lists again. A card whose `heartbeat_at`
-   changed belongs to a live worker: the worker logs
+   changed belongs to a live worker, and so does a card that is not stale
+   and whose instance was not in the first listing (it was published during
+   the wait): the worker logs
    `fleet_worker_name_in_use` and does not start, with the error
    `worker name '<name>' is used by a live worker (instance <i>, <url>); give each worker a unique name`.
    A card that did not change belongs to a killed process; the start goes on.

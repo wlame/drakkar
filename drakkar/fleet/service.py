@@ -329,8 +329,8 @@ class FleetRegistry:
         instance is stale, and the start goes on at once, when its age is
         at least two heartbeats or the provider says it is offline.
         Otherwise the check waits one heartbeat plus 2 s, logs that it
-        waits, and lists again: a card whose ``heartbeat_at`` moved belongs
-        to a live worker. The whole check takes at most two heartbeats plus
+        waits, and lists again: a card whose ``heartbeat_at`` moved, or a
+        fresh card of a new instance, belongs to a live worker. The whole check takes at most two heartbeats plus
         5 s. A provider that does not start or list in that time skips the
         check with a warning: a registry that is down never blocks a start.
 
@@ -348,9 +348,11 @@ class FleetRegistry:
             return
         # ``instance`` and ``heartbeat_at`` are optional card fields: a card
         # without them is keyed by ``''`` and compared as ``None``.
+        first_cards = self._same_name_cards(first.value)
+        listed_first = {card.get('instance', '') for card, _age_seconds, _online in first_cards}
         suspects = {
             card.get('instance', ''): card
-            for card, age_seconds, online in self._same_name_cards(first.value)
+            for card, age_seconds, online in first_cards
             if not self._is_stale(age_seconds, online)
         }
         if not suspects:
@@ -368,9 +370,13 @@ class FleetRegistry:
         if not second.ok:
             await self._name_probe_skipped(f'list {second.outcome}')
             return
-        for card, _age_seconds, _online in self._same_name_cards(second.value):
-            before = suspects.get(card.get('instance', ''))
+        for card, age_seconds, online in self._same_name_cards(second.value):
+            instance = card.get('instance', '')
+            before = suspects.get(instance)
             if before is not None and card.get('heartbeat_at') != before.get('heartbeat_at'):
+                await self._refuse_start(card)
+            # A fresh card that was not there at the first listing was published during the wait.
+            if instance not in listed_first and not self._is_stale(age_seconds, online):
                 await self._refuse_start(card)
 
     def _same_name_cards(self, listed: PeerCardList) -> list[tuple[dict[str, Any], float | None, bool | None]]:
