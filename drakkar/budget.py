@@ -16,10 +16,12 @@ before it awaits anything: the framework sees a window's tasks only after
 ``arrange`` returns them, and without the reservation every loop that checked
 the budget in the meantime would pass on the same room. The fan-out turns the
 reservation into real charges, and what is left is given back when the window
-has fanned out. So the limits are passed only by the error of the estimate,
-by at most the actual fan-out of the admitted window beyond its estimate:
-normally about one message for the whole worker, more when the tasks per
-message jump.
+has fanned out. A partition takes one message per window until it has
+measured a few windows of its own, and a message never reserves less than
+``limit / window_size``, so a full window reserves the whole cap. With a
+steady message shape the limits are passed by about one message for the whole
+worker; after the warm-up a sudden jump in tasks per message can pass them by
+that jump, because the fan-out is known only after ``arrange`` returns.
 
 The estimate comes from moving averages of tasks and bytes per message, which
 rise fast and fall slowly, fed only by windows that created tasks. Before any

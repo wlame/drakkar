@@ -1,6 +1,7 @@
 """Per-partition processor for Drakkar framework."""
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -120,6 +121,12 @@ COMMIT_BATCH_MAX_DELAY_SECONDS = 0.5
 # deterministically, and restarting it forever would bury the fault under
 # an endless error stream instead of surfacing it on /readyz.
 PARTITION_RESTART_LIMIT = 1
+
+# Windows that created tasks a partition must measure itself before its window
+# size adapts. Until then each window takes one message, so a jump of the
+# message shape after the first sample passes the cap by one message, not by a
+# whole window sized on that sample.
+WARM_UP_WINDOWS = 3
 
 
 @dataclass
@@ -321,6 +328,9 @@ class PartitionProcessor:
         # Until the first window is measured, the worker-wide averages of the
         # budget size the window.
         self._shape = MessageShape()
+        # Windows that created tasks, measured by this partition. Below
+        # WARM_UP_WINDOWS each window takes one message.
+        self._measured_windows = 0
         # Whether the window being arranged holds the budget's one slot for a
         # window with no estimate.
         self._holds_unmeasured_window = False
@@ -852,32 +862,60 @@ class PartitionProcessor:
             return False
         return True
 
+    def _in_warm_up(self) -> bool:
+        """Whether this partition has fewer than ``WARM_UP_WINDOWS`` measured windows of its own."""
+        return self._measured_windows < WARM_UP_WINDOWS
+
+    def _per_message_estimate(self, shape: MessageShape) -> tuple[float, float]:
+        """Tasks and bytes to reserve per message: the averages, never below the floor.
+
+        The floor is ``max_pending_tasks / window_size`` tasks and
+        ``max_pending_bytes / window_size`` bytes, so a full window always
+        reserves the whole cap. Without it, an average that is low for every
+        partition (a small first message, a long run of small messages) lets
+        many loops each take a full window on the same room, and the excess of
+        all of them adds up.
+        """
+        assert self._account is not None and shape.tasks is not None
+        budget = self._account.budget
+        floor_tasks = math.ceil(budget.max_tasks / self._window_size)
+        floor_bytes = budget.max_bytes / self._window_size
+        return max(shape.tasks, floor_tasks), max(shape.held_bytes, floor_bytes)
+
     def _admitted_window_size(self) -> int:
         """How many messages the next window may take.
 
-        ``min(free tasks / average tasks per message, free bytes / average
-        bytes per message)``, clamped to 1 .. window_size, where the free room
-        already excludes what other windows reserved. With no estimate yet the
-        window takes one message. A window takes at least one message, so a
-        loop never waits for ever; the cost is that the limits are passed by
-        the error of the estimate: normally one message, more when the tasks
-        per message jump.
+        During the warm-up (fewer than ``WARM_UP_WINDOWS`` measured windows of
+        its own) a partition takes one message per window. After it,
+        ``min(free tasks / tasks per message, free bytes / bytes per
+        message)``, clamped to 1 .. window_size, with the per-message
+        estimate of ``_per_message_estimate`` and the free room already
+        excluding what other windows reserved. A window takes at least one
+        message, so a loop never waits for ever; the cost is that the limits
+        are passed by the error of the estimate: normally one message, more
+        when the tasks per message jump after the warm-up.
         """
         if self._account is None:
             return self._window_size
         shape = self._estimate()
-        if shape is None:
+        if shape is None or self._in_warm_up():
             return 1
         budget = self._account.budget
-        fit = float(self._window_size)
-        if shape.tasks:
-            fit = min(fit, budget.free_tasks / shape.tasks)
-        if shape.held_bytes > 0:
-            fit = min(fit, budget.free_bytes / shape.held_bytes)
+        tasks_per_message, bytes_per_message = self._per_message_estimate(shape)
+        fit = min(
+            float(self._window_size),
+            budget.free_tasks / tasks_per_message,
+            budget.free_bytes / bytes_per_message,
+        )
         return max(1, min(self._window_size, int(fit)))
 
     def _reserve_window(self, message_count: int) -> None:
-        """Reserve the estimated tasks and bytes of a window just taken, or the one unmeasured slot."""
+        """Reserve the estimated tasks and bytes of a window just taken, or the one unmeasured slot.
+
+        A warm-up window reserves at least all the free room: its estimate is
+        not this partition's own, so no other window is admitted until its
+        fan-out has landed, and the cap is passed by at most this one message.
+        """
         if self._account is None:
             return
         shape = self._estimate()
@@ -885,8 +923,14 @@ class PartitionProcessor:
             self._account.budget.open_unmeasured_window()
             self._holds_unmeasured_window = True
             return
-        assert shape.tasks is not None
-        self._account.reserve(message_count * shape.tasks, message_count * shape.held_bytes)
+        tasks_per_message, bytes_per_message = self._per_message_estimate(shape)
+        tasks = message_count * tasks_per_message
+        held_bytes = message_count * bytes_per_message
+        if self._in_warm_up():
+            budget = self._account.budget
+            tasks = max(tasks, budget.free_tasks)
+            held_bytes = max(held_bytes, budget.free_bytes)
+        self._account.reserve(tasks, held_bytes)
 
     def _end_window_reservation(self) -> None:
         """Give back what the window reserved and did not charge, and its unmeasured slot."""
@@ -930,6 +974,7 @@ class PartitionProcessor:
 
     def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
         """Fold one window's fan-out into this partition's averages and the worker's."""
+        self._measured_windows += 1
         self._shape.note_window(message_count, task_count, stdin_bytes)
         if self._account is not None:
             self._account.budget.shape.note_window(message_count, task_count, stdin_bytes)

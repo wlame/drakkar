@@ -386,7 +386,7 @@ async def test_second_unmeasured_window_waits_for_the_first_to_fan_out(monkeypat
     assert len(await second_collect) == 1
 
 
-async def test_first_window_of_a_partition_uses_the_worker_wide_average():
+async def test_warm_up_window_takes_one_message_and_reserves_all_the_free_room():
     budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
     budget.shape.note_window(message_count=1, task_count=10, stdin_bytes=0)
     proc = idle_processor(budget, window_size=50)
@@ -395,8 +395,9 @@ async def test_first_window_of_a_partition_uses_the_worker_wide_average():
 
     messages = await proc._collect_window()
 
-    assert len(messages) == 10
+    assert len(messages) == 1
     assert budget.reserved_tasks == 100
+    assert budget.full_limit() == 'tasks'
     assert not budget.unmeasured_window_open
 
 
@@ -417,6 +418,7 @@ def test_admitted_window_size_follows_the_moving_averages():
     proc = idle_processor(budget, window_size=50)
 
     proc._note_window_shape(message_count=1, task_count=10, stdin_bytes=0)
+    proc._measured_windows = partition_module.WARM_UP_WINDOWS
     assert proc._admitted_window_size() == 10
 
     proc._note_window_shape(message_count=1, task_count=20, stdin_bytes=0)
@@ -424,22 +426,28 @@ def test_admitted_window_size_follows_the_moving_averages():
     assert proc._admitted_window_size() == 6
 
 
-def test_admitted_window_size_is_bound_by_free_bytes_and_window_size():
+def test_admitted_window_size_is_bound_by_free_bytes():
     budget = PendingBudget(max_tasks=10_000, max_bytes=10_000)
     proc = idle_processor(budget, window_size=5)
+    proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=4000)
+    proc._measured_windows = partition_module.WARM_UP_WINDOWS
 
-    proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=1000)
-    assert proc._admitted_window_size() == 5
-
-    budget.charge(0, 8000)
     assert proc._admitted_window_size() == 2
+    budget.charge(0, 4000)
+    assert proc._admitted_window_size() == 1
 
 
-def test_admitted_window_size_ignores_an_average_of_zero_tasks():
-    proc = idle_processor(PendingBudget(max_tasks=10, max_bytes=1 << 30), window_size=6)
-    proc._note_window_shape(message_count=3, task_count=0, stdin_bytes=0)
+def test_admitted_window_size_reserves_at_least_the_floor_for_a_low_average():
+    budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
+    proc = idle_processor(budget, window_size=10)
+    proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=0)
+    proc._measured_windows = partition_module.WARM_UP_WINDOWS
 
-    assert proc._admitted_window_size() == 6
+    # The floor is 100 / 10 = 10 tasks per message, so a full window reserves the cap.
+    assert proc._admitted_window_size() == 10
+    proc._reserve_window(10)
+    assert budget.reserved_tasks == 100
+    assert budget.full_limit() == 'tasks'
 
 
 def test_admitted_window_size_takes_at_least_one_message_with_no_room():
@@ -649,6 +657,118 @@ async def test_every_partition_first_window_without_tasks_stays_within_the_cap_p
     await settle_all(processors)
 
     assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert (budget.tasks, budget.reserved_tasks) == (0, 0)
+
+
+class SmallFirstHandler(SlowArrangeHandler):
+    """The worker's first message (partition 0, offset 0) fans out ``small`` tasks; every other ``fan_out``."""
+
+    def __init__(self, small: int, fan_out: int) -> None:
+        super().__init__(fan_out)
+        self.small = small
+
+    async def arrange(self, messages, pending):
+        await asyncio.sleep(0.01)
+        tasks = []
+        for msg in messages:
+            count = self.small if (msg.partition, msg.offset) == (0, 0) else self.fan_out
+            tasks += [make_task(f'p{msg.partition}-m{msg.offset}-t{i}', msg.offset) for i in range(count)]
+        return tasks
+
+
+async def run_small_first(pool, budget, handler, *, window_size: int, partitions: int, messages: int) -> None:
+    """Measure the worker's first message alone, then give every partition ``messages`` more."""
+    first = PartitionProcessor(
+        partition_id=0, handler=handler, executor_pool=pool, window_size=window_size, budget=budget
+    )
+    first.enqueue(make_msg(0, partition=0))
+    first.start()
+    await wait_for(lambda: first.queue_size == 0 and not first.offset_tracker.has_pending())
+    others = [
+        PartitionProcessor(
+            partition_id=pid, handler=handler, executor_pool=pool, window_size=window_size, budget=budget
+        )
+        for pid in range(1, partitions)
+    ]
+    for proc in [first, *others]:
+        for offset in range(1, messages + 1):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+    for proc in others:
+        proc.start()
+    await settle_all([first, *others])
+
+
+async def test_small_first_measured_message_keeps_15_partitions_within_the_cap_plus_one_message(pool):
+    """A worker average of 1 task per message must not let every loop take a full window on the same room."""
+    fan_out = 100
+    budget = PeakBudget(max_tasks=200, max_bytes=1 << 40)
+
+    await run_small_first(
+        pool, budget, SmallFirstHandler(small=1, fan_out=fan_out), window_size=10, partitions=16, messages=3
+    )
+
+    assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert (budget.tasks, budget.reserved_tasks) == (0, 0)
+
+
+async def test_jump_after_the_first_measured_message_stays_within_the_cap_plus_one_message(pool):
+    """First message 10 tasks, the next ones 100: the warm-up keeps windows at one message, not cap / 10."""
+    fan_out = 100
+    budget = PeakBudget(max_tasks=200, max_bytes=1 << 40)
+
+    await run_small_first(
+        pool, budget, SmallFirstHandler(small=10, fan_out=fan_out), window_size=100, partitions=4, messages=4
+    )
+
+    assert budget.peak_tasks <= budget.max_tasks + fan_out
+    assert (budget.tasks, budget.reserved_tasks) == (0, 0)
+
+
+class SmallThenLargeHandler(SlowArrangeHandler):
+    """Offsets below ``small_until`` fan out one task; later offsets fan out ``fan_out`` tasks."""
+
+    def __init__(self, fan_out: int, small_until: int) -> None:
+        super().__init__(fan_out)
+        self.small_until = small_until
+
+    async def arrange(self, messages, pending):
+        await asyncio.sleep(0.01)
+        tasks = []
+        for msg in messages:
+            count = 1 if msg.offset < self.small_until else self.fan_out
+            tasks += [make_task(f'p{msg.partition}-m{msg.offset}-t{i}', msg.offset) for i in range(count)]
+        return tasks
+
+
+async def test_shape_jump_after_the_warm_up_passes_the_cap_by_at_most_one_window(pool):
+    """After a run of 1-task messages every partition gets 100-task messages at once.
+
+    The floor of max_pending_tasks / window_size tasks per message makes a full
+    window reserve the whole cap, so one window passes on the low average, not
+    one window per partition.
+    """
+    fan_out, window_size, warm_up = 100, 10, partition_module.WARM_UP_WINDOWS
+    budget = PeakBudget(max_tasks=200, max_bytes=1 << 40)
+    handler = SmallThenLargeHandler(fan_out, small_until=warm_up)
+    processors = [
+        PartitionProcessor(
+            partition_id=pid, handler=handler, executor_pool=pool, window_size=window_size, budget=budget
+        )
+        for pid in range(8)
+    ]
+    for proc in processors:
+        for offset in range(warm_up):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+        proc.start()
+    await wait_for(lambda: all(p.queue_size == 0 and not p.offset_tracker.has_pending() for p in processors))
+    assert all(not p._in_warm_up() for p in processors)
+
+    for proc in processors:
+        for offset in range(warm_up, warm_up + window_size):
+            proc.enqueue(make_msg(offset, partition=proc.partition_id))
+    await settle_all(processors)
+
+    assert budget.peak_tasks <= budget.max_tasks + window_size * fan_out
     assert (budget.tasks, budget.reserved_tasks) == (0, 0)
 
 
@@ -867,6 +987,7 @@ def test_released_kept_output_feeds_the_byte_estimate_per_message():
     budget = PendingBudget(max_tasks=100, max_bytes=10_000)
     proc = idle_processor(budget, window_size=50)
     proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=100)
+    proc._measured_windows = partition_module.WARM_UP_WINDOWS
     window = partition_module.Window(window_id=1, source_messages=[make_msg(0), make_msg(1)])
     tracker = partition_module.MessageTracker(source_message=make_msg(0))
     proc._account.charge(0, 1300)
