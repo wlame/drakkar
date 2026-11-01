@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.28"
+  version: "1.29"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -1883,10 +1883,29 @@ components:
         partition: {type: [integer, 'null']}
         start_ts: {type: [number, 'null']}
         end_ts: {type: [number, 'null']}
-        duration: {type: [number, 'null']}
+        duration:
+          type: [number, 'null']
+          description: >-
+            Process run time in seconds, from spawn to exit, measured off the
+            event loop (v1.29). Older backends measured it on the loop, so it
+            included loop stalls.
         status: {type: string}
         args: {}
         pid: {type: [integer, 'null']}
+        run_started_at:
+          type: [number, 'null']
+          description: >-
+            Optional (v1.29). Unix seconds of the subprocess spawn, from the
+            completion event's metadata; null while running, for a launch
+            failure and for a precomputed result. The run bar is
+            [run_started_at, run_started_at + duration].
+        reported_run_seconds:
+          type: [number, 'null']
+          description: >-
+            Optional (v1.29). The run time the handler's task_run_seconds hook
+            reported; absent or null when the hook gave no valid value. When
+            present, the bar is [run_started_at, run_started_at +
+            reported_run_seconds].
         stdout_size:
           type: [integer, 'null']
           description: Captured stdout byte count; null until the task completes.
