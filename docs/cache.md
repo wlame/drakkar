@@ -220,7 +220,7 @@ folder.
 ## Cache exchange
 
 Workers do not read each other's cache files. Each worker keeps its cache
-file private in its own `storage.dir`, and pulls the rows of other workers
+file private in its own folder `<storage.dir>/<cluster>/<worker>/`, and pulls the rows of other workers
 over HTTP. Every `cache.exchange.interval` (default 30) the
 `cache.sync` loop asks each peer worth a pull for the `cluster` and
 `global` rows that this peer originated, from

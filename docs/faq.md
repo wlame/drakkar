@@ -144,7 +144,7 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own `storage.dir`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
+Through the [fleet registry](fleet.md) — no peer list in the cache config, no Kafka topic. Each worker's cache file is private to it, in its own folder `<storage.dir>/<cluster>/<worker>/`. Each worker publishes a registry card with the URL of its API server and, while it serves the exchange, `features.cache`: the marks of the newest `cluster` and `global` rows it originated. Every `cache.exchange.interval` a worker reads the cards and pulls new rows from each peer with `GET /api/v1/peer/cache/changes`, page by page. It pulls only peers the registry lists, that are not offline or starting, and that have a mark past its cursor. See [Cache exchange](cache.md#cache-exchange).
 
 What happens with `autodiscover` off (the default): nothing is pulled and the cache operates single-worker. No error — it just behaves like a local cache, and the worker logs `cache_exchange_off_no_autodiscover` once at startup. If you *want* a cluster-wide cache, turn on `autodiscover` with a provider every worker can reach (for example `filesystem` with one `storage.shared_dir`) and make sure every worker can reach the API port of the others at the URL on their cards.
 
@@ -305,7 +305,7 @@ They get archived, not deleted outright. At rotation each worker seals its finis
 
 ### What does the shared folder need from the filesystem?
 
-Each worker writes its live recorder file only to its own `storage.dir`. Only finished, sealed files cross to `storage.shared_dir`, in a background job, so a slow network mount never holds up rotation or the pipeline. A local disk per worker plus one network mount for `storage.shared_dir` is the usual layout; when the two are on different filesystems the worker copies the file across, fsyncs it, and only then deletes the source.
+Each worker writes its live recorder file only to its own folder `<storage.dir>/<cluster>/<worker>/`, on a local disk. Only finished, sealed files cross to `storage.shared_dir`, in a background job, so a slow network mount never holds up rotation or the pipeline. A local disk per worker plus one network mount for `storage.shared_dir` is the usual layout; when the two are on different filesystems the worker copies the file across, fsyncs it, and only then deletes the source.
 
 The shared folder needs two things:
 

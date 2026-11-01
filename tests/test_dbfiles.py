@@ -245,8 +245,8 @@ async def test_recorder_writer_uses_normal_synchronous(tmp_path):
 
     FULL fsyncs the WAL on every commit. The recorder commits on its flush
     interval, on every state sync, and on every UI poll that forces a flush;
-    on a network-mounted ``db_dir`` each fsync is tens of milliseconds on the
-    aiosqlite thread, and reads queue behind it. NORMAL is the standard WAL
+    on a slow disk each fsync is tens of milliseconds on the aiosqlite
+    thread, and reads queue behind it. NORMAL is the standard WAL
     choice: still safe across an application crash, and it can only lose the
     most recent transactions on a host power loss — acceptable for a flight
     recorder. See docs/local-databases.md.

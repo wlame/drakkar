@@ -1601,7 +1601,7 @@ results and the registry — is a **supported deployment mode**, and the
 reason this page is written as a specification rather than as a
 description. The cache does not use the shared folder: the
 [cache exchange](#cache-exchange) runs over HTTP, and each cache file stays
-in its worker's own `storage.dir`. Two layouts are common:
+in its worker's own folder `<storage.dir>/<cluster>/<worker>/`. Two layouts are common:
 
 - **One host.** The workers of one host share one `storage.dir` and leave
   `storage.shared_dir` empty. Each worker writes its own files into its own
