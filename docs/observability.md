@@ -37,7 +37,9 @@ metrics:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_executor_tasks_total` | Counter | `status` (`started`, `completed`, `failed`) | Total executor tasks by outcome |
-| `drakkar_executor_duration_seconds` | Histogram | -- | Task execution duration. Buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
+| `drakkar_executor_duration_seconds` | Histogram | -- | Task subprocess run time in seconds, from spawn to exit, measured off the event loop (see [Task run time](#task-run-time-and-the-exit-notice)). Buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
+| `drakkar_executor_exit_notice_seconds` | Histogram | -- | Time from a task subprocess exit to the moment the worker handled it; grows when the event loop is busy. A healthy worker stays in the lowest buckets. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5. Rides per task as `exit_notice_ms` in `task_completed` / `task_failed` metadata. |
+| `drakkar_executor_exit_watch_fallbacks_total` | Counter | `reason` (`exited_before_watch`, `unavailable`) | Task exits timed on the event loop because the exit watcher could not watch the process. `exited_before_watch`: the child exited and was reaped before the watch started — a busy loop. `unavailable`: the host cannot watch (no backend for the platform, or the kernel refused). |
 | `drakkar_executor_queue_wait_seconds` | Histogram | -- | Time a task waited for a free executor slot before its subprocess could start. Long waits with a busy pool = the pool (or the CPUs behind it) is the bottleneck; long waits with an idle pool = the worker process itself is too slow to start work. Also rides per task as `queue_wait_ms` in `task_started` metadata (timeline hover). |
 | `drakkar_executor_spawn_seconds` | Histogram | -- | Time to start the task subprocess: fork/exec plus event-loop scheduling delay around it. Normally single-digit milliseconds; spawn approaching the task duration means the worker process — not the task binary — is the bottleneck. The same figure rides per task as `spawn_ms` in `task_completed` event metadata and shows in the timeline hover. |
 | `drakkar_executor_pool_max` | Gauge | -- | Configured executor pool size (`executor.max_executors`) |
@@ -65,6 +67,56 @@ histogram_quantile(0.99,
 histogram_quantile(0.90,
   rate(drakkar_task_label_value_bucket{label="file_size_bytes"}[5m]))
 ```
+
+### Task run time and the exit notice
+
+`duration` (and `drakkar_executor_duration_seconds`) is how long the task's
+subprocess ran: from just before the spawn to its exit. The worker reads the
+exit time when the kernel reports the exit, on a small thread of its own (a
+Linux pidfd, a macOS kqueue), not when its event loop gets to the exit. A
+loop that is busy for two seconds therefore no longer adds two seconds to
+the duration of every task that ended in that time. The thread never reaps
+the child: asyncio keeps the exit status.
+
+Each `task_completed` and `task_failed` event of a task that ran a process
+carries three timing keys in its metadata:
+
+| Key | Meaning |
+|---|---|
+| `run_started_at` | Unix seconds of the spawn, 6 decimals. The run bar in the timeline is `[run_started_at, run_started_at + duration]`. |
+| `exit_notice_ms` | Milliseconds from the exit to the moment the worker handled it. `0` when the worker handled the exit before the watcher reported it. Absent when the exit could not be timed off the loop. |
+| `reported_run_seconds` | The run time the handler's optional [`task_run_seconds`](handler.md#task_run_seconds) hook reported. Present only when the hook gave a valid value. |
+
+**`exit_notice_ms` is a loop-stall indicator.** It measures the worker, not
+the task: a healthy worker handles an exit within a few milliseconds. Values
+in the hundreds of milliseconds mean the event loop was busy (a slow hook,
+a blocking call, garbage collection) while the task had already finished.
+Read it from the histogram:
+
+```promql
+# share of task exits the worker handled more than 100 ms late
+1 - (
+  rate(drakkar_executor_exit_notice_seconds_bucket{le="0.1"}[5m])
+  / rate(drakkar_executor_exit_notice_seconds_count[5m])
+)
+```
+
+The watcher batches its wake-ups: after each batch it pauses 5 ms, so its
+own cost stays near 2 % of one core at 1,200 task exits per second. An exit
+that comes during the pause is stamped at the end of it, so a stamp can be
+up to about 5 ms late; that never delays a task, because the task coroutine
+does not wait for the watcher. When the loop handles an exit before the
+watcher reports it, the loop's own reading is used (it is at least as
+accurate).
+
+On a platform without a watcher, or when the kernel refuses the watch (for
+example a seccomp profile that forbids `pidfd_open`), the duration is
+measured on the loop as before, `exit_notice_ms` is absent, and
+`drakkar_executor_exit_watch_fallbacks_total{reason="unavailable"}` counts
+every task. The worker logs `exit_watcher_started` (with the backend) or
+`exit_watcher_off` at startup. A short task on a busy loop can exit and be
+reaped before the watch starts; it is timed on the loop and counted as
+`exited_before_watch`.
 
 The Live page's timeline tab and the Dashboard show the same avg/p50/p90/p99
 figures computed browser-side over the tasks currently in memory — no
@@ -721,8 +773,8 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `arranged` | `arrange()` completes for a window | `partition`, `metadata` (message_count, task_count, offsets, message_labels, window_id) |
 | `annotation` | A handler calls `self.annotate(...)` — see [Annotations](annotations.md) | `partition`, `offset` (message scope), `task_id` (task scope), `labels`, `metadata` (kind, scope, hook, window_id, offsets, data) |
 | `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot, queue_wait_ms; stdin + stdin_truncated when `recorder.capture.stdin` is on, else stdin_bytes size marker) |
-| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms) |
-| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `recorder.capture.max_stdin`) |
+| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration` (spawn to exit, measured off the loop), `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms, run_started_at, exit_notice_ms, reported_run_seconds) |
+| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `recorder.capture.max_stdin`; run_started_at, exit_notice_ms, reported_run_seconds when the task ran a process) |
 | `task_complete` | `on_task_complete()` hook finishes for one task | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
 | `message_complete` | `on_message_complete()` hook finishes for one source message | `partition`, `offset`, `duration`, `metadata` (task_count, succeeded, failed, replaced, output_message_count) |
 | `window_complete` | `on_window_complete()` hook finishes for one arrange() window | `partition`, `duration`, `metadata` (window_id, task_count, output_message_count) |

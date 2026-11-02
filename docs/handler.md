@@ -20,6 +20,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
 | `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
+| `task_run_seconds(result)` | Optional; right after a task's subprocess exits, before its `task_completed` / `task_failed` event | Once per task that ran a process, only when overridden | `float \| None` |
 | `arrange_http_request(req, pending)` | One HTTP request passed auth + rate-limit + body parsing | Once per HTTP request (webapp only) | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
 | `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request (webapp only) | `str` (validated; ≤64 chars, ASCII, no whitespace) |
@@ -753,6 +754,41 @@ The return value can be **any heapq-comparable object** — int, tuple, or a cla
 **Tasks with `precomputed` set bypass the gate entirely** — `task_priority` is not called for them.
 
 **Error handling.** If `task_priority` raises, the framework logs a `priority_fn_failed` warning, ticks `drakkar_executor_priority_fn_errors_total`, and falls back to the default key. A buggy override never stalls a task.
+
+### task_run_seconds
+
+```python
+def task_run_seconds(self, result: ExecutorResult) -> float | None
+```
+
+Optional. Returns the run time to draw for this task, or `None` to use the framework measure.
+
+The framework measures every task's run time itself: `result.duration_seconds` runs from just before the spawn to the process exit, and the exit time is read off the event loop (see [Task run time and the exit notice](observability.md#task-run-time-and-the-exit-notice)). That measure includes everything the process does, such as the start-up of an interpreter. When your binary knows its real work time better, it can print it, and this hook can hand it to the framework. The value sets the length of the task's bar in the [timeline](ui-timeline.md) and is recorded as `reported_run_seconds` in the `task_completed` / `task_failed` metadata. `duration`, `drakkar_executor_duration_seconds` and every other metric keep the framework measure, so the two can be compared.
+
+**Read only the last line.** The hook runs once per task on the event loop, so it must be cheap. Parsing the last line costs a few microseconds; a regex over the whole stdout costs time in proportion to its size, for every task:
+
+```python
+class TimedHandler(BaseDrakkarHandler):
+    def task_run_seconds(self, result):
+        # The binary prints its own work time as its last line: "elapsed=0.212"
+        last_line = result.stdout.rstrip().rpartition('\n')[2]
+        if not last_line.startswith('elapsed='):
+            return None  # no time printed for this task: use the framework measure
+        return float(last_line.removeprefix('elapsed='))
+```
+
+**When it runs.** Once per task that ran a subprocess, on success and on failure (a timed-out task is passed too, with the output it had), right before the task's event is recorded. It is not called for a [precomputed](#precomputed-task-results-skip-the-subprocess) result or a launch failure, and not at all when the worker has no recorder. The framework calls it only when your handler overrides it; the default costs nothing. It must be a plain method: an `async def task_run_seconds` fails the worker at startup.
+
+**Invalid answers.** Every answer that is not a valid run time falls back to the framework measure:
+
+| Answer | What happens |
+|---|---|
+| `None` | Framework measure; no log line, no count. |
+| A finite number from 0 to `duration_seconds` + 0.05 | Recorded as `reported_run_seconds`; the bar uses it. |
+| The hook raises | Framework measure; a `task_run_seconds_hook_failed` warning (`task_id`, `error`, at most one line per 60 s with `suppressed`) and `drakkar_handler_hook_errors_total{hook="task_run_seconds"}`. |
+| Anything else: not a number, NaN, infinite, below 0, or longer than the process ran (`duration_seconds` + 0.05) | The same as a raise, with `error` = `value out of range: <value>`. |
+
+**Limits.** The reported time has no start offset inside the process lifetime, so its bar starts at the spawn and can end before the real exit. A capped stdout (`executor.max_stdout`) can cut the line off: print the time on stderr instead, or keep the line short and last.
 
 ---
 

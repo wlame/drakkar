@@ -15,6 +15,28 @@ This page covers the bars the framework draws for you. To mark your own domain e
 a deploy, an incident window, a batch boundary — on top of them, see
 [Custom Timeline Events](ui-timeline-events.md).
 
+## What a bar means
+
+A finished task's bar starts at the spawn of its subprocess and is as long as the process
+ran: `[run_started_at, run_started_at + duration]`. The worker reads the exit time off its
+event loop (see [Task run time and the exit notice](observability.md#task-run-time-and-the-exit-notice)),
+so a worker whose loop was busy for a moment does not draw longer bars for the tasks that
+ended in that moment. When the handler reports its own run time through the optional
+[`task_run_seconds`](handler.md#task_run_seconds) hook, the bar uses that value instead,
+still starting at the spawn, so it can end before the process exit.
+
+A running task's bar grows to the present. A launch failure, a precomputed result, and a
+task from a worker of an older release have no `run_started_at`; their bars run from the
+`task_started` event to the completion event, as before.
+
+The hover adds a **Run** line when there is more to say: both times when the handler
+reported one (`reported 0.212s, process 0.240s`), and `worker noticed the exit N ms late`
+when the worker handled the exit more than 50 ms after it happened — a sign that its event
+loop was busy at that moment.
+
+Lanes, the age cut and the retry history keep using the `task_started` and completion
+times, so a bar never moves to another lane because of this.
+
 ## How much history the timeline keeps
 
 Two independent bounds decide what the timeline shows: how many tasks, and how far back.

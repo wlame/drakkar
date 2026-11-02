@@ -183,6 +183,16 @@ Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
 - **A census full of one coroutine** — a fan-out that outran its
   backpressure. The suspension point shows what everything is waiting
   on.
+- **Task exits noticed late** — `drakkar_executor_exit_notice_seconds`
+  (per task: `exit_notice_ms`, and the timeline hover's "worker noticed
+  the exit N ms late") is the time from a task subprocess exit to the
+  moment the loop handled it. It is a second, independent read of loop
+  stalls, taken where they cost the most: the task had already finished
+  and its result waited for the loop. It rises together with the lag
+  histogram; a high notice with a low lag points at blocks shorter than
+  the heartbeat tick. Task run times (`duration`) are measured off the
+  loop and do not grow with it — see
+  [Task run time and the exit notice](observability.md#task-run-time-and-the-exit-notice).
 
 ## Limits
 

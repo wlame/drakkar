@@ -233,6 +233,21 @@ the steps of the upgrade and the changes of behaviour.
   `autodiscover` off it only logs the folder (`recorder_orphan_folder_found`).
 - **Download temps are swept.** A worker deletes the download temps an earlier
   process of its name left in its own folder at start.
+- **Task run time measured off the event loop.** A thread reads the exit time
+  of each task subprocess when the kernel reports it (a pidfd on Linux, kqueue
+  on macOS) and never reaps the child. `task_completed` and `task_failed` gain
+  the metadata keys `run_started_at` and `exit_notice_ms`; `/api/v1/recent-tasks`
+  rows gain `run_started_at` (contract v1.29). New metrics
+  `drakkar_executor_exit_notice_seconds` (a loop-stall signal) and
+  `drakkar_executor_exit_watch_fallbacks_total{reason}`; new log events
+  `exit_watcher_started`, `exit_watcher_off`, `exit_watcher_unavailable`,
+  `exit_watch_refused` and `exit_watcher_failed`.
+- **Optional handler hook `task_run_seconds(result)`.** It reports the run time
+  the timeline draws for a task, for example parsed from the last stdout line.
+  A valid value is recorded as `reported_run_seconds`; a raise or a bad value
+  falls back to the framework measure, logs `task_run_seconds_hook_failed` and
+  counts `drakkar_handler_hook_errors_total{hook="task_run_seconds"}`. An
+  `async def` override fails the startup.
 
 - **Recorder memory store.** The recorder keeps its recent events in an
   in-memory SQLite database while the UI is on, bounded by `recorder.memory`
@@ -346,6 +361,10 @@ the steps of the upgrade and the changes of behaviour.
   `drakkar_dlq_dropped_payloads_total` and `drakkar_dlq_unconfigured_drops_total`.
 - **New help text for `drakkar_backpressure_active`:** it names
   `sources.kafka.max_queued_messages`.
+- **`duration` is the process run time from spawn to exit.** It no longer
+  includes the time the event loop took to handle the exit, so a busy loop
+  does not stretch task bars or `drakkar_executor_duration_seconds`; the help
+  text of that metric says so.
 
 ### Fixed
 

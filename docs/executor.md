@@ -87,6 +87,11 @@ The framework calls `asyncio.create_subprocess_exec` with:
 - `stdout`: `PIPE` (always captured)
 - `stderr`: `PIPE` (always captured)
 
+The run starts right before this call: the framework reads the monotonic
+clock (for the run time) and the wall clock (`run_started_at`) with no
+`await` between them and the fork. On the line right after the call returns
+it starts watching the process for its exit (see [Run time](#run-time)).
+
 ### 4. Communicate
 
 `proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit. All stdout and stderr are captured in memory. With `executor.max_stdout` / `max_stderr` set, the framework streams the pipes instead, retaining up to the cap per stream and discarding the rest — see [Output Caps](#output-caps).
@@ -103,7 +108,7 @@ Four outcomes are possible:
 
 **Non-zero exit** -- Raises `ExecutorTaskError`. The [on_error()](handler.md#on_error) hook decides what to do.
 
-**Timeout** -- The whole process tree is killed with `os.killpg(SIGKILL)` (the subprocess starts in its own process group, so grandchildren die too; on Windows, which has no process groups, this falls back to `proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`.
+**Timeout** -- The whole process tree is killed with `os.killpg(SIGKILL)` (the subprocess starts in its own process group, so grandchildren die too; on Windows, which has no process groups, this falls back to `proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`. The run ends at the killed child's exit; a child that survives `SIGKILL` (wedged in the kernel) has its run cut where the timeout fired.
 
 **OSError (binary not found)** -- `ExecutorTaskError` is raised immediately. No process was ever started.
 
@@ -122,12 +127,61 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 | `exit_code` | `int` | Process exit code. `0` on success, non-zero on failure, `-1` for timeout/launch errors. |
 | `stdout` | `str` | Captured process stdout, decoded as UTF-8 with `errors='replace'`. |
 | `stderr` | `str` | Captured process stderr, decoded as UTF-8 with `errors='replace'`. |
-| `duration_seconds` | `float` | Wall-clock time from process start to completion, rounded to 3 decimal places. |
+| `duration_seconds` | `float` | Run time of the subprocess, from just before the spawn to its exit, rounded to 3 decimal places. The exit time is read off the event loop (see [Run time](#run-time)), so a busy loop does not stretch it. For a launch failure: the time until the failure; for a precomputed result: the handler's value. |
+| `run_started_at` | `float \| None` | Unix seconds of the spawn, read right before it. The run spans `run_started_at` to `run_started_at + duration_seconds`. `None` for a launch failure and a precomputed result. |
+| `exit_notice_seconds` | `float \| None` | Seconds from the exit to the moment the worker handled it: a few milliseconds on a healthy worker, more when the event loop is busy. `0` when the worker handled the exit before the exit watcher reported it. `None` when the exit could not be timed off the loop, for a launch failure and for a precomputed result. |
 | `spawn_seconds` | `float \| None` | Wall-clock time creating the subprocess took (fork/exec plus any event-loop scheduling delay around it) — the parent-side share of `duration_seconds`. Single-digit milliseconds on a healthy host; grows when the worker process itself is the bottleneck. `None` for precomputed results. |
 | `task` | `ExecutorTask` | The original task that produced this result. Carries `metadata` and `labels` through the pipeline. |
 | `pid` | `int \| None` | OS process ID. `None` if the process never started. |
 | `stdout_truncated` | `bool` | `True` when stdout retention stopped at `executor.max_stdout` and the remainder was discarded. Always `False` with unlimited caps and for precomputed results. |
 | `stderr_truncated` | `bool` | Same for stderr, governed by `executor.max_stderr`. |
+
+---
+
+## Run time
+
+asyncio learns about a child's exit on the event loop: it reads the exit
+notification, reaps the child, and resumes the waiting task, each step a
+loop callback. When the loop is busy, all of that waits, and a duration
+measured there grows by the length of the stall.
+
+So the framework reads the exit time somewhere else. One daemon thread per
+worker process (`drakkar-exit-watcher`) waits for task subprocesses to exit
+and reads the clock when the kernel reports the exit:
+
+| Platform | Mechanism |
+|---|---|
+| Linux | one pidfd per child in one `epoll` set; a pidfd becomes readable when its process exits |
+| macOS | one `EVFILT_PROC` / `NOTE_EXIT` event per child in one `kqueue` |
+| anything else | no watcher: the run time is measured on the loop |
+
+The watcher never reaps a child, so asyncio keeps the exit status. Its only
+wait call is a `waitid(..., WNOWAIT)` probe that proves the watched pid is
+still this worker's own unreaped child. The thread writes the stamp into
+the task's watch; the task does not wait for it. If the loop handles the
+exit before the watcher reports it, the loop's own reading is used, because
+the loop was not stalled.
+
+After each batch of exits the thread pauses 5 ms, so its wake-ups stay few
+(measured near 2 % of one core at 1,200 task exits per second). A stamp can
+therefore be up to about 5 ms late; the stalls this corrects are much longer.
+
+Two cases fall back to timing on the loop, counted on
+`drakkar_executor_exit_watch_fallbacks_total{reason}`:
+
+- `exited_before_watch` — the child exited and was reaped before the watch
+  started. `create_subprocess_exec` awaits its pipe set-up after the fork,
+  and on a busy loop a short task can finish in that gap. The run then ends
+  at the watch time.
+- `unavailable` — the host cannot watch: no backend for the platform, or the
+  kernel refused (for example a seccomp profile without `pidfd_open`).
+
+A child whose own child keeps the output pipes open still ends its run at
+its own exit; only the event waits for the pipes to close.
+`exit_notice_seconds` is recorded as `exit_notice_ms` and observed on
+`drakkar_executor_exit_notice_seconds` — see [Observability](observability.md#task-run-time-and-the-exit-notice).
+A handler can report its own run time for the timeline bar with the
+optional [`task_run_seconds`](handler.md#task_run_seconds) hook.
 
 ---
 
