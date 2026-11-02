@@ -638,8 +638,10 @@ paths:
         snapshot is named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC).
         `source` defaults to `file` when a live file is open, else `memory`.
         v1.30: source=cache copies the cache file, attachment
-        `<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db` (UTC); one memory or
-        cache copy runs at a time. 404 `{"error": "No live recorder file
+        `<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db` (UTC); one cache copy
+        runs at a time, apart from the one memory copy, and a copy that does
+        not finish within 30 s answers 500 ("Snapshot failed: the cache copy
+        did not finish in 30 s"). 404 `{"error": "No live recorder file
         on this worker"}` for source=file without a live file; 404
         `{"error": "No memory store on this worker"}` for source=memory
         without an open memory store; 404 `{"error": "No cache on this
