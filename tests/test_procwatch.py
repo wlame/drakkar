@@ -6,6 +6,7 @@ every host (the pidfd backend exists on Linux only, kqueue on macOS only).
 """
 
 import asyncio
+import errno
 import os
 import queue
 import sys
@@ -213,7 +214,7 @@ def test_a_backend_that_cannot_start_disables_the_watcher_with_one_warning():
 
 
 async def test_a_kernel_that_refuses_the_watch_disables_the_watcher():
-    backend = FakeBackend(watch_error=PermissionError('seccomp'))
+    backend = FakeBackend(watch_error=PermissionError(errno.EPERM, 'seccomp'))
     watcher = ExitWatcher(lambda: backend)
     before = fallbacks(UNAVAILABLE)
     try:
@@ -231,6 +232,61 @@ async def test_a_kernel_that_refuses_the_watch_disables_the_watcher():
     assert [log['event'] for log in logs] == ['exit_watch_refused']
 
 
+async def test_a_resource_error_falls_back_for_that_task_only(monkeypatch):
+    backend = FakeBackend(watch_error=OSError(errno.EMFILE, 'Too many open files'))
+    watcher = ExitWatcher(lambda: backend)
+    before = fallbacks(UNAVAILABLE)
+    try:
+        with capture_logs() as logs:
+            first = watcher.watch(fake_proc(pid=1))
+            second = watcher.watch(fake_proc(pid=2))
+        backend.watch_error = None
+        third = watcher.watch(fake_proc(pid=3))
+        third_reason_while_running = third.fallback_reason
+    finally:
+        watcher.stop()
+
+    assert (first.fallback_reason, second.fallback_reason) == (UNAVAILABLE, UNAVAILABLE)
+    assert third_reason_while_running is None  # the watcher stayed on
+    assert backend.watched == [3]
+    assert fallbacks(UNAVAILABLE) == before + 2 + 1  # + 1: the pending watch at stop
+    assert [log['event'] for log in logs] == ['exit_watch_failed']  # one line per 60 s
+    assert logs[0]['suppressed'] == 0
+
+
+async def test_stop_marks_a_pending_watch_as_timed_on_the_loop():
+    backend = FakeBackend()
+    watcher = ExitWatcher(lambda: backend)
+    pending = watcher.watch(fake_proc(pid=21))
+    before = fallbacks(UNAVAILABLE)
+
+    watcher.stop()
+
+    assert pending.fallback_reason == UNAVAILABLE
+    assert pending.stamp is None
+    assert fallbacks(UNAVAILABLE) == before + 1
+
+
+def test_a_thread_that_cannot_start_leaves_no_backend(monkeypatch):
+    class NoThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    backend = FakeBackend()
+    watcher = ExitWatcher(lambda: backend)
+    monkeypatch.setattr(procwatch.threading, 'Thread', NoThread)
+    with capture_logs() as logs:
+        assert watcher.start() is None
+
+    assert backend.closed
+    assert watcher.backend_name is None
+    assert [log['event'] for log in logs] == ['exit_watcher_unavailable']
+    assert watcher.watch(fake_proc()).fallback_reason == UNAVAILABLE
+
+
 async def test_a_failing_thread_leaves_its_watches_to_loop_timing():
     backend = FakeBackend()
     watcher = ExitWatcher(lambda: backend)
@@ -240,6 +296,7 @@ async def test_a_failing_thread_leaves_its_watches_to_loop_timing():
         await asyncio.to_thread(wait_until, lambda: not watcher._thread.is_alive())
 
     assert exit_watch.stamp is None
+    assert exit_watch.fallback_reason == UNAVAILABLE
     assert backend.released == [5]
     assert any(log['event'] == 'exit_watcher_failed' for log in logs)
     assert watcher.watch(fake_proc(pid=6)).fallback_reason == UNAVAILABLE
@@ -427,7 +484,8 @@ def test_pidfd_backend_watches_with_a_probe_that_never_reaps(pidfd_env):
     backend = PidfdBackend()
     key = backend.watch(1234)
 
-    assert key == pidfd_env.opened[0]
+    # opened[0] is the startup probe (closed at once; its number may be reused).
+    assert key == pidfd_env.opened[-1]
     assert pidfd_env.waitid_calls == [(3, key, os.WEXITED | os.WNOHANG | os.WNOWAIT)]
     assert key in pidfd_env.epoll.registered
 
@@ -445,7 +503,7 @@ def test_pidfd_backend_closes_the_fd_of_a_pid_that_is_not_our_child(pidfd_env):
     with pytest.raises(ProcessLookupError):
         backend.watch(1234)
 
-    assert not fd_is_open(pidfd_env.opened[0])
+    assert not fd_is_open(pidfd_env.opened[-1])
     backend.close()
 
 
@@ -456,7 +514,7 @@ def test_pidfd_backend_closes_the_fd_on_any_other_error(pidfd_env):
     with pytest.raises(PermissionError):
         backend.watch(1234)
 
-    assert not fd_is_open(pidfd_env.opened[0])
+    assert not fd_is_open(pidfd_env.opened[-1])
     backend.close()
 
 
@@ -481,6 +539,15 @@ def test_pidfd_backend_poll_reports_exits_and_drains_the_wake_pipe(pidfd_env):
     backend.release(key)  # an unregister error still closes the fd
     assert not fd_is_open(key)
     backend.close()
+
+
+def test_pidfd_backend_asks_the_kernel_at_start(pidfd_env, monkeypatch):
+    def refuse(pid: int) -> int:
+        raise PermissionError(errno.EPERM, 'seccomp')
+
+    monkeypatch.setattr(procwatch, '_pidfd_open', refuse)
+    with pytest.raises(PermissionError):
+        PidfdBackend()
 
 
 def test_pidfd_backend_needs_its_primitives(monkeypatch):
@@ -537,16 +604,18 @@ def fake_kevent(ident, filter, flags=0, fflags=0):
 def kqueue_env(monkeypatch):
     kq = FakeKqueue()
     waitid_error: list[BaseException] = []
+    exited: set[int] = set()
 
     def waitid(idtype, ident, options):
         if waitid_error:
             raise waitid_error[0]
-        return None
+        # A zombie answers with its status, a running child with None.
+        return SimpleNamespace(si_pid=ident) if ident in exited else None
 
     monkeypatch.setattr(procwatch, '_kqueue', lambda: kq)
     monkeypatch.setattr(procwatch, '_kevent', fake_kevent)
     monkeypatch.setattr(procwatch.os, 'waitid', waitid)
-    return SimpleNamespace(kq=kq, waitid_error=waitid_error)
+    return SimpleNamespace(kq=kq, waitid_error=waitid_error, exited=exited)
 
 
 def test_kqueue_backend_registers_a_one_shot_exit_event(kqueue_env):
@@ -585,6 +654,7 @@ def test_kqueue_backend_ignores_a_failed_removal(kqueue_env):
 
 def test_kqueue_backend_poll_reports_exits_and_drains_the_wake_pipe(kqueue_env):
     backend = KqueueBackend()
+    kqueue_env.exited.add(1234)
     backend.wake()
     kqueue_env.kq.ready = [
         fake_kevent(backend._wake_read, procwatch._KQ_FILTER_READ),
@@ -594,6 +664,31 @@ def test_kqueue_backend_poll_reports_exits_and_drains_the_wake_pipe(kqueue_env):
     assert backend.poll() == [1234]
     with pytest.raises(BlockingIOError):
         os.read(backend._wake_read, 1)
+    backend.close()
+
+
+def test_kqueue_backend_re_registers_a_running_child_after_a_left_over_event(kqueue_env):
+    """An exit event of a former process of the same pid must not stamp a running child."""
+    backend = KqueueBackend()
+    kqueue_env.kq.ready = [fake_kevent(1234, procwatch._KQ_FILTER_PROC)]
+
+    assert backend.poll() == []
+
+    change = kqueue_env.kq.changes[-1]
+    assert (change.ident, change.flags) == (1234, procwatch._KQ_EV_ADD | procwatch._KQ_EV_ONESHOT)
+    backend.close()
+
+
+def test_kqueue_backend_reports_a_child_reaped_or_gone_in_between(kqueue_env):
+    backend = KqueueBackend()
+    kqueue_env.waitid_error.append(ChildProcessError())
+    kqueue_env.kq.ready = [fake_kevent(1, procwatch._KQ_FILTER_PROC)]
+    assert backend.poll() == [1]  # reaped already
+
+    kqueue_env.waitid_error.clear()
+    kqueue_env.kq.errors[procwatch._KQ_EV_ADD | procwatch._KQ_EV_ONESHOT] = ProcessLookupError()
+    kqueue_env.kq.ready = [fake_kevent(2, procwatch._KQ_FILTER_PROC)]
+    assert backend.poll() == [2]  # exited between the check and the new registration
     backend.close()
 
 

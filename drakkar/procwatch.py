@@ -28,6 +28,7 @@ on the loop as before and counts the reason on
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import select
 import sys
@@ -40,12 +41,21 @@ from typing import Any, Protocol
 import structlog
 
 from drakkar.metrics import executor_exit_watch_fallbacks
+from drakkar.providers.resilience import RateLimitedLog
 
 logger = structlog.get_logger()
 
 # Fallback reasons, the label values of the fallback counter.
 EXITED_BEFORE_WATCH = 'exited_before_watch'
 UNAVAILABLE = 'unavailable'
+# Counted by the executor: the child exited, but a descendant kept its output
+# pipes open, so the run ends when the pipes close (read on the loop).
+DESCENDANT_HELD_PIPES = 'descendant_held_pipes'
+
+# Errors of a watch that say the host can never watch: the watcher turns off
+# for the process. Any other OSError (EMFILE, ENOMEM, EAGAIN, ...) is a moment
+# of resource pressure and makes only that task fall back.
+_PERMANENT_ERRNOS = frozenset({errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EINVAL})
 
 # The thread sleeps this long after each batch of exits before it waits
 # again. Every wakeup costs a GIL hand-over with the busy event loop, so the
@@ -172,6 +182,9 @@ class PidfdBackend:
     def __init__(self) -> None:
         if _epoll is None or _pidfd_open is None or _P_PIDFD is None:
             raise OSError('pidfd watch needs os.pidfd_open, os.P_PIDFD and select.epoll')
+        # Ask the kernel once now, so an old kernel or a seccomp profile that
+        # refuses pidfd_open is found at startup, not at the first task.
+        os.close(_pidfd_open(os.getpid()))
         self._epoll = _epoll()
         self._wake_read, self._wake_write = _wake_pipe()
         self._epoll.register(self._wake_read, _EPOLLIN)
@@ -251,9 +264,28 @@ class KqueueBackend:
         for event in self._kqueue.control(None, _KQUEUE_MAX_EVENTS, None):
             if event.filter == _KQ_FILTER_READ:
                 _drain_pipe(event.ident)
-            else:
+            elif self._has_exited(event.ident):
                 keys.append(event.ident)
         return keys
+
+    def _has_exited(self, pid: int) -> bool:
+        """Whether a reported pid really exited, or the event was left over from an earlier process of that pid.
+
+        Watches are keyed by pid. A pid reused while the exit event of its
+        former process still waits in the kqueue would otherwise be stamped
+        with that old exit: a still running child gets its registration back.
+        """
+        assert _kevent is not None
+        try:
+            if os.waitid(os.P_PID, pid, _PROBE_FLAGS) is not None:
+                return True
+        except ChildProcessError:
+            return True  # reaped already: it has exited
+        try:
+            self._kqueue.control([_kevent(pid, _KQ_FILTER_PROC, _KQ_EV_ADD | _KQ_EV_ONESHOT, _KQ_NOTE_EXIT)], 0, 0)
+        except ProcessLookupError:
+            return True  # it exited in between
+        return False
 
     def release(self, key: int) -> None:
         # A one-shot event leaves the kqueue when it fires.
@@ -266,6 +298,11 @@ class KqueueBackend:
         self._kqueue.close()
         os.close(self._wake_read)
         os.close(self._wake_write)
+
+
+def count_fallback(reason: str) -> None:
+    """Count one task run timed on the loop instead of by the watcher, by reason."""
+    executor_exit_watch_fallbacks.labels(reason=reason).inc()
 
 
 # The platform table. A platform that is not here times exits on the loop.
@@ -317,6 +354,8 @@ class ExitWatcher:
         self._unavailable = backend_factory is None
         # The process that started the thread: a forked child has no thread.
         self._owner_pid: int | None = None
+        # One line per 60 s for watches that fail on resource pressure.
+        self._failure_log = RateLimitedLog(time.monotonic)
 
     @property
     def backend_name(self) -> str | None:
@@ -337,13 +376,28 @@ class ExitWatcher:
         except ProcessLookupError:
             return self._fallback(EXITED_BEFORE_WATCH, stamp_now())
         except OSError as exc:
-            self._disable('exit_watch_refused', exc)
+            if exc.errno in _PERMANENT_ERRNOS:
+                self._disable('exit_watch_refused', exc)
+            else:
+                self._log_watch_failure(exc)
             return self._fallback(UNAVAILABLE, None)
         return exit_watch
 
+    def _log_watch_failure(self, exc: OSError) -> None:
+        """Log a watch that failed on resource pressure, at most one line per 60 s."""
+        suppressed = self._failure_log.admit('watch')
+        if suppressed is not None:
+            logger.warning(
+                'exit_watch_failed',
+                category='executor',
+                error=str(exc),
+                suppressed=suppressed,
+                hint='this task is timed on the event loop; the watcher stays on',
+            )
+
     @staticmethod
     def _fallback(reason: str, stamp: ExitStamp | None) -> ExitWatch:
-        executor_exit_watch_fallbacks.labels(reason=reason).inc()
+        count_fallback(reason)
         return ExitWatch(stamp=stamp, fallback_reason=reason)
 
     def start(self) -> str | None:
@@ -371,13 +425,23 @@ class ExitWatcher:
             self._disable('exit_watcher_unavailable', exc)
             return None
         thread = threading.Thread(target=self._run, args=(backend,), name='drakkar-exit-watcher', daemon=True)
-        self._backend = backend
-        self._thread = thread
+        # Under the lock, so the new thread cannot read ``_backend`` before it is set.
+        with self._lock:
+            self._backend = backend
+            self._thread = thread
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                # "can't start new thread" (a pids limit): no backend without its thread.
+                self._backend = None
+                self._thread = None
+                backend.close()
+                self._disable('exit_watcher_unavailable', exc)
+                return None
         self._owner_pid = os.getpid()
-        thread.start()
         return backend
 
-    def _disable(self, event: str, exc: OSError) -> None:
+    def _disable(self, event: str, exc: Exception) -> None:
         """Time every later exit on the loop; log why once."""
         self._unavailable = True
         logger.warning(
@@ -411,8 +475,15 @@ class ExitWatcher:
                 _release_all(backend, self._take_keys())
 
     def _take_keys(self) -> list[int]:
-        """Empty the table of pending watches; return their keys."""
+        """Empty the table of pending watches; return their keys.
+
+        Each pending watch is marked ``unavailable`` and counted: nobody will
+        stamp it now, so its task is timed on the loop with no notice.
+        """
         keys = list(self._entries)
+        for exit_watch in self._entries.values():
+            exit_watch.fallback_reason = UNAVAILABLE
+            count_fallback(UNAVAILABLE)
         self._entries.clear()
         return keys
 
