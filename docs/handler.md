@@ -777,7 +777,7 @@ class TimedHandler(BaseDrakkarHandler):
         return float(last_line.removeprefix('elapsed='))
 ```
 
-**When it runs.** Once per task that ran a subprocess, on success and on failure (a timed-out task is passed too, with the output it had), right before the task's event is recorded. It is not called for a [precomputed](#precomputed-task-results-skip-the-subprocess) result or a launch failure, and not at all when the worker has no recorder. The framework calls it only when your handler overrides it; the default costs nothing. It must be a plain method: an `async def task_run_seconds` fails the worker at startup.
+**When it runs.** Once per task that ran a subprocess, on success and on failure (a timed-out task is passed too, but its result carries no output: `stdout` is empty, so a hook that parses the last line returns None there), right before the task's event is recorded. It is not called for a [precomputed](#precomputed-task-results-skip-the-subprocess) result or a launch failure, and not at all when the worker has no recorder. The framework calls it only when your handler overrides it; the default costs nothing. It must be a plain method: an `async def task_run_seconds` fails the worker at startup.
 
 **Invalid answers.** Every answer that is not a valid run time falls back to the framework measure:
 

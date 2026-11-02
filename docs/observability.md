@@ -38,8 +38,8 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_executor_tasks_total` | Counter | `status` (`started`, `completed`, `failed`) | Total executor tasks by outcome |
 | `drakkar_executor_duration_seconds` | Histogram | -- | Task subprocess run time in seconds, from spawn to exit, measured off the event loop (see [Task run time](#task-run-time-and-the-exit-notice)). Buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
-| `drakkar_executor_exit_notice_seconds` | Histogram | -- | Time from a task subprocess exit to the moment the worker handled it; grows when the event loop is busy. A healthy worker stays in the lowest buckets. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5. Rides per task as `exit_notice_ms` in `task_completed` / `task_failed` metadata. |
-| `drakkar_executor_exit_watch_fallbacks_total` | Counter | `reason` (`exited_before_watch`, `unavailable`) | Task exits timed on the event loop because the exit watcher could not watch the process. `exited_before_watch`: the child exited and was reaped before the watch started — a busy loop. `unavailable`: the host cannot watch (no backend for the platform, or the kernel refused). |
+| `drakkar_executor_exit_notice_seconds` | Histogram | -- | Time from a task subprocess exit to the moment the worker handled it; grows when the event loop is busy. A healthy worker stays in the lowest buckets, and most of its samples are exactly 0 (the loop handled the exit before the watcher reported it). Not observed for a timeout or when a descendant held the output pipes. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5. Rides per task as `exit_notice_ms` in `task_completed` / `task_failed` metadata. |
+| `drakkar_executor_exit_watch_fallbacks_total` | Counter | `reason` (`exited_before_watch`, `unavailable`, `descendant_held_pipes`) | Task runs timed on the event loop instead of by the exit watcher, by reason. `exited_before_watch`: the child exited and was reaped before the watch started — a busy loop. `unavailable`: the host cannot watch (no backend for the platform, the kernel refused, a moment of resource pressure such as `EMFILE`, or the watcher stopped). `descendant_held_pipes`: the child exited but a descendant kept its output pipes open, so the run ended when they closed. |
 | `drakkar_executor_queue_wait_seconds` | Histogram | -- | Time a task waited for a free executor slot before its subprocess could start. Long waits with a busy pool = the pool (or the CPUs behind it) is the bottleneck; long waits with an idle pool = the worker process itself is too slow to start work. Also rides per task as `queue_wait_ms` in `task_started` metadata (timeline hover). |
 | `drakkar_executor_spawn_seconds` | Histogram | -- | Time to start the task subprocess: fork/exec plus event-loop scheduling delay around it. Normally single-digit milliseconds; spawn approaching the task duration means the worker process — not the task binary — is the bottleneck. The same figure rides per task as `spawn_ms` in `task_completed` event metadata and shows in the timeline hover. |
 | `drakkar_executor_pool_max` | Gauge | -- | Configured executor pool size (`executor.max_executors`) |
@@ -84,7 +84,7 @@ carries three timing keys in its metadata:
 | Key | Meaning |
 |---|---|
 | `run_started_at` | Unix seconds of the spawn, 6 decimals. The run bar in the timeline is `[run_started_at, run_started_at + duration]`. |
-| `exit_notice_ms` | Milliseconds from the exit to the moment the worker handled it. `0` when the worker handled the exit before the watcher reported it. Absent when the exit could not be timed off the loop. |
+| `exit_notice_ms` | Milliseconds from the exit to the moment the worker handled it. `0` when the worker handled the exit before the watcher reported it — the common value on a healthy worker, because the watcher pauses 5 ms between batches. Absent when the exit could not be timed off the loop, when a descendant held the output pipes, and for a timed-out task. |
 | `reported_run_seconds` | The run time the handler's optional [`task_run_seconds`](handler.md#task_run_seconds) hook reported. Present only when the hook gave a valid value. |
 
 **`exit_notice_ms` is a loop-stall indicator.** It measures the worker, not
@@ -113,10 +113,23 @@ On a platform without a watcher, or when the kernel refuses the watch (for
 example a seccomp profile that forbids `pidfd_open`), the duration is
 measured on the loop as before, `exit_notice_ms` is absent, and
 `drakkar_executor_exit_watch_fallbacks_total{reason="unavailable"}` counts
-every task. The worker logs `exit_watcher_started` (with the backend) or
-`exit_watcher_off` at startup. A short task on a busy loop can exit and be
+every task. A resource error of one watch (`EMFILE`, `ENOMEM`, ...) makes
+only that task fall back (`exit_watch_failed`, at most one line per 60 s); the
+watcher stays on. The worker logs `exit_watcher_started` (with the backend)
+or `exit_watcher_off` at startup; on Linux the start asks the kernel for one
+pidfd, so a refusal shows there. A short task on a busy loop can exit and be
 reaped before the watch starts; it is timed on the loop and counted as
 `exited_before_watch`.
+
+A task ends when its child has exited **and** its output pipes have closed.
+When a descendant (a background process the child started) keeps the pipes
+open more than 50 ms past the child's exit, the run ends when the pipes
+close, read on the loop; it is counted as `descendant_held_pipes` and records
+no `exit_notice_ms`, because that gap is the descendant's lifetime, not a loop
+stall. The two moments are compared as the loop saw them, so a loop stall
+delays both and does not look like a descendant. A timed-out task ends where
+the timeout fired, also with no `exit_notice_ms`; its whole process group is
+killed, also when the child itself had already exited.
 
 The Live page's timeline tab and the Dashboard show the same avg/p50/p90/p99
 figures computed browser-side over the tasks currently in memory — no

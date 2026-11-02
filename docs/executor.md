@@ -108,9 +108,9 @@ Four outcomes are possible:
 
 **Non-zero exit** -- Raises `ExecutorTaskError`. The [on_error()](handler.md#on_error) hook decides what to do.
 
-**Timeout** -- The whole process tree is killed with `os.killpg(SIGKILL)` (the subprocess starts in its own process group, so grandchildren die too; on Windows, which has no process groups, this falls back to `proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`. The run ends at the killed child's exit; a child that survives `SIGKILL` (wedged in the kernel) has its run cut where the timeout fired.
+**Timeout** -- The whole process tree is killed with `os.killpg(SIGKILL)` (the subprocess starts in its own process group, so grandchildren die too — also when the child itself already exited and a grandchild still holds its pipes; on Windows, which has no process groups, this falls back to `proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`. The run ends where the timeout fired. A child that survives `SIGKILL` (wedged in the kernel) is left after one bounded wait of 5 seconds and one `executor_kill_reap_timeout` warning.
 
-**OSError (binary not found)** -- `ExecutorTaskError` is raised immediately. No process was ever started.
+**OSError (binary not found)** -- `ExecutorTaskError` is raised immediately with kind `launch_failure`. No process was ever started. An exec that fails with `ETIMEDOUT` (a binary on a hung network mount) is a launch failure too.
 
 ### 7. Release Slot
 
@@ -127,9 +127,9 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 | `exit_code` | `int` | Process exit code. `0` on success, non-zero on failure, `-1` for timeout/launch errors. |
 | `stdout` | `str` | Captured process stdout, decoded as UTF-8 with `errors='replace'`. |
 | `stderr` | `str` | Captured process stderr, decoded as UTF-8 with `errors='replace'`. |
-| `duration_seconds` | `float` | Run time of the subprocess, from just before the spawn to its exit, rounded to 3 decimal places. The exit time is read off the event loop (see [Run time](#run-time)), so a busy loop does not stretch it. For a launch failure: the time until the failure; for a precomputed result: the handler's value. |
+| `duration_seconds` | `float` | Run time of the subprocess, from just before the spawn to its exit, rounded to 3 decimal places. The exit time is read off the event loop (see [Run time](#run-time)), so a busy loop does not stretch it. When a descendant kept the output pipes open past the exit, the run ends when they close; a timed-out run ends where the timeout fired. For a launch failure: the time until the failure; for a precomputed result: the handler's value. |
 | `run_started_at` | `float \| None` | Unix seconds of the spawn, read right before it. The run spans `run_started_at` to `run_started_at + duration_seconds`. `None` for a launch failure and a precomputed result. |
-| `exit_notice_seconds` | `float \| None` | Seconds from the exit to the moment the worker handled it: a few milliseconds on a healthy worker, more when the event loop is busy. `0` when the worker handled the exit before the exit watcher reported it. `None` when the exit could not be timed off the loop, for a launch failure and for a precomputed result. |
+| `exit_notice_seconds` | `float \| None` | Seconds from the exit to the moment the worker handled it: a few milliseconds on a healthy worker, more when the event loop is busy. `0` when the worker handled the exit before the exit watcher reported it. `None` when the exit could not be timed off the loop, when a descendant held the output pipes, for a timeout, for a launch failure and for a precomputed result. |
 | `spawn_seconds` | `float \| None` | Wall-clock time creating the subprocess took (fork/exec plus any event-loop scheduling delay around it) — the parent-side share of `duration_seconds`. Single-digit milliseconds on a healthy host; grows when the worker process itself is the bottleneck. `None` for precomputed results. |
 | `task` | `ExecutorTask` | The original task that produced this result. Carries `metadata` and `labels` through the pipeline. |
 | `pid` | `int \| None` | OS process ID. `None` if the process never started. |
@@ -166,7 +166,7 @@ After each batch of exits the thread pauses 5 ms, so its wake-ups stay few
 (measured near 2 % of one core at 1,200 task exits per second). A stamp can
 therefore be up to about 5 ms late; the stalls this corrects are much longer.
 
-Two cases fall back to timing on the loop, counted on
+These cases fall back to timing on the loop, counted on
 `drakkar_executor_exit_watch_fallbacks_total{reason}`:
 
 - `exited_before_watch` — the child exited and was reaped before the watch
@@ -174,10 +174,20 @@ Two cases fall back to timing on the loop, counted on
   and on a busy loop a short task can finish in that gap. The run then ends
   at the watch time.
 - `unavailable` — the host cannot watch: no backend for the platform, or the
-  kernel refused (for example a seccomp profile without `pidfd_open`).
+  kernel refused (for example a seccomp profile without `pidfd_open`; then
+  the watcher turns off for the process). A resource error of one watch
+  (`EMFILE`, `ENOMEM`, `EAGAIN`) makes only that task fall back. A watch
+  still pending when the watcher stops falls back too.
+- `descendant_held_pipes` — the child exited, but a descendant kept its
+  output pipes open more than 50 ms longer. A task ends when its child has
+  exited and its pipes have closed, so the run ends when the pipes close.
+  The framework compares the two moments as the loop saw them (it
+  subclasses asyncio's subprocess stream protocol for that), so a loop stall
+  delays both and is not taken for a descendant.
 
-A child whose own child keeps the output pipes open still ends its run at
-its own exit; only the event waits for the pipes to close.
+A timed-out task ends where the timeout fired. Its process group is killed
+once, also when the child itself already exited and only a descendant was
+still running. Neither a timeout nor a descendant records an exit notice.
 `exit_notice_seconds` is recorded as `exit_notice_ms` and observed on
 `drakkar_executor_exit_notice_seconds` — see [Observability](observability.md#task-run-time-and-the-exit-notice).
 A handler can report its own run time for the timeline bar with the

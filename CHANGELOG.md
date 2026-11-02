@@ -237,11 +237,14 @@ the steps of the upgrade and the changes of behaviour.
   of each task subprocess when the kernel reports it (a pidfd on Linux, kqueue
   on macOS) and never reaps the child. `task_completed` and `task_failed` gain
   the metadata keys `run_started_at` and `exit_notice_ms`; `/api/v1/recent-tasks`
-  rows gain `run_started_at` (contract v1.29). New metrics
+  rows gain `run_started_at` and `reported_run_seconds` (contract v1.29). A task
+  ends when its child has exited and its output pipes have closed: a descendant
+  that holds the pipes longer ends the run when they close. New metrics
   `drakkar_executor_exit_notice_seconds` (a loop-stall signal) and
-  `drakkar_executor_exit_watch_fallbacks_total{reason}`; new log events
+  `drakkar_executor_exit_watch_fallbacks_total{reason}` (`exited_before_watch`,
+  `unavailable`, `descendant_held_pipes`); new log events
   `exit_watcher_started`, `exit_watcher_off`, `exit_watcher_unavailable`,
-  `exit_watch_refused` and `exit_watcher_failed`.
+  `exit_watch_refused`, `exit_watch_failed` and `exit_watcher_failed`.
 - **Optional handler hook `task_run_seconds(result)`.** It reports the run time
   the timeline draws for a task, for example parsed from the last stdout line.
   A valid value is recorded as `reported_run_seconds`; a raise or a bad value
@@ -368,6 +371,10 @@ the steps of the upgrade and the changes of behaviour.
 
 ### Fixed
 
+- **A timeout kills the task's descendants also when the child already
+  exited.** Before, a task whose child had exited while a background
+  grandchild still held its pipes ran into the timeout, and the grandchild was
+  never killed.
 - **A stop no longer waits out the whole drain time after a late poll.** A Kafka
   poll that returns after a stop leaves its messages unread (logged as
   `messages_polled_at_stop_dropped`, with `count` and `partitions`; their offsets
