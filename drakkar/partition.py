@@ -13,7 +13,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import taskflow
 from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
-from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks
+from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks, task_run_seconds_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import (
     batch_duration,
@@ -50,6 +50,7 @@ from drakkar.models import (
 )
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
+from drakkar.reported_run import reported_run_seconds
 from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.manager import CollectCallback, MessageContext, MessageDLQState
 
@@ -345,6 +346,10 @@ class PartitionProcessor:
         implemented = overridden_completion_hooks(handler)
         self._keep_window_results = implemented['window_complete']
         self._keep_message_details = implemented['message_complete']
+        # The optional run-time hook, or None when the handler keeps the
+        # default — asked once for the same reason, so a handler without it
+        # pays nothing per task.
+        self._task_run_seconds = task_run_seconds_hook(handler)
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
@@ -1414,6 +1419,7 @@ class PartitionProcessor:
                     self._partition_id,
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
+                    reported_run_seconds=reported_run_seconds(self._task_run_seconds, result),
                 )
 
             bind_contextvars(hook='on_task_complete', task_id=task.task_id)
@@ -1513,6 +1519,8 @@ class PartitionProcessor:
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
                     duration_seconds=e.result.duration_seconds,
+                    result=e.result,
+                    reported_run_seconds=reported_run_seconds(self._task_run_seconds, e.result),
                 )
             # Sync, not ``await log.awarning``: structlog's async variants
             # copy the context and hop through the default thread pool, which

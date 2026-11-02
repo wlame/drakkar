@@ -36,7 +36,7 @@ from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
-from drakkar.handler import BaseDrakkarHandler
+from drakkar.handler import BaseDrakkarHandler, check_task_run_seconds_hook
 from drakkar.logging import setup_logging
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
@@ -220,6 +220,9 @@ class DrakkarApp:
         from drakkar.sources.validation import validate_handler_for_sources
 
         validate_handler_for_sources(handler, self._config.sources)
+        # Same philosophy: an ``async def task_run_seconds`` would cost an
+        # await per task on the event loop, so it is refused here.
+        check_task_run_seconds_hook(handler)
         # Fail fast on an invalid probe-details model — same philosophy as
         # the webapp handler check above: code-owned mistakes surface at
         # boot, not at first probe. Read into a local so the type checker

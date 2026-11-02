@@ -72,6 +72,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar.budget import BudgetAccount, output_bytes, text_bytes
 from drakkar.config import WebAppConfig
 from drakkar.executor import ExecutorTaskError
+from drakkar.handler import task_run_seconds_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import webapp_dropped_after_timeout, webapp_inflight
 from drakkar.models import (
@@ -85,6 +86,7 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
+from drakkar.reported_run import RunSecondsHook, reported_run_seconds
 from drakkar.sinks.manager import (
     DeliveryErrorCallback,
     DeliveryOutcome,
@@ -187,6 +189,9 @@ class WebappRunner:
         # the first synthetic offset is 1, not 0. ``int`` not ``itertools``
         # because we want a plain field for tests to assert against.
         self._request_seq: int = 0
+        # The handler's optional run-time hook, or None when it keeps the
+        # default (asked once: the answer is a property of the handler class).
+        self._task_run_seconds = task_run_seconds_hook(drakkar_app._handler)
 
     async def run(self, ctx: WebRequestContext) -> WebReport:
         """Execute one HTTP request and return the assembled framework report.
@@ -596,7 +601,13 @@ class WebappRunner:
         if account is not None:
             account.charge(1, held)
         try:
-            outcome = await self._execute_task(pool, task, recorder, records_outcome=records_outcome)
+            outcome = await self._execute_task(
+                pool,
+                task,
+                recorder,
+                records_outcome=records_outcome,
+                run_seconds_hook=self._task_run_seconds,
+            )
         finally:
             task.stdin = None
             if account is not None:
@@ -612,8 +623,13 @@ class WebappRunner:
         recorder: Any,
         *,
         records_outcome: bool,
+        run_seconds_hook: RunSecondsHook | None = None,
     ) -> ExecutorResult | ExecutorError:
-        """Run one task through the pool; write its terminal row when ``records_outcome``."""
+        """Run one task through the pool; write its terminal row when ``records_outcome``.
+
+        ``run_seconds_hook`` is the handler's ``task_run_seconds`` override,
+        asked for the row's ``reported_run_seconds``.
+        """
         try:
             result = await pool.execute(task, recorder, partition_id=-1)
         except ExecutorTaskError as exc:
@@ -625,6 +641,8 @@ class WebappRunner:
                     pool_active=pool.active_count,
                     pool_waiting=pool.waiting_count,
                     duration_seconds=exc.result.duration_seconds,
+                    result=exc.result,
+                    reported_run_seconds=reported_run_seconds(run_seconds_hook, exc.result),
                 )
             return exc.error
         except Exception as exc:
@@ -646,6 +664,7 @@ class WebappRunner:
                 -1,
                 pool_active=pool.active_count,
                 pool_waiting=pool.waiting_count,
+                reported_run_seconds=reported_run_seconds(run_seconds_hook, result),
             )
         return result
 

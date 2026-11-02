@@ -84,13 +84,23 @@ class RateLimitedLog:
 
     async def emit(self, key: str, log: Callable[..., Awaitable[Any]], event: str, **fields: Any) -> None:
         """Await ``log(event, **fields, suppressed=<held back>)``, unless a line for ``key`` went out within the interval."""
+        suppressed = self.admit(key)
+        if suppressed is not None:
+            await log(event, **fields, suppressed=suppressed)
+
+    def admit(self, key: str) -> int | None:
+        """Whether a line for ``key`` may go out now: the held-back count to report with it, or None to hold it back.
+
+        The sync form of :meth:`emit`, for callers on a hot path that log with
+        the sync logger.
+        """
         now = self._now_monotonic()
         last_emitted = self._last_emitted.get(key)
         if last_emitted is not None and now - last_emitted < self._interval_seconds:
             self._held_back[key] = self._held_back.get(key, 0) + 1
-            return
+            return None
         self._last_emitted[key] = now
-        await log(event, **fields, suppressed=self._held_back.pop(key, 0))
+        return self._held_back.pop(key, 0)
 
 
 def describe_error(exc: BaseException) -> str:

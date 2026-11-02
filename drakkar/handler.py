@@ -8,6 +8,7 @@ handles sink failures.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 from drakkar.metrics import message_parse_failures
 from drakkar.models import (
     CollectResult,
+    ConfigurationError,
     DeliveryAction,
     DeliveryError,
     ErrorAction,
@@ -448,6 +450,39 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         raise NotImplementedError('arrange() must be implemented by the user')
 
+    def task_run_seconds(self, result: ExecutorResult) -> float | None:
+        """Return the run time to draw for this task, or None to use the framework measure.
+
+        Optional. The framework measures every task's run time from the spawn
+        to the exit (``result.duration_seconds``). Override this when the task
+        binary knows its real work time better — for example it prints the
+        time it spent without its own interpreter start-up. The value you
+        return sets the length of the task's bar in the timeline and is
+        recorded as ``reported_run_seconds`` on ``task_completed`` and
+        ``task_failed``; ``duration`` and every metric keep the framework
+        measure.
+
+        Called once per task that ran a subprocess, on the event loop, right
+        after the subprocess exits — so it must be a plain method (an
+        ``async def`` override is refused at startup) and it must be cheap.
+        Read only the last line of the output, never the whole of it::
+
+            def task_run_seconds(self, result):
+                last_line = result.stdout.rstrip().rpartition('\n')[2]
+                if not last_line.startswith('elapsed='):
+                    return None
+                return float(last_line.removeprefix('elapsed='))
+
+        Not called for a precomputed result or a launch failure. Returning
+        None uses the framework measure, with no log line. A raise, or a value
+        that is not a finite number from 0 to ``duration_seconds`` + 0.05,
+        also uses the framework measure, and logs
+        ``task_run_seconds_hook_failed`` (at most one line per 60 s) and
+        counts ``drakkar_handler_hook_errors_total{hook="task_run_seconds"}``.
+        The framework does not call this method at all unless you override it.
+        """
+        return None
+
     async def on_task_complete(
         self,
         result: ExecutorResult,
@@ -831,6 +866,33 @@ def overridden_completion_hooks(handler: object) -> dict[str, bool]:
         name: getattr(cls, attr, None) is not getattr(BaseDrakkarHandler, attr)
         for name, attr in _COMPLETION_HOOKS.items()
     }
+
+
+def task_run_seconds_hook(handler: Any) -> Callable[[ExecutorResult], float | None] | None:
+    """The handler's ``task_run_seconds`` override as a bound method, or None when it keeps the default.
+
+    Detected the way :func:`overridden_completion_hooks` detects hooks: the
+    function reachable through the handler's class against the base class's.
+    The framework calls the hook only when this returns a method, so an
+    inherited default costs nothing per task.
+    """
+    if getattr(type(handler), 'task_run_seconds', None) in (None, BaseDrakkarHandler.task_run_seconds):
+        return None
+    return handler.task_run_seconds
+
+
+def check_task_run_seconds_hook(handler: object) -> None:
+    """Refuse an ``async def task_run_seconds``: it runs once per task on the event loop and must not await.
+
+    Raises:
+        ConfigurationError: when the override is a coroutine function.
+    """
+    hook = task_run_seconds_hook(handler)
+    if hook is not None and inspect.iscoroutinefunction(hook):
+        raise ConfigurationError(
+            f'{type(handler).__name__}.task_run_seconds must be a plain method, not async def: '
+            'it is called once per task on the event loop'
+        )
 
 
 # Attach the class-level default stubs after class definition. We do this
