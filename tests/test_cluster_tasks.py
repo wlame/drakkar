@@ -1273,3 +1273,20 @@ def test_archive_scope_is_set_with_a_recorder_file_and_a_storage_dir():
 
 def test_archive_scope_is_none_with_the_recorder_off():
     assert cluster_tasks.archive_scope(_archive_config(enabled=False)) is None
+
+
+@pytest.mark.parametrize(
+    ('archive', 'now', 'expected'),
+    [
+        ({}, 7200.5, 10800),
+        ({'interval': '30m'}, 7200.0, 9000),
+        ({'cron': '15 * * * *'}, 7200.0, 8100),
+    ],
+    ids=['default_hourly', 'interval', 'cron'],
+)
+def test_archive_next_slot_follows_the_archive_schedule(archive, now, expected):
+    assert cluster_tasks.archive_next_slot(_archive_config(archive=archive), now) == expected
+
+
+def test_archive_next_slot_is_none_when_no_pass_runs():
+    assert cluster_tasks.archive_next_slot(_archive_config(enabled=False), 7200.0) is None

@@ -114,6 +114,30 @@ def try_sibling_lock(folder: str) -> OwnerLock | None:
     return None
 
 
+def owner_lock_held(folder: str) -> bool | None:
+    """Whether a process holds the owner lock of ``folder``; ``None`` when the folder has no lock file or the test fails.
+
+    For a view, not for a decision: a shared lock is taken without waiting
+    and freed at once, and the file is never created. While the shared
+    lock is held, another worker's orphan pass cannot take the folder and
+    skips it for one round.
+    """
+    try:
+        fd = os.open(os.path.join(folder, OWNER_LOCK_NAME), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return None
+    finally:
+        # Closing the file frees the shared lock when it was taken.
+        os.close(fd)
+    return False
+
+
 def try_staging_lock(folder: str) -> OwnerLock | None:
     """Take the lock of an orphan staging folder, creating the lock file when it is missing; ``None`` when held.
 

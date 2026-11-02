@@ -98,7 +98,7 @@ from drakkar.recorder.memstore import (
 )
 from drakkar.recorder.orphans import OrphanSealer
 from drakkar.recorder.postgres import PostgresQueue, QueuedPair, RecorderPostgresSettings
-from drakkar.recorder.postgres_writer import OpenPool, PostgresLoopThread, PostgresWriter
+from drakkar.recorder.postgres_writer import OpenPool, PostgresLoopThread, PostgresStageStatus, PostgresWriter
 from drakkar.recorder.queries import EventQueries, QueryContext
 from drakkar.recorder.schema import (
     EVENT_COLUMNS,
@@ -412,6 +412,8 @@ class EventRecorder(EventWriter):
         # Pairs the P queue dropped and no log line has reported yet; stage M
         # reports them when it ends (the append itself may not await).
         self._pg_unlogged_drops = 0
+        # Pairs the P queue dropped since the process started, for the UI.
+        self._pg_queue_full_drops = 0
         # One ``recorder_postgres_rows_dropped`` line per 60 s per reason.
         self._pg_drop_log = RateLimitedLog(time.monotonic)
         # Approximate payload bytes appended since the last stage M. Reset
@@ -573,6 +575,27 @@ class EventRecorder(EventWriter):
     @property
     def worker_name(self) -> str:
         return self._worker_name
+
+    @property
+    def instance(self) -> str:
+        """The name of this process in the meta files and in the Postgres rows."""
+        return self._instance
+
+    def postgres_stage_status(self) -> PostgresStageStatus | None:
+        """Stage P as the UI shows it; ``None`` when this recorder has no stage P (another mode, no events, before start).
+
+        Safe from any thread: the writer's status is one immutable value, the
+        queue takes its own lock, and the drop count is one integer.
+        """
+        writer, queue = self._pg_writer, self._pg_queue
+        if writer is None or queue is None:
+            return None
+        return PostgresStageStatus(
+            writer=writer.status,
+            queue_rows=len(queue),
+            queue_bytes=queue.bytes,
+            dropped_queue_full=self._pg_queue_full_drops,
+        )
 
     @property
     def cluster_name(self) -> str:
@@ -1944,6 +1967,7 @@ class EventRecorder(EventWriter):
         if dropped:
             recorder_postgres_dropped_rows.labels(reason='queue_full').inc(dropped)
             self._pg_unlogged_drops += dropped
+            self._pg_queue_full_drops += dropped
         if queue.past_half():
             self._pg_wakeup.set()
 

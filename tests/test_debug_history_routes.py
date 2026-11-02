@@ -126,7 +126,8 @@ async def test_memory_only_databases_answer_is_empty(tmp_path):
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
         resp = await c.get('/api/v1/debug/databases')
 
-    assert resp.json() == {'own': [], 'history': {'folders': []}}
+    answer = resp.json()
+    assert (answer['own'], answer['history']) == ([], {'folders': []})
 
 
 async def test_databases_lists_history_folders_for_a_none_worker_with_shared_dir(tmp_path, shared):

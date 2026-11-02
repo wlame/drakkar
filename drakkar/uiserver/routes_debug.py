@@ -4,7 +4,7 @@ These back the drakkar-ui Debug page; the page itself is served by
 ``routes_spa`` from the bundle, not rendered here.
 
 Routes:
-  * ``/api/v1/debug/databases``         — own files, then the shared history folders.
+  * ``/api/v1/debug/databases``         — the worker, own files, shared history, recorder and storage (``parts``).
   * ``/api/v1/debug/merge``             — merge history files into ``merged/``.
   * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
   * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file or the memory store.
@@ -36,6 +36,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -47,6 +48,7 @@ from pydantic import BaseModel, Field
 
 from drakkar.config.recorder import PERSISTENCE_NONE, PERSISTENCE_POSTGRES
 from drakkar.dbstats import OwnFileStats, measure_memory_store
+from drakkar.fleet.service import FleetRegistry
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder import memstore
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
@@ -57,9 +59,22 @@ from drakkar.recorder.queries import SOURCE_MEMORY, ReadBound, ReadClass, log_me
 from drakkar.recorder.schema import EventType
 from drakkar.recorder.sealing import own_db_files
 from drakkar.timefmt import format_epoch_ns
+from drakkar.uiserver.databases_status import (
+    PART_HISTORY,
+    PART_OWN,
+    PART_RECORDER,
+    PART_STORAGE,
+    WorkerOnline,
+    parse_parts,
+    recorder_block,
+    storage_block,
+    worker_block,
+)
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig
     from drakkar.recorder import EventRecorder
     from drakkar.recorder.memstore import MemoryCoverage
     from drakkar.recorder.postgres import RecorderPostgresSettings
@@ -515,21 +530,56 @@ def _history_answer(shared: Path) -> list[dict[str, Any]]:
     return folders
 
 
-def _databases_answer(
+@dataclass(frozen=True)
+class DatabasesRead:
+    """What one ``/debug/databases`` request reads.
+
+    ``parts`` are the parts asked for. ``coverage`` is the memory coverage,
+    read by the route handler on the API server's loop. ``worker_online`` is
+    the registry's verdict for a worker name (``None`` without a registry).
+    ``on_read_stopped`` is called for each memory read that the read limit
+    stopped.
+    """
+
+    parts: frozenset[str]
+    config: DrakkarConfig
+    coverage: MemoryCoverage | None = None
+    worker_online: WorkerOnline | None = None
+    on_read_stopped: Callable[[], None] | None = None
+
+
+def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats, read: DatabasesRead) -> dict[str, Any]:
+    """The ``/debug/databases`` answer: ``worker``, then each part asked for. Blocking.
+
+    A part not asked for is not read at all, so a peer asked for its own
+    part never lists the shared folder. ``storage`` lists folders and
+    ``recorder`` reads only config and memory.
+    """
+    answer: dict[str, Any] = {'worker': worker_block(recorder)}
+    if PART_OWN in read.parts:
+        answer['own'] = _own_rows(recorder, own_stats, read.coverage, read.on_read_stopped)
+    if PART_HISTORY in read.parts:
+        folders = _history_answer(Path(recorder.shared_dir)) if recorder.shared_dir else []
+        answer['history'] = {'folders': folders}
+    if PART_RECORDER in read.parts:
+        answer['recorder'] = recorder_block(read.config, recorder, now=time.time())
+    if PART_STORAGE in read.parts:
+        answer['storage'] = storage_block(read.config, recorder, worker_online=read.worker_online)
+    return answer
+
+
+def _own_rows(
     recorder: EventRecorder,
     own_stats: OwnFileStats,
     coverage: MemoryCoverage | None,
-    on_read_stopped: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    """The ``/debug/databases`` answer: the memory row, own files measured now, then the shared history. Blocking.
+    on_read_stopped: Callable[[], None] | None,
+) -> list[dict[str, Any]]:
+    """The memory row, then the own files measured now. Blocking.
 
-    The parts are independent. ``coverage`` is the memory coverage, read by
-    the route handler on the API server's loop (four values; at worst the
-    row count is one chunk behind); with it, the memory row comes first, read on a by-name
-    connection through the open guard (no row once the store is closed).
-    The file rows follow when the recorder writes a file, and the shared
-    history is listed whenever a shared folder is set. ``on_read_stopped``
-    is called for each memory read that the read limit stopped.
+    With ``coverage`` (four values; at worst the row count is one chunk
+    behind) the memory row comes first, read on a by-name connection
+    through the open guard (no row once the store is closed). The file rows
+    follow when the recorder writes a file.
     """
     own: list[dict[str, Any]] = []
     if coverage is not None:
@@ -550,8 +600,15 @@ def _databases_answer(
             _own_db_row(stats, 'live' if stats.path == live else 'backlog')
             for stats in own_stats.measure(own_db_files(recorder.storage_dir, recorder.worker_name))
         )
-    folders = _history_answer(Path(recorder.shared_dir)) if recorder.shared_dir else []
-    return {'own': own, 'history': {'folders': folders}}
+    return own
+
+
+def _worker_online(drakkar_app: DrakkarApp) -> WorkerOnline | None:
+    """The registry's verdict for a worker name, safe from a worker thread; ``None`` when no registry runs."""
+    fleet = drakkar_app.fleet
+    if not drakkar_app._config.autodiscover.enabled or not isinstance(fleet, FleetRegistry):
+        return None
+    return fleet.name_online
 
 
 def _all_archives(shared_dir: str) -> list[dict[str, Any]]:
@@ -662,18 +719,26 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     own_stats = OwnFileStats()
 
     @router.get(DATABASES_ENDPOINT, dependencies=[Depends(deps.require_auth)])
-    async def api_debug_databases():
-        """This worker's own files with measured stats, then every shared history folder.
+    async def api_debug_databases(parts: str | None = None):
+        """The serving worker, then the parts asked for: own files, shared history, recorder, storage.
 
         Offloaded: it lists folders in the shared folder, which may be a
         network mount, and reads the own files with sqlite3 — /healthz and
-        /readyz live on this same loop.
+        /readyz live on this same loop. 400 for an unknown part.
         """
-        coverage = recorder.memory_coverage()
+        try:
+            asked = parse_parts(parts)
+        except ValueError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
         reads_stopped: list[bool] = []
-        answer = await asyncio.to_thread(
-            _databases_answer, recorder, own_stats, coverage, on_read_stopped=lambda: reads_stopped.append(True)
+        read = DatabasesRead(
+            parts=asked,
+            config=drakkar_app._config,
+            coverage=recorder.memory_coverage() if PART_OWN in asked else None,
+            worker_online=_worker_online(drakkar_app),
+            on_read_stopped=lambda: reads_stopped.append(True),
         )
+        answer = await asyncio.to_thread(_databases_answer, recorder, own_stats, read)
         if reads_stopped:
             await log_memory_read_stopped(DATABASES_ENDPOINT)
         return JSONResponse(answer)

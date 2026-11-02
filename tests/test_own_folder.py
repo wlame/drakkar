@@ -20,6 +20,7 @@ from drakkar.ownerlock import (
     OWNER_LOCK_NAME,
     FolderInUseError,
     open_own_folder,
+    owner_lock_held,
     remove_download_temps,
     take_own_lock,
     try_sibling_lock,
@@ -124,6 +125,46 @@ def test_try_sibling_lock_free_folder_returns_a_held_lock(tmp_path):
 def test_try_sibling_lock_folder_without_lock_file_returns_none_and_creates_nothing(tmp_path):
     assert try_sibling_lock(str(tmp_path)) is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_owner_lock_held_held_folder_returns_true(tmp_path):
+    owner = take_own_lock(str(tmp_path))
+    try:
+        assert owner_lock_held(str(tmp_path)) is True
+    finally:
+        owner.release()
+
+
+def test_owner_lock_held_free_folder_returns_false_and_leaves_it_free(tmp_path):
+    take_own_lock(str(tmp_path)).release()
+
+    assert owner_lock_held(str(tmp_path)) is False
+    # The probe freed its shared lock: an owner can take the folder at once.
+    take_own_lock(str(tmp_path)).release()
+
+
+def test_owner_lock_held_folder_without_lock_file_returns_none_and_creates_nothing(tmp_path):
+    assert owner_lock_held(str(tmp_path)) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_owner_lock_held_flock_error_returns_none_and_closes_the_file(tmp_path, monkeypatch):
+    take_own_lock(str(tmp_path)).release()
+    closed: list[int] = []
+    real_close = os.close
+
+    def failing_flock(fd: int, operation: int) -> None:
+        raise OSError('flock not supported')
+
+    def recording_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(ownerlock.fcntl, 'flock', failing_flock)
+    monkeypatch.setattr(ownerlock.os, 'close', recording_close)
+
+    assert owner_lock_held(str(tmp_path)) is None
+    assert len(closed) == 1
 
 
 def test_take_own_lock_flock_error_closes_the_file_and_raises(tmp_path, monkeypatch):

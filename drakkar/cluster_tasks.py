@@ -106,6 +106,18 @@ def archive_scope(config: DrakkarConfig) -> ArchiveScope | None:
     return ARCHIVE_SCOPE_WORKER
 
 
+def archive_next_slot(config: DrakkarConfig, now: float) -> int | None:
+    """The epoch second of the next archive slot after ``now``; ``None`` when this worker runs no archive pass.
+
+    Both scopes run at the slots of the same schedule (aligned to the epoch),
+    so this is pure arithmetic: no loop and no provider is asked.
+    """
+    if archive_scope(config) is None:
+        return None
+    archive = config.recorder.archive
+    return next_task_slot(now, interval=archive.effective_interval, cron=archive.cron)
+
+
 class ClusterElection:
     """The worker's one election provider and its caller, shared by every cluster task.
 

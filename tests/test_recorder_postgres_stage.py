@@ -33,7 +33,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.memstore import MIB
 from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings
-from drakkar.recorder.postgres_writer import CopyOutcome, PostgresLoopThread, PostgresWriter
+from drakkar.recorder.postgres_writer import CopyOutcome, PostgresLoopThread, PostgresWriter, UpkeepStatus, WriterStatus
 from drakkar.recorder.schema import EVENT_COLUMNS
 from tests.conftest import wait_for
 from tests.recorder_pg_fake import RecorderFakePostgres
@@ -94,6 +94,7 @@ def _writer(
     clock: FakeClock | None = None,
     queue: PostgresQueue | None = None,
     resilience: ResilienceConfig | None = None,
+    now_wall=time.time,
     **settings,
 ) -> PostgresWriter:
     clock = clock if clock is not None else FakeClock()
@@ -114,6 +115,7 @@ def _writer(
         caller=caller,
         open_pool=fake.open_pool,
         now_monotonic=clock,
+        now_wall=now_wall,
     )
 
 
@@ -616,6 +618,96 @@ async def test_stop_with_the_breaker_open_makes_no_attempt():
     assert _dropped()['shutdown'] == dropped_before['shutdown'] + 6
     assert writer._slot is None
     assert len(writer._queue) == 0
+
+
+# --- the status the writer publishes ---
+
+
+async def test_status_of_a_new_writer_is_empty():
+    writer = _writer(RecorderFakePostgres())
+
+    assert writer.status == WriterStatus()
+
+
+async def test_status_after_a_run_holds_the_start_the_written_rows_and_the_upkeep():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake, now_wall=lambda: 1_760_000_000.0)
+    writer._queue.append(_pairs(1, 250))
+
+    await writer.run_once()
+
+    status = writer.status
+    assert (status.started, status.slot_rows, status.rows_written, status.breaker_open) == (True, 0, 250, False)
+    upkeep = status.last_upkeep
+    assert upkeep is not None
+    assert (upkeep.at, upkeep.held_lock, upkeep.dropped, upkeep.dropped_for_size) == (1_760_000_000.0, True, (), ())
+    assert len(upkeep.created) == 5
+
+
+async def test_status_of_an_upkeep_that_lost_the_try_lock_says_so_with_no_changes():
+    fake = RecorderFakePostgres()
+    fake.try_lock_answer = False
+    writer = _writer(fake, now_wall=lambda: 1_760_000_000.0)
+
+    await writer.run_once()
+
+    assert writer.status.last_upkeep == UpkeepStatus(at=1_760_000_000.0, held_lock=False)
+
+
+async def test_status_counts_a_kept_chunk_and_its_rejected_drop():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake)
+    writer._queue.append(_pairs(1, 4))
+    error = asyncpg.exceptions.InvalidTextRepresentationError
+    fake.fail_copies(_final_error(error), _final_error(error, 'still bad'))
+
+    await writer.run_once()
+    assert (writer.status.slot_rows, writer.status.dropped_rejected) == (4, 0)
+    await writer.run_once()
+
+    assert (writer.status.slot_rows, writer.status.dropped_rejected, writer.status.rows_written) == (0, 4, 0)
+
+
+async def test_status_counts_no_partition_and_shutdown_drops():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake)
+    writer._queue.append(_pairs(1, 2))
+    violation = asyncpg.exceptions.CheckViolationError
+    fake.fail_copies(_final_error(violation), _final_error(violation))
+    await writer.run_once()
+    await writer.run_once()
+    writer._queue.append(_pairs(3, 3))
+    fake.fail_copies(asyncpg.exceptions.ConnectionDoesNotExistError('connection lost'))
+
+    await writer.final(5.0)
+
+    assert (writer.status.dropped_no_partition, writer.status.dropped_shutdown) == (2, 3)
+
+
+async def test_status_shows_the_open_breaker():
+    fake = RecorderFakePostgres()
+    writer = _writer(fake, resilience=_resilience(max_retries=0, breaker_failures=1))
+    writer._queue.append(_pairs(1, 4))
+    fake.fail_copies(asyncpg.exceptions.ConnectionDoesNotExistError('connection lost'))
+
+    await writer.run_once()
+
+    assert (writer.status.breaker_open, writer.status.slot_rows) == (True, 4)
+
+
+async def test_recorder_stage_status_counts_queue_full_drops_and_the_queue():
+    fake = RecorderFakePostgres()
+    rec = _recorder(fake, max_buffer_rows=1000)
+    assert rec.postgres_stage_status() is None
+    rec._pg_writer = _writer(fake, queue=rec._pg_queue)
+
+    rec._append_downstream(_pairs(1, 1020))
+
+    stage = rec.postgres_stage_status()
+    assert stage is not None
+    assert (stage.queue_rows, stage.dropped_queue_full) == (1000, 20)
+    assert stage.queue_bytes == rec._pg_queue.bytes
+    assert stage.writer == WriterStatus()
 
 
 # --- the loop thread ---

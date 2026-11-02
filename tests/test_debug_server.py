@@ -88,6 +88,9 @@ def mock_recorder():
     rec.history_dir = ''
     rec.db_path = ''
     rec.worker_name = 'test-worker'
+    rec.cluster_name = ''
+    rec.instance = 'test-instance'
+    rec.postgres_settings = None
     rec.get_stats.return_value = {
         'total_events': 42,
         'consumed': 20,

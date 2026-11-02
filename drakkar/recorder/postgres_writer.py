@@ -20,7 +20,7 @@ One run (:meth:`PostgresWriter.run_once`):
    on, so a backlog drains as fast as Postgres takes it; any other outcome
    ends the run;
 4. set ``drakkar_recorder_postgres_queue_rows`` to the rows of the queue plus
-   the slot.
+   the slot, and publish a new :class:`WriterStatus`.
 
 A chunk is dropped only after ``POSTGRES_CHUNK_FINAL_FAILURES`` final COPY
 errors: an error that its rows cause (a data or integrity error of the server,
@@ -31,6 +31,10 @@ missing table (42P01) on a COPY or in the upkeep makes the next run start the
 writer again, which creates the table when the schema is managed. At stop,
 :meth:`PostgresWriter.final` makes one attempt per chunk within the time left
 and drops what is left with ``shutdown``.
+
+The writer publishes what it did as one immutable :class:`WriterStatus`,
+replaced after each chunk, each upkeep and each run; another thread (the API
+server) reads the reference and never touches the writer itself.
 """
 
 from __future__ import annotations
@@ -205,6 +209,63 @@ def size_drops(table: str, now: float, measured: Sequence[str], sizes: dict[str,
     return drop
 
 
+@dataclass(frozen=True)
+class UpkeepStatus:
+    """The last upkeep a writer ran: when (epoch seconds), whether it held the table's try-lock, and its changes.
+
+    A writer that lost the try-lock changed nothing, so its lists are empty.
+    """
+
+    at: float
+    held_lock: bool
+    created: tuple[str, ...] = ()
+    dropped: tuple[str, ...] = ()
+    dropped_for_size: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WriterStatus:
+    """What one writer did since the process started, as one immutable value safe to read from any thread.
+
+    ``slot_rows`` are the rows of the chunk in flight (the queue holds the
+    rest); ``rows_written`` and the three ``dropped_*`` counts are the rows of
+    the writer's own outcomes. Rows the queue drops as ``queue_full`` are
+    counted by the recorder, which appends to the queue.
+    """
+
+    started: bool = False
+    slot_rows: int = 0
+    rows_written: int = 0
+    dropped_rejected: int = 0
+    dropped_no_partition: int = 0
+    dropped_shutdown: int = 0
+    breaker_open: bool = False
+    last_upkeep: UpkeepStatus | None = None
+
+
+@dataclass(frozen=True)
+class PostgresStageStatus:
+    """Stage P of one recorder as the UI shows it: the writer's status and the queue in front of it.
+
+    ``queue_rows`` and ``queue_bytes`` are the rows and the text of the queue
+    alone (the chunk in flight is ``writer.slot_rows``); ``dropped_queue_full``
+    counts the rows the queue dropped since the process started.
+    """
+
+    writer: WriterStatus
+    queue_rows: int
+    queue_bytes: int
+    dropped_queue_full: int
+
+
+# The ``WriterStatus`` field that counts the rows dropped for each reason.
+_DROPPED_FIELDS = {
+    DROP_REASON_REJECTED: 'dropped_rejected',
+    DROP_REASON_NO_PARTITION: 'dropped_no_partition',
+    DROP_REASON_SHUTDOWN: 'dropped_shutdown',
+}
+
+
 class PostgresLoopThread:
     """A daemon thread that runs its own event loop; stage P and its pool live there.
 
@@ -281,7 +342,8 @@ class PostgresWriter:
     Every method runs on one loop (the stage P thread's), one at a time:
     :meth:`run_once` and :meth:`final` take the writer's own lock.
     ``open_pool`` replaces :func:`drakkar.providers.postgres.open_pool`;
-    ``None`` looks that function up when the pool opens.
+    ``None`` looks that function up when the pool opens. ``now_wall`` gives
+    the epoch time of an upkeep in the status.
     """
 
     def __init__(
@@ -295,6 +357,7 @@ class PostgresWriter:
         caller: ResilientCaller,
         open_pool: OpenPool | None = None,
         now_monotonic: Callable[[], float] = time.monotonic,
+        now_wall: Callable[[], float] = time.time,
     ) -> None:
         self._settings = settings
         self._cluster = cluster
@@ -304,6 +367,7 @@ class PostgresWriter:
         self._caller = caller
         self._open_pool = open_pool
         self._now_monotonic = now_monotonic
+        self._now_wall = now_wall
         self._pool: Any = None
         self._started = False
         self._slot: PendingChunk | None = None
@@ -320,6 +384,23 @@ class PostgresWriter:
         # Rows dropped per reason that no log line reported yet: a line the
         # rate limit holds back keeps its rows for the next line.
         self._unlogged_drops: dict[str, int] = {}
+        # Replaced, never changed in place: another thread reads the reference.
+        self._status = WriterStatus()
+
+    @property
+    def status(self) -> WriterStatus:
+        """The last status the writer published; safe to read from any thread."""
+        return self._status
+
+    def _publish_status(self, **changes: Any) -> None:
+        """Replace the status with one that holds the current start, slot and breaker state plus ``changes``."""
+        self._status = replace(
+            self._status,
+            started=self._started,
+            slot_rows=len(self._slot.pairs) if self._slot is not None else 0,
+            breaker_open=self._caller.breaker_open,
+            **changes,
+        )
 
     # --- the run ---
 
@@ -388,6 +469,8 @@ class PostgresWriter:
         on with its COPYs either way.
         """
         result = await self._caller.call('partitions', self._upkeep_attempt)
+        if result.ok:
+            self._publish_upkeep(result.value)
         if result.ok and result.value:
             actions: UpkeepActions = result.value
             # Counted only here, after the commit: a rolled-back upkeep dropped nothing.
@@ -403,6 +486,22 @@ class PostgresWriter:
                 dropped=sorted(actions.drop),
                 dropped_for_size=sorted(actions.drop_for_size),
             )
+
+    def _publish_upkeep(self, actions: UpkeepActions | None) -> None:
+        """Publish a committed upkeep; ``None`` is one that found the try-lock held by another writer."""
+        at = self._now_wall()
+        if actions is None:
+            self._publish_status(last_upkeep=UpkeepStatus(at=at, held_lock=False))
+            return
+        self._publish_status(
+            last_upkeep=UpkeepStatus(
+                at=at,
+                held_lock=True,
+                created=tuple(name for name, _, _ in actions.create),
+                dropped=tuple(actions.drop),
+                dropped_for_size=tuple(actions.drop_for_size),
+            )
+        )
 
     async def _upkeep_attempt(self) -> UpkeepActions | None:
         """One upkeep transaction; ``None`` when another writer holds the table's try-lock.
@@ -524,6 +623,7 @@ class PostgresWriter:
         if outcome in WRITTEN_OUTCOMES:
             recorder_postgres_rows_written.inc(len(slot.pairs))
             self._slot = None
+            self._publish_status(rows_written=self._status.rows_written + len(slot.pairs))
             return outcome
         await self._reject(slot, sqlstate, error)
         return outcome
@@ -653,12 +753,16 @@ class PostgresWriter:
     # --- metrics and logs ---
 
     def _set_queue_gauge(self) -> None:
+        """Set the queue gauge to the rows of the queue plus the slot, and publish the status with them."""
         slot_rows = len(self._slot.pairs) if self._slot is not None else 0
         recorder_postgres_queue_rows.set(len(self._queue) + slot_rows)
+        self._publish_status()
 
     async def _drop(self, reason: str, rows: int, error: str) -> None:
         """Count dropped rows and log them, at most one line per 60 s per reason."""
         recorder_postgres_dropped_rows.labels(reason=reason).inc(rows)
+        status_field = _DROPPED_FIELDS[reason]
+        self._publish_status(**{status_field: getattr(self._status, status_field) + rows})
         unlogged = self._unlogged_drops.get(reason, 0) + rows
         self._unlogged_drops[reason] = unlogged
         written = False
