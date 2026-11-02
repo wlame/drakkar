@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
+import io
 import os
 import re
 import sqlite3
@@ -23,7 +25,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
-from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
+from drakkar.cache.engine import CacheEngine
+from drakkar.cache.sql import SCHEMA_CACHE_ENTRIES
+from drakkar.config import CacheConfig, DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.uiserver import routes_debug
@@ -265,7 +269,7 @@ async def test_download_live_unknown_source_answers_400(tmp_path):
         resp = await client.get('/api/v1/debug/download-live', params={'source': 'disk'})
 
     assert resp.status_code == 400
-    assert resp.json() == {'error': 'source must be memory or file'}
+    assert resp.json() == {'error': 'source must be memory, file or cache'}
 
 
 async def test_stepped_memory_snapshot_with_storage_dir(tmp_path, storage, started):
@@ -533,3 +537,186 @@ async def test_a_memory_download_whose_client_left_keeps_the_slot_until_its_copy
 
     assert second_resp.status_code == 200
     assert most_at_once == 1
+
+
+# --- compress=gzip (contract v1.30) ---
+
+
+async def test_download_live_compressed_file_snapshot_is_a_gzip_stream_of_the_copy(tmp_path, storage, started):
+    rec = await started('sqlite', storage_dir=str(storage), events=3)
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'file', 'compress': 'gzip'})
+
+    assert resp.status_code == 200
+    assert resp.headers['content-type'] == 'application/gzip'
+    assert resp.headers['content-disposition'] == f'attachment; filename="{os.path.basename(rec.db_path)}.gz"'
+    assert resp.headers['cache-control'] == 'no-store, private'
+    assert 'content-length' not in resp.headers
+    with contextlib.closing(_open_snapshot(gzip.decompress(resp.content), tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=3)
+    assert [p.name for p in storage.iterdir() if p.name.startswith('.')] == []
+
+
+async def test_download_live_compressed_memory_snapshot(tmp_path, started):
+    rec = await started('none', events=2)
+
+    async with _client_of(rec) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'memory', 'compress': 'gzip'})
+
+    assert resp.status_code == 200
+    name = resp.headers['content-disposition'].removeprefix('attachment; filename="').removesuffix('.gz"')
+    assert MEMORY_NAME_RE.fullmatch(name)
+    with contextlib.closing(_open_snapshot(gzip.decompress(resp.content), tmp_path)) as conn:
+        _assert_recorder_copy(conn, events=2)
+
+
+@pytest.mark.parametrize('compress', ['zip', '', 'GZIP'])
+async def test_download_live_other_compress_answers_400_before_the_source_check(tmp_path, compress):
+    client, _recorder = _client(tmp_path, memory_only=True)
+    async with client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'disk', 'compress': compress})
+
+    assert (resp.status_code, resp.json()) == (400, {'error': 'compress must be gzip'})
+
+
+def test_gzip_chunks_closes_the_file_when_the_client_leaves_mid_stream(monkeypatch):
+    monkeypatch.setattr(routes_debug, '_SNAPSHOT_CHUNK_BYTES', 4)
+    handle = io.BytesIO(b'0123456789abcdef')
+    chunks = routes_debug._gzip_chunks(handle)
+
+    next(chunks)
+    chunks.close()
+
+    assert handle.closed
+
+
+def test_gzip_chunks_of_a_whole_file_decompress_to_its_bytes(monkeypatch):
+    monkeypatch.setattr(routes_debug, '_SNAPSHOT_CHUNK_BYTES', 7)
+    data = os.urandom(100) + b'z' * 1000
+    handle = io.BytesIO(data)
+
+    assert gzip.decompress(b''.join(routes_debug._gzip_chunks(handle))) == data
+    assert handle.closed
+
+
+# --- source=cache (contract v1.30) ---
+
+CACHE_NAME_RE = re.compile(r'^w-1-cache-\d{4}-\d{2}-\d{2}__\d{2}_\d{2}_\d{2}\.db$')
+
+
+def _cache_engine(storage, rows: int = 3, *, create: bool = True) -> CacheEngine:
+    """A cache engine that is never started, pointing at a cache file in WAL mode written here."""
+    engine = CacheEngine(CacheConfig(enabled=True), str(storage), 'w-1', 'search')
+    path = storage / 'w-1-cache.db'
+    if create:
+        conn = sqlite3.connect(str(path))
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.executescript(SCHEMA_CACHE_ENTRIES)
+        conn.executemany(
+            'INSERT INTO cache_entries VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [(f'k{i}', 'local', 'v', 1, 0, 0, None, 'w-1') for i in range(rows)],
+        )
+        conn.commit()
+        conn.close()
+    engine._db_path = str(path)
+    return engine
+
+
+def _client_with_cache(rec: EventRecorder, engine: CacheEngine | None) -> AsyncClient:
+    drakkar_app = MagicMock()
+    drakkar_app._config = _drakkar_config()
+    drakkar_app.cache_engine = engine
+    app = create_ui_app(UIConfig(), rec, drakkar_app)
+    return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
+
+
+async def test_download_live_cache_serves_a_copy_of_the_cache_file(tmp_path, storage, started):
+    rec = await started('none', events=1)
+
+    async with _client_with_cache(rec, _cache_engine(storage, rows=3)) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
+
+    assert resp.status_code == 200
+    assert resp.headers['content-type'] == 'application/x-sqlite3'
+    assert resp.headers['cache-control'] == 'no-store, private'
+    name = resp.headers['content-disposition'].removeprefix('attachment; filename="').removesuffix('"')
+    assert CACHE_NAME_RE.fullmatch(name)
+    with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM cache_entries').fetchone() == (3,)
+        assert conn.execute('PRAGMA journal_mode').fetchone() == ('delete',)
+    assert [p.name for p in storage.iterdir() if p.name.startswith('.')] == []
+
+
+async def test_download_live_cache_compressed(tmp_path, storage, started):
+    rec = await started('none', events=1)
+
+    async with _client_with_cache(rec, _cache_engine(storage, rows=2)) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache', 'compress': 'gzip'})
+
+    assert resp.status_code == 200
+    assert resp.headers['content-disposition'].endswith('.db.gz"')
+    with contextlib.closing(_open_snapshot(gzip.decompress(resp.content), tmp_path)) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM cache_entries').fetchone() == (2,)
+
+
+@pytest.mark.parametrize('case', ['no_engine', 'mocked_engine', 'no_file_yet', 'memory_only_cache'])
+async def test_download_live_cache_without_a_cache_file_answers_404(storage, started, case):
+    rec = await started('none', events=1)
+    engines = {
+        'no_engine': None,
+        'mocked_engine': MagicMock(),
+        'no_file_yet': _cache_engine(storage, create=False),
+        'memory_only_cache': CacheEngine(CacheConfig(enabled=True), '', 'w-1', 'search'),
+    }
+
+    async with _client_with_cache(rec, engines[case]) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
+
+    assert (resp.status_code, resp.json()) == (404, {'error': 'No cache on this worker'})
+
+
+async def test_download_live_cache_copy_that_fails_answers_500(storage, started, monkeypatch):
+    rec = await started('none', events=1)
+
+    def failing_copy(_path):
+        raise sqlite3.DatabaseError('file is not a database')
+
+    monkeypatch.setattr(routes_debug, '_snapshot_live_file', failing_copy)
+
+    async with _client_with_cache(rec, _cache_engine(storage)) as client:
+        with capture_logs() as cap:
+            resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
+
+    assert (resp.status_code, resp.json()) == (500, {'error': 'Snapshot failed: file is not a database'})
+    failed = [e for e in cap if e['event'] == 'debug_download_live_failed']
+    assert [(e['source'], e['error']) for e in failed] == [('cache', 'file is not a database')]
+
+
+async def test_cache_download_waits_for_a_memory_copy_and_names_it_when_busy(storage, started, monkeypatch):
+    rec = await started('none', events=1)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
+    real_snapshot = routes_debug._snapshot_memory
+    memory_copy_started = threading.Event()
+    memory_copy_may_end = threading.Event()
+
+    def held_snapshot(recorder):
+        memory_copy_started.set()
+        memory_copy_may_end.wait(timeout=10)
+        return real_snapshot(recorder)
+
+    monkeypatch.setattr(routes_debug, '_snapshot_memory', held_snapshot)
+
+    async with _client_with_cache(rec, _cache_engine(storage)) as client:
+        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
+        assert await asyncio.to_thread(memory_copy_started.wait, 5)
+        second = await client.get('/api/v1/debug/download-live?source=cache')
+        memory_copy_may_end.set()
+        first_resp = await first
+        third = await client.get('/api/v1/debug/download-live?source=cache')
+
+    assert (second.status_code, second.json()) == (
+        500,
+        {'error': 'Snapshot failed: another memory snapshot is still running'},
+    )
+    assert (first_resp.status_code, third.status_code) == (200, 200)

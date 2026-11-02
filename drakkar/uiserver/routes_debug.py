@@ -6,8 +6,9 @@ These back the drakkar-ui Debug page; the page itself is served by
 Routes:
   * ``/api/v1/debug/databases``         — the worker, own files, shared history, recorder and storage (``parts``).
   * ``/api/v1/debug/merge``             — merge history files into ``merged/``.
-  * ``/api/v1/debug/download/{path}``   — download one file of the shared folder.
-  * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file or the memory store.
+  * ``/api/v1/debug/download/{path}``   — download one file of the shared folder (``compress=gzip``).
+  * ``/api/v1/debug/download-live``     — download a snapshot of the live recorder file, the memory store or the
+    cache file (``compress=gzip``).
   * ``/api/v1/debug/archives``          — compressed archives of every cluster folder.
   * ``/api/v1/debug/trace``             — trace one (partition, offset): own files, or the cluster history.
   * ``/api/v1/debug/label-keys``        — distinct label keys across events.
@@ -35,6 +36,7 @@ import secrets
 import sqlite3
 import stat
 import time
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,6 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from drakkar.cache.engine import CacheEngine
 from drakkar.config.recorder import PERSISTENCE_NONE, PERSISTENCE_POSTGRES
 from drakkar.dbstats import OwnFileStats, measure_memory_store
 from drakkar.fleet.service import FleetRegistry
@@ -127,16 +130,24 @@ _CLUSTER_FOLDER_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 NO_LIVE_FILE_ERROR = 'No live recorder file on this worker'
 NO_MEMORY_STORE_ERROR = 'No memory store on this worker'
+NO_CACHE_ERROR = 'No cache on this worker'
 DATABASES_ENDPOINT = '/api/v1/debug/databases'
 TRACE_ENDPOINT = '/api/v1/debug/trace'
 # The body of a failed or timed-out Postgres history search (503).
 HISTORY_SEARCH_FAILED_DETAIL = 'history search failed'
-BAD_SOURCE_ERROR = 'source must be memory or file'
+BAD_SOURCE_ERROR = 'source must be memory, file or cache'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
-# The reason of the 500 answer of a memory download that waited the whole
-# snapshot limit for the snapshot already running.
-MEMORY_SNAPSHOT_BUSY_REASON = 'another memory snapshot is still running'
+DOWNLOAD_SOURCE_CACHE = 'cache'
+# The reason of the 500 answer of a memory or cache download that waited the
+# whole snapshot limit for the copy already running; it names that copy.
+SNAPSHOT_BUSY_REASON = 'another {source} snapshot is still running'
+# The one value of ``compress`` on the download routes, and its refusals.
+COMPRESS_GZIP = 'gzip'
+BAD_COMPRESS_ERROR = 'compress must be gzip'
+ALREADY_COMPRESSED_ERROR = 'the file is already compressed'
+# gzip framing for zlib: a gzip header and trailer around the deflate stream.
+_GZIP_WBITS = 31
 # The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
 IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
 IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
@@ -300,12 +311,12 @@ def _snapshot_memory(recorder: EventRecorder) -> tuple[BinaryIO, str] | None:
         return io.BytesIO(_snapshot_memory_serialized(conn)), _memory_snapshot_name(recorder.worker_name)
 
 
-class _MemorySnapshotBusyError(Exception):
-    """Another memory snapshot held the slot for the whole snapshot limit."""
+class _SnapshotBusyError(Exception):
+    """Another memory or cache snapshot held the slot for the whole snapshot limit."""
 
 
 def _close_unsent_snapshot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
-    """Close the copy of a memory download whose request went away before the copy ended."""
+    """Close the copy of a memory or cache download whose request went away before the copy ended."""
     if copy.cancelled() or copy.exception() is not None:
         return
     snapshot = copy.result()
@@ -320,8 +331,10 @@ def _stream_size(handle: BinaryIO) -> int:
     return size
 
 
-def _snapshot_response(handle: BinaryIO, filename: str) -> StreamingResponse:
-    """Stream a snapshot as an attachment named ``filename``; the stream closes ``handle``."""
+def _snapshot_response(handle: BinaryIO, filename: str, *, compress: str | None = None) -> StreamingResponse:
+    """Stream a snapshot as an attachment named ``filename``, gzip-compressed with ``compress``; the stream closes ``handle``."""
+    if compress == COMPRESS_GZIP:
+        return _gzip_response(handle, filename)
     return StreamingResponse(
         _read_chunks(handle),
         media_type='application/x-sqlite3',
@@ -339,6 +352,68 @@ def _read_chunks(handle: BinaryIO) -> Iterator[bytes]:
     with handle:
         while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
             yield chunk
+
+
+def _gzip_chunks(handle: BinaryIO) -> Iterator[bytes]:
+    """Stream ``handle`` as one gzip member, chunk by chunk, and close it after the last chunk.
+
+    Synchronous, so Starlette runs it in its thread pool: the compression
+    never runs on the API server's loop. Only one chunk is held at a time.
+    """
+    compressor = zlib.compressobj(wbits=_GZIP_WBITS)
+    for chunk in _read_chunks(handle):
+        if compressed := compressor.compress(chunk):
+            yield compressed
+    yield compressor.flush()
+
+
+def _gzip_response(handle: BinaryIO, filename: str) -> StreamingResponse:
+    """Stream ``handle`` gzip-compressed as an attachment named ``<filename>.gz``; no length is known in advance."""
+    return StreamingResponse(
+        _gzip_chunks(handle),
+        media_type='application/gzip',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}.gz"',
+            # Same reason as /debug/download: the URL may carry ?token=.
+            'Cache-Control': 'no-store, private',
+        },
+    )
+
+
+def _open_binary(path: Path) -> BinaryIO:
+    """Open ``path`` for reading bytes. Blocking."""
+    return path.open('rb')
+
+
+def _compress_error(compress: str | None) -> JSONResponse | None:
+    """400 for a ``compress`` value other than ``gzip``; ``None`` when it is absent or ``gzip``."""
+    if compress is None or compress == COMPRESS_GZIP:
+        return None
+    return JSONResponse({'error': BAD_COMPRESS_ERROR}, status_code=400)
+
+
+def _cache_snapshot_name(worker_name: str) -> str:
+    """``<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db``, the UTC time now in the recorder file name format."""
+    return os.path.basename(make_db_path('', f'{worker_name}-cache'))
+
+
+def _snapshot_cache_file(cache_path: str, worker_name: str) -> tuple[BinaryIO, str]:
+    """A consistent copy of the cache file and its attachment name, as an open handle to an unlinked temp file.
+
+    Made like the live-file snapshot: the backup API on a read-only
+    connection of its own (never the cache engine's), into a private temp
+    file beside the cache file, unlinked before the handle is returned. In
+    WAL mode the copy does not block the cache's writer. Blocking.
+    """
+    return _snapshot_live_file(cache_path), _cache_snapshot_name(worker_name)
+
+
+def _cache_file_path(drakkar_app: DrakkarApp) -> str:
+    """The path of this worker's cache file; ``''`` when the cache keeps no file or it does not exist yet. Blocking."""
+    engine = drakkar_app.cache_engine
+    if not isinstance(engine, CacheEngine) or not engine.db_path:
+        return ''
+    return engine.db_path if os.path.isfile(engine.db_path) else ''
 
 
 # The paths, relative to the shared folder, that the download and merge
@@ -704,10 +779,12 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     # (no-op without a token). The per-route Depends below predate the
     # router-level gate and are kept as explicit markers.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
-    # One memory snapshot at a time on this recorder: a copy in RAM costs
-    # one more image of the store, so parallel downloads must not multiply
-    # it. An asyncio lock, so a waiting request holds no thread.
-    memory_snapshot_slot = asyncio.Lock()
+    # One memory or cache snapshot at a time on this worker: a copy in RAM
+    # costs one more image of the store, so parallel downloads must not
+    # multiply it. An asyncio lock, so a waiting request holds no thread.
+    # ``snapshot_holder`` names the copy that holds it, for the busy answer.
+    snapshot_slot = asyncio.Lock()
+    snapshot_holder: dict[str, str] = {'source': ''}
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -995,16 +1072,25 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         return JSONResponse(sorted(tasks.values(), key=lambda t: t['name']))
 
     @router.get('/api/v1/debug/download/{path:path}', dependencies=[Depends(deps.require_auth)])
-    async def debug_download(path: str):
+    async def debug_download(path: str, compress: str | None = None):
         """Download one sealed file, archive or merge result; ``path`` is relative to the shared folder.
 
         Every refusal — a path of another shape, an unsafe segment, a link
-        leading out of the folder, a missing file — answers 404.
+        leading out of the folder, a missing file — answers 404. With
+        ``compress=gzip`` the file is streamed gzip-compressed (400 for
+        another value, and for an archive, which is compressed already).
         """
+        if (error := _compress_error(compress)) is not None:
+            return error
+        name = path.rsplit('/', 1)[-1]
+        if compress is not None and ARCHIVE_NAME_RE.fullmatch(name):
+            return JSONResponse({'error': ALREADY_COMPRESSED_ERROR}, status_code=400)
         full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
         if full is None:
             return JSONResponse({'error': 'File not found'}, status_code=404)
-        name = path.rsplit('/', 1)[-1]
+        if compress is not None:
+            # Opened in a thread: the shared folder may be a network mount.
+            return _gzip_response(await asyncio.to_thread(_open_binary, full), name)
         return FileResponse(
             path=str(full),
             filename=name,
@@ -1016,24 +1102,30 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         )
 
     @router.get('/api/v1/debug/download-live', dependencies=[Depends(deps.require_auth)])
-    async def debug_download_live(source: str | None = None):
-        """Download a consistent snapshot of the live recorder file or of the memory store.
+    async def debug_download_live(source: str | None = None, compress: str | None = None):
+        """Download a consistent snapshot of the live recorder file, the memory store or the cache file.
 
-        ``source`` is ``file`` or ``memory``; it defaults to ``file`` when
-        a live file is open, else ``memory`` (so a worker before its first
-        file serves the memory store). 400 for another value;
-        404 without a live file (``file``) or without an open memory store
-        (``memory``); 500 when the snapshot fails, or when another memory
-        snapshot still runs after the snapshot limit (one memory snapshot
-        runs at a time). See :func:`_snapshot_live_file` and
-        :func:`_snapshot_memory`.
+        ``source`` is ``file``, ``memory`` or ``cache``; it defaults to
+        ``file`` when a live file is open, else ``memory`` (so a worker
+        before its first file serves the memory store). 400 for another
+        value, and for a ``compress`` other than ``gzip`` (checked first);
+        404 without a live file (``file``), without an open memory store
+        (``memory``) or without a cache file (``cache``); 500 when the
+        snapshot fails, or when another memory or cache snapshot still runs
+        after the snapshot limit (one runs at a time). See
+        :func:`_snapshot_live_file`, :func:`_snapshot_memory` and
+        :func:`_snapshot_cache_file`.
         """
+        if (error := _compress_error(compress)) is not None:
+            return error
         if source is None:
             source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
         if source == DOWNLOAD_SOURCE_FILE:
-            return await _download_live_file()
+            return await _download_live_file(compress)
         if source == DOWNLOAD_SOURCE_MEMORY:
-            return await _download_memory_store()
+            return await _download_memory_store(compress)
+        if source == DOWNLOAD_SOURCE_CACHE:
+            return await _download_cache_file(compress)
         return JSONResponse({'error': BAD_SOURCE_ERROR}, status_code=400)
 
     async def _live_file_path() -> str:
@@ -1043,7 +1135,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return ''
         return live_path
 
-    async def _download_live_file():
+    async def _download_live_file(compress: str | None):
         live_path = await _live_file_path()
         if not live_path:
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
@@ -1052,29 +1144,35 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         except (OSError, sqlite3.Error) as exc:
             await logger.awarning('debug_download_live_failed', category='debug', db_path=live_path, error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
-        return _snapshot_response(handle, os.path.basename(live_path))
+        return _snapshot_response(handle, os.path.basename(live_path), compress=compress)
 
-    def _release_memory_snapshot_slot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
+    def _release_snapshot_slot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
         """Free the slot once the copy thread has ended; mark its error as seen."""
-        memory_snapshot_slot.release()
+        snapshot_holder['source'] = ''
+        snapshot_slot.release()
         if not copy.cancelled():
             copy.exception()
 
-    async def _snapshot_memory_alone() -> tuple[BinaryIO, str] | None:
-        """Run :func:`_snapshot_memory` in a thread while no other memory snapshot runs.
+    async def _snapshot_alone(
+        source: str, copy_in_thread: Callable[[], tuple[BinaryIO, str] | None]
+    ) -> tuple[BinaryIO, str] | None:
+        """Run ``copy_in_thread`` (the ``source`` copy) in a thread while no other memory or cache copy runs.
 
-        Waits for the running snapshot at most :data:`SNAPSHOT_LIMIT_SECONDS`
-        and then raises :class:`_MemorySnapshotBusyError`. The slot is freed
-        when the copy thread ends, not when the request ends: a request that
-        goes away mid-copy cannot let a second copy start beside the first.
+        Waits for the running copy at most :data:`SNAPSHOT_LIMIT_SECONDS`
+        and then raises :class:`_SnapshotBusyError`, naming the copy that
+        holds the slot. The slot is freed when the copy thread ends, not
+        when the request ends: a request that goes away mid-copy cannot let
+        a second copy start beside the first.
         """
         try:
             async with asyncio.timeout(memstore.SNAPSHOT_LIMIT_SECONDS):
-                await memory_snapshot_slot.acquire()
+                await snapshot_slot.acquire()
         except TimeoutError:
-            raise _MemorySnapshotBusyError(MEMORY_SNAPSHOT_BUSY_REASON) from None
-        copy = asyncio.ensure_future(asyncio.to_thread(_snapshot_memory, recorder))
-        copy.add_done_callback(_release_memory_snapshot_slot)
+            holder = snapshot_holder['source'] or source
+            raise _SnapshotBusyError(SNAPSHOT_BUSY_REASON.format(source=holder)) from None
+        snapshot_holder['source'] = source
+        copy = asyncio.ensure_future(asyncio.to_thread(copy_in_thread))
+        copy.add_done_callback(_release_snapshot_slot)
         try:
             # Shielded: a cancelled request leaves the copy running to its end.
             return await asyncio.shield(copy)
@@ -1082,17 +1180,31 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             copy.add_done_callback(_close_unsent_snapshot)
             raise
 
-    async def _download_memory_store():
+    async def _download_memory_store(compress: str | None):
         try:
-            snapshot = await _snapshot_memory_alone()
-        except (OSError, sqlite3.Error, _MemorySnapshotBusyError) as exc:
+            snapshot = await _snapshot_alone(DOWNLOAD_SOURCE_MEMORY, functools.partial(_snapshot_memory, recorder))
+        except (OSError, sqlite3.Error, _SnapshotBusyError) as exc:
             # OSError covers the TimeoutError of a copy that kept restarting.
             await logger.awarning('debug_download_live_failed', category='debug', source='memory', error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
         if snapshot is None:
             return JSONResponse({'error': NO_MEMORY_STORE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name)
+        return _snapshot_response(handle, name, compress=compress)
+
+    async def _download_cache_file(compress: str | None):
+        cache_path = await asyncio.to_thread(_cache_file_path, drakkar_app)
+        if not cache_path:
+            return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
+        copy = functools.partial(_snapshot_cache_file, cache_path, recorder.worker_name)
+        try:
+            snapshot = await _snapshot_alone(DOWNLOAD_SOURCE_CACHE, copy)
+        except (OSError, sqlite3.Error, _SnapshotBusyError) as exc:
+            await logger.awarning('debug_download_live_failed', category='debug', source='cache', error=str(exc))
+            return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
+        assert snapshot is not None  # the cache copy always answers a file or raises
+        handle, name = snapshot
+        return _snapshot_response(handle, name, compress=compress)
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():

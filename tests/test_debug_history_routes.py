@@ -241,6 +241,41 @@ async def test_download_refuses_any_other_path(client, shared, storage, path):
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize('folder', ['history', 'merged'])
+async def test_download_compressed_streams_a_gzip_of_the_file(client, shared, folder):
+    if folder == 'history':
+        source = _sealed(shared, CLUSTER, 'w-1-2026-10-13__08_00_00.db')
+        path = f'history/{CLUSTER}/{os.path.basename(source)}'
+    else:
+        source = _recorder_db(shared / 'merged' / 'merged-2026-10-14__10_00_00-0123456789abcdef.db')
+        path = f'merged/{os.path.basename(source)}'
+
+    resp = await client.get(f'/api/v1/debug/download/{path}', params={'compress': 'gzip'})
+
+    assert resp.status_code == 200
+    assert gzip.decompress(resp.content) == Path(source).read_bytes()
+    assert resp.headers['content-type'] == 'application/gzip'
+    assert resp.headers['content-disposition'] == f'attachment; filename="{os.path.basename(source)}.gz"'
+    assert resp.headers['cache-control'] == 'no-store, private'
+    assert 'content-length' not in resp.headers
+
+
+async def test_download_compressed_archive_answers_400_before_any_lookup(client, shared):
+    missing_archive = archive_file_name(CLUSTER, 0.0, DAY)
+
+    resp = await client.get(f'/api/v1/debug/download/history/{CLUSTER}/{missing_archive}', params={'compress': 'gzip'})
+
+    assert (resp.status_code, resp.json()) == (400, {'error': 'the file is already compressed'})
+
+
+async def test_download_other_compress_answers_400_and_a_missing_file_with_gzip_answers_404(client, shared):
+    bad = await client.get(f'/api/v1/debug/download/history/{CLUSTER}/missing.db', params={'compress': 'br'})
+    missing = await client.get(f'/api/v1/debug/download/history/{CLUSTER}/missing.db', params={'compress': 'gzip'})
+
+    assert (bad.status_code, bad.json()) == (400, {'error': 'compress must be gzip'})
+    assert missing.status_code == 404
+
+
 async def test_download_refuses_a_symlink_that_leaves_the_shared_folder(client, shared, tmp_path):
     outside = tmp_path / 'outside.db'
     outside.write_bytes(b'not yours')

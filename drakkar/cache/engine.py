@@ -281,6 +281,11 @@ class CacheEngine:
                 self._marks[scope] = candidate
 
     @property
+    def db_path(self) -> str:
+        """The path of the cache file; ``''`` before start and for a memory-only cache."""
+        return self._db_path
+
+    @property
     def reader_db(self) -> aiosqlite.Connection | None:
         """Public accessor for the reader aiosqlite connection.
 
