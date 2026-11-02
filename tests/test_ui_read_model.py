@@ -236,6 +236,43 @@ class TestGroupTimelineTasks:
         assert row['slot'] == 4
         assert row['env'] == {'A': '1'}
 
+    @pytest.mark.parametrize('finish', [completed, failed])
+    def test_run_timing_comes_from_the_completion_metadata(self, finish):
+        metadata = json.dumps({'run_started_at': 99.75, 'exit_notice_ms': 812.5, 'reported_run_seconds': 0.5})
+        (row,), _ = group_timeline_tasks(
+            [started(), finish(metadata=metadata)],
+            ws_min_duration_seconds=0.0,
+            limit=10,
+        )
+
+        assert row['run_started_at'] == 99.75
+        assert row['reported_run_seconds'] == 0.5
+        # start_ts and end_ts keep their meaning: the two events' ts.
+        assert (row['start_ts'], row['end_ts']) == (100.0, 101.0)
+
+    def test_run_timing_is_null_while_running_and_on_an_older_row(self):
+        rows, _ = group_timeline_tasks(
+            [started('t1'), started('t2'), completed('t2', metadata=json.dumps({'spawn_ms': 1.0}))],
+            ws_min_duration_seconds=0.0,
+            limit=10,
+        )
+
+        for row in rows:
+            assert row['run_started_at'] is None
+            assert row['reported_run_seconds'] is None
+
+    @pytest.mark.parametrize('bad', ['"99.5"', 'true', 'null', '[1]'])
+    def test_a_run_timing_value_that_is_not_a_number_reads_as_null(self, bad):
+        metadata = f'{{"run_started_at": {bad}, "reported_run_seconds": {bad}}}'
+        (row,), _ = group_timeline_tasks(
+            [started(), completed(metadata=metadata)],
+            ws_min_duration_seconds=0.0,
+            limit=10,
+        )
+
+        assert row['run_started_at'] is None
+        assert row['reported_run_seconds'] is None
+
     def test_origin_defaults_to_kafka_on_an_older_row(self):
         (row,), _ = group_timeline_tasks([started()], ws_min_duration_seconds=0.0, limit=10)
 

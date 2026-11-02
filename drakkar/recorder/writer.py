@@ -73,6 +73,25 @@ def _capped_stdin(stdin: str, max_bytes: int) -> tuple[str, bool]:
     return stdin.encode()[:max_bytes].decode(errors='ignore'), True
 
 
+def _run_timing_metadata(result: ExecutorResult | None, reported_run_seconds: float | None) -> dict:
+    """The run timing keys of a ``task_completed`` / ``task_failed`` event.
+
+    ``run_started_at`` (unix seconds of the spawn) and ``duration`` give the
+    run bar measured off the event loop; ``exit_notice_ms`` is how late the
+    worker handled the exit, a loop-stall signal; ``reported_run_seconds`` is
+    the handler hook's run time. Each key is left out when it has no value.
+    """
+    metadata: dict = {}
+    if result is not None:
+        if result.run_started_at is not None:
+            metadata['run_started_at'] = round(result.run_started_at, 6)
+        if result.exit_notice_seconds is not None:
+            metadata['exit_notice_ms'] = round(result.exit_notice_seconds * 1000, 1)
+    if reported_run_seconds is not None:
+        metadata['reported_run_seconds'] = round(reported_run_seconds, 6)
+    return metadata
+
+
 def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int) -> dict:
     """Metadata for a task_failed event: the exception, plus the task's stdin.
 
@@ -340,7 +359,13 @@ class EventWriter:
         origin: str | None = None,
         client_name: str | None = None,
         request_id: str | None = None,
+        reported_run_seconds: float | None = None,
     ) -> None:
+        """Record a subprocess that exited with code 0.
+
+        ``reported_run_seconds`` is the handler's ``task_run_seconds`` answer,
+        already checked; None when it gave none.
+        """
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
         duration = result.duration_seconds
@@ -397,6 +422,7 @@ class EventWriter:
             # Parent-side share of the duration (see ExecutorResult.spawn_seconds);
             # the live UI shows it in the timeline hover detail.
             completed_meta['spawn_ms'] = round(result.spawn_seconds * 1000, 1)
+        completed_meta.update(_run_timing_metadata(result, reported_run_seconds))
         if completed_meta:
             entry['metadata'] = encode_json_str(completed_meta)
         if include_output:
@@ -426,7 +452,15 @@ class EventWriter:
         origin: str | None = None,
         client_name: str | None = None,
         request_id: str | None = None,
+        result: ExecutorResult | None = None,
+        reported_run_seconds: float | None = None,
     ) -> None:
+        """Record a task that failed.
+
+        ``result`` is the failure's :class:`ExecutorResult` when there is one;
+        its run timing goes into the metadata. ``reported_run_seconds`` is the
+        handler's ``task_run_seconds`` answer, already checked.
+        """
         self._counters['failed'] += 1
 
         # Failed tasks ALWAYS go to WS regardless of ws_min_duration_ms.
@@ -459,7 +493,10 @@ class EventWriter:
             'pid': error.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
-            'metadata': encode_json_str(_failed_metadata(task, error, self._capture.max_stdin)),
+            'metadata': encode_json_str(
+                _failed_metadata(task, error, self._capture.max_stdin)
+                | _run_timing_metadata(result, reported_run_seconds)
+            ),
             'labels': encode_json_str(task.labels) if task.labels else None,
             'origin': resolved_origin,
             'client_name': resolved_client_name,

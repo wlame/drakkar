@@ -432,6 +432,63 @@ async def test_record_task_failed(recorder):
     assert events[0]['exit_code'] == 1
 
 
+async def test_record_task_completed_writes_run_timing_metadata(recorder):
+    result = make_result('t1').model_copy(update={'run_started_at': 1700000000.1234567, 'exit_notice_seconds': 0.81249})
+    recorder.record_task_completed(result, partition=0, reported_run_seconds=1.2345678)
+    await recorder.flush()
+
+    (event,) = await recorder.get_events(event_type='task_completed')
+    meta = json.loads(event['metadata'])
+    assert meta['run_started_at'] == 1700000000.123457
+    assert meta['exit_notice_ms'] == 812.5
+    assert meta['reported_run_seconds'] == 1.234568
+    # duration keeps the framework measure, so the two can be compared.
+    assert event['duration'] == 1.5
+
+
+async def test_record_task_completed_leaves_out_run_timing_it_does_not_have(recorder):
+    recorder.record_task_completed(make_result('t1'), partition=0)
+    await recorder.flush()
+
+    (event,) = await recorder.get_events(event_type='task_completed')
+    assert event['metadata'] is None
+
+
+async def test_record_task_failed_writes_run_timing_metadata(recorder):
+    task = make_task('t1')
+    error = ExecutorError(task=task, exit_code=3, stderr='bad input', exception='boom')
+    result = ExecutorResult(
+        exit_code=3,
+        stdout='',
+        stderr='bad input',
+        duration_seconds=0.25,
+        run_started_at=1700000000.5,
+        exit_notice_seconds=0.0,
+        task=task,
+        pid=42,
+    )
+    recorder.record_task_failed(
+        task, error, partition=0, duration_seconds=0.25, result=result, reported_run_seconds=0.2
+    )
+    await recorder.flush()
+
+    (event,) = await recorder.get_events(event_type='task_failed')
+    meta = json.loads(event['metadata'])
+    assert meta['exception'] == 'boom'
+    assert meta['run_started_at'] == 1700000000.5
+    assert meta['exit_notice_ms'] == 0.0
+    assert meta['reported_run_seconds'] == 0.2
+
+
+async def test_record_task_failed_without_a_result_writes_no_run_timing(recorder):
+    task = make_task('t1')
+    recorder.record_task_failed(task, ExecutorError(task=task, kind='internal', exception='boom'), partition=0)
+    await recorder.flush()
+
+    (event,) = await recorder.get_events(event_type='task_failed')
+    assert set(json.loads(event['metadata'])) == {'exception'}
+
+
 async def test_record_task_started_includes_queue_wait(recorder):
     recorder.record_task_started(make_task(), partition=0, queue_wait_ms=12.5)
     await recorder.flush()

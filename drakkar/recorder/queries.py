@@ -676,7 +676,19 @@ def _new_timeline_entry(event: dict) -> dict:
         'origin': event.get('origin') or 'kafka',
         'client_name': event.get('client_name'),
         'request_id': event.get('request_id'),
+        # Run timing measured off the event loop, from the completion
+        # event's metadata; null while running and on rows older backends
+        # wrote.
+        'run_started_at': None,
+        'reported_run_seconds': None,
     }
+
+
+def _number_or_none(value: object) -> float | None:
+    """A metadata number as stored, or None for anything else (a hand-edited or older row)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return value
 
 
 def group_timeline_tasks(
@@ -730,6 +742,9 @@ def group_timeline_tasks(
             entry['duration'] = event.get('duration')
             if event.get('pid'):
                 entry['pid'] = event['pid']
+            metadata = parse_json_object(event.get('metadata'))
+            entry['run_started_at'] = _number_or_none(metadata.get('run_started_at'))
+            entry['reported_run_seconds'] = _number_or_none(metadata.get('reported_run_seconds'))
             if event['event'] == EventType.TASK_COMPLETED:
                 entry['stdout_size'] = event.get('stdout_size')
 
