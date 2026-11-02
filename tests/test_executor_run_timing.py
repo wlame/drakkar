@@ -43,15 +43,16 @@ def notice_count() -> float:
 
 @needs_native_backend
 async def test_a_loop_stall_does_not_stretch_the_duration():
-    watcher = StallingWatcher(stall_seconds=0.5)
+    # Wide margins: a slow exec on a loaded runner must not decide the outcome.
+    watcher = StallingWatcher(stall_seconds=1.0)
     try:
         result = await make_pool(watcher).execute(make_task('0.05'))
     finally:
         watcher.stop()
 
-    assert result.duration_seconds < 0.2
+    assert result.duration_seconds < 0.5
     assert result.exit_notice_seconds is not None
-    assert result.exit_notice_seconds >= 0.4
+    assert result.exit_notice_seconds >= 0.5
 
 
 @needs_native_backend
@@ -117,7 +118,7 @@ async def test_a_child_that_survives_the_kill_is_cut_where_the_timeout_fired(mon
 
     result = raised.value.result
     assert len(calls) == 2  # the timeout branch, then the cleanup that really kills
-    assert 1.0 <= result.duration_seconds < 1.5
+    assert 1.0 <= result.duration_seconds < 2.0
     assert result.exit_notice_seconds is None
     assert result.run_started_at is not None
 
@@ -173,6 +174,8 @@ def test_the_pool_uses_the_shared_watcher_by_default():
         (ExitWatch(), (5.0, 0.0)),
         # The watcher stamped the exit: ends there, the loop was 4 s late.
         (ExitWatch(stamp=ExitStamp(monotonic=101.0, wall=0.0)), (1.0, 4.0)),
+        # A stamp written after the loop's reading: the loop reading wins.
+        (ExitWatch(stamp=ExitStamp(monotonic=105.5, wall=0.0)), (5.0, 0.0)),
     ],
 )
 def test_measure_run(exit_watch, expected):

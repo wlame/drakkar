@@ -70,7 +70,10 @@ def measure_run(run_started_mono: float, exit_watch: ExitWatch | None, loop_end:
         return end - run_started_mono, None
     if stamp is None:
         return loop_end - run_started_mono, 0.0
-    return stamp.monotonic - run_started_mono, max(0.0, loop_end - stamp.monotonic)
+    # ``loop_end`` is read before the stamp, so a stamp written in between is
+    # later than it; the loop reading is then the earlier, better one.
+    end = min(stamp.monotonic, loop_end)
+    return end - run_started_mono, loop_end - end
 
 
 def _trim_incomplete_utf8(data: bytes) -> bytes:
@@ -707,8 +710,11 @@ class ExecutorPool:
                 **platform_kwargs,
             )
             # Watch the exit on the very next line, with no ``await`` in
-            # between: asyncio reaps the child on this loop, so nothing can
-            # reap it (and free its pid for reuse) before the watch starts.
+            # between, so no reap can happen between here and the watch.
+            # asyncio may still have reaped the child during the spawn's own
+            # internal await, with ``returncode`` set one loop hop later; the
+            # watcher's ``waitid(..., WNOWAIT)`` probe catches that case, so
+            # a reused pid is never watched.
             exit_watch = self._exit_watcher.watch(proc)
             spawn_seconds = time.monotonic() - run_started_mono
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None

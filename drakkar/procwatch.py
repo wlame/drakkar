@@ -76,8 +76,9 @@ _KQ_NOTE_EXIT: int = getattr(select, 'KQ_NOTE_EXIT', 0x80000000)
 _EPOLLIN: int = getattr(select, 'EPOLLIN', 0x1)
 
 # ``waitid`` flags of the "is this still our unreaped child" probe: report an
-# exit if there is one, never block, and never consume the status.
-_PROBE_FLAGS = os.WEXITED | os.WNOHANG | os.WNOWAIT
+# exit if there is one, never block, and never consume the status. ``getattr``
+# so the module still imports where they do not exist (no backend runs there).
+_PROBE_FLAGS: int = getattr(os, 'WEXITED', 0) | getattr(os, 'WNOHANG', 0) | getattr(os, 'WNOWAIT', 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,9 +296,11 @@ class ExitWatcher:
 
     The thread starts on the first watch (or on :meth:`start`). ``watch``
     runs on the event loop and must be called right after
-    ``create_subprocess_exec`` returns, with no ``await`` in between: asyncio
-    reaps children on the loop, so no reap can happen between the spawn's
-    return and the start of the watch.
+    ``create_subprocess_exec`` returns, with no ``await`` in between, so no
+    reap can happen between the spawn's return and the start of the watch.
+    A reap during the spawn's own internal await is still possible, and
+    ``returncode`` is set one loop hop after it, so the pid may already be
+    free; each backend's ``waitid(..., WNOWAIT)`` probe catches that case.
     """
 
     def __init__(
@@ -405,7 +408,13 @@ class ExitWatcher:
             logger.error('exit_watcher_failed', category='executor', error=str(exc), exc_info=exc)
             with self._lock:
                 self._unavailable = True
-                self._entries.clear()
+                _release_all(backend, self._take_keys())
+
+    def _take_keys(self) -> list[int]:
+        """Empty the table of pending watches; return their keys."""
+        keys = list(self._entries)
+        self._entries.clear()
+        return keys
 
     def stop(self, timeout_seconds: float = 1.0) -> None:
         """Stop the thread; pending watches are timed on the loop. A later watch starts it again."""
@@ -415,13 +424,23 @@ class ExitWatcher:
                 return
             self._backend = None
             self._thread = None
-            self._entries.clear()
+            pending_keys = self._take_keys()
         backend.wake()
         thread.join(timeout_seconds)
         if not thread.is_alive():
             # A thread still inside poll would read closed descriptors; leave
             # them to the process exit in that case.
+            _release_all(backend, pending_keys)
             backend.close()
+
+
+def _release_all(backend: ExitBackend, keys: list[int]) -> None:
+    """Free what each pending watch holds (a pidfd on Linux), ignoring one that is gone already."""
+    for key in keys:
+        try:
+            backend.release(key)
+        except OSError:
+            pass
 
 
 _shared_watcher: ExitWatcher | None = None

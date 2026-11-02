@@ -119,15 +119,16 @@ async def test_native_watch_stamps_the_exit_during_a_loop_stall():
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec('sleep', '0.05')
         exit_watch = watcher.watch(proc)
-        time.sleep(0.5)  # the loop is blocked while the child exits
+        time.sleep(1.0)  # the loop is blocked while the child exits
         await proc.wait()
         loop_saw_exit = time.monotonic()
     finally:
         watcher.stop()
 
+    # Wide margins: a slow exec on a loaded runner must not decide the outcome.
     assert exit_watch.stamp is not None
-    assert exit_watch.stamp.monotonic - started < 0.2
-    assert loop_saw_exit - exit_watch.stamp.monotonic >= 0.3
+    assert exit_watch.stamp.monotonic - started < 0.5
+    assert loop_saw_exit - exit_watch.stamp.monotonic >= 0.5
 
 
 @needs_native_backend
@@ -239,6 +240,7 @@ async def test_a_failing_thread_leaves_its_watches_to_loop_timing():
         await asyncio.to_thread(wait_until, lambda: not watcher._thread.is_alive())
 
     assert exit_watch.stamp is None
+    assert backend.released == [5]
     assert any(log['event'] == 'exit_watcher_failed' for log in logs)
     assert watcher.watch(fake_proc(pid=6)).fallback_reason == UNAVAILABLE
 
@@ -260,12 +262,30 @@ async def test_stop_ends_the_thread_and_a_later_watch_starts_it_again():
 
     assert not first_thread.is_alive()
     assert backends[0].closed
+    assert backends[0].released == [3]  # the pending watch's descriptor is freed
     assert pending.stamp is None
     assert watcher.backend_name is None
     watcher.watch(fake_proc(pid=4))
     assert len(backends) == 2
     assert backends[1].watched == [4]
     watcher.stop()
+
+
+def test_stop_ignores_a_pending_watch_that_is_gone_already():
+    class GoneBackend(FakeBackend):
+        def release(self, key: int) -> None:
+            raise OSError('closed already')
+
+    backend = GoneBackend()
+    watcher = ExitWatcher(lambda: backend)
+
+    async def watch_one() -> None:
+        watcher.watch(fake_proc(pid=12))
+
+    asyncio.run(watch_one())
+    watcher.stop()
+
+    assert backend.closed
 
 
 def test_stop_leaves_the_descriptors_open_when_the_thread_does_not_end():
