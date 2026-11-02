@@ -58,7 +58,10 @@ Then the worker opens `.owner.lock` in its own folder and takes an
 exclusive, non-blocking `flock` on it. It keeps the file open until its
 stop ends. The kernel drops the lock when the process ends in any way, also
 on `kill -9` or an OOM kill, so a held lock always means a live process.
-When another process holds the lock, the start fails with:
+When another process holds the lock, the worker tries again every 50 ms
+for 2 seconds: the Databases tab of another worker may hold a shared lock
+on the file for a moment while it tests whether the folder is in use. When
+the lock is still held after that, the start fails with:
 
 ```text
 storage.dir: the folder <own folder> is in use by another process; give each worker a unique worker name (worker.name or WORKER_ID)
@@ -1470,7 +1473,8 @@ part '<p>'; known: history, own, recorder, storage"}`.
   `online` (the registry's verdict; `null` with autodiscover off). The lock
   test takes a shared lock without waiting and frees it at once, so an
   [orphan pass](#orphan-folders) that looks at the folder at that moment
-  skips it for one round. `siblings` is `null` with no `storage.dir`.
+  skips it for one round, and a worker of that name that starts at that
+  moment waits for it (see [The own folder](#the-own-folder)). `siblings` is `null` with no `storage.dir`.
 
 A worker with a memory store and no file answers the memory row only in `own`. A worker with
 neither a memory store nor a file answers `own: []`. `history.folders` is
@@ -1508,11 +1512,18 @@ journal, so it opens on its own. It goes to an owner-only temp file in
 `source=memory` it answers a snapshot of the memory store, named
 `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db`; see
 [The snapshot download](recent-events.md#the-snapshot-download). With
-`source=cache` it answers a copy of the worker's cache file, made like the
-live-file copy (backup API, read-only connection, owner-only temp file in
-the own folder, removed before the answer starts), named
-`<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db`. One memory or cache copy runs at
-a time. The route answers `404` `{"error": "No live recorder file on this
+`source=cache` it answers a copy of the worker's cache file, named
+`<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db`. The worker writes the copy with
+`VACUUM INTO` on a read-only connection of its own, into an owner-only temp
+file in the own folder that is removed before the answer starts. It is one
+read transaction, so the copy is consistent and the cache keeps writing
+meanwhile. A copy that does not finish within 30 seconds is stopped, its
+partial file is deleted, and the route answers `500` `{"error": "Snapshot
+failed: the cache copy did not finish in 30 s"}`; a cache file too large to
+copy in that time cannot be downloaded this way. One cache copy runs at a
+time, apart from the one memory copy; a second cache download waits up to
+30 seconds and then answers `500` with the reason `another cache snapshot is
+still running`. The route answers `404` `{"error": "No live recorder file on this
 worker"}` for `source=file` with no live file, `404` `{"error": "No memory
 store on this worker"}` for `source=memory` with no memory store, `404`
 `{"error": "No cache on this worker"}` for `source=cache` with no cache

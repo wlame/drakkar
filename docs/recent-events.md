@@ -206,11 +206,11 @@ named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC time of the snapshot).
   The worker logs `debug_download_live_in_ram` (info, with `reason`
   `storage_dir_unset` or `storage_dir_unusable`) for each such copy.
 
-One memory or cache snapshot runs at a time. Another such download waits for
-it, up to 30 seconds, and then answers 500 with the reason `another memory
-snapshot is still running` (or `another cache snapshot is still running`,
-naming the copy that holds the slot). Parallel downloads therefore never
-make two copies at the same time. A finished copy stays in memory until its download ends.
+One memory snapshot runs at a time. Another memory download waits for it, up
+to 30 seconds, and then answers 500 with the reason `another memory snapshot
+is still running`. Parallel downloads therefore never make two copies at the
+same time. A cache copy has a slot of its own, so it never makes a memory
+download wait. A finished copy stays in memory until its download ends.
 
 Answers:
 

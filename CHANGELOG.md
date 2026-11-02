@@ -234,9 +234,13 @@ the steps of the upgrade and the changes of behaviour.
   v1.30).
 - **Compressed downloads and the cache snapshot.** `compress=gzip` on
   `/api/v1/debug/download/{path}` and `/api/v1/debug/download-live` streams the
-  file as gzip, one chunk at a time. `download-live?source=cache` serves a copy
-  of the cache file; one memory or cache copy runs at a time. A bad `source` now
-  answers `source must be memory, file or cache`.
+  file as gzip, one chunk at a time, at the fastest level. `download-live?source=cache`
+  serves a copy of the cache file (`VACUUM INTO`, stopped after 30 s), one at a
+  time, apart from the memory copy. A bad `source` now answers `source must be
+  memory, file or cache`.
+- **A start waits out a short lock.** When the owner lock of its folder is held,
+  a worker tries again for 2 s before it refuses to start, so the Databases tab
+  of another worker, which tests the lock for a moment, never stops a restart.
 - **Orphan folders.** The leftover pass seals the recorder files of another
   worker name's own folder in the same cluster when no process holds the folder,
   its files are idle for 300 s and the registry shows the name is not online, then

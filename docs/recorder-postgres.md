@@ -539,9 +539,9 @@ never part of the answer:
 - `table` has no schema prefix. `writer` is `null` when the worker writes no
   rows (`recorder.capture.events: false`) or before the recorder started.
 - `started` is false until stage P has opened its connection and found the
-  table. `queue_rows` counts the rows waiting, the chunk in its slot
-  included; `queue_bytes` is the text in the queue, counted as `max_queue`
-  counts it.
+  table. `queue_rows` and `queue_bytes` count the rows and the text
+  waiting, the chunk in its slot included; the text is counted as
+  `max_queue` counts it.
 - `rows_written` and `dropped` count rows since the process started, with
   the reasons of `drakkar_recorder_postgres_dropped_rows_total`.
 - `last_upkeep` is the last upkeep this worker ran: when, whether it held
