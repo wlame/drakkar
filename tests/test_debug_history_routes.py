@@ -21,6 +21,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import archive_file_name
 from drakkar.recorder.history import meta_path, serialize_json
 from drakkar.recorder.schema import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
+from drakkar.uiserver import routes_debug
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
 
@@ -258,6 +259,21 @@ async def test_download_compressed_streams_a_gzip_of_the_file(client, shared, fo
     assert resp.headers['content-disposition'] == f'attachment; filename="{os.path.basename(source)}.gz"'
     assert resp.headers['cache-control'] == 'no-store, private'
     assert 'content-length' not in resp.headers
+
+
+async def test_download_compressed_of_a_file_gone_before_the_open_answers_404(client, shared, monkeypatch):
+    source = _sealed(shared, CLUSTER, 'w-1-2026-10-13__08_00_00.db')
+
+    def gone(_path):
+        raise FileNotFoundError(source)
+
+    monkeypatch.setattr(routes_debug, '_open_binary', gone)
+
+    resp = await client.get(
+        f'/api/v1/debug/download/history/{CLUSTER}/{os.path.basename(source)}', params={'compress': 'gzip'}
+    )
+
+    assert (resp.status_code, resp.json()) == (404, {'error': 'File not found'})
 
 
 async def test_download_compressed_archive_answers_400_before_any_lookup(client, shared):

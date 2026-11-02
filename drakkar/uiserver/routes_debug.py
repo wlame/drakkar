@@ -48,10 +48,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from drakkar.cache.engine import CacheEngine
 from drakkar.config.recorder import PERSISTENCE_NONE, PERSISTENCE_POSTGRES
 from drakkar.dbstats import OwnFileStats, measure_memory_store
-from drakkar.fleet.service import FleetRegistry
 from drakkar.merge import DbStats, MergeResult, merge_databases_atomic
 from drakkar.recorder import memstore
 from drakkar.recorder.archive import ARCHIVE_NAME_RE, list_archives
@@ -139,15 +137,25 @@ BAD_SOURCE_ERROR = 'source must be memory, file or cache'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
 DOWNLOAD_SOURCE_CACHE = 'cache'
-# The reason of the 500 answer of a memory or cache download that waited the
-# whole snapshot limit for the copy already running; it names that copy.
-SNAPSHOT_BUSY_REASON = 'another {source} snapshot is still running'
+# The reasons of the 500 answer of a memory or a cache download that waited
+# the whole snapshot limit for the copy of the same source already running.
+MEMORY_SNAPSHOT_BUSY_REASON = 'another memory snapshot is still running'
+CACHE_SNAPSHOT_BUSY_REASON = 'another cache snapshot is still running'
+# The longest a cache copy may run, the same limit as a memory copy. The
+# cache file has no size bound, so a copy that would take longer is stopped.
+CACHE_SNAPSHOT_LIMIT_SECONDS = memstore.SNAPSHOT_LIMIT_SECONDS
+CACHE_COPY_TIMEOUT_REASON = 'the cache copy did not finish in {seconds:g} s'
+# The progress handler of a cache copy runs every this many SQLite steps.
+_CACHE_COPY_CHECK_STEPS = 1000
 # The one value of ``compress`` on the download routes, and its refusals.
 COMPRESS_GZIP = 'gzip'
 BAD_COMPRESS_ERROR = 'compress must be gzip'
 ALREADY_COMPRESSED_ERROR = 'the file is already compressed'
 # gzip framing for zlib: a gzip header and trailer around the deflate stream.
 _GZIP_WBITS = 31
+# The fastest level: most of the size gain on SQLite pages for a small part
+# of the CPU of the default level, so a download takes little from the tasks.
+_GZIP_LEVEL = 1
 # The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
 IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
 IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
@@ -312,7 +320,7 @@ def _snapshot_memory(recorder: EventRecorder) -> tuple[BinaryIO, str] | None:
 
 
 class _SnapshotBusyError(Exception):
-    """Another memory or cache snapshot held the slot for the whole snapshot limit."""
+    """Another copy of the same source held its slot for the whole snapshot limit."""
 
 
 def _close_unsent_snapshot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
@@ -360,9 +368,10 @@ def _gzip_chunks(handle: BinaryIO) -> Iterator[bytes]:
     Synchronous, so Starlette runs it in its thread pool: the compression
     never runs on the API server's loop. Only one chunk is held at a time.
     """
-    compressor = zlib.compressobj(wbits=_GZIP_WBITS)
-    # The file is closed here, not by a nested generator: a client that
-    # leaves mid-stream closes this generator, and the file closes at once.
+    compressor = zlib.compressobj(level=_GZIP_LEVEL, wbits=_GZIP_WBITS)
+    # The file closes when the stream ends or this generator is closed. The
+    # server does not close it when a client leaves; the file then closes
+    # when the generator is collected.
     with handle:
         while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
             if compressed := compressor.compress(chunk):
@@ -388,6 +397,28 @@ def _open_binary(path: Path) -> BinaryIO:
     return path.open('rb')
 
 
+def _close_opened(opening: asyncio.Future[BinaryIO]) -> None:
+    """Close the file an open thread returned after its request went away."""
+    if not opening.cancelled() and opening.exception() is None:
+        opening.result().close()
+
+
+async def _open_for_stream(path: Path) -> BinaryIO | None:
+    """Open ``path`` in a thread for a stream; ``None`` when it is gone (the archive pass may have folded it).
+
+    The shared folder may be a network mount, so the open runs in a thread.
+    A request cancelled during the open closes the file the thread returns.
+    """
+    opening = asyncio.ensure_future(asyncio.to_thread(_open_binary, path))
+    try:
+        return await asyncio.shield(opening)
+    except FileNotFoundError:
+        return None
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_opened)
+        raise
+
+
 def _compress_error(compress: str | None) -> JSONResponse | None:
     """400 for a ``compress`` value other than ``gzip``; ``None`` when it is absent or ``gzip``."""
     if compress is None or compress == COMPRESS_GZIP:
@@ -400,21 +431,59 @@ def _cache_snapshot_name(worker_name: str) -> str:
     return os.path.basename(make_db_path('', f'{worker_name}-cache'))
 
 
+def _cache_copy_check(deadline: float) -> Callable[[], int]:
+    """A progress handler that stops the statement (a non-zero answer) once ``deadline`` (monotonic) has passed."""
+    return lambda: int(time.monotonic() > deadline)
+
+
+def _vacuum_into(source_path: str, target: str) -> None:
+    """Write a consistent copy of the database at ``source_path`` into the empty file ``target``. Blocking.
+
+    ``VACUUM INTO`` on a read-only connection of its own: one read
+    transaction, so the copy is consistent, and in WAL mode the writer of
+    the database goes on committing meanwhile. A backup in steps would start
+    again at every write, and the cache writes every few seconds. A progress
+    handler stops the copy after :data:`CACHE_SNAPSHOT_LIMIT_SECONDS` with
+    :class:`TimeoutError`; the copy is then partial and the caller deletes it.
+    """
+    limit = CACHE_SNAPSHOT_LIMIT_SECONDS
+    deadline = time.monotonic() + limit
+    source = sqlite3.connect(f'file:{source_path}?mode=ro', uri=True)
+    try:
+        source.set_progress_handler(_cache_copy_check(deadline), _CACHE_COPY_CHECK_STEPS)
+        try:
+            source.execute('VACUUM INTO ?', (target,))
+        except sqlite3.OperationalError as exc:
+            if time.monotonic() > deadline:
+                raise TimeoutError(CACHE_COPY_TIMEOUT_REASON.format(seconds=limit)) from exc
+            raise
+    finally:
+        source.close()
+
+
 def _snapshot_cache_file(cache_path: str, worker_name: str) -> tuple[BinaryIO, str]:
     """A consistent copy of the cache file and its attachment name, as an open handle to an unlinked temp file.
 
-    Made like the live-file snapshot: the backup API on a read-only
-    connection of its own (never the cache engine's), into a private temp
-    file beside the cache file, unlinked before the handle is returned. In
-    WAL mode the copy does not block the cache's writer. Blocking.
+    The copy (:func:`_vacuum_into`) goes into a private temp file beside the
+    cache file, created empty, exclusive and owner-only. The temp file and
+    any sidecar are unlinked before the handle is returned, and also when
+    the copy fails or is stopped, so a partial copy never stays. Blocking.
     """
-    return _snapshot_live_file(cache_path), _cache_snapshot_name(worker_name)
+    temp = _create_snapshot_temp(os.path.dirname(cache_path), os.path.basename(cache_path))
+    try:
+        _vacuum_into(cache_path, temp)
+        # The response closes the handle after the last chunk.
+        return open(temp, 'rb'), _cache_snapshot_name(worker_name)
+    finally:
+        for suffix in _SNAPSHOT_SIDECARS:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp + suffix)
 
 
 def _cache_file_path(drakkar_app: DrakkarApp) -> str:
     """The path of this worker's cache file; ``''`` when the cache keeps no file or it does not exist yet. Blocking."""
     engine = drakkar_app.cache_engine
-    if not isinstance(engine, CacheEngine) or not engine.db_path:
+    if engine is None or not engine.db_path:
         return ''
     return engine.db_path if os.path.isfile(engine.db_path) else ''
 
@@ -684,7 +753,7 @@ def _own_rows(
 def _worker_online(drakkar_app: DrakkarApp) -> WorkerOnline | None:
     """The registry's verdict for a worker name, safe from a worker thread; ``None`` when no registry runs."""
     fleet = drakkar_app.fleet
-    if not drakkar_app._config.autodiscover.enabled or not isinstance(fleet, FleetRegistry):
+    if not drakkar_app._config.autodiscover.enabled or fleet is None:
         return None
     return fleet.name_online
 
@@ -782,12 +851,13 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     # (no-op without a token). The per-route Depends below predate the
     # router-level gate and are kept as explicit markers.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
-    # One memory or cache snapshot at a time on this worker: a copy in RAM
-    # costs one more image of the store, so parallel downloads must not
-    # multiply it. An asyncio lock, so a waiting request holds no thread.
-    # ``snapshot_holder`` names the copy that holds it, for the busy answer.
-    snapshot_slot = asyncio.Lock()
-    snapshot_holder: dict[str, str] = {'source': ''}
+    # One memory snapshot at a time on this recorder: a copy in RAM costs
+    # one more image of the store, so parallel downloads must not multiply
+    # it. One cache copy at a time, in a slot of its own, so a slow cache
+    # copy never makes a memory download wait. asyncio locks, so a waiting
+    # request holds no thread.
+    memory_snapshot_slot = asyncio.Lock()
+    cache_snapshot_slot = asyncio.Lock()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -1092,8 +1162,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if full is None:
             return JSONResponse({'error': 'File not found'}, status_code=404)
         if compress is not None:
-            # Opened in a thread: the shared folder may be a network mount.
-            return _gzip_response(await asyncio.to_thread(_open_binary, full), name)
+            handle = await _open_for_stream(full)
+            if handle is None:
+                return JSONResponse({'error': 'File not found'}, status_code=404)
+            return _gzip_response(handle, name)
         return FileResponse(
             path=str(full),
             filename=name,
@@ -1114,8 +1186,9 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         value, and for a ``compress`` other than ``gzip`` (checked first);
         404 without a live file (``file``), without an open memory store
         (``memory``) or without a cache file (``cache``); 500 when the
-        snapshot fails, or when another memory or cache snapshot still runs
-        after the snapshot limit (one runs at a time). See
+        snapshot fails or is stopped at its limit, or when another copy of
+        the same source still runs after the snapshot limit (one memory copy
+        and one cache copy run at a time). See
         :func:`_snapshot_live_file`, :func:`_snapshot_memory` and
         :func:`_snapshot_cache_file`.
         """
@@ -1149,33 +1222,30 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
         return _snapshot_response(handle, os.path.basename(live_path), compress=compress)
 
-    def _release_snapshot_slot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
-        """Free the slot once the copy thread has ended; mark its error as seen."""
-        snapshot_holder['source'] = ''
-        snapshot_slot.release()
+    def _release_snapshot_slot(slot: asyncio.Lock, copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
+        """Free ``slot`` once the copy thread has ended; mark its error as seen."""
+        slot.release()
         if not copy.cancelled():
             copy.exception()
 
     async def _snapshot_alone(
-        source: str, copy_in_thread: Callable[[], tuple[BinaryIO, str] | None]
+        slot: asyncio.Lock, busy_reason: str, copy_in_thread: Callable[[], tuple[BinaryIO, str] | None]
     ) -> tuple[BinaryIO, str] | None:
-        """Run ``copy_in_thread`` (the ``source`` copy) in a thread while no other memory or cache copy runs.
+        """Run ``copy_in_thread`` in a thread while no other copy holds ``slot``.
 
         Waits for the running copy at most :data:`SNAPSHOT_LIMIT_SECONDS`
-        and then raises :class:`_SnapshotBusyError`, naming the copy that
-        holds the slot. The slot is freed when the copy thread ends, not
-        when the request ends: a request that goes away mid-copy cannot let
-        a second copy start beside the first.
+        and then raises :class:`_SnapshotBusyError` with ``busy_reason``.
+        The slot is freed when the copy thread ends, not when the request
+        ends: a request that goes away mid-copy cannot let a second copy
+        start beside the first.
         """
         try:
             async with asyncio.timeout(memstore.SNAPSHOT_LIMIT_SECONDS):
-                await snapshot_slot.acquire()
+                await slot.acquire()
         except TimeoutError:
-            holder = snapshot_holder['source'] or source
-            raise _SnapshotBusyError(SNAPSHOT_BUSY_REASON.format(source=holder)) from None
-        snapshot_holder['source'] = source
+            raise _SnapshotBusyError(busy_reason) from None
         copy = asyncio.ensure_future(asyncio.to_thread(copy_in_thread))
-        copy.add_done_callback(_release_snapshot_slot)
+        copy.add_done_callback(functools.partial(_release_snapshot_slot, slot))
         try:
             # Shielded: a cancelled request leaves the copy running to its end.
             return await asyncio.shield(copy)
@@ -1185,7 +1255,9 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
 
     async def _download_memory_store(compress: str | None):
         try:
-            snapshot = await _snapshot_alone(DOWNLOAD_SOURCE_MEMORY, functools.partial(_snapshot_memory, recorder))
+            snapshot = await _snapshot_alone(
+                memory_snapshot_slot, MEMORY_SNAPSHOT_BUSY_REASON, functools.partial(_snapshot_memory, recorder)
+            )
         except (OSError, sqlite3.Error, _SnapshotBusyError) as exc:
             # OSError covers the TimeoutError of a copy that kept restarting.
             await logger.awarning('debug_download_live_failed', category='debug', source='memory', error=str(exc))
@@ -1201,11 +1273,13 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
         copy = functools.partial(_snapshot_cache_file, cache_path, recorder.worker_name)
         try:
-            snapshot = await _snapshot_alone(DOWNLOAD_SOURCE_CACHE, copy)
+            snapshot = await _snapshot_alone(cache_snapshot_slot, CACHE_SNAPSHOT_BUSY_REASON, copy)
         except (OSError, sqlite3.Error, _SnapshotBusyError) as exc:
+            # OSError covers the TimeoutError of a copy stopped at its limit.
             await logger.awarning('debug_download_live_failed', category='debug', source='cache', error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
-        assert snapshot is not None  # the cache copy always answers a file or raises
+        if snapshot is None:
+            return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
         handle, name = snapshot
         return _snapshot_response(handle, name, compress=compress)
 

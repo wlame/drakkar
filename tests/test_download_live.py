@@ -660,12 +660,11 @@ async def test_download_live_cache_compressed(tmp_path, storage, started):
         assert conn.execute('SELECT COUNT(*) FROM cache_entries').fetchone() == (2,)
 
 
-@pytest.mark.parametrize('case', ['no_engine', 'mocked_engine', 'no_file_yet', 'memory_only_cache'])
+@pytest.mark.parametrize('case', ['no_engine', 'no_file_yet', 'memory_only_cache'])
 async def test_download_live_cache_without_a_cache_file_answers_404(storage, started, case):
     rec = await started('none', events=1)
     engines = {
         'no_engine': None,
-        'mocked_engine': MagicMock(),
         'no_file_yet': _cache_engine(storage, create=False),
         'memory_only_cache': CacheEngine(CacheConfig(enabled=True), '', 'w-1', 'search'),
     }
@@ -679,10 +678,10 @@ async def test_download_live_cache_without_a_cache_file_answers_404(storage, sta
 async def test_download_live_cache_copy_that_fails_answers_500(storage, started, monkeypatch):
     rec = await started('none', events=1)
 
-    def failing_copy(_path):
+    def failing_copy(_source, _target):
         raise sqlite3.DatabaseError('file is not a database')
 
-    monkeypatch.setattr(routes_debug, '_snapshot_live_file', failing_copy)
+    monkeypatch.setattr(routes_debug, '_vacuum_into', failing_copy)
 
     async with _client_with_cache(rec, _cache_engine(storage)) as client:
         with capture_logs() as cap:
@@ -693,30 +692,123 @@ async def test_download_live_cache_copy_that_fails_answers_500(storage, started,
     assert [(e['source'], e['error']) for e in failed] == [('cache', 'file is not a database')]
 
 
-async def test_cache_download_waits_for_a_memory_copy_and_names_it_when_busy(storage, started, monkeypatch):
+async def test_a_cache_copy_past_its_limit_answers_500_and_leaves_no_temp_file(storage, started, monkeypatch):
     rec = await started('none', events=1)
-    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
-    real_snapshot = routes_debug._snapshot_memory
-    memory_copy_started = threading.Event()
-    memory_copy_may_end = threading.Event()
+    monkeypatch.setattr(routes_debug, 'CACHE_SNAPSHOT_LIMIT_SECONDS', 0.0)
 
-    def held_snapshot(recorder):
-        memory_copy_started.set()
-        memory_copy_may_end.wait(timeout=10)
-        return real_snapshot(recorder)
+    async with _client_with_cache(rec, _cache_engine(storage, rows=3000)) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
 
-    monkeypatch.setattr(routes_debug, '_snapshot_memory', held_snapshot)
+    assert (resp.status_code, resp.json()) == (500, {'error': 'Snapshot failed: the cache copy did not finish in 0 s'})
+    assert [p.name for p in storage.iterdir() if p.name.startswith('.')] == []
+
+
+async def test_the_cache_writer_commits_while_the_copy_runs_and_the_copy_stays_consistent(
+    tmp_path, storage, started, monkeypatch
+):
+    rec = await started('none', events=1)
+    engine = _cache_engine(storage, rows=3000)
+    real_check = routes_debug._cache_copy_check
+    writes: list[str] = []
+
+    def check_that_writes(deadline):
+        check = real_check(deadline)
+
+        def step() -> int:
+            if not writes:
+                # The cache engine's writer, on its own connection, with no busy wait.
+                writer = sqlite3.connect(engine.db_path, timeout=0)
+                try:
+                    writer.execute("INSERT INTO cache_entries VALUES ('late', 'local', 'v', 1, 0, 0, NULL, 'w-1')")
+                    writer.commit()
+                    writes.append('committed')
+                finally:
+                    writer.close()
+            return check()
+
+        return step
+
+    monkeypatch.setattr(routes_debug, '_cache_copy_check', check_that_writes)
+
+    async with _client_with_cache(rec, engine) as client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
+
+    assert resp.status_code == 200
+    assert writes == ['committed']
+    with contextlib.closing(_open_snapshot(resp.content, tmp_path)) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM cache_entries').fetchone() == (3000,)
+    with contextlib.closing(sqlite3.connect(engine.db_path)) as live:
+        assert live.execute('SELECT COUNT(*) FROM cache_entries').fetchone() == (3001,)
+
+
+def _hold_cache_copies(monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Make each cache copy wait for ``may_end``; ``started`` is set when the first one runs."""
+    real_copy = routes_debug._snapshot_cache_file
+    started_event = threading.Event()
+    may_end = threading.Event()
+
+    def held_copy(cache_path, worker_name):
+        started_event.set()
+        may_end.wait(timeout=10)
+        return real_copy(cache_path, worker_name)
+
+    monkeypatch.setattr(routes_debug, '_snapshot_cache_file', held_copy)
+    return started_event, may_end
+
+
+async def test_a_memory_download_runs_while_a_cache_copy_runs(storage, started, monkeypatch):
+    rec = await started('none', events=2)
+    copy_started, copy_may_end = _hold_cache_copies(monkeypatch)
 
     async with _client_with_cache(rec, _cache_engine(storage)) as client:
-        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
-        assert await asyncio.to_thread(memory_copy_started.wait, 5)
+        cache = asyncio.create_task(client.get('/api/v1/debug/download-live?source=cache'))
+        assert await asyncio.to_thread(copy_started.wait, 5)
+        memory = await client.get('/api/v1/debug/download-live?source=memory')
+        copy_may_end.set()
+        cache_resp = await cache
+
+    assert (memory.status_code, cache_resp.status_code) == (200, 200)
+
+
+async def test_a_second_cache_download_answers_500_while_the_first_copy_holds_its_slot(storage, started, monkeypatch):
+    rec = await started('none', events=1)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
+    copy_started, copy_may_end = _hold_cache_copies(monkeypatch)
+
+    async with _client_with_cache(rec, _cache_engine(storage)) as client:
+        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=cache'))
+        assert await asyncio.to_thread(copy_started.wait, 5)
         second = await client.get('/api/v1/debug/download-live?source=cache')
-        memory_copy_may_end.set()
+        copy_may_end.set()
         first_resp = await first
-        third = await client.get('/api/v1/debug/download-live?source=cache')
 
     assert (second.status_code, second.json()) == (
         500,
-        {'error': 'Snapshot failed: another memory snapshot is still running'},
+        {'error': 'Snapshot failed: another cache snapshot is still running'},
     )
-    assert (first_resp.status_code, third.status_code) == (200, 200)
+    assert first_resp.status_code == 200
+
+
+async def test_open_for_stream_closes_the_file_of_a_request_cancelled_during_the_open(tmp_path, monkeypatch):
+    opened = io.BytesIO(b'data')
+    open_started = threading.Event()
+    open_may_end = threading.Event()
+
+    def slow_open(_path):
+        open_started.set()
+        open_may_end.wait(timeout=10)
+        return opened
+
+    monkeypatch.setattr(routes_debug, '_open_binary', slow_open)
+    task = asyncio.create_task(routes_debug._open_for_stream(tmp_path / 'f.db'))
+    assert await asyncio.to_thread(open_started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    open_may_end.set()
+    for _ in range(100):
+        if opened.closed:
+            break
+        await asyncio.sleep(0.01)
+
+    assert opened.closed
