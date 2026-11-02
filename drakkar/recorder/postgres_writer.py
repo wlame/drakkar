@@ -88,7 +88,13 @@ from drakkar.providers.postgres import (
     render_recorder,
 )
 from drakkar.providers.resilience import OUTCOME_NOT_STARTED, RateLimitedLog, ResilientCaller, describe_error
-from drakkar.recorder.postgres import PendingChunk, PostgresQueue, RecorderPostgresSettings, build_record
+from drakkar.recorder.postgres import (
+    PendingChunk,
+    PostgresQueue,
+    RecorderPostgresSettings,
+    build_record,
+    row_text_bytes,
+)
 
 logger = structlog.get_logger()
 
@@ -227,14 +233,16 @@ class UpkeepStatus:
 class WriterStatus:
     """What one writer did since the process started, as one immutable value safe to read from any thread.
 
-    ``slot_rows`` are the rows of the chunk in flight (the queue holds the
-    rest); ``rows_written`` and the three ``dropped_*`` counts are the rows of
+    ``slot_rows`` and ``slot_bytes`` are the rows and the text of the chunk
+    in flight (the queue holds the rest), counted as the queue counts them;
+    ``rows_written`` and the three ``dropped_*`` counts are the rows of
     the writer's own outcomes. Rows the queue drops as ``queue_full`` are
     counted by the recorder, which appends to the queue.
     """
 
     started: bool = False
     slot_rows: int = 0
+    slot_bytes: int = 0
     rows_written: int = 0
     dropped_rejected: int = 0
     dropped_no_partition: int = 0
@@ -248,7 +256,7 @@ class PostgresStageStatus:
     """Stage P of one recorder as the UI shows it: the writer's status and the queue in front of it.
 
     ``queue_rows`` and ``queue_bytes`` are the rows and the text of the queue
-    alone (the chunk in flight is ``writer.slot_rows``); ``dropped_queue_full``
+    alone (the chunk in flight is ``writer.slot_rows`` and ``writer.slot_bytes``); ``dropped_queue_full``
     counts the rows the queue dropped since the process started.
     """
 
@@ -373,6 +381,8 @@ class PostgresWriter:
         self._slot: PendingChunk | None = None
         # The error text of the last final COPY error of the chunk in the slot.
         self._slot_error = ''
+        # The text size of the chunk in the slot, as the queue counted it.
+        self._slot_bytes = 0
         # True after a start and after a check violation: the next run upkeeps first.
         self._upkeep_requested = False
         self._last_upkeep_at: float | None = None
@@ -398,6 +408,7 @@ class PostgresWriter:
             self._status,
             started=self._started,
             slot_rows=len(self._slot.pairs) if self._slot is not None else 0,
+            slot_bytes=self._slot_bytes if self._slot is not None else 0,
             breaker_open=self._caller.breaker_open,
             **changes,
         )
@@ -608,6 +619,7 @@ class PostgresWriter:
         ]
         self._slot = PendingChunk(pairs=pairs, records=records)
         self._slot_error = ''
+        self._slot_bytes = sum(row_text_bytes(row) for _, row in pairs)
         return True
 
     async def _write_slot(self, *, attempts: int | None = None, deadline_seconds: float | None = None) -> CopyOutcome:

@@ -32,7 +32,7 @@ from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import EventRecorder
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.memstore import MIB
-from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings
+from drakkar.recorder.postgres import PostgresQueue, RecorderPostgresSettings, row_text_bytes
 from drakkar.recorder.postgres_writer import CopyOutcome, PostgresLoopThread, PostgresWriter, UpkeepStatus, WriterStatus
 from drakkar.recorder.schema import EVENT_COLUMNS
 from tests.conftest import wait_for
@@ -663,9 +663,11 @@ async def test_status_counts_a_kept_chunk_and_its_rejected_drop():
 
     await writer.run_once()
     assert (writer.status.slot_rows, writer.status.dropped_rejected) == (4, 0)
+    assert writer.status.slot_bytes == sum(row_text_bytes(row) for _, row in _pairs(1, 4))
     await writer.run_once()
 
-    assert (writer.status.slot_rows, writer.status.dropped_rejected, writer.status.rows_written) == (0, 4, 0)
+    assert (writer.status.slot_rows, writer.status.slot_bytes) == (0, 0)
+    assert (writer.status.dropped_rejected, writer.status.rows_written) == (4, 0)
 
 
 async def test_status_counts_no_partition_and_shutdown_drops():

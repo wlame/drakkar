@@ -243,6 +243,7 @@ def test_recorder_block_of_a_postgres_worker_shows_its_writer():
     writer = WriterStatus(
         started=True,
         slot_rows=7,
+        slot_bytes=100,
         rows_written=1200,
         dropped_rejected=2,
         dropped_no_partition=3,
@@ -270,7 +271,7 @@ def test_recorder_block_of_a_postgres_worker_shows_its_writer():
     assert block['postgres']['writer'] == {
         'started': True,
         'queue_rows': 17,
-        'queue_bytes': 2048,
+        'queue_bytes': 2148,
         'rows_written': 1200,
         'dropped': {'queue_full': 5, 'rejected': 2, 'no_partition': 3, 'shutdown': 4},
         'breaker_open': True,

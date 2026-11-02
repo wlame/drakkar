@@ -150,7 +150,7 @@ def _writer_block(stage: PostgresStageStatus) -> dict[str, Any]:
     return {
         'started': writer.started,
         'queue_rows': stage.queue_rows + writer.slot_rows,
-        'queue_bytes': stage.queue_bytes,
+        'queue_bytes': stage.queue_bytes + writer.slot_bytes,
         'rows_written': writer.rows_written,
         'dropped': {
             'queue_full': stage.dropped_queue_full,
