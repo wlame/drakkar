@@ -312,9 +312,10 @@ class ExecutorResult(BaseModel):
             'Run time of the subprocess in seconds, from just before the spawn to its exit, '
             'rounded to 3 decimal places. The exit time is read when the kernel reports the '
             'exit, not when the event loop handles it, so a busy loop does not stretch it '
-            '(on platforms without an exit watcher it is measured on the loop). For a launch '
-            'failure it is the time until the failure; for a precomputed result it is the '
-            "handler's value."
+            '(on platforms without an exit watcher it is measured on the loop). When a '
+            'descendant kept the output pipes open past the exit, the run ends when they '
+            'close; a timed-out run ends where the timeout fired. For a launch failure it is '
+            "the time until the failure; for a precomputed result it is the handler's value."
         )
     )
     run_started_at: float | None = Field(
@@ -331,7 +332,8 @@ class ExecutorResult(BaseModel):
             'Seconds from the subprocess exit to the moment the worker handled it: a few '
             'milliseconds on a healthy worker, more when the event loop is busy. 0 when the '
             'worker handled the exit before the exit watcher reported it. None when the exit '
-            'could not be timed off the loop, for a launch failure and for a precomputed result.'
+            'could not be timed off the loop, when a descendant held the output pipes, for a '
+            'timeout, for a launch failure and for a precomputed result.'
         ),
     )
     spawn_seconds: float | None = Field(

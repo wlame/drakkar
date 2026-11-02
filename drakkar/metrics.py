@@ -109,7 +109,9 @@ executor_duration = Histogram(
 # The exit watcher (drakkar/procwatch.py) reads the clock when the kernel
 # reports a task subprocess exit. The gap between that and the moment the
 # worker's event loop handled the exit is a direct read of loop stalls: a
-# healthy loop handles an exit within a few milliseconds.
+# healthy loop handles an exit within a few milliseconds. Not observed for a
+# timeout, or when a descendant held the output pipes (that gap is the
+# descendant's lifetime, not a stall).
 executor_exit_notice = Histogram(
     'drakkar_executor_exit_notice_seconds',
     'Time from a task subprocess exit to the moment the worker handled it; grows when the event loop is busy',
@@ -117,11 +119,13 @@ executor_exit_notice = Histogram(
 )
 
 # reason: exited_before_watch (the child exited and was reaped before the
-# watch started — a busy loop) or unavailable (the host cannot watch: no
-# backend for the platform, or the kernel refused the watch).
+# watch started — a busy loop), unavailable (the host cannot watch: no backend
+# for the platform, the kernel refused the watch, or the watcher stopped), or
+# descendant_held_pipes (the child exited but a descendant kept its output
+# pipes open, so the run ended when the pipes closed).
 executor_exit_watch_fallbacks = Counter(
     'drakkar_executor_exit_watch_fallbacks_total',
-    'Task exits timed on the event loop because the exit watcher could not watch the process',
+    'Task runs timed on the event loop instead of by the exit watcher, by reason',
     ['reason'],
 )
 

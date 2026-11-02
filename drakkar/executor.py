@@ -23,7 +23,14 @@ from drakkar.metrics import (
     tasks_precomputed,
 )
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
-from drakkar.procwatch import EXITED_BEFORE_WATCH, ExitWatch, ExitWatcher, shared_watcher
+from drakkar.procwatch import (
+    DESCENDANT_HELD_PIPES,
+    EXITED_BEFORE_WATCH,
+    ExitWatch,
+    ExitWatcher,
+    count_fallback,
+    shared_watcher,
+)
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -48,6 +55,41 @@ _READ_CHUNK_BYTES = 65536
 _KILL_REAP_TIMEOUT_SECONDS = 5.0
 
 
+# Buffer limit of each output stream reader: asyncio's default for subprocess streams.
+_STREAM_LIMIT_BYTES = 2**16
+
+# How much later than the child's exit its output pipes may close and still
+# count as closing with it. Both moments are read on the event loop, a few loop
+# callbacks apart, so a stall delays both; a larger gap means a descendant
+# kept the pipes open after the child exited.
+DESCENDANT_PIPE_MARGIN_SECONDS = 0.05
+
+
+class TimedStreamProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+    """asyncio's subprocess stream protocol, plus the loop times of the exit and of the output pipes closing."""
+
+    def __init__(self, limit: int, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__(limit=limit, loop=loop)
+        self.exited_at: float | None = None
+        self.output_closed_at: float | None = None
+
+    def process_exited(self) -> None:
+        self.exited_at = time.monotonic()
+        super().process_exited()
+
+    def pipe_connection_lost(self, fd: int, exc: Exception | None) -> None:
+        if fd in (1, 2):
+            # The later of stdout and stderr wins: both must be closed.
+            self.output_closed_at = time.monotonic()
+        super().pipe_connection_lost(fd, exc)
+
+    def descendant_held_pipes(self) -> bool:
+        """Whether the output pipes closed clearly later than the child's exit."""
+        if self.exited_at is None or self.output_closed_at is None:
+            return False
+        return self.output_closed_at - self.exited_at > DESCENDANT_PIPE_MARGIN_SECONDS
+
+
 def measure_run(run_started_mono: float, exit_watch: ExitWatch | None, loop_end: float) -> tuple[float, float | None]:
     """Run time of an exited process and how late the loop handled its exit.
 
@@ -70,6 +112,10 @@ def measure_run(run_started_mono: float, exit_watch: ExitWatch | None, loop_end:
         return end - run_started_mono, None
     if stamp is None:
         return loop_end - run_started_mono, 0.0
+    if stamp.monotonic < run_started_mono:
+        # A stamp from before the spawn belongs to another process (a pid
+        # reused within one batch pause on macOS): time this run on the loop.
+        return loop_end - run_started_mono, None
     # ``loop_end`` is read before the stamp, so a stamp written in between is
     # later than it; the loop reading is then the earlier, better one.
     end = min(stamp.monotonic, loop_end)
@@ -670,6 +716,8 @@ class ExecutorPool:
         binary = self._resolve_binary(task)
         start = time.monotonic()
         proc = None
+        # Set once the timeout path has killed the process group, so ``finally`` does not wait a second time.
+        killed = False
         exit_watch: ExitWatch | None = None
         # Read again right before the fork; set here so every handler below can read them.
         run_started_mono = start
@@ -692,7 +740,7 @@ class ExecutorPool:
             platform_kwargs: dict[str, Any] = {'start_new_session': True} if _IS_POSIX else {}
             # The run starts here: one monotonic reading for the run time and
             # one wall reading for the bar, right before the fork. There is no
-            # ``await`` between them and the fork (``create_subprocess_exec``
+            # ``await`` between them and the fork (``loop.subprocess_exec``
             # runs ``Popen`` before its first await). The spawn is also timed
             # on its own: fork/exec runs on the event loop, so on a congested
             # worker this measures the parent's own contribution to task wall
@@ -700,17 +748,10 @@ class ExecutorPool:
             # orchestrator".
             run_started_mono = time.monotonic()
             run_started_at = time.time()
-            proc = await asyncio.create_subprocess_exec(
-                binary,
-                *task.args,
-                stdin=stdin_pipe,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=subprocess_env,
-                **platform_kwargs,
-            )
+            proc, protocol = await self._spawn(binary, task.args, stdin_pipe, subprocess_env, platform_kwargs)
             # Watch the exit on the very next line, with no ``await`` in
-            # between, so no reap can happen between here and the watch.
+            # between, so no reap can happen between here and the watch
+            # (returning from ``_spawn`` gives the loop no turn).
             # asyncio may still have reaped the child during the spawn's own
             # internal await, with ``returncode`` set one loop hop later; the
             # watcher's ``waitid(..., WNOWAIT)`` probe catches that case, so
@@ -752,7 +793,7 @@ class ExecutorPool:
                             cap_bytes=cap,
                             total_bytes=total,
                         )
-            duration, exit_notice = self._measured_run(run_started_mono, exit_watch, time.monotonic())
+            duration, exit_notice = self._measured_run(run_started_mono, exit_watch, protocol, time.monotonic())
 
             pid = proc.pid
             # After `communicate()` returns normally the process has exited and
@@ -797,20 +838,20 @@ class ExecutorPool:
             # with more detail than this line carried.
             return result
 
-        except TimeoutError:
-            timed_out_at = time.monotonic()
-            # The timeout wraps only the communication, so the process exists.
-            assert proc is not None
+        except TimeoutError as exc:
+            if proc is None:
+                # An exec errno of ETIMEDOUT (a binary on a hung network
+                # mount) is a ``TimeoutError`` too: no process, a launch failure.
+                raise self._launch_failure(task, exc, start)  # noqa: B904
+            # The timeout fired: the run ends here, timed on the loop, with no
+            # exit notice (the child's own exit is not the end of this run: a
+            # descendant may have kept it going). The process group is killed
+            # once, also when the child itself already exited and only a
+            # descendant still holds the pipes.
+            duration = time.monotonic() - run_started_mono
             timeout_pid = proc.pid
-            exit_notice: float | None = None
-            # Kill first, so the run ends at the killed child's exit.
             await self._kill_process_tree(proc)
-            if proc.returncode is None:
-                # The child survived SIGKILL (wedged in the kernel): the run is
-                # cut where the timeout fired.
-                duration = timed_out_at - run_started_mono
-            else:
-                duration, exit_notice = self._measured_run(run_started_mono, exit_watch, time.monotonic())
+            killed = True
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
@@ -825,39 +866,78 @@ class ExecutorPool:
                     stderr='task timed out',
                     duration_seconds=round(duration, 3),
                     run_started_at=run_started_at,
-                    exit_notice_seconds=exit_notice,
                     task=task,
                     pid=timeout_pid,
                 ),
             )
 
-        except OSError as e:
-            # No process: no exit to time, so the duration is measured on the loop.
-            duration = time.monotonic() - start
-            raise ExecutorTaskError(  # noqa: B904
-                error=ExecutorError(
-                    task=task,
-                    kind='launch_failure',
-                    exception=str(e),
-                ),
-                result=ExecutorResult(
-                    exit_code=-1,
-                    stdout='',
-                    stderr=str(e),
-                    duration_seconds=round(duration, 3),
-                    task=task,
-                ),
-            )
+        except OSError as exc:
+            raise self._launch_failure(task, exc, start)  # noqa: B904
 
         finally:
-            if proc and proc.returncode is None:
+            if proc and proc.returncode is None and not killed:
                 await self._kill_process_tree(proc)
 
     @staticmethod
+    async def _spawn(
+        binary: str,
+        args: list[str],
+        stdin: int | None,
+        env: dict[str, str] | None,
+        platform_kwargs: dict[str, Any],
+    ) -> tuple[asyncio.subprocess.Process, TimedStreamProtocol]:
+        """``asyncio.create_subprocess_exec`` with a :class:`TimedStreamProtocol`.
+
+        The same three calls ``create_subprocess_exec`` makes, with the
+        protocol swapped, so the run can tell a descendant that held the
+        output pipes from a loop stall.
+        """
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.subprocess_exec(
+            lambda: TimedStreamProtocol(_STREAM_LIMIT_BYTES, loop),
+            binary,
+            *args,
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            **platform_kwargs,
+        )
+        return asyncio.subprocess.Process(transport, protocol, loop), protocol
+
+    @staticmethod
+    def _launch_failure(task: ExecutorTask, exc: OSError, start: float) -> ExecutorTaskError:
+        """The error of a process that never started; its duration is measured on the loop."""
+        return ExecutorTaskError(
+            error=ExecutorError(task=task, kind='launch_failure', exception=str(exc)),
+            result=ExecutorResult(
+                exit_code=-1,
+                stdout='',
+                stderr=str(exc),
+                duration_seconds=round(time.monotonic() - start, 3),
+                task=task,
+            ),
+        )
+
+    @staticmethod
     def _measured_run(
-        run_started_mono: float, exit_watch: ExitWatch | None, loop_end: float
+        run_started_mono: float,
+        exit_watch: ExitWatch | None,
+        protocol: TimedStreamProtocol,
+        loop_end: float,
     ) -> tuple[float, float | None]:
-        """:func:`measure_run`, plus the exit-notice histogram when the notice is known."""
+        """The run time and exit notice of an exited process; the notice also goes to its histogram.
+
+        A task ends when its child has exited and its output pipes have
+        closed. When a descendant kept the pipes open past the child's exit,
+        the run ends at the loop's reading, the fallback is counted as
+        ``descendant_held_pipes`` and no notice is recorded: the gap was the
+        descendant's lifetime, not a loop stall.
+        """
+        if protocol.descendant_held_pipes():
+            if exit_watch is not None and exit_watch.fallback_reason is None:
+                count_fallback(DESCENDANT_HELD_PIPES)
+            return loop_end - run_started_mono, None
         duration, exit_notice = measure_run(run_started_mono, exit_watch, loop_end)
         if exit_notice is not None:
             executor_exit_notice.observe(exit_notice)
@@ -884,7 +964,13 @@ class ExecutorPool:
         """
         if _IS_POSIX:
             try:
-                pgid = os.getpgid(proc.pid)
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    # The child is reaped already, while a descendant may still
+                    # hold its group: ``start_new_session`` made the child the
+                    # group's leader, so the group id is its pid.
+                    pgid = proc.pid
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 # Child exited between our getpgid/killpg calls — that's fine.
