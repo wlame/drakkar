@@ -10,6 +10,8 @@ own queries against.
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -34,6 +36,7 @@ from drakkar.recorder.queries import (
 from drakkar.recorder.queries import (
     base_task_id as parse_base,
 )
+from drakkar.recorder.schema import SCHEMA_EVENTS
 
 
 def started(task_id='t1', ts=100.0, **extra) -> dict:
@@ -237,10 +240,9 @@ class TestGroupTimelineTasks:
         assert row['env'] == {'A': '1'}
 
     @pytest.mark.parametrize('finish', [completed, failed])
-    def test_run_timing_comes_from_the_completion_metadata(self, finish):
-        metadata = json.dumps({'run_started_at': 99.75, 'exit_notice_ms': 812.5, 'reported_run_seconds': 0.5})
+    def test_run_timing_comes_from_the_completion_row(self, finish):
         (row,), _ = group_timeline_tasks(
-            [started(), finish(metadata=metadata)],
+            [started(), finish(run_started_at=99.75, reported_run_seconds=0.5)],
             ws_min_duration_seconds=0.0,
             limit=10,
         )
@@ -252,7 +254,7 @@ class TestGroupTimelineTasks:
 
     def test_run_timing_is_null_while_running_and_on_an_older_row(self):
         rows, _ = group_timeline_tasks(
-            [started('t1'), started('t2'), completed('t2', metadata=json.dumps({'spawn_ms': 1.0}))],
+            [started('t1'), started('t2'), completed('t2')],
             ws_min_duration_seconds=0.0,
             limit=10,
         )
@@ -261,17 +263,63 @@ class TestGroupTimelineTasks:
             assert row['run_started_at'] is None
             assert row['reported_run_seconds'] is None
 
-    @pytest.mark.parametrize('bad', ['"99.5"', 'true', 'null', '[1]'])
+    @pytest.mark.parametrize('bad', ['99.5', True, [1]])
     def test_a_run_timing_value_that_is_not_a_number_reads_as_null(self, bad):
-        metadata = f'{{"run_started_at": {bad}, "reported_run_seconds": {bad}}}'
         (row,), _ = group_timeline_tasks(
-            [started(), completed(metadata=metadata)],
+            [started(), completed(run_started_at=bad, reported_run_seconds=bad)],
             ws_min_duration_seconds=0.0,
             limit=10,
         )
 
         assert row['run_started_at'] is None
         assert row['reported_run_seconds'] is None
+
+
+class TestRecentTasksQueryOnSqlite:
+    """The run timing numbers are read by SQLite's JSON functions, not in Python."""
+
+    @staticmethod
+    def rows_for(completion_metadata: str | None) -> list[dict]:
+        with closing(sqlite3.connect(':memory:')) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.executescript(SCHEMA_EVENTS)
+            conn.execute(
+                "INSERT INTO events (ts, dt, event, task_id, metadata) VALUES (100.0, 'x', 'task_started', 't1', ?)",
+                [json.dumps({'slot': 2})],
+            )
+            conn.execute(
+                'INSERT INTO events (ts, dt, event, task_id, duration, metadata) '
+                "VALUES (101.0, 'x', 'task_completed', 't1', 0.5, ?)",
+                [completion_metadata],
+            )
+            sql, params = recent_tasks_query(since=0.0, event_limit=10)
+            return [dict(row) for row in conn.execute(sql, params)]
+
+    def test_numbers_come_through_and_completion_metadata_does_not(self):
+        rows = self.rows_for(json.dumps({'run_started_at': 99.75, 'reported_run_seconds': 1, 'stdin': 'x' * 100}))
+
+        started_row, completed_row = rows
+        assert json.loads(started_row['metadata']) == {'slot': 2}
+        assert (started_row['run_started_at'], started_row['reported_run_seconds']) == (None, None)
+        assert completed_row['metadata'] is None
+        assert (completed_row['run_started_at'], completed_row['reported_run_seconds']) == (99.75, 1)
+        (row,), _ = group_timeline_tasks(rows, ws_min_duration_seconds=0.0, limit=10)
+        assert (row['slot'], row['run_started_at'], row['reported_run_seconds']) == (2, 99.75, 1)
+
+    @pytest.mark.parametrize(
+        'metadata',
+        [
+            None,
+            '{truncated',
+            '{"run_started_at": "99.5", "reported_run_seconds": true}',
+            '{"run_started_at": null, "reported_run_seconds": [1]}',
+            '{"spawn_ms": 1.0}',
+        ],
+    )
+    def test_anything_but_a_number_reads_as_null(self, metadata):
+        _, completed_row = self.rows_for(metadata)
+
+        assert (completed_row['run_started_at'], completed_row['reported_run_seconds']) == (None, None)
 
     def test_origin_defaults_to_kafka_on_an_older_row(self):
         (row,), _ = group_timeline_tasks([started()], ws_min_duration_seconds=0.0, limit=10)

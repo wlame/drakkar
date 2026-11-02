@@ -520,12 +520,33 @@ TASK_LIFECYCLE_EVENTS = (EventType.TASK_STARTED, EventType.TASK_COMPLETED, Event
 # values are enum members, never caller input.
 _TASK_LIFECYCLE_SQL = ', '.join(f"'{event}'" for event in TASK_LIFECYCLE_EVENTS)
 
+
 # Columns the timeline needs. Deliberately not ``SELECT *``: ``stdout`` and
 # ``stderr`` hold captured subprocess output that no timeline renders, and
 # pulling them made the response size track total task output rather than
 # task count.
+def _completion_number(key: str) -> str:
+    """SQL: a number stored under ``key`` in a completion row's metadata, else NULL.
+
+    Read by SQLite's JSON functions, so no metadata JSON crosses into Python
+    for it: a failed row's metadata carries its stdin (up to 64 KiB by
+    default). The nested CASE keeps ``json_type`` away from text that is not
+    JSON (it raises there); a string, a boolean or a missing key gives NULL.
+    """
+    return (
+        f"CASE WHEN event IN ('{EventType.TASK_COMPLETED}', '{EventType.TASK_FAILED}') AND json_valid(metadata) "
+        f"THEN CASE WHEN json_type(metadata, '$.{key}') IN ('integer', 'real') "
+        f"THEN json_extract(metadata, '$.{key}') END END AS {key}"
+    )
+
+
+# Only a task_started row's metadata is read (slot, env); a completion row
+# contributes just its two run timing numbers.
 _TIMELINE_COLUMNS = (
-    'ts, event, partition, task_id, args, duration, metadata, pid, labels, origin, client_name, request_id, stdout_size'
+    'ts, event, partition, task_id, args, duration, '
+    f"CASE WHEN event = '{EventType.TASK_STARTED}' THEN metadata END AS metadata, "
+    'pid, labels, origin, client_name, request_id, stdout_size, '
+    f'{_completion_number("run_started_at")}, {_completion_number("reported_run_seconds")}'
 )
 
 # Columns the task-state lookup needs — the timeline set plus exit_code,
@@ -742,9 +763,8 @@ def group_timeline_tasks(
             entry['duration'] = event.get('duration')
             if event.get('pid'):
                 entry['pid'] = event['pid']
-            metadata = parse_json_object(event.get('metadata'))
-            entry['run_started_at'] = _number_or_none(metadata.get('run_started_at'))
-            entry['reported_run_seconds'] = _number_or_none(metadata.get('reported_run_seconds'))
+            entry['run_started_at'] = _number_or_none(event.get('run_started_at'))
+            entry['reported_run_seconds'] = _number_or_none(event.get('reported_run_seconds'))
             if event['event'] == EventType.TASK_COMPLETED:
                 entry['stdout_size'] = event.get('stdout_size')
 
