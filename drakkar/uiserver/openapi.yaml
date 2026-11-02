@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.29"
+  version: "1.30"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -502,12 +502,30 @@ paths:
         files closed but not sealed yet (statistics measured on request);
         history lists one folder per history/<cluster> plus merged, read
         from storage.shared_dir. Pre-v1.23 backends answer an array.
+        v1.30: worker is always present; recorder and storage are new
+        parts; `parts` limits the answer to the parts asked for, and the
+        backend does no work for a part not asked for. 400
+        `{"error": "unknown part '<p>'; known: history, own, recorder,
+        storage"}` for the first unknown item (an empty item is one).
+      parameters:
+        - name: parts
+          in: query
+          required: false
+          description: >-
+            Comma list of own, history, storage, recorder (v1.30). Absent:
+            all four.
+          schema: {type: string}
       responses:
         '200':
           description: Own files and history folders.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DatabasesResponse'}
+        '400':
+          description: An unknown part (v1.30).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /api/v1/debug/merge:
@@ -571,12 +589,21 @@ paths:
         merged/<name>.db (v1.23). Every segment is hardened as in merge and
         the resolved file must stay inside storage.shared_dir. Attachment with
         Cache-Control no-store. The bearer token may ride as ?token=
-        because plain <a> downloads cannot set headers.
+        because plain <a> downloads cannot set headers. v1.30:
+        compress=gzip sends the file as a gzip stream named `<name>.gz`
+        (application/gzip, no Content-Length); 400 `{"error": "compress
+        must be gzip"}` for another value, before any other check; 400
+        `{"error": "the file is already compressed"}` for an archive path,
+        before the file is looked up.
       parameters:
         - name: path
           in: path
           required: true
           schema: {type: string}
+        - name: compress
+          in: query
+          required: false
+          schema: {type: string, enum: [gzip]}
       responses:
         '200':
           description: The file.
@@ -586,7 +613,9 @@ paths:
             application/gzip:
               schema: {type: string, format: binary}
         '400':
-          description: Rejected filename.
+          description: >-
+            Rejected filename, a compress value other than gzip, or
+            compress on an archive (v1.30).
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -608,31 +637,48 @@ paths:
         no-store. The file snapshot is named like the live file; the memory
         snapshot is named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC).
         `source` defaults to `file` when a live file is open, else `memory`.
-        404 `{"error": "No live recorder file on this worker"}` for
-        source=file without a live file; 404 `{"error": "No memory store on
-        this worker"}` for source=memory without an open memory store; 400
-        `{"error": "source must be memory or file"}` for any other value.
-        The bearer token may ride as ?token= (v1.23).
+        v1.30: source=cache copies the cache file, attachment
+        `<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db` (UTC); one memory or
+        cache copy runs at a time. 404 `{"error": "No live recorder file
+        on this worker"}` for source=file without a live file; 404
+        `{"error": "No memory store on this worker"}` for source=memory
+        without an open memory store; 404 `{"error": "No cache on this
+        worker"}` for source=cache without a cache file; 400 `{"error":
+        "source must be memory, file or cache"}` for any other value.
+        v1.30: compress=gzip sends the snapshot as a gzip stream named
+        `<name>.gz` (application/gzip, no Content-Length); 400 `{"error":
+        "compress must be gzip"}` for another value, checked first. The
+        bearer token may ride as ?token= (v1.23).
       parameters:
         - name: source
           in: query
           required: false
-          schema: {type: string, enum: [memory, file]}
+          schema: {type: string, enum: [memory, file, cache]}
+        - name: compress
+          in: query
+          required: false
+          schema: {type: string, enum: [gzip]}
       responses:
         '200':
           description: The snapshot.
           content:
             application/x-sqlite3:
               schema: {type: string, format: binary}
+            application/gzip:
+              schema: {type: string, format: binary}
         '400':
-          description: 'source is not memory or file ("source must be memory or file").'
+          description: >-
+            source is not memory, file or cache ("source must be memory,
+            file or cache"), or compress is not gzip ("compress must be
+            gzip").
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '404':
           description: >-
             No live file on this worker ("No live recorder file on this
-            worker") or no memory store ("No memory store on this worker").
+            worker"), no memory store ("No memory store on this worker") or
+            no cache file ("No cache on this worker").
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -1992,7 +2038,155 @@ components:
               type: array
               items: {$ref: '#/components/schemas/HistoryFolder'}
           required: [folders]
-      required: [own, history]
+        worker: {$ref: '#/components/schemas/DatabasesWorker'}
+        recorder: {$ref: '#/components/schemas/RecorderStatus'}
+        storage: {$ref: '#/components/schemas/StorageStatus'}
+      description: >-
+        own and history are absent when `parts` leaves them out (v1.30);
+        a backend older than v1.30 always sends both and none of worker,
+        recorder and storage.
+
+    DatabasesWorker:
+      type: object
+      description: The serving worker (v1.30).
+      properties:
+        name: {type: string}
+        cluster: {type: [string, 'null']}
+        instance: {type: string}
+      required: [name, cluster, instance]
+
+    RecorderStatus:
+      type: object
+      description: >-
+        What the recorder runs (v1.30), from config and memory; provider is
+        the effective provider (none with the recorder off).
+      properties:
+        enabled: {type: boolean}
+        provider: {type: string, enum: [none, sqlite, postgres]}
+        memory:
+          oneOf:
+            - type: object
+              properties:
+                window_seconds: {type: integer}
+                max_rows: {type: integer}
+                max_bytes: {type: integer}
+              required: [window_seconds, max_rows, max_bytes]
+            - {type: 'null'}
+        sqlite:
+          oneOf:
+            - type: object
+              properties:
+                rotation_interval_seconds: {type: integer}
+                archive:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    scope: {type: [string, 'null'], enum: [cluster, worker, null]}
+                    next_slot_ts: {type: [number, 'null']}
+                    window_seconds: {type: integer}
+                    due_after_seconds: {type: integer}
+                    retention_days: {type: integer}
+                    merged_retention_days: {type: integer}
+                  required: [enabled, scope, next_slot_ts, window_seconds, due_after_seconds,
+                             retention_days, merged_retention_days]
+              required: [rotation_interval_seconds, archive]
+            - {type: 'null'}
+        postgres:
+          oneOf:
+            - {$ref: '#/components/schemas/PostgresStatus'}
+            - {type: 'null'}
+      required: [enabled, provider, memory, sqlite, postgres]
+
+    PostgresStatus:
+      type: object
+      description: >-
+        The Postgres table of the recorder and this worker's writer (v1.30).
+        The DSN is never sent. table has no schema prefix.
+      properties:
+        connection: {type: string}
+        schema: {type: string}
+        table: {type: string}
+        initial_retention_hours: {type: integer}
+        max_size_bytes: {type: integer}
+        store_completed_output: {type: boolean}
+        writer:
+          oneOf:
+            - type: object
+              properties:
+                started: {type: boolean}
+                queue_rows: {type: integer}
+                queue_bytes: {type: integer}
+                rows_written: {type: integer}
+                dropped:
+                  type: object
+                  properties:
+                    queue_full: {type: integer}
+                    rejected: {type: integer}
+                    no_partition: {type: integer}
+                    shutdown: {type: integer}
+                  required: [queue_full, rejected, no_partition, shutdown]
+                breaker_open: {type: boolean}
+                last_upkeep:
+                  oneOf:
+                    - type: object
+                      properties:
+                        at: {type: string, format: date-time}
+                        held_lock: {type: boolean}
+                        created: {type: array, items: {type: string}}
+                        dropped: {type: array, items: {type: string}}
+                        dropped_for_size: {type: array, items: {type: string}}
+                      required: [at, held_lock, created, dropped, dropped_for_size]
+                    - {type: 'null'}
+              required: [started, queue_rows, queue_bytes, rows_written, dropped, breaker_open, last_upkeep]
+            - {type: 'null'}
+      required: [connection, schema, table, initial_retention_hours, max_size_bytes,
+                 store_completed_output, writer]
+
+    StorageStatus:
+      type: object
+      description: >-
+        The own folder <storage.dir>/<sanitized cluster>/<worker> and the
+        other worker folders of the cluster on this host (v1.30). No
+        absolute path is sent.
+      properties:
+        dir_set: {type: boolean}
+        own_folder:
+          type: string
+          description: <sanitized cluster>/<worker>, relative to storage.dir; empty without storage.dir.
+        shared_dir_set: {type: boolean}
+        shared_is_storage_dir: {type: boolean}
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              kind: {type: string, enum: [cache, watchdog, owner_lock]}
+              size_bytes: {type: integer}
+              modified_at: {type: string, format: date-time}
+              entries: {type: [integer, 'null']}
+            required: [name, kind, size_bytes, modified_at, entries]
+        temp_files:
+          type: object
+          properties:
+            count: {type: integer}
+            size_bytes: {type: integer}
+          required: [count, size_bytes]
+        siblings:
+          oneOf:
+            - type: array
+              items:
+                type: object
+                properties:
+                  worker: {type: string}
+                  files: {type: integer}
+                  size_bytes: {type: integer}
+                  newest_modified_at: {type: [string, 'null'], format: date-time}
+                  in_use: {type: [boolean, 'null']}
+                  online: {type: [boolean, 'null']}
+                required: [worker, files, size_bytes, newest_modified_at, in_use, online]
+            - {type: 'null'}
+      required: [dir_set, own_folder, shared_dir_set, shared_is_storage_dir, files, temp_files, siblings]
 
     OwnDatabase:
       type: object
