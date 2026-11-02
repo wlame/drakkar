@@ -2,6 +2,8 @@
 
 import fcntl
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -71,7 +73,42 @@ def test_own_storage_dir_leaves_the_shared_folder_at_the_top_level(tmp_path):
 # --- the owner lock ---
 
 
-def test_take_own_lock_second_holder_fails_with_the_folder_in_use_message(tmp_path):
+@pytest.fixture
+def short_lock_wait(monkeypatch):
+    """A refused start gives up after 0.1 s instead of the real wait, so a refusal test stays fast."""
+    monkeypatch.setattr(ownerlock, 'OWN_LOCK_WAIT_SECONDS', 0.1)
+    monkeypatch.setattr(ownerlock, 'OWN_LOCK_RETRY_SECONDS', 0.01)
+
+
+def test_take_own_lock_waits_out_a_short_shared_probe(tmp_path):
+    take_own_lock(str(tmp_path)).release()
+    probe_holds = threading.Event()
+
+    def probe() -> None:
+        # What the Databases view does to a sibling folder, held long enough to be seen.
+        fd = os.open(tmp_path / OWNER_LOCK_NAME, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            probe_holds.set()
+            time.sleep(0.3)
+        finally:
+            os.close(fd)
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    assert probe_holds.wait(5)
+    started = time.monotonic()
+    lock = take_own_lock(str(tmp_path))
+    waited = time.monotonic() - started
+    thread.join()
+    try:
+        assert lock.held
+        assert waited >= 0.1
+    finally:
+        lock.release()
+
+
+def test_take_own_lock_second_holder_fails_with_the_folder_in_use_message(tmp_path, short_lock_wait):
     first = take_own_lock(str(tmp_path))
     try:
         # Two open file descriptions are two flock holders, also in one process.
@@ -109,7 +146,7 @@ def test_try_sibling_lock_held_folder_returns_none(tmp_path):
         owner.release()
 
 
-def test_try_sibling_lock_free_folder_returns_a_held_lock(tmp_path):
+def test_try_sibling_lock_free_folder_returns_a_held_lock(tmp_path, short_lock_wait):
     take_own_lock(str(tmp_path)).release()
 
     lock = try_sibling_lock(str(tmp_path))
@@ -242,7 +279,7 @@ def test_open_own_folder_sweep_failure_releases_the_lock(tmp_path, monkeypatch):
 # --- the lifecycle ---
 
 
-async def test_prepare_storage_second_worker_with_the_same_name_is_refused(tmp_path):
+async def test_prepare_storage_second_worker_with_the_same_name_is_refused(tmp_path, short_lock_wait):
     config = _config(tmp_path, cluster={'name': 'search'})
     first = DrakkarApp(handler=SimpleHandler(), config=config, worker_id='w-1')
     second = DrakkarApp(handler=SimpleHandler(), config=config.model_copy(deep=True), worker_id='w-1')
@@ -293,7 +330,7 @@ async def test_shutdown_releases_the_owner_lock(tmp_path):
     take_own_lock(app.own_storage_dir).release()
 
 
-def test_owner_lock_survives_while_held_by_another_open_file(tmp_path):
+def test_owner_lock_survives_while_held_by_another_open_file(tmp_path, short_lock_wait):
     """A lock held through any open file of the folder's lock refuses the owner lock."""
     take_own_lock(str(tmp_path)).release()
     fd = os.open(tmp_path / OWNER_LOCK_NAME, os.O_RDWR)

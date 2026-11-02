@@ -22,6 +22,7 @@ import fcntl
 import os
 import re
 import stat
+import time
 
 from drakkar.dbfiles import DB_DIR_MODE
 
@@ -35,6 +36,13 @@ FOLDER_IN_USE_MESSAGE = (
 )
 
 _OPEN_FLAGS = os.O_RDWR | os.O_NOFOLLOW
+
+# How long a start tries again before it refuses a folder whose lock is held,
+# and the pause between tries. A short shared lock (the Databases view tests
+# whether a sibling folder is in use) must never make a restart fail; a live
+# twin holds the lock for its whole life, so it is still refused.
+OWN_LOCK_WAIT_SECONDS = 2.0
+OWN_LOCK_RETRY_SECONDS = 0.05
 
 # The download temps of the API server (a copy of the live file or of the
 # memory store) and their SQLite sidecars: ``.<worker>-<...>.<hex>.download``.
@@ -94,12 +102,18 @@ def _try_lock(folder: str, *, create: bool) -> OwnerLock | None:
 def take_own_lock(folder: str) -> OwnerLock:
     """Take the owner lock of this worker's own folder, creating the lock file when it is missing.
 
+    A held lock is tried again every :data:`OWN_LOCK_RETRY_SECONDS` for up to
+    :data:`OWN_LOCK_WAIT_SECONDS` before the start is refused. Blocking: it
+    sleeps between tries, so call it in a thread.
+
     Raises:
         FolderInUseError: another live process holds the lock.
     """
-    lock = _try_lock(folder, create=True)
-    if lock is None:
-        raise FolderInUseError(FOLDER_IN_USE_MESSAGE.format(folder=folder))
+    give_up_at = time.monotonic() + OWN_LOCK_WAIT_SECONDS
+    while (lock := _try_lock(folder, create=True)) is None:
+        if time.monotonic() >= give_up_at:
+            raise FolderInUseError(FOLDER_IN_USE_MESSAGE.format(folder=folder))
+        time.sleep(OWN_LOCK_RETRY_SECONDS)
     return lock
 
 
