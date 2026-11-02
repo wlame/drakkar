@@ -183,11 +183,15 @@ These cases fall back to timing on the loop, counted on
   exited and its pipes have closed, so the run ends when the pipes close.
   The framework compares the two moments as the loop saw them (it
   subclasses asyncio's subprocess stream protocol for that), so a loop stall
-  delays both and is not taken for a descendant.
+  during the run delays both and is not taken for a descendant. A single
+  callback longer than 50 ms that runs between the two (they are a few loop
+  callbacks apart) is counted here too, so on a busy worker this reason can
+  also rise with loop stalls.
 
 A timed-out task ends where the timeout fired. Its process group is killed
-once, also when the child itself already exited and only a descendant was
-still running. Neither a timeout nor a descendant records an exit notice.
+once with `killpg(<child pid>, SIGKILL)`, also when the child itself already
+exited and only a descendant was still running; the group is never looked up
+with `getpgid`, because a reaped child's pid may name another process. Neither a timeout nor a descendant records an exit notice.
 `exit_notice_seconds` is recorded as `exit_notice_ms` and observed on
 `drakkar_executor_exit_notice_seconds` — see [Observability](observability.md#task-run-time-and-the-exit-notice).
 A handler can report its own run time for the timeline bar with the

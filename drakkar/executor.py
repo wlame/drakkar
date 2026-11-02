@@ -947,33 +947,48 @@ class ExecutorPool:
     async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         """Kill a subprocess and all of its descendants.
 
-        On POSIX, the child was spawned with ``start_new_session=True`` so its
-        PID is also its process-group ID. ``os.killpg`` then signals every
+        On POSIX, the child was spawned with ``start_new_session=True``, so
+        it leads its own session and process group, and the group id is its
+        original pid. ``os.killpg(proc.pid, SIGKILL)`` then signals every
         process in that group — parent and all (grand)children — in one call.
         This is how we prevent the classic "I killed the shell but its
-        backgrounded jobs are still running" leak on timeout.
+        backgrounded jobs are still running" leak on timeout. It also works
+        after asyncio has reaped the child, while a descendant still holds
+        the group.
 
-        Race handling: the child may exit between ``getpgid`` and ``killpg``
-        (or between the signal and ``wait``), in which case the kernel raises
-        ``ProcessLookupError``. That is benign — the process is already gone,
-        which is what we wanted — so we log at debug and continue.
+        The group is never looked up with ``getpgid``: once the child is
+        reaped, its pid may name an unrelated process (on Linux even a thread
+        of this worker), and the lookup would return that process's group.
+        While the group has a member, the kernel does not reuse its number.
+        One case remains: when every member has left the group (a descendant
+        that started its own session) and the pid number was reused by a new
+        group leader, the signal reaches that group. The group of this worker
+        itself is never signalled.
+
+        Race handling: the group may be empty already (or empty between the
+        signal and ``wait``), in which case the kernel raises
+        ``ProcessLookupError``. That is benign — the processes are already
+        gone, which is what we wanted — so we log at debug and continue.
 
         Windows has no ``killpg``; we fall back to the standard ``proc.kill``
         which terminates only the direct child. Grandchild-cleanup on Windows
         would need job objects and is out of scope.
         """
         if _IS_POSIX:
+            if proc.pid == os.getpgrp():
+                # Cannot happen for a child started in its own session; a
+                # guard so that a mistake can never kill the worker itself.
+                logger.error(
+                    'executor_kill_own_group_refused',
+                    category='executor',
+                    pid=proc.pid,
+                    hint="the task's process group is the worker's own group; nothing was signalled",
+                )
+                return
             try:
-                try:
-                    pgid = os.getpgid(proc.pid)
-                except ProcessLookupError:
-                    # The child is reaped already, while a descendant may still
-                    # hold its group: ``start_new_session`` made the child the
-                    # group's leader, so the group id is its pid.
-                    pgid = proc.pid
-                os.killpg(pgid, signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
-                # Child exited between our getpgid/killpg calls — that's fine.
+                # The group is empty already — that's fine.
                 # Sync, not ``await logger.adebug``: the async variants hop
                 # through the default thread pool before the level filter
                 # runs, so they cost a thread round trip even when debug

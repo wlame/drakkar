@@ -127,7 +127,13 @@ open more than 50 ms past the child's exit, the run ends when the pipes
 close, read on the loop; it is counted as `descendant_held_pipes` and records
 no `exit_notice_ms`, because that gap is the descendant's lifetime, not a loop
 stall. The two moments are compared as the loop saw them, so a loop stall
-delays both and does not look like a descendant. A timed-out task ends where
+during the run delays both and does not look like a descendant. One case
+does: a single loop callback longer than 50 ms that runs exactly between the
+loop's handling of the exit and of the pipes closing (a few callbacks apart).
+That task then gets loop timing and counts as `descendant_held_pipes`. On a
+busy worker, a rise of `descendant_held_pipes` together with loop-lag spikes
+(see [Runtime Health](runtime-health.md)) points at the loop, not at a binary
+that leaves processes behind. A timed-out task ends where
 the timeout fired, also with no `exit_notice_ms`; its whole process group is
 killed, also when the child itself had already exited.
 

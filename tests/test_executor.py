@@ -909,7 +909,7 @@ async def test_timeout_kills_grandchildren_via_process_group(tmp_path):
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX-only: os.killpg')
 async def test_killpg_process_lookup_error_swallowed(monkeypatch):
-    """If the child exits between ``getpgid`` and ``killpg`` (a benign race),
+    """If the group is empty by the time ``killpg`` runs (a benign race),
     the kernel raises ProcessLookupError. The executor must swallow it and
     complete the cleanup without propagating the error up the stack.
 
@@ -965,7 +965,6 @@ async def test_kill_process_tree_bounded_when_process_ignores_sigkill(monkeypatc
         await asyncio.sleep(3600)
 
     proc.wait = never_returns
-    monkeypatch.setattr('os.getpgid', lambda pid: pid)
     monkeypatch.setattr('os.killpg', lambda pgid, sig: None)
     # Shorten the reap-timeout constant so this test doesn't burn the real
     # production 5s wait on every run; the shipped value stays 5.0 in

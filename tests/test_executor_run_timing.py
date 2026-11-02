@@ -154,9 +154,10 @@ async def test_a_timeout_is_timed_on_the_loop_with_no_notice():
 
 
 @needs_native_backend
-async def test_a_timeout_whose_child_exited_early_kills_the_descendant(tmp_path):
+async def test_a_timeout_whose_child_exited_early_kills_the_descendant(tmp_path, monkeypatch):
     """The child exits at once; its background sleep holds stdout until the timeout kills its group."""
     pid_file = tmp_path / 'grandchild.pid'
+    monkeypatch.setattr(executor_module.os, 'getpgid', never_call_getpgid)
     watcher = ExitWatcher(NATIVE_BACKEND)
     try:
         with pytest.raises(ExecutorTaskError) as raised:
@@ -173,7 +174,56 @@ async def test_a_timeout_whose_child_exited_early_kills_the_descendant(tmp_path)
     assert 1.0 <= result.duration_seconds < 1.5
     assert result.exit_notice_seconds is None
     grandchild = int(pid_file.read_text())
+    # Bounded below its own 5 s sleep: the kill ended it.
+    await wait_for(lambda: not process_exists(grandchild), timeout=2.0)
+
+
+def never_call_getpgid(pid: int) -> int:
+    raise AssertionError('the group must not be looked up with getpgid')
+
+
+async def test_a_reaped_childs_group_is_killed_without_a_group_lookup(monkeypatch):
+    """After the child is reaped its pid may name another process; killpg goes straight to the old group."""
+    monkeypatch.setattr(executor_module.os, 'getpgid', never_call_getpgid)
+    proc = await asyncio.create_subprocess_exec(
+        'sh',
+        '-c',
+        'sleep 5 & echo $!; exit 0',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    grandchild = int(await proc.stdout.readline())
+    # Not ``proc.wait()``: it returns only once the pipes close, which the grandchild prevents.
+    await wait_for(lambda: proc.returncode is not None)  # the child is reaped; the grandchild holds the group
+    assert process_exists(grandchild)
+
+    killed_at = time.monotonic()
+    await ExecutorPool._kill_process_tree(proc)
+
     await wait_for(lambda: not process_exists(grandchild))
+    assert time.monotonic() - killed_at < 2.0  # killed, not ended by its own 5 s sleep
+    await proc.stdout.read()  # EOF once the grandchild is gone
+    await asyncio.sleep(0.1)  # let this loop close the transport
+
+
+async def test_the_workers_own_group_is_never_signalled(monkeypatch):
+    signalled: list[int] = []
+    monkeypatch.setattr(executor_module.os, 'killpg', lambda pgid, sig: signalled.append(pgid))
+
+    class OwnGroupProc:
+        pid = os.getpgrp()
+
+        async def wait(self) -> int:
+            return 0
+
+    with capture_logs() as logs:
+        await ExecutorPool._kill_process_tree(OwnGroupProc())  # type: ignore[arg-type]
+
+    assert signalled == []
+    assert [log['event'] for log in logs] == ['executor_kill_own_group_refused']
+    assert logs[0]['log_level'] == 'error'
 
 
 async def test_a_child_that_survives_the_kill_costs_one_bounded_wait_and_one_warning(monkeypatch):
