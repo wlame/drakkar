@@ -235,7 +235,13 @@ shows only the rows of the memory window (two minutes by default). With
 `postgres`, only the trace with history (`trace?history=1`) reads the
 [Postgres table](recorder-postgres.md#the-history-search); with provider `sqlite` it reads the sealed files of the cluster, and with the recorder off it answers the memory rows. The Databases tab of the
 debug UI shows the memory store as its first row, "Recent events in memory;
-not a file", with a download button; see
+not a file", with a download button. Above the views, one line says what the
+worker runs (its cluster, the recorder provider, the next archive slot, the
+autodiscover provider). The tab also shows the worker's own folder (the cache
+file, with a snapshot download, the crash marker, the owner lock), the other
+worker folders on the same host with their lock and registry state, when
+history files leave, and a second, gzip-compressed download for every file
+but an archive; see
 [The Databases page](local-databases.md#the-databases-page).
 
 ---

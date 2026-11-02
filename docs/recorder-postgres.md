@@ -33,8 +33,9 @@ The provider does not do this:
   and the archives list still show the sealed files that are in the history
   folder.
 - `trace-by-label` does not search the table. It reads the memory store.
-- `/api/v1/debug/databases` shows no Postgres row, and there is no download
-  of Postgres rows.
+- There is no download of Postgres rows. `/api/v1/debug/databases` shows the
+  table settings and this worker's writer, not the rows (see
+  [The Databases tab](#the-databases-tab)).
 
 Write `provider: postgres` in the config; it is never chosen for you. It
 loads with an empty `storage.dir`: the worker then has no cache file and no
@@ -513,6 +514,45 @@ Metrics and log events of the write path:
 
 See [Observability](observability.md#recorder-history-in-postgres) for every
 line and field.
+
+## The Databases tab
+
+The `recorder` part of `GET /api/v1/debug/databases` (the Databases tab of
+the Debug page) shows the table and this worker's writer, from values the
+worker keeps in memory. It sends no statement to Postgres, and the DSN is
+never part of the answer:
+
+```json
+"postgres": {
+  "connection": "main", "schema": "drakkar", "table": "fast_recorder_events",
+  "initial_retention_hours": 24, "max_size_bytes": 0, "store_completed_output": false,
+  "writer": {
+    "started": true, "queue_rows": 0, "queue_bytes": 0, "rows_written": 182340,
+    "dropped": {"queue_full": 0, "rejected": 0, "no_partition": 0, "shutdown": 0},
+    "breaker_open": false,
+    "last_upkeep": {"at": "2026-11-08T10:05:00.000000Z", "held_lock": true,
+                    "created": ["fast_recorder_events_p2026110813"], "dropped": [], "dropped_for_size": []}
+  }
+}
+```
+
+- `table` has no schema prefix. `writer` is `null` when the worker writes no
+  rows (`recorder.capture.events: false`) or before the recorder started.
+- `started` is false until stage P has opened its connection and found the
+  table. `queue_rows` counts the rows waiting, the chunk in its slot
+  included; `queue_bytes` is the text in the queue, counted as `max_queue`
+  counts it.
+- `rows_written` and `dropped` count rows since the process started, with
+  the reasons of `drakkar_recorder_postgres_dropped_rows_total`.
+- `last_upkeep` is the last upkeep this worker ran: when, whether it held
+  the table's upkeep lock (`held_lock: false` means another writer had it,
+  and nothing changed), and the partitions it created, dropped by the
+  stored retention and dropped for the size cap. A failed upkeep leaves the
+  previous value; `null` before the first upkeep.
+
+Stage P publishes these values as one unchangeable object after each chunk,
+each upkeep and each run, so the API server reads them without touching the
+writer's thread.
 
 ## The history search
 

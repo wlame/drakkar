@@ -187,9 +187,11 @@ file have the same id. With `postgres`, the row in the table has the same id.
 
 ## The snapshot download
 
-`GET /api/v1/debug/download-live` takes `source=memory` or `source=file`. The
-default is `file` when a live file is open, else `memory`. The Databases tab
-shows a download button on the memory row and on the live row.
+`GET /api/v1/debug/download-live` takes `source=memory`, `source=file` or
+`source=cache`. The default is `file` when a live file is open, else
+`memory`. The Databases tab shows a download button on the memory row, on
+the live row and on the cache file row, and a second button for the same
+copy gzip-compressed (`compress=gzip`).
 
 The memory snapshot is a recorder database of the same shape as a file,
 named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC time of the snapshot).
@@ -204,10 +206,11 @@ named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC time of the snapshot).
   The worker logs `debug_download_live_in_ram` (info, with `reason`
   `storage_dir_unset` or `storage_dir_unusable`) for each such copy.
 
-One memory snapshot runs at a time. Another memory download waits for it, up
-to 30 seconds, and then answers 500 with the reason `another memory snapshot
-is still running`. Parallel downloads therefore never make two copies at the
-same time. A finished copy stays in memory until its download ends.
+One memory or cache snapshot runs at a time. Another such download waits for
+it, up to 30 seconds, and then answers 500 with the reason `another memory
+snapshot is still running` (or `another cache snapshot is still running`,
+naming the copy that holds the slot). Parallel downloads therefore never
+make two copies at the same time. A finished copy stays in memory until its download ends.
 
 Answers:
 

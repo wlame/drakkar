@@ -223,6 +223,20 @@ the steps of the upgrade and the changes of behaviour.
 
 ### Added
 
+- **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
+  `worker`, and two new parts: `recorder` (the effective provider, the memory
+  bounds, the rotation and the next archive slot, or the Postgres table and this
+  worker's writer: queue, rows written, drops by reason, breaker, last upkeep)
+  and `storage` (the own folder's cache file with its row count, crash marker,
+  owner lock and download temps, and the other worker folders of the host with
+  their lock and registry state). `?parts=` limits the answer, so the other
+  workers of the cluster no longer list the shared history for the UI (contract
+  v1.30).
+- **Compressed downloads and the cache snapshot.** `compress=gzip` on
+  `/api/v1/debug/download/{path}` and `/api/v1/debug/download-live` streams the
+  file as gzip, one chunk at a time. `download-live?source=cache` serves a copy
+  of the cache file; one memory or cache copy runs at a time. A bad `source` now
+  answers `source must be memory, file or cache`.
 - **Orphan folders.** The leftover pass seals the recorder files of another
   worker name's own folder in the same cluster when no process holds the folder,
   its files are idle for 300 s and the registry shows the name is not online, then

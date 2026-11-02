@@ -1411,11 +1411,21 @@ CLI or any tool that already reads a merged `.db`.
 
 ## The Databases page
 
-`GET /api/v1/debug/databases` answers in two parts:
+`GET /api/v1/debug/databases` answers the serving worker and four parts:
 
 ```json
-{"own": [...], "history": {"folders": [...]}}
+{"worker": {...}, "own": [...], "history": {"folders": [...]}, "recorder": {...}, "storage": {...}}
 ```
+
+`?parts=` takes a comma list of `own`, `history`, `recorder` and `storage`
+and answers only those (and `worker`, always). The worker does not do the
+work of a part that is not asked for: the UI asks the other workers of the
+cluster for `own,storage,recorder`, so only the page's own worker lists the
+shared history folder. An unknown part answers `400` `{"error": "unknown
+part '<p>'; known: history, own, recorder, storage"}`.
+
+- **`worker`** is `{"name", "cluster", "instance"}`; `cluster` is `null`
+  when the worker has none.
 
 - **`own`** starts with one **memory row** when the worker has an open
   [memory store](recent-events.md): `kind: "memory"`, `filename`
@@ -1436,6 +1446,31 @@ CLI or any tool that already reads a merged `.db`.
   `size_bytes`, `modified_at`, and `meta`: the meta object of a sealed
   file, `null` for the other kinds. No sealed file is opened to build this
   list.
+- **`recorder`** says what the recorder runs, from the config and from
+  values in memory; it reads no file. `provider` is `none` with the
+  recorder off. `memory` holds the bounds of the memory store (time
+  window, row cap, data budget), or `null` with no open store. With
+  provider `sqlite`, `sqlite` gives the rotation interval and the archive
+  schedule: whether it is enabled, its scope (`cluster`, `worker`, or
+  `null` when no pass runs), the epoch second of the next archive slot,
+  the window, `due_after`, `retention` and `merged_retention`. With provider
+  `postgres`, `postgres` gives the table and this worker's writer; see
+  [The Databases tab](recorder-postgres.md#the-databases-tab).
+- **`storage`** describes the [own folder](#the-own-folder) and the other
+  worker folders beside it. `own_folder` is `<sanitized cluster>/<worker>`,
+  relative to `storage.dir` (no absolute path is sent; `""` with no
+  `storage.dir`). `files` lists the own files that are not recorder files:
+  the cache file (its size includes its `-wal` and `-shm` files; `entries`
+  is its row count, `null` when the count takes more than 1 second), the
+  crash marker and the owner lock file. `temp_files` counts the download
+  temp files in the own folder. `siblings` lists the other worker folders
+  of `<storage.dir>/<sanitized cluster>/`: their files (the owner lock file
+  left out), size and newest change, `in_use` (whether a process holds the
+  folder's owner lock; `null` when the folder has no lock file) and
+  `online` (the registry's verdict; `null` with autodiscover off). The lock
+  test takes a shared lock without waiting and frees it at once, so an
+  [orphan pass](#orphan-folders) that looks at the folder at that moment
+  skips it for one round. `siblings` is `null` with no `storage.dir`.
 
 A worker with a memory store and no file answers the memory row only in `own`. A worker with
 neither a memory store nor a file answers `own: []`. `history.folders` is
@@ -1454,9 +1489,17 @@ outside `storage.shared_dir`, or a missing file answers `404`. Own files in
 `storage.dir` are not downloadable by path: download a file once it is
 sealed.
 
-**Live file and memory store.** `GET /api/v1/debug/download-live` takes no
-path. It takes `source=file` or `source=memory`; the default is `file` when
-a live file is open, else `memory`. With `source=file` it answers a
+**Compressed downloads.** `compress=gzip` on `/api/v1/debug/download/{path}`
+and on `/api/v1/debug/download-live` sends the same bytes as a gzip stream,
+named `<name>.gz`, with no `Content-Length`. The worker compresses one
+1 MiB chunk at a time while it sends, off the API server's event loop, so a
+large file never sits in memory. Another value answers `400` `{"error":
+"compress must be gzip"}`, and an archive (already gzip) answers `400`
+`{"error": "the file is already compressed"}`.
+
+**Live file, memory store and cache file.** `GET /api/v1/debug/download-live`
+takes no path. It takes `source=file`, `source=memory` or `source=cache`;
+the default is `file` when a live file is open, else `memory`. With `source=file` it answers a
 consistent snapshot of the serving worker's live recorder file. The worker
 makes the copy with the SQLite backup API, on its own read-only connection,
 so the recorder keeps writing during the copy. The copy uses a rollback
@@ -1464,12 +1507,17 @@ journal, so it opens on its own. It goes to an owner-only temp file in
 `storage.dir`, which is removed before the answer starts. With
 `source=memory` it answers a snapshot of the memory store, named
 `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db`; see
-[The snapshot download](recent-events.md#the-snapshot-download). The route
-answers `404` `{"error": "No live recorder file on this worker"}` for
-`source=file` with no live file, `404` `{"error": "No memory store on this
-worker"}` for `source=memory` with no memory store, `400` `{"error":
-"source must be memory or file"}` for another value, and `500` `{"error":
-"Snapshot failed: ..."}` when the copy fails. It is behind `ui.auth_token`
+[The snapshot download](recent-events.md#the-snapshot-download). With
+`source=cache` it answers a copy of the worker's cache file, made like the
+live-file copy (backup API, read-only connection, owner-only temp file in
+the own folder, removed before the answer starts), named
+`<worker>-cache-<YYYY-MM-DD__HH_MM_SS>.db`. One memory or cache copy runs at
+a time. The route answers `404` `{"error": "No live recorder file on this
+worker"}` for `source=file` with no live file, `404` `{"error": "No memory
+store on this worker"}` for `source=memory` with no memory store, `404`
+`{"error": "No cache on this worker"}` for `source=cache` with no cache
+file, `400` `{"error": "source must be memory, file or cache"}` for another
+value, and `500` `{"error": "Snapshot failed: ..."}` when the copy fails. It is behind `ui.auth_token`
 like the other debug routes.
 
 **Merge.** `POST /api/v1/debug/merge` takes the same `.db` paths (sealed
