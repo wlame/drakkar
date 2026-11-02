@@ -361,10 +361,13 @@ def _gzip_chunks(handle: BinaryIO) -> Iterator[bytes]:
     never runs on the API server's loop. Only one chunk is held at a time.
     """
     compressor = zlib.compressobj(wbits=_GZIP_WBITS)
-    for chunk in _read_chunks(handle):
-        if compressed := compressor.compress(chunk):
-            yield compressed
-    yield compressor.flush()
+    # The file is closed here, not by a nested generator: a client that
+    # leaves mid-stream closes this generator, and the file closes at once.
+    with handle:
+        while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
+            if compressed := compressor.compress(chunk):
+                yield compressed
+        yield compressor.flush()
 
 
 def _gzip_response(handle: BinaryIO, filename: str) -> StreamingResponse:
