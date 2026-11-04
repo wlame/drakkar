@@ -26,6 +26,7 @@ from pathlib import Path
 import structlog
 
 from drakkar.dbfiles import secure_db_file
+from drakkar.recorder.schema import WORKER_CONFIG_COLUMNS, WORKER_STATE_COLUMNS
 
 logger = structlog.get_logger()
 
@@ -113,26 +114,6 @@ CREATE INDEX idx_states_worker ON worker_states(worker_id);
 CREATE INDEX idx_states_updated ON worker_states(updated_at);
 """
 
-_WORKER_CONFIG_COLUMNS = [
-    'worker_name',
-    'cluster_name',
-    'ip_address',
-    'debug_port',
-    'debug_url',
-    'kafka_brokers',
-    'source_topic',
-    'consumer_group',
-    'binary_path',
-    'max_executors',
-    'task_timeout_seconds',
-    'max_retries',
-    'window_size',
-    'sinks_json',
-    'env_vars_json',
-    'created_at',
-    'created_at_dt',
-]
-
 _EVENT_COLUMNS = [
     'ts',
     'dt',
@@ -159,34 +140,12 @@ _EVENT_COLUMNS = [
     'request_id',
 ]
 
-_STATE_COLUMNS = [
-    'uptime_seconds',
-    'assigned_partitions',
-    'partition_count',
-    'pool_active',
-    'pool_max',
-    'total_queued',
-    'consumed_count',
-    'completed_count',
-    'failed_count',
-    'produced_count',
-    'committed_count',
-    'paused',
-    # row.get() yields None for source files that lack a column, which
-    # INSERTs as NULL. A source file may carry columns this schema does not
-    # have; only the columns listed here are read.
-    'health_state',
-    'loop_lag_ms',
-    'updated_at',
-    'updated_at_dt',
-]
-
 # A merge output used as a merge source (an archive folded into its
 # successor, or a merged file picked again in the UI) carries ``workers``
 # rows instead of one ``worker_config`` row. Its rows are copied verbatim,
 # source_file included, so every original worker keeps its events and
 # states, and a folded archive still names the raw files it covers.
-_MERGED_WORKER_COLUMNS = [*_WORKER_CONFIG_COLUMNS, 'source_file']
+_MERGED_WORKER_COLUMNS = [*WORKER_CONFIG_COLUMNS, 'source_file']
 
 
 @dataclass
@@ -434,10 +393,10 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             if _table_exists(src, 'worker_config'):
                 row = src.execute('SELECT * FROM worker_config WHERE id = 1').fetchone()
                 if row:
-                    values = [row.get(col) for col in _WORKER_CONFIG_COLUMNS]
+                    values = [row.get(col) for col in WORKER_CONFIG_COLUMNS]
                     values.append(basename)
                     placeholders = ', '.join(['?'] * len(values))
-                    cols = ', '.join([*_WORKER_CONFIG_COLUMNS, 'source_file'])
+                    cols = ', '.join([*WORKER_CONFIG_COLUMNS, 'source_file'])
                     cursor = out.execute(f'INSERT INTO workers ({cols}) VALUES ({placeholders})', values)
                     worker_id = cursor.lastrowid
                     result.worker_count += 1
@@ -516,10 +475,10 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             if _table_exists(src, state_table):
                 rows = src.execute(f'SELECT * FROM {state_table} ORDER BY updated_at').fetchall()
                 owners = _owner_ids(rows, db_path, worker_map, merged_ids)
-                cols = ', '.join(['worker_id', *_STATE_COLUMNS])
-                placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
+                cols = ', '.join(['worker_id', *WORKER_STATE_COLUMNS])
+                placeholders = ', '.join(['?'] * (1 + len(WORKER_STATE_COLUMNS)))
                 for owner, row in zip(owners, rows, strict=True):
-                    values = [row.get(col) for col in _STATE_COLUMNS]
+                    values = [row.get(col) for col in WORKER_STATE_COLUMNS]
                     out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [owner, *values])
                     result.state_count += 1
         except Exception as e:

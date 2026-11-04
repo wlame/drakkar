@@ -1,8 +1,9 @@
-"""Cross-thread asyncio dispatch helper.
+"""Cross-thread asyncio dispatch helpers.
 
 This module owns ``dispatch_to_loop(coro, target_loop)`` — the single
 shared mechanism the framework uses to bridge work between two
-``asyncio`` event loops running on different threads.
+``asyncio`` event loops running on different threads — and
+``run_in_thread_to_end``, a ``to_thread`` whose cancel waits for the thread.
 
 Why this helper exists
 ----------------------
@@ -66,7 +67,8 @@ via the variable name passed in.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+import contextlib
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 
@@ -111,3 +113,27 @@ async def dispatch_to_loop(coro: Coroutine[Any, Any, Any], target_loop: Any) -> 
     # coroutine still runs to completion; this branch just skips the
     # ``run_coroutine_threadsafe`` round-trip.
     return await coro
+
+
+async def run_in_thread_to_end[T](
+    fn: Callable[..., T], /, *args: Any, on_cancelled_result: Callable[[T], None] | None = None
+) -> T:
+    """Run ``fn(*args)`` in a worker thread; a cancel of the caller waits for the thread to end before it goes on.
+
+    ``asyncio.to_thread`` leaves the thread running when its caller is
+    cancelled, so the caller could close a connection or a file that the
+    thread still uses. Here the thread is always awaited to its end (each
+    call must be bounded on its own), then the cancel is raised again. When
+    the thread finished with a result after a cancel, ``on_cancelled_result``
+    gets it, so the caller can close what the call opened.
+    """
+    future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        if not future.cancelled() and future.exception() is None and on_cancelled_result is not None:
+            on_cancelled_result(future.result())
+        raise

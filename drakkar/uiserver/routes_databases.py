@@ -46,7 +46,7 @@ from drakkar.slices import (
     parse_slice_request,
     plan_slice,
 )
-from drakkar.uiserver.routes_debug import _gzip_chunks, _read_chunks
+from drakkar.uiserver.streaming import gzip_chunks, read_chunks
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -100,9 +100,9 @@ def _slice_response(built: BuiltSlice, compress: str | None) -> StreamingRespons
     if built.truncated is not None:
         headers[HEADER_TRUNCATED] = built.truncated
     if compress == COMPRESS_GZIP:
-        return StreamingResponse(_gzip_chunks(built.handle), media_type='application/gzip', headers=headers)
+        return StreamingResponse(gzip_chunks(built.handle), media_type='application/gzip', headers=headers)
     headers['Content-Length'] = str(built.size_bytes)
-    return StreamingResponse(_read_chunks(built.handle), media_type='application/x-sqlite3', headers=headers)
+    return StreamingResponse(read_chunks(built.handle), media_type='application/x-sqlite3', headers=headers)
 
 
 def _close_unsent(build: asyncio.Future[BuiltSlice]) -> None:

@@ -30,7 +30,7 @@ from drakkar.cache.sql import SCHEMA_CACHE_ENTRIES
 from drakkar.config import CacheConfig, DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
-from drakkar.uiserver import routes_debug
+from drakkar.uiserver import routes_debug, streaming
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
 
@@ -581,9 +581,9 @@ async def test_download_live_other_compress_answers_400_before_the_source_check(
 
 
 def test_gzip_chunks_closes_the_file_when_the_client_leaves_mid_stream(monkeypatch):
-    monkeypatch.setattr(routes_debug, '_SNAPSHOT_CHUNK_BYTES', 4)
+    monkeypatch.setattr(streaming, 'CHUNK_BYTES', 4)
     handle = io.BytesIO(b'0123456789abcdef')
-    chunks = routes_debug._gzip_chunks(handle)
+    chunks = streaming.gzip_chunks(handle)
 
     next(chunks)
     chunks.close()
@@ -592,11 +592,11 @@ def test_gzip_chunks_closes_the_file_when_the_client_leaves_mid_stream(monkeypat
 
 
 def test_gzip_chunks_of_a_whole_file_decompress_to_its_bytes(monkeypatch):
-    monkeypatch.setattr(routes_debug, '_SNAPSHOT_CHUNK_BYTES', 7)
+    monkeypatch.setattr(streaming, 'CHUNK_BYTES', 7)
     data = os.urandom(100) + b'z' * 1000
     handle = io.BytesIO(data)
 
-    assert gzip.decompress(b''.join(routes_debug._gzip_chunks(handle))) == data
+    assert gzip.decompress(b''.join(streaming.gzip_chunks(handle))) == data
     assert handle.closed
 
 

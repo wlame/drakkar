@@ -36,8 +36,7 @@ import secrets
 import sqlite3
 import stat
 import time
-import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,6 +71,7 @@ from drakkar.uiserver.databases_status import (
     worker_block,
 )
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
+from drakkar.uiserver.streaming import gzip_chunks, read_chunks
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -151,19 +151,12 @@ _CACHE_COPY_CHECK_STEPS = 1000
 COMPRESS_GZIP = 'gzip'
 BAD_COMPRESS_ERROR = 'compress must be gzip'
 ALREADY_COMPRESSED_ERROR = 'the file is already compressed'
-# gzip framing for zlib: a gzip header and trailer around the deflate stream.
-_GZIP_WBITS = 31
-# The fastest level: most of the size gain on SQLite pages for a small part
-# of the CPU of the default level, so a download takes little from the tasks.
-_GZIP_LEVEL = 1
 # The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
 IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
 IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
 
 # Rows of ``/api/v1/debug/periodic``: the newest periodic runs, by ``ts``.
 PERIODIC_HISTORY_ROWS = 500
-# The live-file snapshot is streamed in chunks of this size.
-_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 # Exclusive, owner-only, never through a link: the temp file holds a copy
 # of the recorder file.
 _SNAPSHOT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -344,7 +337,7 @@ def _snapshot_response(handle: BinaryIO, filename: str, *, compress: str | None 
     if compress == COMPRESS_GZIP:
         return _gzip_response(handle, filename)
     return StreamingResponse(
-        _read_chunks(handle),
+        read_chunks(handle),
         media_type='application/x-sqlite3',
         headers={
             'Content-Disposition': f'attachment; filename="{filename}"',
@@ -355,34 +348,10 @@ def _snapshot_response(handle: BinaryIO, filename: str, *, compress: str | None 
     )
 
 
-def _read_chunks(handle: BinaryIO) -> Iterator[bytes]:
-    """Stream ``handle`` to the client and close it after the last chunk."""
-    with handle:
-        while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
-            yield chunk
-
-
-def _gzip_chunks(handle: BinaryIO) -> Iterator[bytes]:
-    """Stream ``handle`` as one gzip member, chunk by chunk, and close it after the last chunk.
-
-    Synchronous, so Starlette runs it in its thread pool: the compression
-    never runs on the API server's loop. Only one chunk is held at a time.
-    """
-    compressor = zlib.compressobj(level=_GZIP_LEVEL, wbits=_GZIP_WBITS)
-    # The file closes when the stream ends or this generator is closed. The
-    # server does not close it when a client leaves; the file then closes
-    # when the generator is collected.
-    with handle:
-        while chunk := handle.read(_SNAPSHOT_CHUNK_BYTES):
-            if compressed := compressor.compress(chunk):
-                yield compressed
-        yield compressor.flush()
-
-
 def _gzip_response(handle: BinaryIO, filename: str) -> StreamingResponse:
     """Stream ``handle`` gzip-compressed as an attachment named ``<filename>.gz``; no length is known in advance."""
     return StreamingResponse(
-        _gzip_chunks(handle),
+        gzip_chunks(handle),
         media_type='application/gzip',
         headers={
             'Content-Disposition': f'attachment; filename="{filename}.gz"',

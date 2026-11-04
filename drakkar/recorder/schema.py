@@ -146,6 +146,48 @@ EVENT_COLUMNS: tuple[str, ...] = (
     'request_id',
 )
 
+# The columns of ``worker_config`` after ``id``, and of ``worker_state``
+# after ``id``, in DDL order. The merge and the slice download copy these
+# columns by name; a source file that lacks a column reads it as NULL, and a
+# column a source has beyond these is not copied.
+WORKER_CONFIG_COLUMNS: tuple[str, ...] = (
+    'worker_name',
+    'cluster_name',
+    'ip_address',
+    'debug_port',
+    'debug_url',
+    'kafka_brokers',
+    'source_topic',
+    'consumer_group',
+    'binary_path',
+    'max_executors',
+    'task_timeout_seconds',
+    'max_retries',
+    'window_size',
+    'sinks_json',
+    'env_vars_json',
+    'created_at',
+    'created_at_dt',
+)
+WORKER_STATE_COLUMNS: tuple[str, ...] = (
+    'uptime_seconds',
+    'assigned_partitions',
+    'partition_count',
+    'pool_active',
+    'pool_max',
+    'total_queued',
+    'consumed_count',
+    'completed_count',
+    'failed_count',
+    'produced_count',
+    'committed_count',
+    'paused',
+    'health_state',
+    'loop_lag_ms',
+    'updated_at',
+    'updated_at_dt',
+)
+
 # The one insert of event rows, into the memory store and into the file. The
 # recorder assigns ``id``, so a row has the same id in both. ``OR IGNORE``
 # makes a retried chunk whose rows already landed (written, then the commit

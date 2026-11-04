@@ -33,13 +33,20 @@ from typing import Any, BinaryIO
 import structlog
 
 from drakkar.dbfiles import secure_db_file
-from drakkar.merge import _STATE_COLUMNS, _WORKER_CONFIG_COLUMNS, MERGED_SCHEMA
+from drakkar.merge import MERGED_SCHEMA
 from drakkar.recorder.archive import is_own_sealed_name, parse_db_start_ts
 from drakkar.recorder.history import list_sealed, meta_path, read_meta
 from drakkar.recorder.memstore import MEMORY_READ_LIMIT_SECONDS, PROGRESS_HANDLER_STEPS, MemoryCoverage
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.recorder.postgres_history import PostgresHistoryError, SliceQuery, read_postgres_slice
-from drakkar.recorder.schema import EVENT_COLUMNS, SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE
+from drakkar.recorder.schema import (
+    EVENT_COLUMNS,
+    SCHEMA_EVENTS,
+    SCHEMA_WORKER_CONFIG,
+    SCHEMA_WORKER_STATE,
+    WORKER_CONFIG_COLUMNS,
+    WORKER_STATE_COLUMNS,
+)
 from drakkar.recorder.sealing import own_db_files
 from drakkar.slices import (
     NOTE_SOURCE_UNREADABLE,
@@ -373,7 +380,7 @@ class SliceWriter:
             f'VALUES ({", ".join("?" * len(event_columns))})'
         )
         state_table = 'worker_states' if self._cluster_scope else 'worker_state'
-        state_columns = ['worker_id', *_STATE_COLUMNS] if self._cluster_scope else list(_STATE_COLUMNS)
+        state_columns = ['worker_id', *WORKER_STATE_COLUMNS] if self._cluster_scope else list(WORKER_STATE_COLUMNS)
         self._state_insert = (
             f'INSERT INTO {state_table} ({", ".join(state_columns)}) VALUES ({", ".join("?" * len(state_columns))})'
         )
@@ -413,9 +420,9 @@ class SliceWriter:
 
     def set_worker_config(self, config: dict[str, Any]) -> None:
         """Write the ``worker_config`` row of a worker-scope slice; a later call replaces it (newest source wins)."""
-        values = [config.get(col) for col in _WORKER_CONFIG_COLUMNS]
+        values = [config.get(col) for col in WORKER_CONFIG_COLUMNS]
         self._conn.execute(
-            f'INSERT OR REPLACE INTO worker_config (id, {", ".join(_WORKER_CONFIG_COLUMNS)}) '
+            f'INSERT OR REPLACE INTO worker_config (id, {", ".join(WORKER_CONFIG_COLUMNS)}) '
             f'VALUES (1, {", ".join("?" * len(values))})',
             values,
         )
@@ -424,8 +431,8 @@ class SliceWriter:
 
     def add_worker(self, config: dict[str, Any], source_file: str) -> int:
         """Write one ``workers`` row of a cluster-scope slice; its id."""
-        columns = [*_WORKER_CONFIG_COLUMNS, 'source_file']
-        values = [config.get(col) for col in _WORKER_CONFIG_COLUMNS] + [source_file]
+        columns = [*WORKER_CONFIG_COLUMNS, 'source_file']
+        values = [config.get(col) for col in WORKER_CONFIG_COLUMNS] + [source_file]
         cursor = self._conn.execute(
             f'INSERT INTO workers ({", ".join(columns)}) VALUES ({", ".join("?" * len(columns))})', values
         )
@@ -539,7 +546,7 @@ class _Build:
         if 'updated_at' not in present:
             return
         sql = (
-            f'SELECT id, {_select_list(present, _STATE_COLUMNS)} FROM worker_state '
+            f'SELECT id, {_select_list(present, WORKER_STATE_COLUMNS)} FROM worker_state '
             'WHERE id > ? AND updated_at >= ? AND updated_at < ? ORDER BY id LIMIT ?'
         )
         after = _NO_ID
