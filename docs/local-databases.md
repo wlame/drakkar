@@ -1538,6 +1538,96 @@ writes a temporary file and renames it, so the result appears only when it
 is complete. `merged/` is created with mode `0700`. The answer carries an
 extra `path` field with the result's path relative to `storage.shared_dir`.
 
+### Slice download
+
+`GET /api/v1/debug/slice` builds a SQLite file with the recorder events of
+one time range, filtered, and sends it as an attachment. The worker that
+holds the data builds the file, also for events that are not sealed yet or
+are only in its memory store. The Slice view of the Databases tab builds
+the link; the link is a plain download, so it also works on another
+worker's address (no CORS).
+
+```
+/api/v1/debug/slice?from=1762000000&to=1762000900&events=task_failed&max_rows=50000
+```
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `from`, `to` | the range in epoch seconds (`from` included, `to` left out), at most 168 h | required |
+| `scope` | `worker` (this worker) or `cluster` (the shared sources of the cluster) | `worker` |
+| `sources` | comma list of `memory`, `files`, `history`, `postgres`; only sources this worker has | every source it has |
+| `partition`, `offset_from`, `offset_to` | one partition and an offset range in it | none |
+| `task_id` | one task | none |
+| `events` | comma list of at most 40 event types | all |
+| `label_key`, `label_value` | one [label](handler.md#task-labels) value | none |
+| `output` | `0` leaves `stdout` and `stderr` out | `1` |
+| `max_rows` | 1 to 1000000 | 200000 |
+| `compress` | `gzip` | none |
+
+A parameter that breaks a rule answers `400` `{"error": "<message>"}`; the
+rules run in a fixed order and the first broken one answers. `scope=cluster`
+with the recorder off answers `409`. Only one slice builds at a time on a
+worker: a second request answers `429` with `Retry-After: 5`. A failed
+Postgres read answers `503` `{"error": "postgres read failed"}`, and a file
+that cannot be written `500` `{"error": "Slice failed: ..."}`.
+
+**What each source holds.** Each event is written once:
+
+| Provider | `scope=worker` | `scope=cluster` |
+|---|---|---|
+| `sqlite` | `files`: the worker first asks the recorder for one flush (at most 5 s), then reads the live and backlog files; after the flush they hold every memory row too. `history`: this worker's own sealed files. `memory` alone reads the memory store. | every sealed file of `history/<cluster>/`, every worker |
+| `postgres` | `postgres`: the table rows of this worker that its memory store does not hold; `memory`: the memory store | the table rows of the cluster, every worker |
+| recorder off | `memory` | none (`409`) |
+
+Archives (`.db.gz`) are never read: download the archive itself. With
+`sqlite` the whole-cluster file holds the sealed history only. The newest
+part of each worker (up to the rotation interval) is in that worker's
+files, so the Slice view offers one more link per worker
+(`scope=worker&sources=files` on that worker), listed first: a file sealed
+between two downloads is then in both, never in none. No worker calls
+another worker for a slice.
+
+**The file.** A worker slice has the tables of a recorder file (`events`,
+`worker_config`, `worker_state`), so every tool that opens a recorder file,
+and the merge, opens it. A cluster slice has the tables of a merge result
+(`workers`, `events` with `worker_id`, `worker_states`). Both carry two more
+tables: `slice` (one row: the scope, the building worker, the range, the
+filters as sorted JSON, the row count, the limit that cut the file and the
+notes, for example `flush_timed_out`) and `slice_sources` (one row per
+source read: `memory`, `live`, `backlog`, `sealed` or `postgres`, the file
+name, the worker and its rows). Event ids start at 1 in the order the rows
+were written, oldest source first; the source ids are not kept, because one
+worker's ids start at 1 again after a restart.
+
+The attachment is `<worker>-slice-<from>__<to>.db` or
+`<cluster>-cluster-slice-<from>__<to>.db` (UTC,
+`YYYY-MM-DD_HH-MM-SS`), with `-partial` before `.db` when a limit cut it
+and `.gz` after it with `compress=gzip`. The header `X-Drakkar-Slice-Rows`
+gives the row count, and `X-Drakkar-Slice-Truncated` the limit.
+
+**Limits.** A limit never answers an error. The worker ends the file with
+the rows it has and marks it:
+
+| Limit | Value | Mark |
+|---|---|---|
+| rows | `max_rows` | `rows` |
+| file size | 1 GiB on disk; 64 MiB in RAM | `bytes` |
+| build time | 60 s, the Postgres read included | `time` |
+| sealed files | `recorder.search.max_files`, newest first | `files` |
+
+**Where it is built.** With `storage.dir` set, in an owner-only temp file
+of the own folder named `.<worker>-slice-<16 hex>.download`, which the
+worker removes before it sends the first byte; the start sweep of the own
+folder removes one that a crash left. With `storage.dir` empty (the
+recorder off, or `postgres`), in RAM, logged as `debug_slice_in_ram`. Every
+SQLite read and write runs in a worker thread, never on the API server's
+event loop. The files are read in batches of 5000 rows by `id`, each batch
+one statement, so the recorder's checkpoint is never held back for the
+whole build; the memory store is read under its 2 second read limit per
+batch. The Postgres rows come through a server-side cursor on a connection
+of its own, with `statement_timeout` set to the time left; the Postgres
+history search and the slice share two read slots per worker process.
+
 ## Schema evolution
 
 There are **no migrations**. Tables are created with

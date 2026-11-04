@@ -238,6 +238,17 @@ the steps of the upgrade and the changes of behaviour.
   serves a copy of the cache file (`VACUUM INTO`, stopped after 30 s), one at a
   time, apart from the memory copy. A bad `source` now answers `source must be
   memory, file or cache`.
+- **Slice downloads.** `GET /api/v1/debug/slice` builds a SQLite file with the
+  recorder events of one time range, filtered by partition and offsets, task,
+  event types and one label, and streams it: from this worker (its memory store,
+  its files after one flush, its sealed files, or its Postgres rows) or from the
+  whole cluster (the sealed history, or the table rows of the cluster). Each event
+  is written once. A limit (rows, 1 GiB on disk or 64 MiB in RAM, 60 s, the sealed
+  file budget) marks the file `-partial` and never fails it; one build at a time
+  per worker (`429`). The Postgres history search and the slice share two read
+  slots. The `slice` statement is in `tests/fixtures/fleet_providers.json`, the
+  messages, names and slice tables in `tests/fixtures/slice_contract.json`
+  (contract v1.30).
 - **A start waits out a short lock.** When the owner lock of its folder is held,
   a worker tries again for 2 s before it refuses to start, so the Databases tab
   of another worker, which tests the lock for a moment, never stops a restart.
