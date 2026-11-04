@@ -3519,6 +3519,22 @@
       ]
     },
     {
+      "name": "ui_delete_enabled_default_off",
+      "yaml": {},
+      "path": "ui.delete_enabled",
+      "value": false
+    },
+    {
+      "name": "ui_delete_enabled_given",
+      "yaml": {
+        "ui": {
+          "delete_enabled": true
+        }
+      },
+      "path": "ui.delete_enabled",
+      "value": true
+    },
+    {
       "name": "ui_probe_enabled_default",
       "yaml": {},
       "path": "ui.probe.enabled",

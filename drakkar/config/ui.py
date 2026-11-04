@@ -618,11 +618,22 @@ class UIConfig(ConfigModel):
         default=True,
         description=(
             'Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that '
-            'writes to disk: each call creates a new ``merged-<ts>-<token>.db`` '
+            'writes a file: each call creates a new ``merged-<ts>-<token>.db`` '
             'in the ``merged`` folder of the shared folder, kept for '
             '``recorder.archive.merged_retention``. Set to false to serve 403 '
             'instead — independently of ``auth_token``, per the reasoning on '
             '``probe.enabled``.'
+        ),
+    )
+    delete_enabled: bool = Field(
+        default=False,
+        description=(
+            'Serve ``DELETE /api/v1/debug/files/{path}``, which deletes one merge '
+            'result (``merged/<name>.db`` in the shared folder) from the Databases '
+            'view. Off by default: the route answers 403. Only merge results can '
+            'be deleted; sealed files, archives and every other file are never '
+            'deleted from the UI. Independent of ``auth_token``, per the reasoning '
+            'on ``probe.enabled``.'
         ),
     )
     kafka_read_enabled: bool = Field(

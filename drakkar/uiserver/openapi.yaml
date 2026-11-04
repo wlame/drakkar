@@ -838,6 +838,111 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/databases/postgres:
+    get:
+      tags: [debug-tools]
+      operationId: getDatabasesPostgres
+      summary: Hour partitions of the recorder's Postgres table
+      description: >-
+        v1.30. Only with the effective recorder provider postgres. One
+        connection of its own and one of the shared UI read slots of the
+        table; four existing statements (server_now, retention_read,
+        partitions_list, partition_sizes) under statement_timeout and jit
+        off. next_drops follows the rules of the upkeep at server_now. The
+        DSN is never sent.
+      responses:
+        '200':
+          description: The partitions and the next drops.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PostgresPartitions'}
+        '404':
+          description: '{"error": "the recorder provider is not postgres"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '503':
+          description: '{"error": "postgres read failed"}: the read failed, ran out of time or found no free slot.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/files/{path}:
+    delete:
+      tags: [debug-tools]
+      operationId: deleteSharedFile
+      summary: Delete one merge result
+      description: >-
+        v1.30. path is relative to storage.shared_dir and must be
+        merged/<name>.db with the checks of /debug/download/{path}. 403 while
+        ui.delete_enabled is false (checked first); 404 for any other shape,
+        an unsafe segment, a link or a missing file; 409 while this worker
+        sends the file or merges from it; 204 after the delete.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: The file is deleted.
+        '403':
+          description: ui.delete_enabled is false.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: '{"error": "File not found"}: not a merge result path, or no such file.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '409':
+          description: '{"error": "the file is in use on this worker"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/autodiscover:
+    get:
+      tags: [debug-tools]
+      operationId: getAutodiscover
+      summary: Registry cards from the last refresh
+      description: >-
+        v1.30. From the registry snapshot in memory; no store is read. The
+        own card is not in workers. At most 1000 rows, own cluster first.
+      responses:
+        '200':
+          description: The registry state and its cards.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AutodiscoverResponse'}
+        '404':
+          description: '{"error": "autodiscover is off"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/autodiscover/leases:
+    get:
+      tags: [debug-tools]
+      operationId: getAutodiscoverLeases
+      summary: Holders of the cluster task leases
+      description: >-
+        v1.30. One store read per cluster task through the election's own
+        provider caller (op holder, one attempt, 2 s, at most 4 at once);
+        never starts the provider. election is null when the worker runs no
+        cluster task.
+      responses:
+        '200':
+          description: The election state and one row per cluster task.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LeasesResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/archives:
     get:
       tags: [debug-tools]
@@ -2186,6 +2291,11 @@ components:
             folders:
               type: array
               items: {$ref: '#/components/schemas/HistoryFolder'}
+            delete_enabled:
+              type: boolean
+              description: >-
+                ui.delete_enabled (v1.30); absent on an older backend, which
+                means the delete of a merge result is not offered.
           required: [folders]
         worker: {$ref: '#/components/schemas/DatabasesWorker'}
         recorder: {$ref: '#/components/schemas/RecorderStatus'}
@@ -2430,6 +2540,132 @@ components:
           type: array
           items: {$ref: '#/components/schemas/ArchiveEntry'}
       required: [archives]
+
+    PostgresPartitions:
+      type: object
+      description: The hour partitions of the recorder's Postgres table (v1.30).
+      properties:
+        server_now: {type: number}
+        stored_retention_hours: {type: [integer, 'null']}
+        partitions:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              from_ts: {type: integer}
+              to_ts: {type: integer}
+              size_bytes: {type: [integer, 'null']}
+            required: [name, from_ts, to_ts, size_bytes]
+        total_bytes: {type: integer}
+        next_drops:
+          type: object
+          properties:
+            retention: {type: array, items: {type: string}}
+            size: {type: array, items: {type: string}}
+          required: [retention, size]
+      required: [server_now, stored_retention_hours, partitions, total_bytes, next_drops]
+
+    AutodiscoverResponse:
+      type: object
+      description: The registry as this worker sees it (v1.30).
+      properties:
+        registry:
+          type: object
+          properties:
+            provider: {type: string}
+            connection: {type: [string, 'null']}
+            started: {type: boolean}
+            refreshed_at: {type: [string, 'null'], format: date-time}
+            last_publish_at: {type: [string, 'null'], format: date-time}
+            breaker_open: {type: boolean}
+            offline_after_seconds: {type: number}
+          required: [provider, connection, started, refreshed_at, last_publish_at, breaker_open,
+                     offline_after_seconds]
+        worker:
+          type: object
+          properties:
+            name: {type: string}
+            cluster: {type: [string, 'null']}
+            instance: {type: string}
+            key: {type: [string, 'null']}
+          required: [name, cluster, instance, key]
+        workers:
+          type: array
+          items: {$ref: '#/components/schemas/RegistryCardRow'}
+        truncated: {type: boolean}
+      required: [registry, worker, workers, truncated]
+
+    RegistryCardRow:
+      type: object
+      description: One card of the last registry refresh (v1.30).
+      properties:
+        worker: {type: string}
+        instance: {type: string}
+        cluster: {type: string}
+        state: {type: string}
+        backend: {type: [string, 'null']}
+        version: {type: [string, 'null']}
+        url: {type: string}
+        started_at: {type: [string, 'null']}
+        heartbeat_at: {type: [string, 'null']}
+        age_seconds: {type: [number, 'null']}
+        online: {type: [boolean, 'null']}
+        key: {type: [string, 'null']}
+        features: {type: object}
+      required: [worker, instance, cluster, state, backend, version, url, started_at, heartbeat_at,
+                 age_seconds, online, key, features]
+
+    LeasesResponse:
+      type: object
+      description: The cluster task leases of this worker's cluster (v1.30).
+      properties:
+        election:
+          oneOf:
+            - type: object
+              properties:
+                provider: {type: string}
+                started: {type: boolean}
+                breaker_open: {type: boolean}
+              required: [provider, started, breaker_open]
+            - {type: 'null'}
+        leases:
+          type: array
+          items: {$ref: '#/components/schemas/LeaseRow'}
+      required: [election, leases]
+
+    LeaseRow:
+      type: object
+      description: One cluster task and the holder of its lease (v1.30).
+      properties:
+        task: {type: string}
+        scope: {type: string}
+        system: {type: boolean}
+        lease_seconds: {type: integer}
+        next_slot_ts: {type: [integer, 'null']}
+        last_slot:
+          oneOf:
+            - type: object
+              properties:
+                slot: {type: integer}
+                outcome: {type: string, enum: [won, held_elsewhere, late, election_failed]}
+                at: {type: string, format: date-time}
+              required: [slot, outcome, at]
+            - {type: 'null'}
+        status: {type: string, enum: [held, free, not_started, breaker_open, failed]}
+        holder:
+          oneOf:
+            - type: object
+              properties:
+                worker: {type: [string, 'null']}
+                instance: {type: [string, 'null']}
+                acquired_at: {type: [string, 'null']}
+                age_seconds: {type: [number, 'null']}
+                expires_in_seconds: {type: [number, 'null']}
+              required: [worker, instance, acquired_at, age_seconds, expires_in_seconds]
+            - {type: 'null'}
+        key: {type: [string, 'null']}
+      required: [task, scope, system, lease_seconds, next_slot_ts, last_slot, status, holder, key]
 
     MergeResult:
       type: object

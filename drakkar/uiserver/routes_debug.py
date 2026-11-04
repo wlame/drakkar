@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from drakkar.config.recorder import PERSISTENCE_NONE, PERSISTENCE_POSTGRES
@@ -70,8 +70,9 @@ from drakkar.uiserver.databases_status import (
     storage_block,
     worker_block,
 )
+from drakkar.uiserver.files_in_use import FilesInUse
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
-from drakkar.uiserver.streaming import gzip_chunks, read_chunks
+from drakkar.uiserver.streaming import IdleLimitedStreamingResponse, gzip_chunks, read_chunks, stream_file
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -151,6 +152,10 @@ _CACHE_COPY_CHECK_STEPS = 1000
 COMPRESS_GZIP = 'gzip'
 BAD_COMPRESS_ERROR = 'compress must be gzip'
 ALREADY_COMPRESSED_ERROR = 'the file is already compressed'
+FILE_IN_USE_ERROR = 'the file is in use on this worker'
+# A merge result download whose client takes no chunk for this long is ended,
+# so a stalled client cannot keep the file in use (and undeletable) for ever.
+DOWNLOAD_SEND_IDLE_SECONDS = 120.0
 # The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
 IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
 IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
@@ -512,6 +517,15 @@ def _is_safe_segment(segment: str) -> bool:
     )
 
 
+def _is_merge_result_path(relative: str) -> bool:
+    """Whether ``relative`` names a file of the ``merged`` folder (the only files the UI may delete).
+
+    Only the first segment is read here; the full checks of
+    :func:`_shared_file_path` still apply.
+    """
+    return relative.split('/', 1)[0] == MERGED_FOLDER
+
+
 def _shared_file_path(root: Path, relative: str) -> Path | None:
     """``relative`` (a path inside the shared folder) as a file path, or None when it is not one these endpoints serve.
 
@@ -654,7 +668,8 @@ class DatabasesRead:
     read by the route handler on the API server's loop. ``worker_online`` is
     the registry's verdict for a worker name (``None`` without a registry).
     ``on_read_stopped`` is called for each memory read that the read limit
-    stopped.
+    stopped. ``delete_enabled`` is ``ui.delete_enabled``, sent in the history
+    part.
     """
 
     parts: frozenset[str]
@@ -662,6 +677,7 @@ class DatabasesRead:
     coverage: MemoryCoverage | None = None
     worker_online: WorkerOnline | None = None
     on_read_stopped: Callable[[], None] | None = None
+    delete_enabled: bool = False
 
 
 def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats, read: DatabasesRead) -> dict[str, Any]:
@@ -676,7 +692,7 @@ def _databases_answer(recorder: EventRecorder, own_stats: OwnFileStats, read: Da
         answer['own'] = _own_rows(recorder, own_stats, read.coverage, read.on_read_stopped)
     if PART_HISTORY in read.parts:
         folders = _history_answer(Path(recorder.shared_dir)) if recorder.shared_dir else []
-        answer['history'] = {'folders': folders}
+        answer['history'] = {'folders': folders, 'delete_enabled': read.delete_enabled}
     if PART_RECORDER in read.parts:
         answer['recorder'] = recorder_block(read.config, recorder, now=time.time())
     if PART_STORAGE in read.parts:
@@ -827,6 +843,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     # request holds no thread.
     memory_snapshot_slot = asyncio.Lock()
     cache_snapshot_slot = asyncio.Lock()
+    # Merge results this worker sends or merges from now; the delete refuses them.
+    files_in_use = FilesInUse()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -856,6 +874,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             coverage=recorder.memory_coverage() if PART_OWN in asked else None,
             worker_online=_worker_online(drakkar_app),
             on_read_stopped=lambda: reads_stopped.append(True),
+            delete_enabled=config.delete_enabled,
         )
         answer = await asyncio.to_thread(_databases_answer, recorder, own_stats, read)
         if reads_stopped:
@@ -893,6 +912,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # part that mattered — none to write the output into either. The
         # whole check-and-merge runs in a thread: it resolves paths on the
         # shared mount.
+        # A merge result read as a source is in use until the merge ends (the delete refuses it).
+        release = files_in_use.hold(path for path in filenames if _is_merge_result_path(path))
         try:
             result = await asyncio.to_thread(_merge_into_shared, recorder.shared_dir, filenames, output_name)
         except Exception as exc:
@@ -903,6 +924,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                 error_type=type(exc).__name__,
             )
             return JSONResponse({'error': f'Merge failed: {exc}'}, status_code=500)
+        finally:
+            release()
 
         if isinstance(result, JSONResponse):
             return result
@@ -1130,6 +1153,8 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
         if full is None:
             return JSONResponse({'error': 'File not found'}, status_code=404)
+        if _is_merge_result_path(path):
+            return await _merge_result_download(full, name, path, gzip=compress is not None)
         if compress is not None:
             handle = await _open_for_stream(full)
             if handle is None:
@@ -1144,6 +1169,61 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             # out of shared proxy/CDN caches.
             headers={'Cache-Control': 'no-store, private'},
         )
+
+    async def _merge_result_download(full: Path, name: str, path: str, *, gzip: bool) -> Response:
+        """Stream a merge result while it counts as in use; the delete refuses it until the stream ends.
+
+        A stream, not a file answer, so the end of the send is known: the
+        hold ends when the stream ends, when the client goes away, or when it
+        takes no chunk for :data:`DOWNLOAD_SEND_IDLE_SECONDS`.
+        """
+        release = files_in_use.hold([path])
+        try:
+            handle = await _open_for_stream(full)
+        except BaseException:
+            release()
+            raise
+        if handle is None:
+            release()
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        headers = {
+            'Content-Disposition': f'attachment; filename="{name}.gz"' if gzip else f'attachment; filename="{name}"',
+            'Cache-Control': 'no-store, private',
+        }
+        if not gzip:
+            headers['Content-Length'] = str(os.fstat(handle.fileno()).st_size)
+        return IdleLimitedStreamingResponse(
+            stream_file(handle, gzip=gzip),
+            idle_seconds=DOWNLOAD_SEND_IDLE_SECONDS,
+            on_close=release,
+            media_type='application/gzip' if gzip else 'application/x-sqlite3',
+            headers=headers,
+        )
+
+    @router.delete('/api/v1/debug/files/{path:path}', dependencies=[Depends(deps.require_auth)])
+    async def debug_delete_file(path: str):
+        """Delete one merge result (``merged/<name>.db``); ``path`` is relative to the shared folder.
+
+        403 while ``ui.delete_enabled`` is false (checked first); 404 for any
+        other path shape (a sealed file or an archive included), an unsafe
+        segment, a link or a missing file; 409 while this worker sends the
+        file or merges from it; 204 after the delete.
+        """
+        if not config.delete_enabled:
+            return _disabled_response('delete', 'ui.delete_enabled')
+        if not _is_merge_result_path(path):
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
+        if full is None:
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        if files_in_use.in_use(path):
+            return JSONResponse({'error': FILE_IN_USE_ERROR}, status_code=409)
+        try:
+            await asyncio.to_thread(os.unlink, full)
+        except FileNotFoundError:
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        await logger.ainfo('debug_file_deleted', category='debug', path=path)
+        return Response(status_code=204)
 
     @router.get('/api/v1/debug/download-live', dependencies=[Depends(deps.require_auth)])
     async def debug_download_live(source: str | None = None, compress: str | None = None):

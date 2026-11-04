@@ -9,7 +9,9 @@ bounded as a whole by ``recorder.search.timeout``: the client side by
 
 ``GET /api/v1/debug/slice`` reads the rows of one time range the same way,
 with a server-side cursor, batch by batch, bounded by the time left of the
-build. Both reads share one small set of slots (:func:`postgres_read_slot`).
+build. ``GET /api/v1/debug/databases/postgres`` reads the partitions of the
+table and computes what the next upkeep drops. The three reads share one
+small set of slots (:func:`postgres_read_slot`).
 """
 
 from __future__ import annotations
@@ -28,10 +30,14 @@ from drakkar.providers.postgres import (
     SET_LOCAL_VALUES,
     SETTING_JIT,
     STATEMENT_TIMEOUT_SETTING,
+    parse_partition_hour,
+    parse_retention_comment,
+    partition_bounds,
     render_recorder,
 )
 from drakkar.providers.resilience import describe_error
 from drakkar.recorder.postgres import RecorderPostgresSettings, replace_nul
+from drakkar.recorder.postgres_writer import measured_partitions, size_drops, upkeep_actions
 
 MILLISECONDS_PER_SECOND = 1000
 # The smallest statement_timeout sent: 0 would mean no limit on the server.
@@ -329,3 +335,120 @@ async def _read_slice(
             conn.terminate()
     if close_error is not None:
         await on_close_failed(close_error)
+
+
+@dataclass(frozen=True)
+class PartitionRow:
+    """One hour partition of the table: its name, its hour bounds (epoch seconds) and its size (``None`` when gone)."""
+
+    name: str
+    from_ts: int
+    to_ts: int
+    size_bytes: int | None
+
+
+@dataclass(frozen=True)
+class TablePartitions:
+    """The partitions of the recorder table at the server time ``server_now``, and what the next upkeep drops.
+
+    ``retention_drops`` and ``size_drops`` follow the rules of the upkeep
+    (:func:`~drakkar.recorder.postgres_writer.upkeep_actions` and
+    :func:`~drakkar.recorder.postgres_writer.size_drops`) with the stored
+    retention and this worker's ``max_size``.
+    """
+
+    server_now: float
+    stored_retention_hours: int | None
+    partitions: list[PartitionRow]
+    retention_drops: list[str]
+    size_drops: list[str]
+
+    @property
+    def total_bytes(self) -> int:
+        """The sum of the known partition sizes."""
+        return sum(row.size_bytes or 0 for row in self.partitions)
+
+
+async def read_table_partitions(
+    settings: RecorderPostgresSettings,
+    *,
+    max_seconds: float,
+    on_close_failed: CloseFailed,
+    connect: Connect | None = None,
+) -> TablePartitions:
+    """Read the partitions of the recorder table with four existing statements; no other SQL is sent.
+
+    One connection of its own (no pool) and one of the shared UI read slots,
+    as the history search. In one transaction: ``statement_timeout`` (the
+    capped ``max_seconds`` in whole milliseconds) and JIT off, then
+    ``server_now``, ``retention_read``, ``partitions_list`` and
+    ``partition_sizes``. Only the names that are partitions of this table
+    (``<table>_p`` plus a UTC hour) become rows, ascending.
+
+    Raises :class:`PostgresHistoryError` as the history search does.
+    """
+    with postgres_read_slot():
+        return await _read_partitions(settings, max_seconds, on_close_failed, connect)
+
+
+async def _read_partitions(
+    settings: RecorderPostgresSettings,
+    max_seconds: float,
+    on_close_failed: CloseFailed,
+    connect: Connect | None,
+) -> TablePartitions:
+    """One partitions read with a connection of its own; the caller holds the slot."""
+    connect = connect if connect is not None else asyncpg.connect
+    statements = RECORDER_STATEMENT_TEMPLATES
+    qualified = settings.qualified_table
+    deadline = asyncio.get_running_loop().time() + search_limit_seconds(max_seconds)
+    conn: Any = None
+    close_error: str | None = None
+    try:
+        async with asyncio.timeout_at(deadline):
+            conn = await connect(dsn=settings.connection.dsn)
+            # Started and committed by hand, as in the history search.
+            transaction = conn.transaction()
+            await transaction.start()
+            await conn.execute(statements['set_local'], STATEMENT_TIMEOUT_SETTING, statement_timeout_ms(max_seconds))
+            await conn.execute(statements['set_local'], SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT])
+            now = float(await conn.fetchval(statements['server_now']))
+            stored = parse_retention_comment(await conn.fetchval(statements['retention_read'], qualified))
+            listed = [row[0] for row in await conn.fetch(statements['partitions_list'], qualified)]
+            names = measured_partitions(settings.table, listed, [])
+            sizes = {
+                row[0]: int(row[1]) for row in await conn.fetch(statements['partition_sizes'], settings.schema, names)
+            }
+            await transaction.commit()
+        close_error = await _close_after_search(conn, deadline)
+    except TimeoutError as exc:
+        raise PostgresHistoryError('timeout', describe_error(exc)) from exc
+    except Exception as exc:
+        raise PostgresHistoryError('error', describe_error(exc)) from exc
+    finally:
+        if conn is not None and not conn.is_closed():
+            conn.terminate()
+    if close_error is not None:
+        await on_close_failed(close_error)
+    return _table_partitions(settings, now, stored, names, sizes)
+
+
+def _table_partitions(
+    settings: RecorderPostgresSettings, now: float, stored: int | None, names: list[str], sizes: dict[str, int]
+) -> TablePartitions:
+    """The rows and the next drops of one read, computed as the upkeep computes them."""
+    rows = [
+        PartitionRow(name, *partition_bounds(hour), size_bytes=sizes.get(name))
+        for name in names
+        if (hour := parse_partition_hour(settings.table, name)) is not None
+    ]
+    retention = upkeep_actions(settings.table, now, stored, names).drop
+    measured = measured_partitions(settings.table, names, retention)
+    by_size = size_drops(settings.table, now, measured, sizes, settings.max_size)
+    return TablePartitions(
+        server_now=now,
+        stored_retention_hours=stored,
+        partitions=rows,
+        retention_drops=retention,
+        size_drops=by_size,
+    )

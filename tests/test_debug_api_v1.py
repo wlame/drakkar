@@ -1600,7 +1600,11 @@ async def test_databases_and_download_after_stop_answer_empty_shapes(started_rec
         stopped_download = await c.get('/api/v1/debug/download-live')
 
     assert racing == stopped
-    assert (stopped['own'], stopped['history'], stopped['recorder']['memory']) == ([], {'folders': []}, None)
+    assert (stopped['own'], stopped['history'], stopped['recorder']['memory']) == (
+        [],
+        {'folders': [], 'delete_enabled': False},
+        None,
+    )
     for resp in (racing_download, stopped_download):
         assert resp.status_code == 404
         assert resp.json() == {'error': 'No memory store on this worker'}

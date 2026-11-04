@@ -1259,7 +1259,7 @@ def test_warn_if_ui_unauthenticated_names_the_side_effecting_endpoints(config_wi
     caller-supplied bytes and merge writes files. Each live endpoint is
     named alongside the key that closes it.
     """
-    config = config_with_ui(UIConfig(enabled=True, auth_token=''))
+    config = config_with_ui(UIConfig(enabled=True, auth_token='', delete_enabled=True))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1292,6 +1292,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
         warn_if_ui_unauthenticated(config)
 
     message = _captured_unauth_events(cap)[0]['message']
+    assert 'DELETE /api/v1/debug/files/{path}' not in message
     for endpoint in SIDE_EFFECTING_ENDPOINTS:
         if endpoint.route in expected_routes:
             assert endpoint.route in message

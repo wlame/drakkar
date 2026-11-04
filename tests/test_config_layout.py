@@ -210,6 +210,7 @@ LAYOUT = [
     'ui.probe.max_writes',
     'ui.probe.max_total_size',
     'ui.merge_enabled',
+    'ui.delete_enabled',
     'ui.kafka_read_enabled',
     'ui.consume_pause.enabled',
     'ui.consume_pause.durations',

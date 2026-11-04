@@ -6,15 +6,19 @@ paths relative to the shared folder (``history/<cluster>/<name>``,
 sealed history only with ``history=1``.
 """
 
+import asyncio
 import gzip
 import os
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
+from structlog.testing import capture_logs
 
 from drakkar.config import DrakkarConfig, RecorderConfig, UIConfig
 from drakkar.recorder import EventRecorder
@@ -93,9 +97,16 @@ def shared(tmp_path):
     return tmp_path / 'shared'
 
 
-def _app(tmp_path, *, memory_only: bool = False, shared_only: bool = False, merge_enabled: bool = True):
+def _app(
+    tmp_path,
+    *,
+    memory_only: bool = False,
+    shared_only: bool = False,
+    merge_enabled: bool = True,
+    delete_enabled: bool = False,
+):
     """``memory_only``: no folder at all. ``shared_only``: no recorder file, a shared folder."""
-    config = UIConfig(enabled=True, merge_enabled=merge_enabled)
+    config = UIConfig(enabled=True, merge_enabled=merge_enabled, delete_enabled=delete_enabled)
     recorder = EventRecorder(
         RecorderConfig(),
         worker_name='w-1',
@@ -128,7 +139,7 @@ async def test_memory_only_databases_answer_is_empty(tmp_path):
         resp = await c.get('/api/v1/debug/databases')
 
     answer = resp.json()
-    assert (answer['own'], answer['history']) == ([], {'folders': []})
+    assert (answer['own'], answer['history']) == ([], {'folders': [], 'delete_enabled': False})
 
 
 async def test_databases_lists_history_folders_for_a_none_worker_with_shared_dir(tmp_path, shared):
@@ -479,3 +490,177 @@ async def test_merge_download_and_archives_work_for_a_worker_with_the_recorder_o
     assert merge.status_code == 200
     assert [a['name'] for a in archives.json()['archives']] == [os.path.basename(archive)]
     assert live.status_code == 404
+
+
+# --- DELETE /debug/files (merge results only) ---
+
+MERGED_NAME = 'merged-2026-10-14__10_00_00-0123456789abcdef.db'
+
+
+@pytest.fixture
+async def deleting(tmp_path, storage):
+    app, _recorder = _app(tmp_path, delete_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+        yield c
+
+
+async def test_delete_answers_403_while_ui_delete_enabled_is_false(client, shared):
+    merged = _recorder_db(shared / 'merged' / MERGED_NAME)
+
+    response = await client.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert response.status_code == 403
+    assert response.json() == {
+        'error': 'The delete endpoint is disabled by configuration (set ui.delete_enabled=true to enable it)'
+    }
+    assert os.path.exists(merged)
+
+
+async def test_delete_removes_a_merge_result_and_answers_204(deleting, shared):
+    merged = _recorder_db(shared / 'merged' / MERGED_NAME)
+
+    with capture_logs() as logs:
+        response = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert response.status_code == 204
+    assert response.content == b''
+    assert not os.path.exists(merged)
+    assert [entry for entry in logs if entry['event'] == 'debug_file_deleted'] == [
+        {'event': 'debug_file_deleted', 'log_level': 'info', 'category': 'debug', 'path': f'merged/{MERGED_NAME}'}
+    ]
+
+
+@pytest.mark.parametrize(
+    'path',
+    [
+        f'history/{CLUSTER}/w-1-2026-10-14__08_00_00.db',
+        f'history/{CLUSTER}/{archive_file_name(CLUSTER, 1_760_000_000.0 - DAY, 1_760_000_000.0)}',
+        'merged/.merged-hidden.db',
+        'merged/notes.txt',
+        'merged/sub/x.db',
+        'merged/missing.db',
+        'merged',
+        'tasks/search/history.archive.lock',
+    ],
+)
+async def test_delete_refuses_every_path_but_an_existing_merge_result_with_404(deleting, shared, path):
+    sealed = _sealed(shared, CLUSTER, 'w-1-2026-10-14__08_00_00.db')
+    archive = _archive(shared, CLUSTER, 1_760_000_000.0)
+    hidden = _recorder_db(shared / 'merged' / '.merged-hidden.db')
+
+    response = await deleting.delete(f'/api/v1/debug/files/{path}')
+
+    assert response.status_code == 404
+    assert response.json() == {'error': 'File not found'}
+    assert all(os.path.exists(kept) for kept in (sealed, archive, hidden))
+
+
+async def test_delete_refuses_a_link_in_the_merged_folder(deleting, shared, tmp_path):
+    outside = _recorder_db(tmp_path / 'outside.db')
+    (shared / 'merged').mkdir(parents=True)
+    os.symlink(outside, shared / 'merged' / 'merged-link.db')
+
+    response = await deleting.delete('/api/v1/debug/files/merged/merged-link.db')
+
+    assert response.status_code == 404
+    assert os.path.exists(outside)
+
+
+async def test_delete_without_a_shared_folder_answers_404(tmp_path):
+    app, _recorder = _app(tmp_path, memory_only=True, delete_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+        response = await c.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert response.status_code == 404
+
+
+async def test_delete_answers_409_while_this_worker_merges_from_the_file(deleting, shared, monkeypatch):
+    merged = _recorder_db(shared / 'merged' / MERGED_NAME)
+    sealed = _sealed(shared, CLUSTER, 'w-1-2026-10-14__08_00_00.db')
+    merging = threading.Event()
+    finish = threading.Event()
+
+    def slow_merge(shared_dir, paths, output_name):
+        merging.set()
+        finish.wait(5)
+        return JSONResponse({'error': 'stopped by the test'}, status_code=400)
+
+    monkeypatch.setattr(routes_debug, '_merge_into_shared', slow_merge)
+    paths = [f'history/{CLUSTER}/{os.path.basename(sealed)}', f'merged/{MERGED_NAME}']
+    merge = asyncio.ensure_future(deleting.post('/api/v1/debug/merge', json={'filenames': paths}))
+    await asyncio.to_thread(merging.wait, 5)
+
+    during = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+    finish.set()
+    await merge
+    after = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert during.status_code == 409
+    assert during.json() == {'error': 'the file is in use on this worker'}
+    assert after.status_code == 204
+    assert not os.path.exists(merged)
+
+
+async def test_delete_answers_409_while_this_worker_sends_the_file(deleting, shared, monkeypatch):
+    _recorder_db(shared / 'merged' / MERGED_NAME)
+    sending = asyncio.Event()
+    finish = asyncio.Event()
+    real_stream = routes_debug.stream_file
+
+    async def held_stream(handle, *, gzip):
+        sending.set()
+        await finish.wait()
+        async for chunk in real_stream(handle, gzip=gzip):
+            yield chunk
+
+    monkeypatch.setattr(routes_debug, 'stream_file', held_stream)
+    download = asyncio.ensure_future(deleting.get(f'/api/v1/debug/download/merged/{MERGED_NAME}'))
+    await sending.wait()
+
+    during = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+    finish.set()
+    sent = await download
+    after = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert during.status_code == 409
+    assert sent.status_code == 200
+    assert after.status_code == 204
+
+
+async def test_a_merge_result_download_streams_the_file_with_its_length(client, shared):
+    merged = _recorder_db(shared / 'merged' / MERGED_NAME)
+
+    plain = await client.get(f'/api/v1/debug/download/merged/{MERGED_NAME}')
+    packed = await client.get(f'/api/v1/debug/download/merged/{MERGED_NAME}?compress=gzip')
+
+    raw = Path(merged).read_bytes()
+    assert plain.status_code == 200
+    assert plain.content == raw
+    assert plain.headers['content-length'] == str(len(raw))
+    assert plain.headers['content-type'] == 'application/x-sqlite3'
+    assert plain.headers['content-disposition'] == f'attachment; filename="{MERGED_NAME}"'
+    assert plain.headers['cache-control'] == 'no-store, private'
+    assert gzip.decompress(packed.content) == raw
+    assert 'content-length' not in packed.headers
+    assert packed.headers['content-disposition'] == f'attachment; filename="{MERGED_NAME}.gz"'
+
+
+async def test_a_merge_result_gone_before_its_open_answers_404_and_frees_the_file(client, shared, monkeypatch):
+    _recorder_db(shared / 'merged' / MERGED_NAME)
+
+    async def gone(path):
+        return None
+
+    monkeypatch.setattr(routes_debug, '_open_for_stream', gone)
+
+    response = await client.get(f'/api/v1/debug/download/merged/{MERGED_NAME}')
+
+    assert response.status_code == 404
+
+
+async def test_databases_history_tells_whether_the_delete_is_on(deleting, client):
+    on = (await deleting.get('/api/v1/debug/databases?parts=history')).json()
+    off = (await client.get('/api/v1/debug/databases?parts=history')).json()
+
+    assert on['history']['delete_enabled'] is True
+    assert off['history']['delete_enabled'] is False

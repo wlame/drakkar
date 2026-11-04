@@ -455,10 +455,13 @@ ui:
                                    # (debug/trace, debug/trace-by-label, debug/databases). With auth_token set,
                                    # list every worker origin. env: DK_UI__ALLOWED_ORIGINS (JSON list)
 
-  # --- Side-effecting endpoints (gated independently of auth_token; ui.probe.enabled is the third switch) ---
+  # --- Side-effecting endpoints (gated independently of auth_token; ui.probe.enabled is one more switch) ---
   merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>-<token>.db into
                                    # <storage.shared_dir>/merged/, deleted after recorder.archive.merged_retention.
                                    # false = 403. env: DK_UI__MERGE_ENABLED
+  delete_enabled: false            # DELETE /api/v1/debug/files/{path}; deletes one merge result (merged/<name>.db)
+                                   # from the Databases view. Nothing else can be deleted. false = 403.
+                                   # env: DK_UI__DELETE_ENABLED
   kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 

@@ -1,9 +1,15 @@
-"""Databases view routes: ``/api/v1/debug/slice``.
+"""Databases view routes: the slice download, the Postgres partitions and the autodiscover state.
 
 Routes:
   * ``/api/v1/debug/slice`` — build a slice of the recorder events of one time
     range into a private temp file (or in RAM without a folder), unlink it and
     stream it as an attachment.
+  * ``/api/v1/debug/databases/postgres`` — the hour partitions of the
+    recorder's Postgres table and what the next upkeep drops.
+  * ``/api/v1/debug/autodiscover`` — the registry cards of the last refresh,
+    from memory.
+  * ``/api/v1/debug/autodiscover/leases`` — who holds each cluster task's
+    lease, read through the election's own provider caller.
 
 The answer is a navigation target (a plain link, also to a peer), so the
 route takes only query parameters and answers no CORS. The check order is
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
@@ -27,8 +34,10 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from drakkar.cluster_tasks import HOLDER_OP, ClusterElection
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.recorder.postgres_history import PostgresHistoryError
+from drakkar.providers.resilience import CallResult, describe_error
+from drakkar.recorder.postgres_history import PostgresHistoryError, read_table_partitions
 from drakkar.slice_build import BuiltSlice, SliceWorker, build_slice
 from drakkar.slices import (
     BUSY_ERROR,
@@ -54,6 +63,18 @@ from drakkar.slices import (
     parse_slice_request,
     plan_slice,
 )
+from drakkar.uiserver.autodiscover_status import (
+    AUTODISCOVER_OFF_ERROR,
+    LEASE_FAILED,
+    card_rows,
+    display_key,
+    lease_row,
+    lease_skeletons,
+    lease_status,
+    registry_connection,
+    registry_header,
+)
+from drakkar.uiserver.server import dispatch_bounded
 from drakkar.uiserver.streaming import IdleLimitedStreamingResponse, stream_file
 
 if TYPE_CHECKING:
@@ -63,6 +84,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 SLICE_ENDPOINT = '/api/v1/debug/slice'
+POSTGRES_PARTITIONS_ENDPOINT = '/api/v1/debug/databases/postgres'
+AUTODISCOVER_ENDPOINT = '/api/v1/debug/autodiscover'
+LEASES_ENDPOINT = '/api/v1/debug/autodiscover/leases'
+NOT_POSTGRES_ERROR = 'the recorder provider is not postgres'
+# Lease holder reads that run at once on the main loop.
+MAX_HOLDER_READS = 4
 
 
 def slice_sources_of(recorder: EventRecorder) -> SliceSources:
@@ -158,7 +185,7 @@ def _close_unsent(build: asyncio.Future[BuiltSlice]) -> None:
 
 
 def create_databases_router(deps: UIDeps) -> APIRouter:
-    """Build the router of the Databases view routes (``/api/v1/debug/slice``)."""
+    """Build the router of the Databases view routes (see the module docstring)."""
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -275,4 +302,187 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
             return _error(500, f'{FAILED_ERROR_PREFIX}{exc}')
         return _slice_response(built, slice_request.compress, open_slices.hold(built.size_bytes))
 
+    # --- the Postgres partitions ---
+
+    async def _log_partitions_failed(reason: str, error: str) -> None:
+        """``ui_read_postgres_failed`` of the partitions read, at most one line per minute."""
+        await deps.postgres_read_log.emit(
+            POSTGRES_PARTITIONS_ENDPOINT,
+            logger.awarning,
+            'ui_read_postgres_failed',
+            category='debug',
+            endpoint=POSTGRES_PARTITIONS_ENDPOINT,
+            reason=reason,
+            error=error,
+        )
+
+    async def _log_partitions_close_failed(error: str) -> None:
+        await _log_partitions_failed('close', error)
+
+    @router.get(POSTGRES_PARTITIONS_ENDPOINT)
+    async def api_debug_databases_postgres():
+        """The hour partitions of the recorder table and the next drops; 404 unless the provider is postgres.
+
+        One connection of its own and one of the shared UI read slots, on the
+        API server's loop (asyncpg does not block it); 503 when the read
+        fails, runs out of time or finds no free slot.
+        """
+        settings = recorder.postgres_settings
+        if settings is None:
+            return _error(404, NOT_POSTGRES_ERROR)
+        try:
+            table = await read_table_partitions(
+                settings,
+                max_seconds=recorder.config.search.timeout,
+                on_close_failed=_log_partitions_close_failed,
+            )
+        except PostgresHistoryError as exc:
+            await _log_partitions_failed(exc.reason, exc.error)
+            return _error(503, POSTGRES_FAILED_ERROR)
+        return JSONResponse(
+            {
+                'server_now': table.server_now,
+                'stored_retention_hours': table.stored_retention_hours,
+                'partitions': [
+                    {'name': row.name, 'from_ts': row.from_ts, 'to_ts': row.to_ts, 'size_bytes': row.size_bytes}
+                    for row in table.partitions
+                ],
+                'total_bytes': table.total_bytes,
+                'next_drops': {'retention': table.retention_drops, 'size': table.size_drops},
+            }
+        )
+
+    # --- autodiscover ---
+
+    @router.get(AUTODISCOVER_ENDPOINT)
+    async def api_debug_autodiscover():
+        """The registry and its cards from the last refresh; no store is read. 404 with autodiscover off."""
+        config = drakkar_app._config
+        fleet = drakkar_app.fleet
+        if not config.autodiscover.enabled or fleet is None:
+            return _error(404, AUTODISCOVER_OFF_ERROR)
+        shared_dir = config.resolved_shared_dir
+
+        def key_of(worker: str) -> str | None:
+            return display_key(fleet.card_key(worker), shared_dir)
+
+        identity = fleet.identity
+        rows, truncated = card_rows(fleet.peer_views(), own_cluster=identity.cluster, card_key=key_of)
+        return JSONResponse(
+            {
+                'registry': registry_header(
+                    fleet.status(),
+                    connection=registry_connection(fleet.provider_name, config.autodiscover.connection),
+                    offline_after_seconds=config.autodiscover.offline_after,
+                ),
+                'worker': {
+                    'name': identity.worker,
+                    'cluster': identity.cluster or None,
+                    'instance': identity.instance,
+                    'key': key_of(identity.worker),
+                },
+                'workers': rows,
+                'truncated': truncated,
+            }
+        )
+
+    async def _log_provider_read_failed(provider: str, error: str) -> None:
+        """``ui_read_provider_failed`` of the leases read, at most one line per minute."""
+        await deps.postgres_read_log.emit(
+            LEASES_ENDPOINT,
+            logger.awarning,
+            'ui_read_provider_failed',
+            category='debug',
+            endpoint=LEASES_ENDPOINT,
+            provider=provider,
+            op=HOLDER_OP,
+            error=error,
+        )
+
+    @router.get(LEASES_ENDPOINT)
+    async def api_debug_autodiscover_leases():
+        """Each cluster task of this worker and who holds its lease; the read never starts the election.
+
+        The rows are built here from the roster and memory. Only the holder
+        reads run on the main loop, where the provider lives, through the
+        election's caller (op ``holder``), at most :data:`MAX_HOLDER_READS`
+        at once and within the main-loop dispatch limit; a row whose read
+        did not answer is ``failed``.
+        """
+        election = drakkar_app.cluster_election
+        roster = drakkar_app.periodic_roster
+        if election is None or roster is None:
+            return JSONResponse({'election': None, 'leases': []})
+        skeletons = lease_skeletons(
+            roster.definitions,
+            cluster=recorder.cluster_name,
+            now=time.time(),
+            last_slots=election.last_slots,
+        )
+        started = election.started and not election.stopped
+        results: dict[str, Any] = {}
+        if started and skeletons:
+            answered = await dispatch_bounded(
+                _read_holders(election, [skeleton.scope for skeleton in skeletons]), drakkar_app.main_loop
+            )
+            results = answered if isinstance(answered, dict) else {}
+        shared_dir = drakkar_app._config.resolved_shared_dir
+        rows = []
+        failures: list[str] = []
+        for skeleton in skeletons:
+            result = results.get(skeleton.scope)
+            status, holder = lease_status(started, result)
+            if status == LEASE_FAILED:
+                failures.append(_failure_text(result))
+            key = _lease_key(election, skeleton.scope, shared_dir) if election.started else None
+            rows.append(lease_row(skeleton, status=status, holder=holder, key=key))
+        if failures:
+            await _log_provider_read_failed(election.provider_name, failures[0])
+        return JSONResponse(
+            {
+                'election': {
+                    'provider': election.provider_name,
+                    'started': election.started,
+                    'breaker_open': election.caller.breaker_open,
+                },
+                'leases': rows,
+            }
+        )
+
     return router
+
+
+async def _read_holders(election: ClusterElection, scopes: list[str]) -> dict[str, CallResult | BaseException | None]:
+    """Read the holder of each scope on the main loop, at most :data:`MAX_HOLDER_READS` at once.
+
+    Every error is kept as the scope's result, so one failure never hides
+    the others (the dispatch would swallow it into no answer at all).
+    """
+    gate = asyncio.Semaphore(MAX_HOLDER_READS)
+
+    async def read(scope: str) -> tuple[str, CallResult | BaseException | None]:
+        async with gate:
+            try:
+                return scope, await election.read_holder(scope)
+            except Exception as exc:
+                return scope, exc
+
+    return dict(await asyncio.gather(*(read(scope) for scope in scopes)))
+
+
+def _failure_text(result: Any) -> str:
+    """The error text of a failed holder read, for the log line."""
+    if isinstance(result, CallResult):
+        return f'holder {result.outcome}'
+    if isinstance(result, BaseException):
+        return describe_error(result)
+    return 'the main loop did not answer in time'
+
+
+def _lease_key(election: ClusterElection, scope: str, shared_dir: str) -> str | None:
+    """Where the provider keeps the lease of ``scope``, as the UI shows it; ``None`` when it cannot tell."""
+    try:
+        return display_key(election.provider.lease_key(scope), shared_dir)
+    except Exception:
+        # A display value only: a provider that cannot name the key shows none.
+        return None

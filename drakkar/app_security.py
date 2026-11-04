@@ -47,6 +47,11 @@ SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
         field='merge_enabled',
         effect='writes a new merged-<ts>-<token>.db into storage.dir that nothing reclaims',
     ),
+    SideEffectingEndpoint(
+        route='DELETE /api/v1/debug/files/{path}',
+        field='delete_enabled',
+        effect='deletes a merge result from the merged folder of the shared folder',
+    ),
 )
 
 

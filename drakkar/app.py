@@ -507,6 +507,16 @@ class DrakkarApp:
         return self._fleet
 
     @property
+    def cluster_election(self) -> ClusterElection | None:
+        """The election of the cluster tasks, or None when the worker runs none."""
+        return self._cluster_election
+
+    @property
+    def periodic_roster(self) -> PeriodicRoster | None:
+        """The periodic tasks of the worker, or None before the roster is built."""
+        return self._periodic_roster
+
+    @property
     def lifecycle_state(self) -> str:
         """``starting``, ``running`` or ``draining``."""
         return self._lifecycle_state

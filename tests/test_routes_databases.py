@@ -30,9 +30,10 @@ from drakkar.cache.sql import SCHEMA_CACHE_ENTRIES
 from drakkar.config import DrakkarConfig, PostgresConnectionConfig, RecorderConfig, ResilienceConfig, UIConfig
 from drakkar.fleet.service import FleetRegistry
 from drakkar.ownerlock import take_own_lock
+from drakkar.providers.postgres import RECORDER_STATEMENT_TEMPLATES, partition_name
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.postgres import RecorderPostgresSettings
-from drakkar.recorder.postgres_history import postgres_read_slot
+from drakkar.recorder.postgres_history import postgres_read_slot, statement_timeout_ms
 from drakkar.recorder.postgres_writer import PostgresStageStatus, UpkeepStatus, WriterStatus
 from drakkar.slice_build import BuiltSlice, build_slice
 from drakkar.slices import SliceSources, parse_slice_request, plan_slice
@@ -940,3 +941,239 @@ async def test_a_postgres_slice_names_rows_still_waiting_for_the_write_stage(tmp
     assert asked == [routes_databases.SLICE_POSTGRES_FLUSH_SECONDS]
     with contextlib.closing(sqlite3.connect(_save_body(resp.content, tmp_path))) as conn:
         assert json.loads(conn.execute('SELECT notes FROM slice').fetchone()[0]) == notes
+
+
+# --- GET /debug/databases/postgres ---
+
+PARTITIONS_ENDPOINT = '/api/v1/debug/databases/postgres'
+MIB = 1024 * 1024
+
+
+class _PartitionsConnection:
+    """Answers the four statements of the partitions read; every call lands in ``calls``."""
+
+    def __init__(self, fake: _PartitionsFake) -> None:
+        self._fake = fake
+        self.closed = False
+
+    def transaction(self) -> SimpleNamespace:
+        async def start() -> None:
+            self._fake.calls.append(('BEGIN',))
+
+        async def commit() -> None:
+            self._fake.calls.append(('COMMIT',))
+
+        return SimpleNamespace(start=start, commit=commit)
+
+    async def execute(self, sql: str, *args):
+        self._fake.calls.append((sql, *args))
+
+    async def fetchval(self, sql: str, *args):
+        self._fake.calls.append((sql, *args))
+        statements = RECORDER_STATEMENT_TEMPLATES
+        if sql == statements['server_now']:
+            if self._fake.hang:
+                await asyncio.sleep(3600)
+            return self._fake.now
+        assert sql == statements['retention_read']
+        return self._fake.comment
+
+    async def fetch(self, sql: str, *args):
+        self._fake.calls.append((sql, *args))
+        statements = RECORDER_STATEMENT_TEMPLATES
+        if sql == statements['partitions_list']:
+            return [(name,) for name in self._fake.listed]
+        assert sql == statements['partition_sizes']
+        return [(name, self._fake.sizes[name]) for name in args[1] if name in self._fake.sizes]
+
+    async def close(self) -> None:
+        if self._fake.close_error is not None:
+            raise self._fake.close_error
+        self.closed = True
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def terminate(self) -> None:
+        self.closed = True
+
+
+class _PartitionsFake:
+    """Stands in for :func:`asyncpg.connect` in the partitions read."""
+
+    def __init__(self, *, now: float, listed: list[str], sizes: dict[str, int], comment: str | None) -> None:
+        self.now = now
+        self.listed = listed
+        self.sizes = sizes
+        self.comment = comment
+        self.calls: list[tuple] = []
+        self.dsns: list[str] = []
+        self.connect_error: Exception | None = None
+        self.close_error: Exception | None = None
+        self.hang = False
+
+    async def connect(self, *, dsn: str) -> _PartitionsConnection:
+        self.dsns.append(dsn)
+        if self.connect_error is not None:
+            raise self.connect_error
+        return _PartitionsConnection(self)
+
+
+TABLE = 'fast_recorder_events'
+HOUR = 491_000  # an hour since the epoch (2026-01-05 08:00 UTC)
+
+
+def _partitions_fake() -> _PartitionsFake:
+    """Hours HOUR-8 to HOUR+3 of 10 MiB each and a child table of another name; retention 6 h stored."""
+    hours = range(HOUR - 8, HOUR + 4)
+    listed = [partition_name(TABLE, hour) for hour in hours] + [f'{TABLE}_old']
+    sizes = {partition_name(TABLE, hour): 10 * MIB for hour in hours} | {f'{TABLE}_old': 1}
+    return _PartitionsFake(now=HOUR * 3600 + 100.0, listed=listed, sizes=sizes, comment='retention_hours=6')
+
+
+async def test_postgres_partitions_answers_the_rows_and_the_next_drops(monkeypatch):
+    fake = _partitions_fake()
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+        resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    names = [partition_name(TABLE, hour) for hour in range(HOUR - 8, HOUR + 4)]
+    assert body['server_now'] == HOUR * 3600 + 100.0
+    assert body['stored_retention_hours'] == 6
+    assert [row['name'] for row in body['partitions']] == names
+    assert body['partitions'][0] == {
+        'name': names[0],
+        'from_ts': (HOUR - 8) * 3600,
+        'to_ts': (HOUR - 7) * 3600,
+        'size_bytes': 10 * MIB,
+    }
+    assert body['total_bytes'] == 120 * MIB
+    assert body['next_drops'] == {
+        'retention': names[:2],
+        # 100 MiB are left after the retention; the oldest go until 64 MiB or less remain.
+        'size': names[2:6],
+    }
+    assert DSN not in resp.text
+    assert fake.dsns == [DSN]
+
+
+async def test_postgres_partitions_sends_only_the_four_existing_statements_under_the_search_limit(monkeypatch):
+    fake = _partitions_fake()
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+        await client.get(PARTITIONS_ENDPOINT)
+
+    statements = RECORDER_STATEMENT_TEMPLATES
+    names = [partition_name(TABLE, hour) for hour in range(HOUR - 8, HOUR + 4)]
+    assert fake.calls == [
+        ('BEGIN',),
+        (statements['set_local'], 'statement_timeout', statement_timeout_ms(RecorderConfig().search.timeout)),
+        (statements['set_local'], 'jit', 'off'),
+        (statements['server_now'],),
+        (statements['retention_read'], f'drakkar.{TABLE}'),
+        (statements['partitions_list'], f'drakkar.{TABLE}'),
+        (statements['partition_sizes'], 'drakkar', names),
+        ('COMMIT',),
+    ]
+
+
+async def test_postgres_partitions_without_a_stored_retention_drops_nothing_by_retention(monkeypatch):
+    fake = _partitions_fake()
+    fake.comment = 'set by hand'
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+        body = (await client.get(PARTITIONS_ENDPOINT)).json()
+
+    assert body['stored_retention_hours'] is None
+    assert body['next_drops']['retention'] == []
+    assert len(body['next_drops']['size']) == 6
+
+
+async def test_postgres_partitions_of_a_partition_gone_during_the_read_has_no_size(monkeypatch):
+    fake = _partitions_fake()
+    gone = partition_name(TABLE, HOUR)
+    del fake.sizes[gone]
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+        body = (await client.get(PARTITIONS_ENDPOINT)).json()
+
+    assert next(row for row in body['partitions'] if row['name'] == gone)['size_bytes'] is None
+    assert body['total_bytes'] == 110 * MIB
+
+
+async def test_postgres_partitions_on_a_worker_of_another_provider_answers_404():
+    async with _client(_recorder(), _config()) as client:
+        resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 404
+    assert resp.json() == {'error': 'the recorder provider is not postgres'}
+
+
+async def test_postgres_partitions_answers_503_and_logs_when_the_read_fails(monkeypatch):
+    fake = _partitions_fake()
+    fake.connect_error = OSError('connection refused')
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    with capture_logs() as logs:
+        async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+            resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 503
+    assert resp.json() == {'error': 'postgres read failed'}
+    failed = [entry for entry in logs if entry['event'] == 'ui_read_postgres_failed']
+    assert [(entry['endpoint'], entry['reason']) for entry in failed] == [(PARTITIONS_ENDPOINT, 'error')]
+    assert DSN not in json.dumps(failed)
+
+
+async def test_postgres_partitions_answers_503_busy_when_both_read_slots_are_taken(monkeypatch):
+    fake = _partitions_fake()
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    with capture_logs() as logs, postgres_read_slot(), postgres_read_slot():
+        async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+            resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 503
+    assert fake.dsns == []
+    assert [entry['reason'] for entry in logs if entry['event'] == 'ui_read_postgres_failed'] == ['busy']
+
+
+async def test_postgres_partitions_answers_503_when_the_read_runs_out_of_time(monkeypatch):
+    fake = _partitions_fake()
+    fake.hang = True
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+    config = _config(provider='postgres', search={'timeout': '1s'})
+    recorder = EventRecorder(
+        config.recorder,
+        worker_name=WORKER,
+        cluster_name=CLUSTER,
+        persistence='postgres',
+        instance='0123456789abcdef',
+        postgres=_postgres_settings(),
+    )
+
+    with capture_logs() as logs:
+        async with _client(recorder, config) as client:
+            resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 503
+    assert [entry['reason'] for entry in logs if entry['event'] == 'ui_read_postgres_failed'] == ['timeout']
+
+
+async def test_postgres_partitions_keeps_a_complete_read_whose_close_fails(monkeypatch):
+    fake = _partitions_fake()
+    fake.close_error = OSError('reset by peer')
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    with capture_logs() as logs:
+        async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+            resp = await client.get(PARTITIONS_ENDPOINT)
+
+    assert resp.status_code == 200
+    assert [entry['reason'] for entry in logs if entry['event'] == 'ui_read_postgres_failed'] == ['close']
