@@ -269,8 +269,13 @@ the steps of the upgrade and the changes of behaviour.
   next slot, the outcome of its last slot on this worker and the holder of its
   lease. Every election provider gains `holder(scope)` and `lease_key(scope)`,
   and every registry provider `card_key(worker)`. The holder read goes through
-  the election's caller as the operation `holder` (one attempt, 2 s), never
-  starts the provider, and logs `ui_read_provider_failed` when it fails. The
+  a caller of the UI's own (`feature="ui"`, operation `holder`, one attempt,
+  2 s) whose breaker is apart from the election's, so it never makes a slot
+  call `skipped_open`; one batch of reads runs per worker at a time (others
+  answer `busy`); the `filesystem` read writes nothing, runs on a thread of
+  its own and reports an approximate age. It never starts the provider, and
+  logs `ui_read_provider_failed` when it fails. A merge source that fails part
+  way is rolled back whole. The
   Postgres statement `holder` and the Redis `PTTL` are in
   `tests/fixtures/fleet_providers.json` (contract v1.30).
 - **A start waits out a short lock.** When the owner lock of its folder is held,

@@ -797,7 +797,7 @@ lease. What each provider reads:
 
 | Provider | Read | Age of the last refresh | Time left |
 |---|---|---|---|
-| `filesystem` | the lock file body | the file's change time on the file server's clock | lease length minus the age |
+| `filesystem` | the lock file body | approximate: this host's clock minus the lock file's modification time (`age_approximate: true`) | lease length minus the age |
 | `postgres` | the statement `holder` on `task_locks` | `now() - refreshed_at` on the database server | lease length minus the age |
 | `redis` | `GET` of the lock key (as the fencing check), then `PTTL` | not known | the key's time to live |
 | `consul` | the key read of the fencing check; held only while a session holds the key | not known | not known |
@@ -805,14 +805,33 @@ lease. What each provider reads:
 A negative time left means the lease ran out and the store still keeps it
 (a lock file or a row stays until another worker takes the scope).
 
-Each read goes through the election's own caller as the operation `holder`:
-one attempt, at most 2 seconds, at most 4 reads at once, on the worker's main
-loop. So `drakkar_provider_calls_total{feature="election",op="holder"}`
-counts it, and a failed read counts against the election's breaker like any
-other call. While the breaker is open no read is sent and the row says
-`breaker_open`. The read never starts the provider: before the first slot
-the rows say `not_started`. A row whose read failed or did not answer within
-5 seconds says `failed`, and the worker logs `ui_read_provider_failed`.
+The `filesystem` read only reads: it writes no clock marker into the lock
+folder and changes no file time. It cannot sample the file server's clock
+without a write, so its age compares the server's file time with this host's
+clock; with clocks that differ, the age is off by that difference.
+
+Each read goes through a caller of the UI's own, with the label
+`feature="ui"` and the operation `holder`: one attempt, at most 2 seconds.
+`drakkar_provider_calls_total{feature="ui",op="holder"}` counts the reads,
+and `drakkar_provider_breaker_open{feature="ui"}` shows the UI caller's own
+breaker. A failed or slow UI read never counts against the election's
+breaker, so it can never make a slot's acquire, refresh, fencing check or
+release `skipped_open`. While the election's breaker is open, no read is sent
+and the row says `breaker_open`.
+
+UI reads never compete with the slot path for the provider's resources:
+
+- The `filesystem` provider runs them on a thread of their own, apart from
+  the thread of its slot calls, so a read stuck on a hung mount never delays a
+  slot.
+- One batch of reads runs per worker at a time; a request that comes while
+  one runs gets every row `busy` and reads nothing. Inside a batch at most 2
+  reads run at once, and with `postgres` one, so the slot path keeps the rest
+  of the connection pool.
+
+The read never starts the provider: before the first slot the rows say
+`not_started`. A row whose read failed or did not answer within 5 seconds says
+`failed`, and the worker logs `ui_read_provider_failed`.
 
 ## Connections {#connections}
 
@@ -1065,7 +1084,7 @@ also counted by the three provider metrics:
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `drakkar_provider_calls_total` | counter | `feature` (`registry`, `election`), `provider`, `op`, `outcome` (`ok`, `error`, `timeout`, `skipped_open`, `not_started`) | Provider operations by feature, provider, operation and [outcome](#resilience). |
+| `drakkar_provider_calls_total` | counter | `feature` (`registry`, `election`, `ui` for the holder reads of the [Autodiscover view](#autodiscover-view)), `provider`, `op`, `outcome` (`ok`, `error`, `timeout`, `skipped_open`, `not_started`) | Provider operations by feature, provider, operation and [outcome](#resilience). |
 | `drakkar_provider_call_duration_seconds` | histogram | `feature`, `provider`, `op` | Duration of one provider operation with its retries. One sample per operation that made an attempt. Buckets run from 5 ms to 30 s. |
 | `drakkar_provider_breaker_open` | gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open, else `0`. |
 
