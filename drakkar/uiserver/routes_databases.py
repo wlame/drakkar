@@ -176,12 +176,16 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
             return _error(409, CLUSTER_UNAVAILABLE_ERROR)
         if build_slot.locked():
             return _error(429, BUSY_ERROR, {'Retry-After': str(SLICE_RETRY_AFTER_SECONDS)})
+        # Read before the slot is taken: nothing between the take and the
+        # release callback below may raise, or the slot would stay held.
+        worker = slice_worker_of(recorder)
+        plan = plan_slice(slice_request, recorder.persistence)
         await build_slot.acquire()
         build = asyncio.ensure_future(
             build_slice(
                 slice_request,
-                slice_worker_of(recorder),
-                plan_slice(slice_request, recorder.persistence),
+                worker,
+                plan,
                 flush=_flush_recorder,
                 flush_memory=_flush_memory,
                 on_postgres_failed=_log_postgres_failed,
