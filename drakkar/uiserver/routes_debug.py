@@ -377,6 +377,34 @@ def _close_opened(opening: asyncio.Future[BinaryIO]) -> None:
         opening.result().close()
 
 
+def _open_sized(path: Path) -> tuple[BinaryIO, int]:
+    """Open ``path`` for reading bytes and read its size from the open file. Blocking."""
+    handle = path.open('rb')
+    try:
+        return handle, os.fstat(handle.fileno()).st_size
+    except BaseException:
+        handle.close()
+        raise
+
+
+def _close_opened_sized(opening: asyncio.Future[tuple[BinaryIO, int]]) -> None:
+    """Close the file a sized open returned after its request went away."""
+    if not opening.cancelled() and opening.exception() is None:
+        opening.result()[0].close()
+
+
+async def _open_sized_for_stream(path: Path) -> tuple[BinaryIO, int] | None:
+    """:func:`_open_for_stream` that also reads the size, in the same thread call (no file call on the loop)."""
+    opening = asyncio.ensure_future(asyncio.to_thread(_open_sized, path))
+    try:
+        return await asyncio.shield(opening)
+    except FileNotFoundError:
+        return None
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_opened_sized)
+        raise
+
+
 async def _open_for_stream(path: Path) -> BinaryIO | None:
     """Open ``path`` in a thread for a stream; ``None`` when it is gone (the archive pass may have folded it).
 
@@ -780,11 +808,21 @@ def _merge_sources(root: Path, paths: list[str]) -> tuple[list[str], JSONRespons
     return sources, None
 
 
-def _merge_into_shared(shared_dir: str, paths: list[str], output_name: str) -> MergeResult | JSONResponse:
-    """Check the sources, then merge them into ``<shared>/merged/<output_name>``. Blocking.
+# A file's identity on disk: the key of the in-use holds of the UI delete.
+FileKey = tuple[int, int]
 
-    Answers with the error response when a source is refused. The output
-    folder is created owner-only when missing; a merge failure raises.
+
+def _file_key(path: Path) -> FileKey:
+    """The identity of ``path`` on disk, ``(st_dev, st_ino)``. Blocking."""
+    info = path.stat()
+    return (info.st_dev, info.st_ino)
+
+
+def _resolve_merge(shared_dir: str, paths: list[str]) -> tuple[list[str], list[FileKey]] | JSONResponse:
+    """Check the merge sources: their paths, and the keys of the merge results among them. Blocking.
+
+    Answers with the error response when no shared folder is set or a source
+    is refused.
     """
     root = _db_root(shared_dir)
     if root is None:
@@ -792,9 +830,65 @@ def _merge_into_shared(shared_dir: str, paths: list[str], output_name: str) -> M
     sources, error = _merge_sources(root, paths)
     if error is not None:
         return error
-    folder = root / MERGED_FOLDER
+    try:
+        keys = [
+            _file_key(Path(source)) for source, path in zip(sources, paths, strict=True) if _is_merge_result_path(path)
+        ]
+    except FileNotFoundError:
+        return JSONResponse({'error': 'File not found'}, status_code=404)
+    return sources, keys
+
+
+def _merge_resolved(shared_dir: str, sources: list[str], output_name: str) -> MergeResult:
+    """Merge checked sources into ``<shared>/merged/<output_name>``. Blocking.
+
+    The output folder is created owner-only when missing; a merge failure raises.
+    """
+    folder = Path(shared_dir).resolve() / MERGED_FOLDER
     folder.mkdir(mode=0o700, exist_ok=True)
     return merge_databases_atomic(sources, str(folder / output_name))
+
+
+def _merge_result_file(shared_dir: str, relative: str) -> tuple[Path, FileKey] | None:
+    """An existing merge result to download and its key; ``None`` when it is not one. Blocking."""
+    full = _existing_shared_file(shared_dir, relative)
+    if full is None:
+        return None
+    try:
+        return full, _file_key(full)
+    except FileNotFoundError:
+        return None
+
+
+def _deletable_merge_result(shared_dir: str, relative: str) -> tuple[Path, FileKey] | None:
+    """The merge result ``relative`` names and its key, when the UI may delete it; else ``None``. Blocking.
+
+    Beyond the download checks, the ``merged`` folder itself must be a real
+    folder, not a link, and the file must sit right in it: a ``merged`` that
+    is a link to a history folder never makes a sealed file deletable.
+    """
+    root = _db_root(shared_dir)
+    if root is None or not _is_merge_result_path(relative):
+        return None
+    folder = root / MERGED_FOLDER
+    if folder.is_symlink() or not folder.is_dir():
+        return None
+    full = _shared_file_path(root, relative)
+    if full is None or full.parent != folder or not full.is_file():
+        return None
+    try:
+        return full, _file_key(full)
+    except FileNotFoundError:
+        return None
+
+
+def _unlink_in_folder(folder: Path, name: str) -> None:
+    """Delete ``name`` inside ``folder``, opened without following a link, so a folder swapped meanwhile is refused. Blocking."""
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 # ``/api/v1/debug/probe`` request body — module-scope per the FastAPI
@@ -912,10 +1006,17 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         # part that mattered — none to write the output into either. The
         # whole check-and-merge runs in a thread: it resolves paths on the
         # shared mount.
+        resolved = await asyncio.to_thread(_resolve_merge, recorder.shared_dir, filenames)
+        if isinstance(resolved, JSONResponse):
+            return resolved
+        sources, keys = resolved
         # A merge result read as a source is in use until the merge ends (the delete refuses it).
-        release = files_in_use.hold(path for path in filenames if _is_merge_result_path(path))
+        release = files_in_use.hold(keys)
+        if release is None:
+            # A merge result being deleted right now.
+            return JSONResponse({'error': 'File not found'}, status_code=404)
         try:
-            result = await asyncio.to_thread(_merge_into_shared, recorder.shared_dir, filenames, output_name)
+            result = await asyncio.to_thread(_merge_resolved, recorder.shared_dir, sources, output_name)
         except Exception as exc:
             await logger.awarning(
                 'merge_failed',
@@ -927,8 +1028,6 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         finally:
             release()
 
-        if isinstance(result, JSONResponse):
-            return result
         return JSONResponse(
             {
                 'filename': output_name,
@@ -1150,11 +1249,11 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         name = path.rsplit('/', 1)[-1]
         if compress is not None and ARCHIVE_NAME_RE.fullmatch(name):
             return JSONResponse({'error': ALREADY_COMPRESSED_ERROR}, status_code=400)
+        if _is_merge_result_path(path):
+            return await _merge_result_download(path, name, gzip=compress is not None)
         full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
         if full is None:
             return JSONResponse({'error': 'File not found'}, status_code=404)
-        if _is_merge_result_path(path):
-            return await _merge_result_download(full, name, path, gzip=compress is not None)
         if compress is not None:
             handle = await _open_for_stream(full)
             if handle is None:
@@ -1170,28 +1269,36 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             headers={'Cache-Control': 'no-store, private'},
         )
 
-    async def _merge_result_download(full: Path, name: str, path: str, *, gzip: bool) -> Response:
+    async def _merge_result_download(path: str, name: str, *, gzip: bool) -> Response:
         """Stream a merge result while it counts as in use; the delete refuses it until the stream ends.
 
         A stream, not a file answer, so the end of the send is known: the
         hold ends when the stream ends, when the client goes away, or when it
-        takes no chunk for :data:`DOWNLOAD_SEND_IDLE_SECONDS`.
+        takes no chunk for :data:`DOWNLOAD_SEND_IDLE_SECONDS`. A file being
+        deleted answers 404.
         """
-        release = files_in_use.hold([path])
+        found = await asyncio.to_thread(_merge_result_file, recorder.shared_dir, path)
+        if found is None:
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        full, key = found
+        release = files_in_use.hold([key])
+        if release is None:
+            return JSONResponse({'error': 'File not found'}, status_code=404)
         try:
-            handle = await _open_for_stream(full)
+            opened = await _open_sized_for_stream(full)
         except BaseException:
             release()
             raise
-        if handle is None:
+        if opened is None:
             release()
             return JSONResponse({'error': 'File not found'}, status_code=404)
+        handle, size = opened
         headers = {
             'Content-Disposition': f'attachment; filename="{name}.gz"' if gzip else f'attachment; filename="{name}"',
             'Cache-Control': 'no-store, private',
         }
         if not gzip:
-            headers['Content-Length'] = str(os.fstat(handle.fileno()).st_size)
+            headers['Content-Length'] = str(size)
         return IdleLimitedStreamingResponse(
             stream_file(handle, gzip=gzip),
             idle_seconds=DOWNLOAD_SEND_IDLE_SECONDS,
@@ -1211,17 +1318,21 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         """
         if not config.delete_enabled:
             return _disabled_response('delete', 'ui.delete_enabled')
-        if not _is_merge_result_path(path):
+        found = await asyncio.to_thread(_deletable_merge_result, recorder.shared_dir, path)
+        if found is None:
             return JSONResponse({'error': 'File not found'}, status_code=404)
-        full = await asyncio.to_thread(_existing_shared_file, recorder.shared_dir, path)
-        if full is None:
-            return JSONResponse({'error': 'File not found'}, status_code=404)
-        if files_in_use.in_use(path):
+        full, key = found
+        # The check and the mark run with no await in between: a download or a
+        # merge that starts while the unlink runs is refused, not left reading.
+        if files_in_use.in_use(key):
             return JSONResponse({'error': FILE_IN_USE_ERROR}, status_code=409)
+        end_delete = files_in_use.begin_delete(key)
         try:
-            await asyncio.to_thread(os.unlink, full)
+            await asyncio.to_thread(_unlink_in_folder, full.parent, full.name)
         except FileNotFoundError:
             return JSONResponse({'error': 'File not found'}, status_code=404)
+        finally:
+            end_delete()
         await logger.ainfo('debug_file_deleted', category='debug', path=path)
         return Response(status_code=204)
 

@@ -8,6 +8,7 @@ sealed history only with ``history=1``.
 
 import asyncio
 import gzip
+import io
 import os
 import sqlite3
 import threading
@@ -16,7 +17,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
@@ -580,12 +580,12 @@ async def test_delete_answers_409_while_this_worker_merges_from_the_file(deletin
     merging = threading.Event()
     finish = threading.Event()
 
-    def slow_merge(shared_dir, paths, output_name):
+    def slow_merge(shared_dir, sources, output_name):
         merging.set()
         finish.wait(5)
-        return JSONResponse({'error': 'stopped by the test'}, status_code=400)
+        raise RuntimeError('stopped by the test')
 
-    monkeypatch.setattr(routes_debug, '_merge_into_shared', slow_merge)
+    monkeypatch.setattr(routes_debug, '_merge_resolved', slow_merge)
     paths = [f'history/{CLUSTER}/{os.path.basename(sealed)}', f'merged/{MERGED_NAME}']
     merge = asyncio.ensure_future(deleting.post('/api/v1/debug/merge', json={'filenames': paths}))
     await asyncio.to_thread(merging.wait, 5)
@@ -651,7 +651,7 @@ async def test_a_merge_result_gone_before_its_open_answers_404_and_frees_the_fil
     async def gone(path):
         return None
 
-    monkeypatch.setattr(routes_debug, '_open_for_stream', gone)
+    monkeypatch.setattr(routes_debug, '_open_sized_for_stream', gone)
 
     response = await client.get(f'/api/v1/debug/download/merged/{MERGED_NAME}')
 
@@ -664,3 +664,161 @@ async def test_databases_history_tells_whether_the_delete_is_on(deleting, client
 
     assert on['history']['delete_enabled'] is True
     assert off['history']['delete_enabled'] is False
+
+
+async def test_delete_refuses_a_merged_folder_that_is_a_link_into_the_history(deleting, shared):
+    sealed = _sealed(shared, CLUSTER, 'w-1-2026-10-14__08_00_00.db')
+    os.symlink(shared / 'history' / CLUSTER, shared / 'merged')
+
+    response = await deleting.delete('/api/v1/debug/files/merged/w-1-2026-10-14__08_00_00.db')
+
+    assert response.status_code == 404
+    assert os.path.exists(sealed)
+
+
+async def test_delete_answers_409_for_another_name_of_a_file_being_sent(deleting, shared, monkeypatch):
+    merged = _recorder_db(shared / 'merged' / MERGED_NAME)
+    os.link(merged, shared / 'merged' / 'merged-second-name.db')
+    sending = asyncio.Event()
+    finish = asyncio.Event()
+    real_stream = routes_debug.stream_file
+
+    async def held_stream(handle, *, gzip):
+        sending.set()
+        await finish.wait()
+        async for chunk in real_stream(handle, gzip=gzip):
+            yield chunk
+
+    monkeypatch.setattr(routes_debug, 'stream_file', held_stream)
+    download = asyncio.ensure_future(deleting.get(f'/api/v1/debug/download/merged/{MERGED_NAME}'))
+    await sending.wait()
+
+    during = await deleting.delete('/api/v1/debug/files/merged/merged-second-name.db')
+    finish.set()
+    await download
+
+    assert during.status_code == 409
+
+
+async def test_a_download_that_starts_while_the_file_is_deleted_answers_404(deleting, shared, monkeypatch):
+    _recorder_db(shared / 'merged' / MERGED_NAME)
+    unlinking = threading.Event()
+    finish = threading.Event()
+    real_unlink = routes_debug._unlink_in_folder
+
+    def slow_unlink(folder, name):
+        unlinking.set()
+        finish.wait(5)
+        real_unlink(folder, name)
+
+    monkeypatch.setattr(routes_debug, '_unlink_in_folder', slow_unlink)
+    delete = asyncio.ensure_future(deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}'))
+    await asyncio.to_thread(unlinking.wait, 5)
+
+    download = await deleting.get(f'/api/v1/debug/download/merged/{MERGED_NAME}')
+    merge = await deleting.post(
+        '/api/v1/debug/merge', json={'filenames': [f'merged/{MERGED_NAME}', f'merged/{MERGED_NAME}']}
+    )
+    finish.set()
+    deleted = await delete
+
+    assert download.status_code == 404
+    assert merge.status_code == 404
+    assert deleted.status_code == 204
+
+
+async def test_a_merge_with_a_missing_shared_folder_answers_404(tmp_path):
+    app, _recorder = _app(tmp_path, memory_only=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+        response = await c.post('/api/v1/debug/merge', json={'filenames': ['merged/a.db', 'merged/b.db']})
+
+    assert response.status_code == 404
+
+
+async def test_the_sized_open_closes_the_file_of_a_request_cancelled_during_the_open(tmp_path, monkeypatch):
+    opened = io.BytesIO(b'data')
+    started = threading.Event()
+    may_end = threading.Event()
+
+    def slow_open(_path):
+        started.set()
+        may_end.wait(timeout=10)
+        return opened, 4
+
+    monkeypatch.setattr(routes_debug, '_open_sized', slow_open)
+    task = asyncio.create_task(routes_debug._open_sized_for_stream(tmp_path / 'f.db'))
+    assert await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    may_end.set()
+    for _ in range(100):
+        if opened.closed:
+            break
+        await asyncio.sleep(0.01)
+
+    assert opened.closed
+
+
+async def test_the_sized_open_of_a_missing_file_is_none_and_reads_the_size(tmp_path):
+    (tmp_path / 'f.db').write_bytes(b'12345')
+
+    missing = await routes_debug._open_sized_for_stream(tmp_path / 'gone.db')
+    handle, size = await routes_debug._open_sized_for_stream(tmp_path / 'f.db')
+    handle.close()
+
+    assert missing is None
+    assert size == 5
+
+
+def test_the_sized_open_closes_its_file_when_the_size_cannot_be_read(tmp_path, monkeypatch):
+    (tmp_path / 'f.db').write_bytes(b'12345')
+    handles = []
+    real_open = Path.open
+
+    def recording_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    def no_size(_fd):
+        raise OSError('stale handle')
+
+    monkeypatch.setattr(Path, 'open', recording_open)
+    monkeypatch.setattr(routes_debug.os, 'fstat', no_size)
+
+    with pytest.raises(OSError, match='stale handle'):
+        routes_debug._open_sized(tmp_path / 'f.db')
+    assert handles and handles[0].closed
+
+
+def _vanishing_key(_path):
+    raise FileNotFoundError('gone between the check and the stat')
+
+
+async def test_a_file_gone_before_its_key_is_read_answers_404_everywhere(deleting, shared, monkeypatch):
+    _recorder_db(shared / 'merged' / MERGED_NAME)
+    monkeypatch.setattr(routes_debug, '_file_key', _vanishing_key)
+    path = f'merged/{MERGED_NAME}'
+
+    download = await deleting.get(f'/api/v1/debug/download/{path}')
+    delete = await deleting.delete(f'/api/v1/debug/files/{path}')
+    merge = await deleting.post('/api/v1/debug/merge', json={'filenames': [path, path]})
+
+    assert (download.status_code, delete.status_code, merge.status_code) == (404, 404, 404)
+
+
+async def test_a_merge_result_download_whose_open_fails_frees_the_file(deleting, shared, monkeypatch):
+    _recorder_db(shared / 'merged' / MERGED_NAME)
+
+    async def broken_open(_path):
+        raise RuntimeError('the mount went away')
+
+    monkeypatch.setattr(routes_debug, '_open_sized_for_stream', broken_open)
+    with pytest.raises(RuntimeError):
+        await deleting.get(f'/api/v1/debug/download/merged/{MERGED_NAME}')
+    monkeypatch.undo()
+
+    response = await deleting.delete(f'/api/v1/debug/files/merged/{MERGED_NAME}')
+
+    assert response.status_code == 204
