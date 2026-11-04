@@ -33,9 +33,11 @@ The provider does not do this:
   and the archives list still show the sealed files that are in the history
   folder.
 - `trace-by-label` does not search the table. It reads the memory store.
-- There is no download of Postgres rows. `/api/v1/debug/databases` shows the
-  table settings and this worker's writer, not the rows (see
-  [The Databases tab](#the-databases-tab)).
+- `/api/v1/debug/databases` shows the table settings and this worker's
+  writer, not the rows (see [The Databases tab](#the-databases-tab)). The
+  rows of a time range are downloaded as a SQLite file through
+  `/api/v1/debug/slice`: this worker's rows, or every row of the cluster
+  (see [Slice download](local-databases.md#slice-download)).
 
 Write `provider: postgres` in the config; it is never chosen for you. It
 loads with an empty `storage.dir`: the worker then has no cache file and no

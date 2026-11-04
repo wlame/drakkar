@@ -1173,8 +1173,9 @@ deletes merge results older than `recorder.archive.merged_retention`
 (default 32 days; `0` keeps them).
 
 A worker's own files in `storage.dir` — the live file and the backlog —
-are not merge sources and are not downloadable: use a file once it is
-sealed into the history folder.
+are not merge sources and are not downloadable as files: use a file once it
+is sealed into the history folder, or download the events of a time range
+as a [slice](local-databases.md#slice-download).
 
 **Archives are never merge candidates.** The Databases tab's archives
 (see [Archiving](#archiving) above) are read-only — no selection

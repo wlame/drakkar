@@ -1491,7 +1491,8 @@ is in `drakkar-ui/docs/api-contract-v1.md`.
 Any other path, an unsafe path segment, a symlink, a path that resolves
 outside `storage.shared_dir`, or a missing file answers `404`. Own files in
 `storage.dir` are not downloadable by path: download a file once it is
-sealed.
+sealed, or download the events of a time range as a
+[slice](#slice-download).
 
 **Compressed downloads.** `compress=gzip` on `/api/v1/debug/download/{path}`
 and on `/api/v1/debug/download-live` sends the same bytes as a gzip stream,
