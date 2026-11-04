@@ -39,6 +39,7 @@ import structlog
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.dbfiles import DB_FILE_MODE
 from drakkar.recorder.history import folder_server_now, serialize_json
+from drakkar.recorder.lease import LeaseHolder, holder_from_body
 from drakkar.timefmt import format_rfc3339_micro
 
 logger = structlog.get_logger()
@@ -264,28 +265,56 @@ class TaskLock:
         return folder_server_now(self._folder, self._instance)
 
     def _read_body(self) -> dict[str, Any] | None:
-        """The lock body; ``None`` when there is no lock this protocol wrote. Other read errors raise ``OSError``.
+        """The lock body; ``None`` when there is no lock this protocol wrote (see :func:`read_lock_body`)."""
+        return read_lock_body(self._path)
 
-        ``None`` for a missing file, a symlink (the open refuses to follow
-        it), a file that is not regular, and a body that is not a JSON
-        object.
-        """
-        try:
-            fd = os.open(self._path, _READ_FLAGS)
-        except FileNotFoundError:
+
+def read_lock_body(path: str) -> dict[str, Any] | None:
+    """The body of the lock file ``path``; ``None`` when there is no lock this protocol wrote. Other read errors raise ``OSError``.
+
+    ``None`` for a missing file, a symlink (the open refuses to follow it), a
+    file that is not regular, and a body that is not a JSON object.
+    """
+    try:
+        fd = os.open(path, _READ_FLAGS)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
             return None
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                return None
-            raise
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return None
-            raw = os.read(fd, MAX_LOCK_BYTES)
-        finally:
-            os.close(fd)
-        try:
-            body = json.loads(raw.decode('utf-8'))
-        except ValueError:
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        return body if isinstance(body, dict) else None
+        raw = os.read(fd, MAX_LOCK_BYTES)
+    finally:
+        os.close(fd)
+    try:
+        body = json.loads(raw.decode('utf-8'))
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def read_lock_holder(path: str, instance: str) -> LeaseHolder | None:
+    """Who holds the lock file ``path``; ``None`` when there is none. Read-only for the lock; blocking.
+
+    The age is the time since the lock's last refresh (its mtime) on the file
+    server's clock, read in the lock's folder with the marker of
+    ``instance``; ``None`` when that clock cannot be read (a read-only
+    mount). A lock file whose body is not a lock names no holder, and a lock
+    older than its lease is still reported: the store keeps it until a taker
+    moves it aside. An error of the read itself raises ``OSError``.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    body = read_lock_body(path)
+    try:
+        age: float | None = max(0.0, folder_server_now(os.path.dirname(path), instance) - info.st_mtime)
+    except OSError:
+        age = None
+    return holder_from_body(body, age_seconds=age)

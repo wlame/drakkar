@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
@@ -19,6 +20,8 @@ from drakkar.providers.postgres import (
     statements_for,
 )
 from drakkar.providers.thread import PROVIDER_STOPPED
+from drakkar.recorder.lease import LeaseHolder
+from drakkar.timefmt import format_rfc3339_micro
 
 if TYPE_CHECKING:
     # Only for the annotations: drakkar.recorder.election imports this module to register the provider.
@@ -78,6 +81,8 @@ class PostgresElection:
         self._worker = ''
         self._instance = ''
         self._logger: Any = structlog.get_logger()
+        # The schema of the lock table, set by a successful start.
+        self._schema = ''
         self._stopped = False
 
     async def start(self, ctx: 'ElectionContext') -> None:
@@ -96,6 +101,7 @@ class PostgresElection:
             tables=[TASK_LOCKS_TABLE],
         )
         self._ready = (pool, statements_for(schema))
+        self._schema = schema
 
     async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
         """Take ``scope`` for ``token``; True for a free scope, an expired lease, or the token that holds it."""
@@ -140,6 +146,30 @@ class PostgresElection:
         pool, statements = self._started()
         async with borrow(pool) as conn:
             await conn.execute(statements['release'], scope, token)
+
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        """The row of ``scope``: its worker, instance, ``acquired_at`` and the age of its last refresh on the server's clock.
+
+        The row of a lease that ran out stays until a taker replaces it, so
+        its age can be above the lease length.
+        """
+        pool, statements = self._started()
+        async with borrow(pool) as conn:
+            row = await conn.fetchrow(statements['holder'], scope)
+        if row is None:
+            return None
+        acquired_at = row[2]
+        return LeaseHolder(
+            worker=row[0],
+            instance=row[1],
+            acquired_at=format_rfc3339_micro(acquired_at) if isinstance(acquired_at, datetime) else None,
+            age_seconds=max(0.0, float(row[3])),
+        )
+
+    def lease_key(self, scope: str) -> str:
+        """The row of ``scope``: ``<schema>.task_locks (scope = '<scope>')``."""
+        self._started()
+        return f"{self._schema}.{TASK_LOCKS_TABLE} (scope = '{scope}')"
 
     async def stop(self) -> None:
         """Refuse every later call; leases are released by their holders, the shared pool by the worker."""

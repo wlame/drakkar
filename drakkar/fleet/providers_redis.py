@@ -178,6 +178,11 @@ class RedisRegistry:
             member,
         )
 
+    def card_key(self, worker: str) -> str:
+        """The key of the card of ``worker``: ``<prefix>fleet:workers:<sanitized worker>``."""
+        _, prefix = self._started()
+        return key('registry_card', prefix=prefix, worker=sanitize_worker_name(worker))
+
     async def stop(self) -> None:
         """Refuse every later call; the shared client stays open for the worker to close."""
         self._stopped = True

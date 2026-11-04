@@ -189,6 +189,11 @@ class ConsulRegistry:
         if session is not None:
             await destroy_session(client, session)
 
+    def card_key(self, worker: str) -> str:
+        """The KV key of the card of ``worker``: ``<prefix>/fleet/workers/<sanitized worker>``."""
+        _, prefix = self._started()
+        return path('registry_card', prefix=prefix, worker=sanitize_worker_name(worker)).removeprefix(KV_PATH_HEAD)
+
     async def stop(self) -> None:
         """Refuse every later call; the session is left to ``withdraw`` and the shared client to the worker."""
         self._stopped = True

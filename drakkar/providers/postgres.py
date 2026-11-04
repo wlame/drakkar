@@ -89,6 +89,11 @@ STATEMENT_TEMPLATES: dict[str, str] = {
     'refresh': 'UPDATE {schema}.task_locks SET refreshed_at = now() WHERE scope = $1 AND token = $2',
     'is_held': 'SELECT 1 FROM {schema}.task_locks WHERE scope = $1 AND token = $2',
     'release': 'DELETE FROM {schema}.task_locks WHERE scope = $1 AND token = $2',
+    # Read-only: who holds a scope and how long ago the lease was refreshed (the Databases view).
+    'holder': (
+        'SELECT worker, instance, acquired_at, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 '
+        'FROM {schema}.task_locks WHERE scope = $1'
+    ),
 }
 
 # SQLSTATE classes a retry can cure: connection exceptions (08), insufficient

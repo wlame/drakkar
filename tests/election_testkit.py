@@ -234,6 +234,7 @@ async def check_calls_after_stop_are_refused(
         'refresh': lambda: provider.refresh(SCOPE_A, TOKEN_A),
         'release': lambda: provider.release(SCOPE_A, TOKEN_A),
         'acquire': lambda: provider.acquire(SCOPE_A, TOKEN_A, lease_seconds),
+        'holder': lambda: provider.holder(SCOPE_A),
         'start': lambda: provider.start(make_context('kit-stopped')),
     }
     answered: list[str] = []
@@ -247,6 +248,50 @@ async def check_calls_after_stop_are_refused(
     _expect(not answered, f'a call after stop did not fail: {", ".join(answered)}')
 
 
+async def check_holder_names_the_lease_holder(
+    make_provider: ElectionMaker, advance: Advance, lease_seconds: float
+) -> None:
+    """Another process reads who holds a scope, without a token and without changing the lease.
+
+    ``holder`` answers ``None`` for a free scope and after the release, and
+    names the holder's worker and instance while it holds the scope.
+    ``lease_key`` names a different place for each scope.
+    """
+    async with (
+        _running(make_provider, 'kit-holder', INSTANCE_A) as holder,
+        _running(make_provider, 'kit-reader', INSTANCE_B) as reader,
+    ):
+        before = await reader.holder(SCOPE_A)
+        took = await holder.acquire(SCOPE_A, TOKEN_A, lease_seconds)
+        held_by = await reader.holder(SCOPE_A)
+        other_scope = await reader.holder(SCOPE_B)
+        still_held = await holder.is_held(SCOPE_A, TOKEN_A)
+        await holder.release(SCOPE_A, TOKEN_A)
+        after = await reader.holder(SCOPE_A)
+        keys = (reader.lease_key(SCOPE_A), reader.lease_key(SCOPE_B))
+    _expect(before is None, f'a free scope reports a holder ({before!r})')
+    _expect(took is True, f'the first acquire of a free scope answered {took!r}')
+    _expect(held_by is not None, 'a held scope reports no holder')
+    if held_by is not None:
+        _expect(held_by.worker == 'kit-holder', f'the holder is reported as worker {held_by.worker!r}')
+        _expect(held_by.instance == INSTANCE_A, f'the holder is reported as instance {held_by.instance!r}')
+        _expect(
+            held_by.acquired_at is None or isinstance(held_by.acquired_at, str),
+            f'acquired_at is not text ({held_by.acquired_at!r})',
+        )
+        _expect(
+            held_by.age_seconds is None or held_by.age_seconds >= 0,
+            f'a negative age was reported ({held_by.age_seconds!r})',
+        )
+    _expect(other_scope is None, f'a free scope next to a held one reports a holder ({other_scope!r})')
+    _expect(still_held is True, 'reading the holder took the lease from its holder')
+    _expect(after is None, f'a released scope still reports a holder ({after!r})')
+    _expect(
+        all(isinstance(key, str) and key for key in keys) and keys[0] != keys[1],
+        f'lease_key does not name one place per scope ({keys!r})',
+    )
+
+
 ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]], ...] = (
     check_one_holder_at_a_time,
     check_refresh_keeps_the_lease,
@@ -256,4 +301,5 @@ ELECTION_CHECKS: tuple[Callable[[ElectionMaker, Advance, float], Awaitable[None]
     check_scopes_are_independent,
     check_acquire_is_idempotent_for_the_holder,
     check_calls_after_stop_are_refused,
+    check_holder_names_the_lease_holder,
 )

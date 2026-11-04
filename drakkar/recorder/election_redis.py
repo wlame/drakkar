@@ -20,6 +20,7 @@ from drakkar.providers.redis import (
 )
 from drakkar.providers.thread import PROVIDER_STOPPED
 from drakkar.recorder.history import serialize_json
+from drakkar.recorder.lease import LeaseHolder, holder_from_body
 from drakkar.timefmt import format_epoch_micro
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from drakkar.recorder.election import ElectionContext
 
 REFRESH_BEFORE_ACQUIRE = 'redis election: refresh of a scope this provider has not acquired'
+MILLISECONDS_PER_SECOND = 1000
 
 
 class RedisElection:
@@ -163,6 +165,26 @@ class RedisElection:
             key('election_lock', prefix=prefix, scope=scope),
             fragment('token', token),
         )
+
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        """The lock body of ``scope`` and the time left of its key: ``GET`` (as ``is_held``), then ``PTTL``.
+
+        The two commands are not one read: when the key ends between them,
+        the holder is reported with no time left known.
+        """
+        client, _ = self._started()
+        lock_key = self.lease_key(scope)
+        body = await run(client, 'GET', lock_key)
+        if body is None:
+            return None
+        ttl = await run(client, 'PTTL', lock_key)
+        expires_in = ttl / MILLISECONDS_PER_SECOND if isinstance(ttl, int) and ttl >= 0 else None
+        return holder_from_body(body, expires_in_seconds=expires_in)
+
+    def lease_key(self, scope: str) -> str:
+        """The key of the lease of ``scope``: ``<prefix>task-locks:<scope>``."""
+        _, prefix = self._started()
+        return key('election_lock', prefix=prefix, scope=scope)
 
     async def stop(self) -> None:
         """Refuse every later call; leases are released by their holders, the shared client by the worker."""

@@ -21,9 +21,11 @@ runs on the loop through the election's
 at most the call's bound. A hung provider therefore holds up the archive
 thread for a bounded time and never the loop.
 
-A provider is a class with the six async methods of :class:`ElectionProvider`
-plus a factory ``(options) -> provider``; ``BUILTIN_ELECTIONS`` maps each
-provider name to its factory.
+A provider is a class with the seven async methods and the one plain method
+of :class:`ElectionProvider` plus a factory ``(options) -> provider``;
+``BUILTIN_ELECTIONS`` maps each provider name to its factory. Two of the
+methods only read, for the Databases view of the UI: ``holder`` (who holds a
+scope now) and ``lease_key`` (where the store keeps it).
 """
 
 import asyncio
@@ -44,7 +46,8 @@ from drakkar.recorder.election_consul import consul_election_factory
 from drakkar.recorder.election_postgres import postgres_election_factory
 from drakkar.recorder.election_redis import redis_election_factory
 from drakkar.recorder.history import task_lock_dir
-from drakkar.recorder.task_lock import TaskLock
+from drakkar.recorder.lease import LeaseHolder
+from drakkar.recorder.task_lock import LOCK_SUFFIX, TaskLock, read_lock_holder
 from drakkar.schedule import parse_task_scope
 
 if TYPE_CHECKING:
@@ -129,6 +132,23 @@ class ElectionProvider(Protocol):
         """Free ``scope``, but only while ``token`` holds it."""
         ...
 
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        """Who holds ``scope`` now, as the store reports it; ``None`` when it is free. Read-only.
+
+        It needs no token and takes, refreshes and frees nothing. A store that
+        keeps a lease past its length (a lock file, a row) still reports it
+        until a taker replaces it, with its age.
+        """
+        ...
+
+    def lease_key(self, scope: str) -> str:
+        """Where the store keeps the lease of ``scope``, as an operator would look it up. No I/O.
+
+        It names the file, row or key after a successful ``start``, which
+        resolves the folder, schema or key prefix; before it, it raises.
+        """
+        ...
+
     async def stop(self) -> None:
         """Release what ``start`` took. Called at most once, last; leases are released by their holders.
 
@@ -197,6 +217,17 @@ class FilesystemElection:
     async def release(self, scope: str, token: str) -> None:
         """Delete the lock file while it holds ``token``."""
         await self._run(self._lock(scope, token).release)
+
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        """The holder named by the lock file of ``scope``, with the age of its last refresh on the file server's clock."""
+        path = self.lease_key(scope)
+        instance = self._context().instance
+        return await self._run(lambda: read_lock_holder(path, instance))
+
+    def lease_key(self, scope: str) -> str:
+        """The path of the lock file of ``scope``: ``<shared>/tasks/<cluster>/<task>.lock``."""
+        _, name = parse_task_scope(scope)
+        return os.path.join(self._folder(scope), name + LOCK_SUFFIX)
 
     async def stop(self) -> None:
         """Let the provider thread exit; no lease is released, each slot releases its own.

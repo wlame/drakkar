@@ -30,6 +30,7 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -77,6 +78,10 @@ ArchiveScope = Literal['cluster', 'worker']
 ARCHIVE_SCOPE_CLUSTER: ArchiveScope = 'cluster'
 ARCHIVE_SCOPE_WORKER: ArchiveScope = 'worker'
 
+# The holder read of the Databases view: one attempt within this many seconds.
+HOLDER_READ_SECONDS = 2.0
+HOLDER_OP = 'holder'
+
 # A peer's definition hash counts only in this exact form; anything else is unknown.
 _CLUSTER_HASH = re.compile(r'[0-9a-f]{16}')
 
@@ -118,12 +123,25 @@ def archive_next_slot(config: DrakkarConfig, now: float) -> int | None:
     return next_task_slot(now, interval=archive.effective_interval, cron=archive.cron)
 
 
+@dataclass(frozen=True)
+class SlotRecord:
+    """What became of the last slot of one task on this worker: the slot, its outcome, and when (epoch seconds)."""
+
+    slot: int
+    outcome: str
+    at: float
+
+
 class ClusterElection:
     """The worker's one election provider and its caller, shared by every cluster task.
 
     The provider starts lazily: :meth:`ensure_started` starts it once, and
     concurrent first slots wait for that one start instead of starting it
     again. :meth:`stop` stops it once, with one attempt.
+
+    It also keeps, per task, the outcome of the last slot on this worker
+    (:attr:`last_slots`), and reads who holds a scope for the Databases view
+    (:meth:`read_holder`), which never starts the provider.
     """
 
     def __init__(
@@ -143,6 +161,46 @@ class ClusterElection:
         self._start_lock = asyncio.Lock()
         self._started = False
         self._stopped = False
+        # Task name -> its last slot. Replaced as a whole, never changed in place.
+        self._last_slots: Mapping[str, SlotRecord] = MappingProxyType({})
+
+    @property
+    def started(self) -> bool:
+        """True once a provider ``start`` succeeded (and still after :meth:`stop`)."""
+        return self._started
+
+    @property
+    def stopped(self) -> bool:
+        """True once :meth:`stop` was called."""
+        return self._stopped
+
+    @property
+    def last_slots(self) -> Mapping[str, SlotRecord]:
+        """The last slot of each task that has had one, read-only."""
+        return self._last_slots
+
+    def record_slot(self, name: str, slot: int, outcome: str) -> None:
+        """Keep the outcome of task ``name``'s slot ``slot`` as its last one."""
+        updated = dict(self._last_slots)
+        updated[name] = SlotRecord(slot=slot, outcome=outcome, at=self._clock.time())
+        self._last_slots = MappingProxyType(updated)
+
+    async def read_holder(self, scope: str) -> CallResult | None:
+        """Ask the provider who holds ``scope``, through the caller (op ``holder``, one attempt, 2 s).
+
+        ``None`` when the provider has not started or has stopped: the read
+        never starts it. An open breaker makes no call (outcome
+        ``skipped_open``). The provider metrics count the read like every
+        other call.
+        """
+        if not self._started or self._stopped:
+            return None
+        return await self.caller.call(
+            HOLDER_OP,
+            lambda: self.provider.holder(scope),
+            attempts=1,
+            deadline_seconds=HOLDER_READ_SECONDS,
+        )
 
     async def ensure_started(self, deadline_seconds: float) -> CallResult:
         """Start the provider unless it has started; the result of the start, or an ok one with no call.
@@ -421,10 +479,12 @@ async def run_cluster_task(
         last_slot = slot
         now = clock.time()
         if now >= slot + ACQUIRE_WINDOW_SECONDS:
+            election.record_slot(task.name, slot, SLOT_LATE)
             await _skip_slot(task, slot, SLOT_LATE, warnings, late_seconds=round(now - slot, 3))
             continue
         lease = SlotLease(election, scope=scope, lease_seconds=task.lease_seconds, clock=clock)
         outcome, error = await _contest_slot(election, lease, slot, clock)
+        election.record_slot(task.name, slot, outcome)
         if outcome != SLOT_WON:
             await _skip_slot(task, slot, outcome, warnings, error=error)
             continue

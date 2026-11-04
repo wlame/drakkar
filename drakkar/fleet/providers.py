@@ -157,6 +157,10 @@ class FilesystemRegistry:
     async def withdraw(self, worker: str, instance: str) -> None:
         await self._run(lambda: self._withdraw_sync(worker, instance))
 
+    def card_key(self, worker: str) -> str:
+        """The path of the card file of ``worker``: ``<folder>/workers/<sanitized worker>.json``."""
+        return self._card_path(worker)
+
     async def stop(self) -> None:
         self._stopped = True
         if self._runner is not None:

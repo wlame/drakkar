@@ -124,10 +124,12 @@ async def test_commands_match_the_fixture_example(clock, server):
     await provider.acquire(scope, token, inputs['lease_seconds'])
     await provider.refresh(scope, token)
     await provider.is_held(scope, token)
+    await provider.holder(scope)
     await provider.release(scope, token)
 
     assert [list(argv) for argv in recorder.calls] == [
-        expand_scripts(commands[name]) for name in ('start', 'acquire', 'refresh', 'is_held', 'release')
+        expand_scripts(commands[name])
+        for name in ('start', 'acquire', 'refresh', 'is_held', 'is_held', 'holder_ttl', 'release')
     ]
 
 
@@ -515,3 +517,72 @@ async def test_redis_election_factory_builds_a_provider_from_the_options(clock, 
     assert took is True
     assert opened_urls == [URL]
     assert await fake_client(server).pttl(LOCK_KEY) == LEASE_MILLISECONDS
+
+
+# --- The holder read ---
+
+
+async def test_holder_names_the_lock_body_and_the_time_left_of_the_key(clock, server):
+    clock.set(_epoch_of('2026-10-14T02:00:00.125000Z'))
+    holder = await _started(server, 'search-worker-3', INSTANCE_A)
+    reader = await _started(server, 'w-2', INSTANCE_B)
+    await holder.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    clock.advance(100)
+
+    found = await reader.holder(SCOPE)
+
+    assert found is not None
+    assert (found.worker, found.instance, found.acquired_at) == (
+        'search-worker-3',
+        INSTANCE_A,
+        '2026-10-14T02:00:00.125000Z',
+    )
+    assert found.age_seconds is None
+    assert found.expires_in_seconds == pytest.approx(500.0)
+
+
+async def test_holder_of_a_free_scope_sends_only_the_get(clock, server):
+    recorder = RecordingClient(fake_client(server))
+    provider = _provider(server, client=recorder)
+    await provider.start(_context())
+
+    assert await provider.holder(SCOPE) is None
+    assert [list(argv) for argv in recorder.calls] == [['PING'], ['GET', LOCK_KEY]]
+
+
+async def test_holder_of_a_key_that_is_not_a_lock_names_nobody(clock, server):
+    raw = fake_client(server)
+    await raw.set(LOCK_KEY, b'\xff not json')
+    provider = await _started(server)
+
+    found = await provider.holder(SCOPE)
+
+    assert found is not None
+    assert (found.worker, found.instance, found.acquired_at, found.expires_in_seconds) == (None, None, None, None)
+
+
+async def test_holder_reports_no_time_left_when_the_key_ends_between_the_two_reads(clock, server):
+    class EndsAfterTheGet(RecordingClient):
+        async def execute_command(self, *argv: Any) -> Any:
+            if argv[0] == 'PTTL':
+                return -2
+            return await super().execute_command(*argv)
+
+    provider = _provider(server, client=EndsAfterTheGet(fake_client(server)))
+    await provider.start(_context(worker='w-1'))
+    await provider.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+
+    found = await provider.holder(SCOPE)
+
+    assert found is not None
+    assert found.worker == 'w-1'
+    assert found.expires_in_seconds is None
+
+
+async def test_lease_key_is_the_lock_key_of_the_fixture(clock, server):
+    provider = _provider(server, state_prefix=EXAMPLE['inputs']['prefix'])
+    with pytest.raises(RuntimeError):
+        provider.lease_key(EXAMPLE['inputs']['scope'])
+    await provider.start(_context())
+
+    assert provider.lease_key(EXAMPLE['inputs']['scope']) == EXAMPLE['commands']['is_held'][1]

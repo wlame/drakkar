@@ -123,6 +123,22 @@ class PeerView:
     last_seen_ts: float | None
 
 
+@dataclass(frozen=True)
+class RegistryStatus:
+    """The registry service as the Databases view shows it; one immutable value.
+
+    ``refreshed_at`` is the epoch time of the last successful refresh and
+    ``last_publish_at`` of this worker's last successful publish (``None``
+    before the first). ``started`` says a provider ``start`` succeeded.
+    """
+
+    provider: str
+    started: bool
+    refreshed_at: float | None
+    last_publish_at: float | None
+    breaker_open: bool
+
+
 class FleetRegistry:
     """Runs one registry provider for this worker."""
 
@@ -182,6 +198,8 @@ class FleetRegistry:
         self._first_publish_done = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._snapshot = FleetSnapshot()
+        # The epoch time of the last publish that succeeded; None before it.
+        self._last_publish_at: float | None = None
         self._iteration_failure_log = RateLimitedLog(now_monotonic)
         self._reported_card_workers: set[str] = set()
         self._duplicate_instances: set[str] = set()
@@ -248,6 +266,28 @@ class FleetRegistry:
                 )
             )
         return views
+
+    def status(self) -> RegistryStatus:
+        """The service's state now. Safe from any thread: it reads only values replaced as a whole."""
+        refreshed_at = self._snapshot.refreshed_at
+        refreshed_epoch = None if refreshed_at is None else self._now_epoch() - (self._now_monotonic() - refreshed_at)
+        return RegistryStatus(
+            provider=self._provider_name,
+            started=self._provider_started.is_set(),
+            refreshed_at=refreshed_epoch,
+            last_publish_at=self._last_publish_at,
+            breaker_open=self._caller.breaker_open,
+        )
+
+    def card_key(self, worker: str) -> str | None:
+        """Where the provider keeps the card of ``worker``; ``None`` when it cannot tell yet (no started provider). No I/O."""
+        if not self._provider_started.is_set():
+            return None
+        try:
+            return self._provider.card_key(worker)
+        except Exception:
+            # A display value only: a provider that cannot name the key yet shows none.
+            return None
 
     def name_online(self, worker: str) -> bool | None:
         """Whether the last refresh lists another worker's name as online.
@@ -513,7 +553,9 @@ class FleetRegistry:
             heartbeat_at=datetime.fromtimestamp(self._now_epoch(), UTC),
             features=self._features() if self._features is not None else None,
         )
-        await self._call_provider('publish', lambda: self._provider.publish(card))
+        result = await self._call_provider('publish', lambda: self._provider.publish(card))
+        if result.ok:
+            self._last_publish_at = self._now_epoch()
 
     async def _refresh_once(self) -> None:
         result = await self._call_provider('list', self._list_checked)

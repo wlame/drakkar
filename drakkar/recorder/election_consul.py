@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from drakkar.providers.consul import (
     CONSUL_PROVIDER,
     DEFAULT_STATE_PREFIX,
+    KV_PATH_HEAD,
     REFRESH_BEFORE_ACQUIRE_MESSAGE,
     ConsulClient,
     acquire_key,
@@ -26,6 +27,7 @@ from drakkar.providers.consul import (
 )
 from drakkar.providers.thread import PROVIDER_STOPPED
 from drakkar.recorder.history import serialize_json
+from drakkar.recorder.lease import LeaseHolder, holder_from_body
 from drakkar.schedule import parse_task_scope
 from drakkar.timefmt import format_epoch_micro
 
@@ -208,6 +210,25 @@ class ConsulElection:
             return
         await destroy_session(client, lease.session)
         self._forget(scope, token, lease)
+
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        """The lock body of the key of ``scope`` while a session holds it (the key read of ``is_held``).
+
+        Consul ends a lease by ending its session, so the store reports
+        neither the age of the last refresh nor the time left.
+        """
+        parse_task_scope(scope)
+        client, prefix = self._started()
+        entry = await read_key(client, path('election_lock', prefix=prefix, scope=scope))
+        if entry is None or holder_of(entry) is None:
+            return None
+        return holder_from_body(entry.get('Value'))
+
+    def lease_key(self, scope: str) -> str:
+        """The KV key of the lease of ``scope``: ``<prefix>/task-locks/<scope>``."""
+        parse_task_scope(scope)
+        _, prefix = self._started()
+        return path('election_lock', prefix=prefix, scope=scope).removeprefix(KV_PATH_HEAD)
 
     async def stop(self) -> None:
         """Refuse every later call; leases are released by their holders, the shared client by the worker."""

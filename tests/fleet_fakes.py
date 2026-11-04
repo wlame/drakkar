@@ -17,6 +17,7 @@ from typing import Any
 from drakkar.fleet.card import sanitize_worker_name
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.recorder.election import ElectionContext
+from drakkar.recorder.lease import LeaseHolder
 
 
 class MemoryStore:
@@ -68,6 +69,9 @@ class MemoryRegistry:
             listed.append(PeerCard(card=dict(card), age_seconds=age, online=online))
         return listed
 
+    def card_key(self, worker: str) -> str:
+        return f'memory/workers/{sanitize_worker_name(worker)}'
+
     async def withdraw(self, worker: str, instance: str) -> None:
         name = sanitize_worker_name(worker)
         stored = self._store.cards.get(name)
@@ -84,6 +88,8 @@ class ElectionStore:
     def __init__(self) -> None:
         self.now = 1_000.0
         self.leases: dict[str, tuple[str, float, float]] = {}
+        # Scope -> (worker, instance) of the provider that last acquired it.
+        self.owners: dict[str, tuple[str, str]] = {}
 
     def advance(self, seconds: float) -> None:
         """Move the store clock forward; every stored lease gets closer to its end."""
@@ -126,6 +132,8 @@ class MemoryElection:
         if holder is not None and holder != token:
             return False
         self._store.leases[scope] = (token, self._store.now + lease_seconds, lease_seconds)
+        if self.started_with is not None:
+            self._store.owners[scope] = (self.started_with.worker, self.started_with.instance)
         return True
 
     async def refresh(self, scope: str, token: str) -> bool:
@@ -147,6 +155,24 @@ class MemoryElection:
         self._refuse_after_stop()
         if self._store.holder(scope) == token:
             del self._store.leases[scope]
+
+    async def holder(self, scope: str) -> LeaseHolder | None:
+        self.calls['holder'] += 1
+        self._refuse_after_stop()
+        if self._store.holder(scope) is None:
+            return None
+        _, ends_at, lease_seconds = self._store.leases[scope]
+        worker, instance = self._store.owners.get(scope, (None, None))
+        return LeaseHolder(
+            worker=worker,
+            instance=instance,
+            acquired_at=None,
+            age_seconds=lease_seconds - (ends_at - self._store.now),
+            expires_in_seconds=ends_at - self._store.now,
+        )
+
+    def lease_key(self, scope: str) -> str:
+        return f'memory/task-locks/{scope}'
 
     async def stop(self) -> None:
         self.calls['stop'] += 1

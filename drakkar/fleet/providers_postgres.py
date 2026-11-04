@@ -66,6 +66,8 @@ class PostgresRegistry:
         self._preset_manage_schema = manage_schema
         # The pool and the statements rendered for its schema, set once a start succeeded.
         self._ready: tuple[Any, dict[str, str]] | None = None
+        # The schema of the card table, set by a successful start.
+        self._schema = ''
         self._invalid_cards = InvalidCardLog()
         self._logger: Any = structlog.get_logger()
         self._stopped = False
@@ -84,6 +86,7 @@ class PostgresRegistry:
             tables=[FLEET_WORKERS_TABLE],
         )
         self._ready = (pool, statements_for(schema))
+        self._schema = schema
 
     async def publish(self, card: dict[str, Any]) -> None:
         """Upsert ``card`` as its canonical bytes under its worker name, stamped with the server's ``now()``."""
@@ -115,6 +118,11 @@ class PostgresRegistry:
         pool, statements = self._started()
         async with borrow(pool) as conn:
             await conn.execute(statements['withdraw'], worker, instance)
+
+    def card_key(self, worker: str) -> str:
+        """The row of ``worker``: ``<schema>.fleet_workers (worker = '<worker>')``."""
+        self._started()
+        return f"{self._schema}.{FLEET_WORKERS_TABLE} (worker = '{worker}')"
 
     async def stop(self) -> None:
         """Refuse every later call; the shared pool stays open for the worker to close."""

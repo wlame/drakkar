@@ -5,7 +5,8 @@ its own liveness verdict when its service keeps one. It knows nothing about
 loops, timeouts, retries or validation: the registry service owns those.
 Adding a provider never touches the features that use the registry.
 
-A provider is a class with the five async methods of :class:`RegistryProvider`
+A provider is a class with the five async methods and the one plain method
+(``card_key``, for the Databases view of the UI) of :class:`RegistryProvider`
 plus a factory ``(options) -> provider``; ``BUILTIN_PROVIDERS`` maps each
 provider name to its factory.
 """
@@ -90,6 +91,14 @@ class RegistryProvider(Protocol):
 
     async def withdraw(self, worker: str, instance: str) -> None:
         """Delete the card of ``worker``, but only while it still holds ``instance``."""
+        ...
+
+    def card_key(self, worker: str) -> str:
+        """Where the store keeps the card of ``worker``, as an operator would look it up. No I/O.
+
+        It names the file, row or key after a successful ``start``, which
+        resolves the folder, schema or key prefix; before it, it may raise.
+        """
         ...
 
     async def stop(self) -> None:

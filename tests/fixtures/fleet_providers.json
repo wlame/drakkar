@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the header that marks an answer whose results the token's rights hid, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, the refused scopes (a scope that is not <cluster>/<task>: every election call with one raises the scope_invalid message of periodic_contract.json before any request), and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
+  "_comment": "Shared corpus of the registry and election providers. The postgres keys (schema_placeholder, ddl, statements, transient_sqlstate_prefixes, messages, schema_command, schema_command_usage_errors) hold the DDL, every statement text ({schema} stands for the connection's schema), the schema command output, the SQLSTATE classes retried as transient and the messages. The redis section holds the key templates ({prefix}, {worker} and {scope} stand for the connection's key prefix, the sanitized worker name and the scope), the six Lua scripts, the reply codes retried as transient, the connect time limit, the messages, the URL cases (the verdict of the URL check that runs before the client parses a URL: null opens, otherwise the key of the message), and one worked example with the arguments of every command (@name stands for the script of that name; the read of a lease holder sends the is_held GET, then holder_ttl). The consul section holds the request paths and the session names ({prefix}, {worker}, {scope}, {session}, {instance} and {token} stand for the connection's key prefix, the sanitized worker name, the scope, a session id, the worker instance and the election token), the session settings, the token header, the header that marks an answer whose results the token's rights hid, the statuses retried as transient, the connect time limit, the status text limit, the session id pattern, the session TTL rule ([limit in seconds, TTL]), the messages, the address cases (null is refused, otherwise the base URL every path is appended to), the token cases, the own-session-name cases, the refused scopes (a scope that is not <cluster>/<task>: every election call with one raises the scope_invalid message of periodic_contract.json before any request), and one worked example with every request as [method, path, query pairs sorted by name, body text or null]. Pinned so every implementation emits the same bytes.",
   "schema_placeholder": "{schema}",
   "ddl": [
     "CREATE SCHEMA IF NOT EXISTS {schema}",
@@ -19,7 +19,8 @@
     "acquire": {"sql": "INSERT INTO {schema}.task_locks AS held (scope, token, worker, instance, acquired_at, refreshed_at) VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT (scope) DO UPDATE SET token = EXCLUDED.token, worker = EXCLUDED.worker, instance = EXCLUDED.instance, acquired_at = CASE WHEN held.token = EXCLUDED.token THEN held.acquired_at ELSE now() END, refreshed_at = now() WHERE held.token = EXCLUDED.token OR held.refreshed_at < now() - make_interval(secs => $5) RETURNING token", "params": ["scope", "token", "worker", "instance", "lease_seconds"]},
     "refresh": {"sql": "UPDATE {schema}.task_locks SET refreshed_at = now() WHERE scope = $1 AND token = $2", "params": ["scope", "token"]},
     "is_held": {"sql": "SELECT 1 FROM {schema}.task_locks WHERE scope = $1 AND token = $2", "params": ["scope", "token"]},
-    "release": {"sql": "DELETE FROM {schema}.task_locks WHERE scope = $1 AND token = $2", "params": ["scope", "token"]}
+    "release": {"sql": "DELETE FROM {schema}.task_locks WHERE scope = $1 AND token = $2", "params": ["scope", "token"]},
+    "holder": {"sql": "SELECT worker, instance, acquired_at, EXTRACT(EPOCH FROM now() - refreshed_at)::float8 FROM {schema}.task_locks WHERE scope = $1", "params": ["scope"]}
   },
   "transient_sqlstate_prefixes": ["08", "53", "57", "40001", "40P01"],
   "messages": {
@@ -347,6 +348,7 @@
         "acquire": ["EVAL", "@acquire", "1", "drakkar:task-locks:main/history.archive", "{\"acquired_at\":\"2026-10-14T02:00:00.125000Z\",\"instance\":\"9c41e0b27fd34a1e\",\"provider\":\"redis\",\"token\":\"5f0c1d2e3a4b6978\",\"worker\":\"search-worker-3\"}", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
         "refresh": ["EVAL", "@refresh", "1", "drakkar:task-locks:main/history.archive", "\"token\":\"5f0c1d2e3a4b6978\"", "7200000"],
         "is_held": ["GET", "drakkar:task-locks:main/history.archive"],
+        "holder_ttl": ["PTTL", "drakkar:task-locks:main/history.archive"],
         "release": ["EVAL", "@release", "1", "drakkar:task-locks:main/history.archive", "\"token\":\"5f0c1d2e3a4b6978\""]
       }
     }
@@ -469,6 +471,7 @@
         ],
         "refresh": [["PUT", "/v1/session/renew/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]],
         "is_held": [["GET", "/v1/kv/drakkar/task-locks/main/history.archive", [["dc", "dc1"]], null]],
+        "holder": [["GET", "/v1/kv/drakkar/task-locks/main/history.archive", [["dc", "dc1"]], null]],
         "release": [["PUT", "/v1/session/destroy/00000000-0000-4000-8000-000000000001", [["dc", "dc1"]], null]]
       }
     }

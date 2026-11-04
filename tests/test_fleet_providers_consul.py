@@ -882,3 +882,12 @@ async def test_consul_registry_factory_builds_a_provider_from_the_options(fake, 
     assert create.body is not None
     assert json.loads(create.body)['TTL'] == '60s'
     assert _routes(fake)[-1] == ('PUT', card_path('w-1', 'ops'))
+
+
+async def test_card_key_is_the_kv_key_of_the_card(fake):
+    provider = _provider(fake)
+    with pytest.raises(RuntimeError):
+        provider.card_key('w-1')
+    await provider.start(_context())
+
+    assert provider.card_key('w 1') == f'{DEFAULT_STATE_PREFIX}/fleet/workers/w_1'

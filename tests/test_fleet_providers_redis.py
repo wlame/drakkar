@@ -617,3 +617,12 @@ async def test_redis_registry_factory_builds_a_provider_from_the_options(clock, 
     assert opened_urls == [URL]
     assert await fake_client(server).pttl(f'{CARD_PREFIX}w-1') == 120_000
     await connections.close_all()
+
+
+async def test_card_key_is_the_card_key_of_the_fixture(server):
+    provider = _provider(server, state_prefix=EXAMPLE['inputs']['prefix'])
+    with pytest.raises(RuntimeError):
+        provider.card_key('search-worker-3')
+    await provider.start(_context())
+
+    assert provider.card_key('search-worker-3') == EXAMPLE['commands']['publish'][3]

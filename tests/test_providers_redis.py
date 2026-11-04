@@ -190,6 +190,7 @@ def test_example_commands_follow_from_the_helpers():
     assert commands['acquire'][5:] == [token, lease]
     assert commands['refresh'] == ['EVAL', SCRIPTS['refresh'], '1', lock, token, lease]
     assert commands['is_held'] == ['GET', lock]
+    assert commands['holder_ttl'] == ['PTTL', lock]
     assert commands['release'] == ['EVAL', SCRIPTS['release'], '1', lock, token]
 
 

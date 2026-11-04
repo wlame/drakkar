@@ -403,6 +403,7 @@ def test_example_requests_follow_from_the_helpers():
         'acquire_by_the_holder': [renew(FIRST), put(LOCK_PATH, FIRST, lock)],
         'refresh': [renew(FIRST)],
         'is_held': [['GET', LOCK_PATH, dc, None]],
+        'holder': [['GET', LOCK_PATH, dc, None]],
         'release': [destroy(FIRST)],
     }
 

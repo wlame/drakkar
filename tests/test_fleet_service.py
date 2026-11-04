@@ -19,7 +19,7 @@ from drakkar.config import AutodiscoverConfig, ResilienceConfig
 from drakkar.config.connections import ConnectionsConfig
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
-from drakkar.fleet.service import FleetRegistry
+from drakkar.fleet.service import FleetRegistry, RegistryStatus
 from drakkar.providers.connections import Connections
 from drakkar.providers.resilience import ResilientCaller
 from tests.conftest import wait_for
@@ -1006,3 +1006,46 @@ async def test_an_on_refresh_error_is_a_failed_refresh_iteration_and_keeps_the_s
     assert (failure['loop'], failure['error']) == ('refresh', 'hash check broke')
     assert _sample('drakkar_fleet_registry_errors_total', {'op': 'list'}) == errors_before + 1
     assert [entry.card['worker'] for entry in service.snapshot().peers] == ['w-2']
+
+
+# --- status and card keys (the Databases view) ---
+
+
+async def test_status_tells_the_start_the_last_publish_and_the_last_refresh_in_epoch_time():
+    clock = _Clock()
+    service = _service(_Recording(MemoryStore()), clock)
+    assert service.status() == RegistryStatus(
+        provider='memory', started=False, refreshed_at=None, last_publish_at=None, breaker_open=False
+    )
+    assert service.card_key('w-2') is None
+
+    assert await service._ensure_started()
+    await service._publish_once('running')
+    published_at = clock.epoch
+    clock.advance(3)
+    await service._refresh_once()
+    refreshed_at = clock.epoch
+    clock.advance(2)
+
+    status = service.status()
+    assert status.started is True
+    assert status.last_publish_at == published_at
+    assert status.refreshed_at == pytest.approx(refreshed_at)
+    assert status.breaker_open is False
+    assert service.card_key('w-2') == 'memory/workers/w-2'
+
+
+async def test_a_failed_publish_leaves_the_last_publish_time_alone():
+    service = _service(_Failing())
+    assert await service._ensure_started()
+
+    await service._publish_once('running')
+
+    assert service.status().last_publish_at is None
+
+
+async def test_card_key_of_a_provider_that_cannot_name_it_is_none():
+    service = _service(_Listing())
+    assert await service._ensure_started()
+
+    assert service.card_key('w-2') is None

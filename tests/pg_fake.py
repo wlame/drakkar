@@ -15,6 +15,7 @@ async context manager that yields a connection with ``execute``, ``fetch``,
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -92,6 +93,7 @@ class FakePostgres:
             statements['refresh']: self._on_tables(self._refresh, TASK_LOCKS_TABLE),
             statements['is_held']: self._on_tables(self._is_held, TASK_LOCKS_TABLE),
             statements['release']: self._on_tables(self._release, TASK_LOCKS_TABLE),
+            statements['holder']: self._on_tables(self._holder, TASK_LOCKS_TABLE),
         }
 
     def advance(self, seconds: float) -> None:
@@ -211,6 +213,15 @@ class FakePostgres:
         if held is None or held.token != token:
             return [], 'SELECT 0'
         return [(1,)], 'SELECT 1'
+
+    def _holder(self, args: tuple[Any, ...]) -> Result:
+        (scope,) = args
+        held = self.locks.get(scope)
+        if held is None:
+            return [], 'SELECT 0'
+        # asyncpg answers a timestamptz column with an aware datetime.
+        acquired_at = datetime.fromtimestamp(held.acquired_at, UTC)
+        return [(held.worker, held.instance, acquired_at, self.now - held.refreshed_at)], 'SELECT 1'
 
     def _release(self, args: tuple[Any, ...]) -> Result:
         scope, token = args

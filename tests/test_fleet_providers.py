@@ -608,3 +608,9 @@ async def test_filesystem_refuses_a_symlinked_workers_folder(make_filesystem, re
 
     assert old_file.exists()
     assert sorted(path.name for path in elsewhere.iterdir()) == ['precious.json']
+
+
+def test_filesystem_card_key_is_the_card_file_path(tmp_path):
+    registry = FilesystemRegistry(directory=str(tmp_path), prune_after_seconds=PRUNE_AFTER)
+
+    assert registry.card_key('w 1') == str(tmp_path / 'workers' / 'w_1.json')

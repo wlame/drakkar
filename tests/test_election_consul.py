@@ -193,9 +193,10 @@ async def test_requests_match_the_fixture_example(fake, monkeypatch):
     await step('acquire_by_the_holder', provider.acquire(scope, token, INPUTS['lease_seconds']))
     await step('refresh', provider.refresh(scope, token))
     await step('is_held', provider.is_held(scope, token))
+    await step('holder', provider.holder(scope))
     await step('release', provider.release(scope, token))
 
-    names = ('start', 'acquire', 'acquire_by_the_holder', 'refresh', 'is_held', 'release')
+    names = ('start', 'acquire', 'acquire_by_the_holder', 'refresh', 'is_held', 'holder', 'release')
     assert sent == {name: REQUESTS[name] for name in names}
 
 
@@ -701,3 +702,51 @@ async def test_consul_election_factory_builds_a_provider_from_the_options(fake, 
 
     assert took is True
     assert _routes(fake)[-1] == ('PUT', path('election_lock', prefix='ops', scope=SCOPE))
+
+
+# --- The holder read ---
+
+
+async def test_holder_names_the_lock_body_of_the_held_key_and_no_age(fake, monkeypatch):
+    monkeypatch.setattr(time, 'time', lambda: _epoch_of('2026-10-14T02:00:00.125000Z'))
+    holder = await _started(fake, 'search-worker-3', INSTANCE_A)
+    reader = await _started(fake, 'w-2', INSTANCE_B)
+    await holder.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+
+    found = await reader.holder(SCOPE)
+
+    assert found is not None
+    assert (found.worker, found.instance, found.acquired_at) == (
+        'search-worker-3',
+        INSTANCE_A,
+        '2026-10-14T02:00:00.125000Z',
+    )
+    assert (found.age_seconds, found.expires_in_seconds) == (None, None)
+
+
+async def test_holder_of_a_key_that_no_session_holds_is_none(fake):
+    fake.put_raw(LOCK_KEY, b'{"worker":"gone"}')
+    provider = await _started(fake)
+
+    assert await provider.holder(SCOPE) is None
+
+
+@pytest.mark.parametrize('scope', FIXTURE['refused_scopes'])
+async def test_holder_and_lease_key_check_the_scope_before_any_request(fake, scope):
+    provider = await _started(fake)
+    started = len(fake.seen)
+
+    with pytest.raises(ValueError):
+        await provider.holder(scope)
+    with pytest.raises(ValueError):
+        provider.lease_key(scope)
+    assert _requests(fake, started) == []
+
+
+async def test_lease_key_is_the_kv_key_of_the_lock(fake):
+    provider = _provider(fake)
+    with pytest.raises(RuntimeError):
+        provider.lease_key(SCOPE)
+    await provider.start(_context())
+
+    assert provider.lease_key(SCOPE) == LOCK_KEY

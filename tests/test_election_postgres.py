@@ -425,3 +425,64 @@ async def test_postgres_election_factory_builds_a_provider_from_the_options(monk
 
     assert took is True
     create_pool.assert_awaited_once_with(dsn=DSN, min_size=1, max_size=4)
+
+
+# --- The holder read ---
+
+
+async def test_holder_sends_the_fixture_statement_and_formats_acquired_at(fake):
+    holder = await _started(fake, 'search-worker-3', INSTANCE_A)
+    reader = await _started(fake, 'w-2', INSTANCE_B)
+    fake.now = 1_791_943_200.125
+    await holder.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    fake.advance(30)
+    fake.calls.clear()
+
+    found = await reader.holder(SCOPE)
+
+    assert fake.calls == [(statements_for('drakkar')['holder'], (SCOPE,))]
+    assert found is not None
+    assert (found.worker, found.instance, found.acquired_at) == (
+        'search-worker-3',
+        INSTANCE_A,
+        '2026-10-14T02:00:00.125000Z',
+    )
+    assert found.age_seconds == pytest.approx(30.0)
+    assert found.expires_in_seconds is None
+
+
+async def test_holder_reports_a_row_past_its_lease_with_its_age(fake):
+    holder = await _started(fake)
+    await holder.acquire(SCOPE, TOKEN_A, LEASE_SECONDS)
+    fake.advance(LEASE_SECONDS + 5)
+
+    found = await holder.holder(SCOPE)
+
+    assert found is not None
+    assert found.age_seconds == pytest.approx(LEASE_SECONDS + 5)
+
+
+async def test_holder_of_a_free_scope_is_none(fake):
+    provider = await _started(fake)
+
+    assert await provider.holder(SCOPE) is None
+
+
+async def test_lease_key_names_the_row_in_the_schema_of_the_start(fake):
+    provider = _provider(fake)
+    with pytest.raises(RuntimeError):
+        provider.lease_key(SCOPE)
+    await provider.start(_context())
+
+    assert provider.lease_key(SCOPE) == f"drakkar.task_locks (scope = '{SCOPE}')"
+
+
+async def test_registry_card_key_names_the_row_in_the_schema_of_the_start(fake):
+    registry = PostgresRegistry(connection='main', pool=fake, prune_after_seconds=86_400.0)
+    with pytest.raises(RuntimeError):
+        registry.card_key('w-1')
+    await registry.start(
+        RegistryContext(worker='w-1', instance=INSTANCE_A, cluster='c', logger=structlog.get_logger(), options={})
+    )
+
+    assert registry.card_key('w-1') == "drakkar.fleet_workers (worker = 'w-1')"

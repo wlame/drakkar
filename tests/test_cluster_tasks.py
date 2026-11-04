@@ -1012,6 +1012,98 @@ async def test_cluster_election_after_stop_never_starts_the_provider():
     assert provider.calls['start'] == 0
 
 
+# --- the holder read and the last slot ---
+
+
+async def test_cluster_election_holder_read_never_starts_the_provider():
+    provider = ScriptedElection()
+    election = make_election(provider)
+
+    assert election.started is False
+    assert await election.read_holder(task_scope(CLUSTER, 'reader')) is None
+    assert provider.calls['start'] == 0
+    assert provider.calls['holder'] == 0
+
+
+async def test_cluster_election_holder_read_goes_through_the_caller_with_one_attempt_and_2s():
+    provider = ScriptedElection()
+    election = make_election(provider, provider_name='holder_reads')
+    assert (await election.ensure_started(5.0)).ok
+    scope = task_scope(CLUSTER, 'reader')
+    await provider.acquire(scope, 'a' * 16, 60)
+    before = sample(
+        'drakkar_provider_calls_total', feature='election', provider='holder_reads', op='holder', outcome='ok'
+    )
+
+    result = await election.read_holder(scope)
+
+    assert result is not None and result.ok
+    assert result.value.worker == CONTEXT.worker
+    assert result.attempts == 1
+    assert ('holder', 2.0) in election.caller.deadlines
+    after = sample(
+        'drakkar_provider_calls_total', feature='election', provider='holder_reads', op='holder', outcome='ok'
+    )
+    assert after == before + 1
+
+
+async def test_cluster_election_holder_read_with_an_open_breaker_makes_no_call():
+    provider = ScriptedElection()
+    election = ClusterElection(
+        provider,
+        make_caller(provider='holder_breaker', breaker_failures=1),
+        provider_name='holder_breaker',
+        context=CONTEXT,
+    )
+    assert (await election.ensure_started(5.0)).ok
+    await election.caller.call('acquire', _raise_os_error)
+    assert election.caller.breaker_open
+
+    result = await election.read_holder(task_scope(CLUSTER, 'reader'))
+
+    assert result is not None
+    assert (result.ok, result.outcome, result.attempts) == (False, 'skipped_open', 0)
+    assert provider.calls['holder'] == 0
+
+
+async def test_cluster_election_holder_read_after_stop_is_none():
+    provider = ScriptedElection()
+    election = make_election(provider)
+    assert (await election.ensure_started(5.0)).ok
+    await election.stop(5.0)
+
+    assert election.stopped is True
+    assert await election.read_holder(task_scope(CLUSTER, 'reader')) is None
+
+
+async def _raise_os_error() -> None:
+    raise OSError('store down')
+
+
+async def test_the_slot_loop_records_the_last_outcome_of_each_task(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock, acquire=(False,))
+    election = make_election(provider, logs, clock=clock)
+    task = make_task('recorded', sleeping_body(clock, 1, []))
+
+    await run_until(clock, run_cluster_task(task, election, cluster=CLUSTER, clock=clock), SLOT + 5)
+
+    record = election.last_slots['recorded']
+    assert (record.slot, record.outcome, record.at) == (SLOT, SLOT_HELD_ELSEWHERE, SLOT)
+    with pytest.raises(TypeError):
+        election.last_slots['other'] = record  # type: ignore[index]
+
+
+async def test_the_slot_loop_records_a_late_slot(logs):
+    clock = VirtualClock(NOW, drift=(-10,))
+    election = make_election(ScriptedElection(clock), logs, clock=clock)
+    task = make_task('recorded_late', sleeping_body(clock, 1, []))
+
+    await run_until(clock, run_cluster_task(task, election, cluster=CLUSTER, clock=clock), SLOT + 15)
+
+    assert election.last_slots['recorded_late'].outcome == SLOT_LATE
+
+
 # --- the thread fence ---
 
 
