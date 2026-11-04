@@ -709,7 +709,8 @@ paths:
         on a worker with no cluster source answers 409 after every 400
         check, a request while another build runs 429 after that. A limit
         (max_rows, 1 GiB on disk or 64 MiB in RAM, 60 s, the sealed-file
-        budget) never answers an error: the file is marked in
+        budget; the size limits are checked after each batch of at most 5000
+        rows or 8 MiB) never answers an error: the file is marked in
         X-Drakkar-Slice-Truncated and its name ends in -partial.db. The
         attachment is `<worker>-slice-<from>__<to>.db` or
         `<cluster>-cluster-slice-<from>__<to>.db` (UTC, %Y-%m-%d_%H-%M-%S),
@@ -718,7 +719,7 @@ paths:
         - name: from
           in: query
           required: false
-          description: Start of the range in epoch seconds (included). Required; checked by the route (400).
+          description: Start of the range in epoch seconds (included), 0 to 253402300799. Required; checked by the route (400).
           schema: {type: string}
         - name: to
           in: query
@@ -814,7 +815,11 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '429':
-          description: Another slice is building on this worker ("a slice is already being built on this worker").
+          description: >-
+            Another slice is building on this worker ("a slice is already being
+            built on this worker"), or finished slices still being sent hold 2 GiB
+            on it ("slices still being sent hold 2 GiB on this worker; wait for one
+            to end").
           headers:
             Retry-After:
               schema: {type: integer, enum: [5]}
