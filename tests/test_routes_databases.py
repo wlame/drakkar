@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gc
 import gzip
 import io
 import json
@@ -748,21 +747,85 @@ async def test_a_request_that_leaves_mid_build_keeps_the_slot_until_the_build_en
     assert after.status_code == 200
 
 
-async def test_a_stream_closed_early_leaves_no_temp_file(tmp_path, started_slice_recorder):
+async def test_a_stream_closed_early_closes_its_file_at_once_and_leaves_no_temp_file(tmp_path, started_slice_recorder):
     rec = await started_slice_recorder('sqlite', events=2)
     request = parse_slice_request(_range(), routes_databases.slice_sources_of(rec))
     built = await build_slice(request, routes_databases.slice_worker_of(rec), plan_slice(request, rec.persistence))
-    response = routes_databases._slice_response(built, None)
+    released: list[bool] = []
+    response = routes_databases._slice_response(built, None, lambda: released.append(True))
 
     assert _dot_files(rec.storage_dir) == []
     first_chunk = await response.body_iterator.__anext__()
     await response.body_iterator.aclose()
-    del response
-    gc.collect()
 
     assert first_chunk.startswith(b'SQLite format 3')
+    # Closed by the stream itself, not later by the garbage collector.
     assert built.handle.closed
     assert _dot_files(rec.storage_dir) == []
+
+
+async def test_a_client_that_takes_no_chunk_ends_the_stream_and_frees_its_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes_databases, 'SLICE_SEND_IDLE_SECONDS', 0.05)
+    handle = io.BytesIO(b'x' * 10)
+    released: list[bool] = []
+    built = BuiltSlice(handle=handle, name='w-1-slice.db', rows=0, truncated=None, size_bytes=10)
+    response = routes_databases._slice_response(built, None, lambda: released.append(True))
+    sent: list[dict] = []
+
+    async def stalled_send(message):
+        sent.append(message)
+        if message['type'] == 'http.response.body':
+            await asyncio.sleep(3600)
+
+    async def receive():
+        await asyncio.sleep(3600)
+
+    with pytest.raises(Exception):  # noqa: B017 - the server turns the timeout into a disconnect
+        await response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, stalled_send)
+
+    assert sent[0]['type'] == 'http.response.start'
+    assert handle.closed
+    assert released == [True]
+
+
+def test_open_slices_count_until_release_and_release_once():
+    open_slices = routes_databases.OpenSlices()
+    release = open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES - 1)
+    assert not open_slices.is_full()
+    second = open_slices.hold(1)
+    assert open_slices.is_full()
+    second()
+    second()
+    assert open_slices.bytes == routes_databases.SLICE_OPEN_MAX_BYTES - 1
+    release()
+    assert open_slices.bytes == 0
+
+
+async def test_slice_answers_429_while_slices_being_sent_hold_the_open_bytes(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('none', events=1)
+    seen: list[routes_databases.OpenSlices] = []
+
+    class Recorded(routes_databases.OpenSlices):
+        def __init__(self) -> None:
+            super().__init__()
+            seen.append(self)
+
+    monkeypatch.setattr(routes_databases, 'OpenSlices', Recorded)
+    async with _slice_client(rec) as client:
+        done = await client.get(SLICE, params=_range())
+        (open_slices,) = seen
+        # The whole body was sent: its bytes left the count.
+        after_send = open_slices.bytes
+        open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES)
+        full = await client.get(SLICE, params=_range())
+
+    assert done.status_code == 200
+    assert after_send == 0
+    assert (full.status_code, full.json()) == (
+        429,
+        {'error': 'slices still being sent hold 2 GiB on this worker; wait for one to end'},
+    )
+    assert full.headers['retry-after'] == '5'
 
 
 async def test_a_slice_that_cannot_be_written_answers_500_and_logs(started_slice_recorder, monkeypatch):
@@ -856,3 +919,24 @@ async def test_a_failed_postgres_read_answers_503_and_logs(monkeypatch, cause):
     (line,) = [entry for entry in logs if entry['event'] == 'ui_read_postgres_failed']
     assert line['endpoint'] == SLICE and line['reason'] == cause and line['category'] == 'debug'
     assert 'secret-password' not in line['error']
+
+
+@pytest.mark.parametrize(('waiting', 'notes'), [(3, ['postgres_queue_waiting']), (0, []), (None, [])])
+async def test_a_postgres_slice_names_rows_still_waiting_for_the_write_stage(tmp_path, monkeypatch, waiting, notes):
+    fake = SliceFakePostgres([])
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+    rec = _recorder(persistence='postgres')
+    asked: list[float] = []
+
+    async def flush_postgres(timeout: float) -> int | None:
+        asked.append(timeout)
+        return waiting
+
+    rec.flush_postgres = flush_postgres  # ty: ignore[invalid-assignment]
+    async with _client(rec, _config(provider='postgres')) as client:
+        resp = await client.get(SLICE, params=_range())
+
+    assert resp.status_code == 200
+    assert asked == [routes_databases.SLICE_POSTGRES_FLUSH_SECONDS]
+    with contextlib.closing(sqlite3.connect(_save_body(resp.content, tmp_path))) as conn:
+        assert json.loads(conn.execute('SELECT notes FROM slice').fetchone()[0]) == notes

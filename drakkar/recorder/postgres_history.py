@@ -202,7 +202,7 @@ class SliceQuery:
     """The parameters of the ``slice`` statement; every filter is ``None`` when not asked for.
 
     ``exclude_instance`` and ``exclude_from_id`` leave out the rows of one
-    process from one id up (the rows its memory store also holds).
+    process from one id up (rows newer than a read of its memory store).
     """
 
     cluster: str
@@ -250,17 +250,21 @@ async def read_postgres_slice(
     query: SliceQuery,
     *,
     deadline: float,
-    batch_rows: int,
-    on_batch: Callable[[list[Any]], Awaitable[bool]],
+    first_rows: int,
+    on_batch: Callable[[list[Any]], Awaitable[int]],
     on_close_failed: CloseFailed,
     connect: Connect | None = None,
 ) -> None:
     """Read the ``slice`` rows of ``query`` with a server-side cursor; each batch goes to ``on_batch``.
 
-    ``on_batch`` answers whether it wants more. ``deadline`` is a time of the
-    running loop: the client side stops there, and the transaction sets
-    ``statement_timeout`` to the time left (and turns JIT off) before the
-    cursor opens. Takes one of the shared UI read slots for the whole read.
+    The first fetch asks for ``first_rows`` rows; ``on_batch`` answers how
+    many rows the next fetch asks for (0 stops the read). ``deadline`` is a
+    time of the running loop. It bounds every network wait (connect, the
+    statements, each fetch, the commit) but never ``on_batch``: a batch being
+    written is always finished, so its thread never outlives the read. The
+    transaction sets ``statement_timeout`` to the time left (and turns JIT
+    off) before the cursor opens. Takes one of the shared UI read slots for
+    the whole read.
 
     Raises :class:`PostgresHistoryError`: ``busy`` with no free slot,
     ``timeout`` when the deadline or the server's statement timeout ended the
@@ -269,15 +273,21 @@ async def read_postgres_slice(
     ``on_close_failed`` and does not fail the read.
     """
     with postgres_read_slot():
-        await _read_slice(settings, query, deadline, batch_rows, on_batch, on_close_failed, connect)
+        await _read_slice(settings, query, deadline, first_rows, on_batch, on_close_failed, connect)
+
+
+async def _within[T](deadline: float, waiting: Awaitable[T]) -> T:
+    """Await ``waiting`` until ``deadline`` (a time of the running loop)."""
+    async with asyncio.timeout_at(deadline):
+        return await waiting
 
 
 async def _read_slice(
     settings: RecorderPostgresSettings,
     query: SliceQuery,
     deadline: float,
-    batch_rows: int,
-    on_batch: Callable[[list[Any]], Awaitable[bool]],
+    first_rows: int,
+    on_batch: Callable[[list[Any]], Awaitable[int]],
     on_close_failed: CloseFailed,
     connect: Connect | None,
 ) -> None:
@@ -289,19 +299,24 @@ async def _read_slice(
     conn: Any = None
     close_error: str | None = None
     try:
-        async with asyncio.timeout_at(deadline):
-            conn = await connect(dsn=settings.connection.dsn)
-            # Started and committed by hand, as in the history search.
-            transaction = conn.transaction()
-            await transaction.start()
-            await conn.execute(set_local, STATEMENT_TIMEOUT_SETTING, time_left_ms(deadline, loop.time()))
-            await conn.execute(set_local, SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT])
-            cursor = await conn.cursor(statement, *query.args())
-            while True:
-                rows = await cursor.fetch(batch_rows)
-                if not rows or not await on_batch(list(rows)) or len(rows) < batch_rows:
-                    break
-            await transaction.commit()
+        conn = await _within(deadline, connect(dsn=settings.connection.dsn))
+        # Started and committed by hand, as in the history search.
+        transaction = conn.transaction()
+        await _within(deadline, transaction.start())
+        timeout_ms = time_left_ms(deadline, loop.time())
+        await _within(deadline, conn.execute(set_local, STATEMENT_TIMEOUT_SETTING, timeout_ms))
+        await _within(deadline, conn.execute(set_local, SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT]))
+        cursor = await _within(deadline, conn.cursor(statement, *query.args()))
+        count = first_rows
+        while count > 0:
+            rows = await _within(deadline, cursor.fetch(count))
+            if not rows:
+                break
+            next_count = await on_batch(list(rows))
+            if len(rows) < count:
+                break
+            count = next_count
+        await _within(deadline, transaction.commit())
         close_error = await _close_after_search(conn, deadline)
     except (TimeoutError, asyncpg.QueryCanceledError) as exc:
         # The only statement timeout this read sets is the time left of the

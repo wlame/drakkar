@@ -745,6 +745,24 @@ class EventRecorder(EventWriter):
         """Write the recorded events to the memory store only, shielded like :meth:`flush`."""
         await asyncio.shield(self._stage_memory(EVICT_MIN_INTERVAL_SECONDS))
 
+    async def flush_postgres(self, timeout: float) -> int | None:
+        """Write the recorded events to the memory store, then run stage P once, waiting at most ``timeout`` s.
+
+        For reads that take rows from the memory store and the Postgres
+        table: after it, fewer rows of this worker sit only in the P queue.
+        The run is never cancelled; after the timeout it goes on to its end
+        on its own thread. Answers the rows still waiting in the P queue (the
+        chunk in flight included), ``None`` without stage P.
+        """
+        await self.flush_memory()
+        thread, writer = self._pg_thread, self._pg_writer
+        if thread is None or writer is None:
+            return None
+        with contextlib.suppress(TimeoutError):
+            await thread.wait(writer.run_once, timeout)
+        status = self.postgres_stage_status()
+        return None if status is None else status.queue_rows + status.writer.slot_rows
+
     def set_state_provider(self, provider: Callable[[], dict]) -> None:
         """Set callback that returns current worker state (uptime, partitions, pool)."""
         self._state_provider = provider

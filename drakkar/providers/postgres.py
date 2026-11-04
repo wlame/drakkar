@@ -197,7 +197,7 @@ RECORDER_STATEMENT_TEMPLATES: dict[str, str] = {
     # The rows of one slice download: one fixed text for every filter, each
     # filter a parameter that is NULL when not asked for. The ts bounds let
     # the planner prune hour partitions. $12 and $13 leave out the rows of
-    # one process from one id up (the rows its memory store also holds).
+    # one process from one id up (rows newer than a read of its memory store).
     'slice': (
         'SELECT worker, instance, id, ts, dt, event, "partition", "offset", task_id, args, stdout_size, stdout, '
         'stderr, exit_code, duration, output_topic, metadata, pid, labels, origin, client_name, request_id '

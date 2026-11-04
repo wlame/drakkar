@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from drakkar.config import PostgresConnectionConfig, ResilienceConfig
 from drakkar.ownerlock import download_temp_pattern
 from drakkar.providers.postgres import RECORDER_STATEMENT_TEMPLATES, render_recorder
 from drakkar.recorder import postgres_history
-from drakkar.recorder.memstore import MemoryCoverage, MemoryStore
+from drakkar.recorder.memstore import MemoryStore
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.recorder.postgres_history import PostgresHistoryError, postgres_read_slot
 from drakkar.recorder.schema import INSERT_EVENT_SQL, SCHEMA_EVENTS
@@ -130,11 +132,21 @@ def test_ddl_answers_headers_and_limits_are_pinned():
     assert FIXTURE['answers'] == {
         'cluster_unavailable': {'status': 409, 'error': slices.CLUSTER_UNAVAILABLE_ERROR},
         'busy': {'status': 429, 'error': slices.BUSY_ERROR, 'retry_after_seconds': slices.SLICE_RETRY_AFTER_SECONDS},
+        'open_bytes_full': {
+            'status': 429,
+            'error': slices.OPEN_BYTES_ERROR,
+            'retry_after_seconds': slices.SLICE_RETRY_AFTER_SECONDS,
+        },
         'postgres_failed': {'status': 503, 'error': slices.POSTGRES_FAILED_ERROR},
         'failed': {'status': 500, 'error_prefix': slices.FAILED_ERROR_PREFIX},
     }
     assert FIXTURE['headers'] == {'rows': slices.HEADER_ROWS, 'truncated': slices.HEADER_TRUNCATED}
-    assert FIXTURE['notes'] == [slices.NOTE_FLUSH_TIMED_OUT, slices.NOTE_FLUSH_FAILED, slices.NOTE_SOURCE_UNREADABLE]
+    assert FIXTURE['notes'] == [
+        slices.NOTE_FLUSH_TIMED_OUT,
+        slices.NOTE_FLUSH_FAILED,
+        slices.NOTE_SOURCE_UNREADABLE,
+        slices.NOTE_POSTGRES_QUEUE_WAITING,
+    ]
     assert FIXTURE['limits'] == {
         'max_range_seconds': 604800,
         'max_rows': 1_000_000,
@@ -143,6 +155,13 @@ def test_ddl_answers_headers_and_limits_are_pinned():
         'max_ram_bytes': 64 * 1024**2,
         'time_limit_seconds': 60.0,
         'batch_rows': 5000,
+        'chunk_bytes': 8 * 1024**2,
+        'postgres_first_fetch_rows': 100,
+        'postgres_flush_seconds': 3.0,
+        'open_max_bytes': 2 * 1024**3,
+        'send_idle_seconds': 120.0,
+        'min_epoch': 0,
+        'max_epoch': 253402300799,
         'flush_wait_seconds': 5.0,
         'max_events': 40,
         'builds_per_worker': 1,
@@ -152,6 +171,9 @@ def test_ddl_answers_headers_and_limits_are_pinned():
     assert FIXTURE['limits']['max_ram_bytes'] == slices.SLICE_MAX_RAM_BYTES
     assert FIXTURE['limits']['time_limit_seconds'] == slices.SLICE_TIME_LIMIT_SECONDS
     assert FIXTURE['limits']['batch_rows'] == slices.SLICE_BATCH_ROWS
+    assert FIXTURE['limits']['chunk_bytes'] == slices.SLICE_CHUNK_BYTES
+    assert FIXTURE['limits']['open_max_bytes'] == slices.SLICE_OPEN_MAX_BYTES
+    assert FIXTURE['limits']['max_epoch'] == slices.MAX_EPOCH
 
 
 def test_the_slice_tables_create_on_sqlite():
@@ -216,9 +238,9 @@ def test_available_sources_per_mode(provider, memory, history, postgres, worker,
             'postgres',
             POSTGRES_SOURCES,
             None,
-            slices.SlicePlan(flush_memory=True, postgres=True, memory=True, dedupe_memory=True),
+            slices.SlicePlan(flush_postgres=True, postgres=True, memory=True, dedupe_memory=True),
         ),
-        ('postgres', POSTGRES_SOURCES, 'postgres', slices.SlicePlan(postgres=True)),
+        ('postgres', POSTGRES_SOURCES, 'postgres', slices.SlicePlan(flush_postgres=True, postgres=True)),
         ('none', OFF_SOURCES, None, slices.SlicePlan(flush_memory=True, memory=True)),
     ],
 )
@@ -233,7 +255,7 @@ def test_plan_slice_per_mode(provider, sources, scope, expected):
     ('provider', 'sources', 'expected'),
     [
         ('sqlite', SQLITE_SOURCES, slices.SlicePlan(sealed=True)),
-        ('postgres', POSTGRES_SOURCES, slices.SlicePlan(postgres=True)),
+        ('postgres', POSTGRES_SOURCES, slices.SlicePlan(flush_postgres=True, postgres=True)),
     ],
 )
 def test_plan_slice_for_the_cluster(provider, sources, expected):
@@ -664,16 +686,12 @@ async def _memory_store(rows: list[tuple], *, config: bool = False) -> MemorySto
     return store
 
 
-def _coverage(floor_id: int, last_id: int) -> MemoryCoverage:
-    return MemoryCoverage(floor_id=floor_id, last_id=last_id, evicted=floor_id > 1, evicted_max_ts=0.0)
-
-
 async def test_memory_only_on_sqlite_reads_the_store_and_no_file(tmp_path):
     own, _history = _folders(tmp_path)
     write_recorder_file(_own_file(own, '2025-11-01__12_10_00'), [event(1, T0 + 1, offset=1)])
     store = await _memory_store([event(5, T0 + 5, offset=5)])
     try:
-        worker = _worker(tmp_path, open_memory=store.open_by_name, coverage=lambda: _coverage(5, 5))
+        worker = _worker(tmp_path, open_memory=store.open_by_name)
         built = await _build(_request({'sources': 'memory'}), worker, flush=_no_flush, flush_memory=_memory_flushed)
     finally:
         await store.close()
@@ -703,13 +721,14 @@ async def test_memory_and_history_leave_out_the_rows_the_store_holds(tmp_path):
     write_meta_file(older, worker=WORKER, instance='earlier', first=T0 + 0.5, last=T0 + 0.5)
     store = await _memory_store([event(i, T0 + i, offset=i) for i in range(4, 8)])
     try:
-        worker = _worker(tmp_path, open_memory=store.open_by_name, coverage=lambda: _coverage(4, 7))
+        worker = _worker(tmp_path, open_memory=store.open_by_name)
         built = await _build(_request({'sources': 'memory,history'}), worker)
     finally:
         await store.close()
     path = _save(built, tmp_path)
 
-    assert [row[1] for row in _offsets(path)] == [40, 3, 4, 5, 6, 7]
+    # The store first, then the sealed files oldest first, each row once.
+    assert [row[1] for row in _offsets(path)] == [4, 5, 6, 7, 40, 3]
     assert [row[0] for row in _offsets(path)] == [1, 2, 3, 4, 5, 6]
 
 
@@ -720,7 +739,7 @@ async def test_files_and_memory_on_sqlite_read_each_row_once(tmp_path):
     # After the flush the memory store holds the same rows with the same ids.
     store = await _memory_store([event(i, T0 + i, offset=i) for i in range(1, 4)])
     try:
-        worker = _worker(tmp_path, live=live, open_memory=store.open_by_name, coverage=lambda: _coverage(1, 3))
+        worker = _worker(tmp_path, live=live, open_memory=store.open_by_name)
         built = await _build(_request({'sources': 'files,memory'}), worker)
     finally:
         await store.close()
@@ -809,10 +828,13 @@ def _pg_worker(tmp_path, **values: Any) -> SliceWorker:
 
 
 async def test_postgres_and_memory_read_each_row_once(tmp_path):
-    fake = SliceFakePostgres([pg_row(1, T0 + 1, offset=1, instance='old'), pg_row(3, T0 + 2, offset=2)])
+    # Row 4 of this process is in the table and in the store: it is written once.
+    fake = SliceFakePostgres(
+        [pg_row(1, T0 + 1, offset=1, instance='old'), pg_row(3, T0 + 2, offset=2), pg_row(4, T0 + 4, offset=4)]
+    )
     store = await _memory_store([event(4, T0 + 4, offset=4), event(5, T0 + 5, offset=5)], config=True)
     try:
-        worker = _pg_worker(tmp_path, open_memory=store.open_by_name, coverage=lambda: _coverage(4, 5))
+        worker = _pg_worker(tmp_path, open_memory=store.open_by_name)
         built = await _build(_request(sources=POSTGRES_SOURCES), worker, connect=fake.connect)
     finally:
         await store.close()
@@ -821,10 +843,11 @@ async def test_postgres_and_memory_read_each_row_once(tmp_path):
     (cursor,) = fake.cursor_calls()
     statement = render_recorder(RECORDER_STATEMENT_TEMPLATES['slice'], schema='drakkar', table='fast_recorder_events')
     assert cursor[1] == statement
-    # The table leaves out the rows of this process from the memory floor up; the store gives them.
-    assert cursor[2] == (CLUSTER, T0, T0 + 900, WORKER, None, None, None, None, None, None, None, INSTANCE, 4, 200001)
-    assert [row[1] for row in _offsets(path)] == [1, 2, 4, 5]
-    assert _sources(path) == [('postgres', None, WORKER, 2), ('memory', None, WORKER, 2)]
+    # The table leaves out the rows of this process newer than the store's cut (id 5), and the limit
+    # leaves room for the two rows the store gave.
+    assert cursor[2] == (CLUSTER, T0, T0 + 900, WORKER, None, None, None, None, None, None, None, INSTANCE, 6, 200001)
+    assert [row[1] for row in _offsets(path)] == [4, 5, 1, 2]
+    assert _sources(path) == [('memory', None, WORKER, 2), ('postgres', None, WORKER, 2)]
     executes = [call for call in fake.calls if call[0] == 'execute']
     assert [call[2][0] for call in executes] == ['statement_timeout', 'jit']
     assert 1 <= int(executes[0][2][1]) <= 60000
@@ -838,7 +861,7 @@ async def test_postgres_alone_leaves_out_nothing(tmp_path):
         {'sources': 'postgres', 'events': 'consumed', 'label_key': 'k', 'label_value': 'v'}, POSTGRES_SOURCES
     )
 
-    built = await _build(request, _pg_worker(tmp_path, coverage=lambda: _coverage(4, 5)), connect=fake.connect)
+    built = await _build(request, _pg_worker(tmp_path), connect=fake.connect)
     built.handle.close()
 
     args = fake.cursor_calls()[0][2]
@@ -861,6 +884,7 @@ async def test_postgres_rows_cut_at_max_rows(tmp_path):
 
 async def test_postgres_rows_are_fetched_in_batches_and_output_can_be_nulled(tmp_path, monkeypatch):
     monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    monkeypatch.setattr(slice_build, 'SLICE_PG_FIRST_FETCH_ROWS', 2)
     fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i, stdout='o', stderr='e') for i in range(1, 6)])
 
     built = await _build(
@@ -902,6 +926,7 @@ async def test_an_empty_postgres_read_lists_its_source(tmp_path):
 )
 async def test_a_postgres_read_cut_by_time_keeps_its_rows_and_marks_time(tmp_path, monkeypatch, error):
     monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 1)
+    monkeypatch.setattr(slice_build, 'SLICE_PG_FIRST_FETCH_ROWS', 1)
     fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i) for i in range(1, 4)])
 
     calls = {'n': 0}
@@ -1117,6 +1142,7 @@ async def test_a_worker_without_a_memory_opener_reads_no_memory(tmp_path):
 
 async def test_a_postgres_read_stops_between_batches_at_the_time_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 1)
+    monkeypatch.setattr(slice_build, 'SLICE_PG_FIRST_FETCH_ROWS', 1)
     fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i) for i in range(1, 30)])
 
     built = await _build(
@@ -1152,3 +1178,260 @@ async def test_a_postgres_plan_without_settings_reads_no_table(tmp_path):
     built.handle.close()
 
     assert built.rows == 0
+
+
+# --- Fix round 1: order, keys, byte bounds, thread safety ---
+
+
+async def _delete_memory_rows(store: MemoryStore, ids: list[int]) -> None:
+    """Evict rows from the store, as its eviction pass does."""
+    await store.writer.execute(f'DELETE FROM events WHERE id IN ({", ".join("?" * len(ids))})', ids)
+    await store.writer.commit()
+
+
+async def test_rows_evicted_from_the_store_during_the_table_read_are_neither_lost_nor_doubled(tmp_path):
+    # After the flush of the write stage the table holds rows 1 to 7 of this process; the store holds 4 to 7.
+    table = [pg_row(i, T0 + i, offset=i, instance=INSTANCE) for i in range(1, 8)]
+    fake = SliceFakePostgres(table)
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(4, 8)])
+    real_connect = fake.connect
+
+    async def connect(*, dsn):
+        conn = await real_connect(dsn=dsn)
+        original = conn.cursor
+
+        async def cursor(sql, *args):
+            # The store evicts rows 4 and 5 while the table is read.
+            await _delete_memory_rows(store, [4, 5])
+            return await original(sql, *args)
+
+        conn.cursor = cursor
+        return conn
+
+    try:
+        worker = _pg_worker(tmp_path, open_memory=store.open_by_name)
+        built = await _build(_request(sources=POSTGRES_SOURCES), worker, connect=connect)
+    finally:
+        await store.close()
+    offsets = [row[1] for row in _offsets(_save(built, tmp_path))]
+
+    assert sorted(offsets) == [1, 2, 3, 4, 5, 6, 7]
+
+
+async def test_rows_evicted_from_the_store_during_its_own_read_come_from_the_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    table = [pg_row(i, T0 + i, offset=i, instance=INSTANCE) for i in range(1, 8)]
+    fake = SliceFakePostgres(table)
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(1, 8)])
+    real_fetch = slice_build._fetch_chunk
+    calls: list[int] = []
+
+    def evicting_fetch(conn, sql, params, max_bytes):
+        rows = real_fetch(conn, sql, params, max_bytes)
+        calls.append(1)
+        if len(calls) == 1:
+            # Between the first and the second memory batch the store evicts rows 3 and 4.
+            writer = sqlite3.connect(store.uri, uri=True)
+            writer.execute('DELETE FROM events WHERE id IN (3, 4)')
+            writer.commit()
+            writer.close()
+        return rows
+
+    monkeypatch.setattr(slice_build, '_fetch_chunk', evicting_fetch)
+    try:
+        worker = _pg_worker(tmp_path, open_memory=store.open_by_name)
+        built = await _build(_request(sources=POSTGRES_SOURCES), worker, connect=fake.connect)
+    finally:
+        await store.close()
+    offsets = [row[1] for row in _offsets(_save(built, tmp_path))]
+
+    assert sorted(offsets) == [1, 2, 3, 4, 5, 6, 7]
+
+
+async def test_an_own_sealed_file_without_meta_leaves_out_the_store_rows_by_id_and_time(tmp_path):
+    _own, history = _folders(tmp_path)
+    # Rows 4 and 5 are the store's rows (same id and time); another process's row 6 has another time.
+    write_recorder_file(
+        _own_file(history, '2025-11-01__12_00_00'),
+        [
+            event(3, T0 + 3, offset=3),
+            event(4, T0 + 4, offset=4),
+            event(5, T0 + 5, offset=5),
+            event(6, T0 + 0.5, offset=60),
+        ],
+    )
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(4, 8)])
+    try:
+        built = await _build(_request({'sources': 'memory,history'}), _worker(tmp_path, open_memory=store.open_by_name))
+    finally:
+        await store.close()
+
+    assert [row[1] for row in _offsets(_save(built, tmp_path))] == [4, 5, 6, 7, 3, 60]
+
+
+async def test_a_batch_ends_at_its_byte_bound_and_the_read_goes_on(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_CHUNK_BYTES', 1000)
+    own, _history = _folders(tmp_path)
+    write_recorder_file(
+        _own_file(own, '2025-11-01__12_10_00'), [event(i, T0 + i, offset=i, stdout='o' * 900) for i in range(1, 6)]
+    )
+    sizes: list[int] = []
+    real_fetch = slice_build._fetch_chunk
+
+    def counting_fetch(conn, sql, params, max_bytes):
+        rows, cut = real_fetch(conn, sql, params, max_bytes)
+        sizes.append(len(rows))
+        return rows, cut
+
+    monkeypatch.setattr(slice_build, '_fetch_chunk', counting_fetch)
+    built = await _build(_request({'sources': 'files'}), _worker(tmp_path))
+
+    assert [row[1] for row in _offsets(_save(built, tmp_path))] == [1, 2, 3, 4, 5]
+    # Two rows of about 950 bytes pass the bound of 1000: each batch holds at most two.
+    assert max(sizes) <= 2
+    assert built.truncated is None
+
+
+async def test_a_ram_build_stops_within_one_bounded_batch_of_its_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_CHUNK_BYTES', 5000)
+    monkeypatch.setattr(slice_build, 'SLICE_MAX_RAM_BYTES', 1)
+    store = await _memory_store([event(i, T0 + i, offset=i, stdout='o' * 1000) for i in range(1, 200)])
+    try:
+        built = await _build(
+            _request(sources=OFF_SOURCES),
+            _worker(tmp_path, provider='none', storage_dir='', open_memory=store.open_by_name),
+        )
+    finally:
+        await store.close()
+    built.handle.close()
+
+    assert built.truncated == 'bytes'
+    # One batch of at most 5000 bytes, so at most 5 rows of about 1 KiB.
+    assert built.rows <= 5
+
+
+async def test_postgres_batches_are_written_in_byte_bounded_parts_and_the_next_fetch_shrinks(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_CHUNK_BYTES', 2000)
+    monkeypatch.setattr(slice_build, 'SLICE_PG_FIRST_FETCH_ROWS', 4)
+    fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i, stdout='o' * 1000) for i in range(1, 9)])
+    parts: list[int] = []
+    real_insert = slice_build.SliceWriter.insert_events
+
+    def counting_insert(self, rows, worker_id):
+        parts.append(len(rows))
+        real_insert(self, rows, worker_id)
+
+    monkeypatch.setattr(slice_build.SliceWriter, 'insert_events', counting_insert)
+    built = await _build(
+        _request({'sources': 'postgres'}, POSTGRES_SOURCES), _pg_worker(tmp_path), connect=fake.connect
+    )
+    built.handle.close()
+
+    assert built.rows == 8
+    assert max(parts) <= 2
+    fetches = [call[1] for call in fake.calls if call[0] == 'fetch']
+    assert fetches[0] == 4 and all(count <= 2 for count in fetches[1:])
+
+
+async def test_a_batch_being_written_at_the_deadline_is_finished_and_counted(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_TIME_LIMIT_SECONDS', 0.2)
+    monkeypatch.setattr(slice_build, 'SLICE_PG_FIRST_FETCH_ROWS', 2)
+    monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i) for i in range(1, 7)])
+    real_insert = slice_build.SliceWriter.insert_events
+    finished: list[int] = []
+
+    def slow_insert(self, rows, worker_id):
+        time.sleep(0.4)  # past the build's deadline
+        real_insert(self, rows, worker_id)
+        finished.append(len(rows))
+
+    monkeypatch.setattr(slice_build.SliceWriter, 'insert_events', slow_insert)
+    built = await _build(
+        _request({'sources': 'postgres'}, POSTGRES_SOURCES), _pg_worker(tmp_path), connect=fake.connect
+    )
+    path = _save(built, tmp_path)
+
+    assert built.truncated == 'time'
+    # The batch in flight was written to its end, and the file, the count and the header agree.
+    assert finished == [2]
+    assert built.rows == 2
+    assert slice_rows(path, 'SELECT COUNT(*) FROM events') == [(2,)]
+    assert _slice_row(path)['rows'] == 2
+
+
+async def test_a_build_cancelled_during_a_thread_waits_for_it_and_removes_the_temp_file(tmp_path, monkeypatch):
+    own, _history = _folders(tmp_path)
+    write_recorder_file(_own_file(own, '2025-11-01__12_10_00'), [event(1, T0 + 1, offset=1)])
+    entered = threading.Event()
+    gate = threading.Event()
+    errors: list[BaseException] = []
+    real_insert = slice_build.SliceWriter.insert_events
+
+    def blocked_insert(self, rows, worker_id):
+        entered.set()
+        gate.wait(5)
+        try:
+            real_insert(self, rows, worker_id)
+        except BaseException as exc:
+            errors.append(exc)
+            raise
+
+    monkeypatch.setattr(slice_build.SliceWriter, 'insert_events', blocked_insert)
+    task = asyncio.ensure_future(_build(_request({'sources': 'files'}), _worker(tmp_path)))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    asyncio.get_running_loop().call_later(0.1, gate.set)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The insert ran on an open connection; only then was the target closed and removed.
+    assert errors == []
+    assert temp_files(own) == []
+
+
+async def test_a_build_cancelled_while_its_target_opens_removes_the_temp_file(tmp_path, monkeypatch):
+    own, _history = _folders(tmp_path)
+    entered = threading.Event()
+    gate = threading.Event()
+    real_open = slice_build.open_target
+
+    def slow_open(storage_dir, worker):
+        target = real_open(storage_dir, worker)
+        entered.set()
+        gate.wait(5)
+        return target
+
+    monkeypatch.setattr(slice_build, 'open_target', slow_open)
+    task = asyncio.ensure_future(_build(_request({'sources': 'files'}), _worker(tmp_path)))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    asyncio.get_running_loop().call_later(0.1, gate.set)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert temp_files(own) == []
+
+
+async def test_a_postgres_plan_asks_for_the_flush_of_the_write_stage(tmp_path):
+    fake = SliceFakePostgres([])
+    asked: list[str] = []
+
+    async def flush_postgres() -> str:
+        asked.append('postgres')
+        return slices.NOTE_POSTGRES_QUEUE_WAITING
+
+    async def other() -> None:
+        raise AssertionError('another flush was asked for')
+
+    built = await _build(
+        _request(sources=POSTGRES_SOURCES),
+        _pg_worker(tmp_path),
+        connect=fake.connect,
+        flush=other,
+        flush_memory=other,
+        flush_postgres=flush_postgres,
+    )
+
+    assert asked == ['postgres']
+    assert json.loads(_slice_row(_save(built, tmp_path))['notes']) == ['postgres_queue_waiting']

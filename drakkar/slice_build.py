@@ -1,13 +1,23 @@
 """Build a slice file: read the sources of a plan in batches and write them into one SQLite file.
 
 The builder never runs SQLite on the API server's loop: every SQLite read
-and write is one call of :func:`asyncio.to_thread`. The Postgres rows are
-fetched on the loop with a server-side cursor, and each batch is written by
-a thread call. Each source is read in keyset batches of
-:data:`SLICE_BATCH_ROWS` rows by ``id`` up to the largest id it held when the
-build opened it, each batch one statement with no transaction across
-batches: the cut is fixed, and the recorder's checkpoint is never held back
-for the whole build.
+and write is one thread call (:func:`drakkar.concurrency.run_in_thread_to_end`,
+whose cancel waits for the thread, so no connection is closed under a thread
+that still uses it). The Postgres rows are fetched on the loop with a
+server-side cursor, and each batch is written by a thread call.
+
+Each SQLite source is read in keyset batches by ``id`` up to the largest id
+it held when the build opened it, each batch one statement with no
+transaction across batches: the cut is fixed, and the recorder's checkpoint
+is never held back for the whole build. A batch ends at
+:data:`SLICE_BATCH_ROWS` rows or :data:`SLICE_CHUNK_BYTES` text bytes,
+whichever comes first, so one batch is bounded in memory; the file and RAM
+size limits are checked after each batch.
+
+The memory store is read first. A later source leaves out the rows the
+store gave (the same process and id; for an own sealed file without a meta
+file, the same id and time), so each row is written once even when the
+store evicts rows while the build runs.
 
 A limit never fails a build. The rows cap, the file size cap, the time limit
 and the sealed-file budget end the build (or skip files) and mark the file
@@ -18,13 +28,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import io
 import json
 import os
 import secrets
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,11 +43,12 @@ from typing import Any, BinaryIO
 
 import structlog
 
+from drakkar.concurrency import run_in_thread_to_end
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import MERGED_SCHEMA
 from drakkar.recorder.archive import is_own_sealed_name, parse_db_start_ts
 from drakkar.recorder.history import list_sealed, meta_path, read_meta
-from drakkar.recorder.memstore import MEMORY_READ_LIMIT_SECONDS, PROGRESS_HANDLER_STEPS, MemoryCoverage
+from drakkar.recorder.memstore import MEMORY_READ_LIMIT_SECONDS, PROGRESS_HANDLER_STEPS
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.recorder.postgres_history import PostgresHistoryError, SliceQuery, read_postgres_slice
 from drakkar.recorder.schema import (
@@ -52,8 +64,10 @@ from drakkar.slices import (
     NOTE_SOURCE_UNREADABLE,
     SCOPE_CLUSTER,
     SLICE_BATCH_ROWS,
+    SLICE_CHUNK_BYTES,
     SLICE_MAX_FILE_BYTES,
     SLICE_MAX_RAM_BYTES,
+    SLICE_PG_FIRST_FETCH_ROWS,
     SLICE_SCHEMA_VERSION,
     SLICE_SOURCES_TABLE_DDL,
     SLICE_TABLE_DDL,
@@ -92,6 +106,14 @@ IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
 # The ``source_file`` of the ``workers`` rows of a cluster slice built from the table.
 POSTGRES_SOURCE_FILE = 'postgres'
 _NO_ID = -(2**63)
+# A row counts its text and blob bytes plus this much for each value.
+_VALUE_OVERHEAD_BYTES = 8
+# Ids asked at once from the temp table of memory keys (under SQLite's variable limit).
+_KEY_LOOKUP_CHUNK = 500
+# How a source leaves out the rows the memory store gave: by id (a source of
+# this process), by id and time (an own file of an unknown process), or not.
+DEDUPE_BY_ID = 'id'
+DEDUPE_BY_ID_AND_TS = 'id_ts'
 
 MemoryOpener = Callable[[], AbstractContextManager[sqlite3.Connection | None]]
 Flush = Callable[[], Awaitable[str | None]]
@@ -104,8 +126,7 @@ class SliceWorker:
     """What a build needs to know of the worker that builds it, read once per request.
 
     ``open_memory`` opens a by-name connection to the memory store through
-    its open guard (``None`` inside when the store is closed);
-    ``coverage`` reads the id range the store holds.
+    its open guard (``None`` inside when the store is closed).
     """
 
     worker: str
@@ -117,7 +138,6 @@ class SliceWorker:
     live_path: str
     max_files: int
     open_memory: MemoryOpener | None = None
-    coverage: Callable[[], MemoryCoverage | None] = lambda: None
     postgres: RecorderPostgresSettings | None = None
 
 
@@ -187,14 +207,52 @@ def _deadline_handler(deadline: float, clock: Callable[[], float]) -> Callable[[
     return lambda: int(clock() >= deadline)
 
 
+def _source_error(exc: sqlite3.Error) -> Exception:
+    """A source error as a stop by the progress handler, or as an unreadable source."""
+    if getattr(exc, 'sqlite_errorcode', 0) & 0xFF == _SQLITE_INTERRUPT:
+        return _SourceTimedOut()
+    return _SourceUnreadable(str(exc))
+
+
 def _run_source(conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()) -> list[tuple]:
     """One statement on a source connection; a stop by the progress handler and every other error are told apart."""
     try:
         return conn.execute(sql, params).fetchall()
     except sqlite3.Error as exc:
-        if getattr(exc, 'sqlite_errorcode', 0) & 0xFF == _SQLITE_INTERRUPT:
-            raise _SourceTimedOut from exc
-        raise _SourceUnreadable(str(exc)) from exc
+        raise _source_error(exc) from exc
+
+
+def row_bytes(values: Iterable[Any]) -> int:
+    """The bytes a row holds in memory, roughly: its text and blob lengths plus a small cost per value."""
+    total = 0
+    for value in values:
+        total += _VALUE_OVERHEAD_BYTES
+        if isinstance(value, str | bytes):
+            total += len(value)
+    return total
+
+
+def _fetch_chunk(conn: sqlite3.Connection, sql: str, params: Sequence[Any], max_bytes: int) -> tuple[list[tuple], bool]:
+    """Read rows of one statement until it ends or ``max_bytes`` is reached; the rows and whether the bytes cut them.
+
+    The statement is reset after the last row read, so no read is held
+    open between batches.
+    """
+    rows: list[tuple] = []
+    size = 0
+    try:
+        cursor = conn.execute(sql, params)
+        try:
+            for row in cursor:
+                rows.append(row)
+                size += row_bytes(row)
+                if size >= max_bytes:
+                    return rows, True
+        finally:
+            cursor.close()
+    except sqlite3.Error as exc:
+        raise _source_error(exc) from exc
+    return rows, False
 
 
 def _quote(column: str) -> str:
@@ -249,9 +307,7 @@ def _source_config(conn: sqlite3.Connection) -> dict[str, Any]:
         cursor = conn.execute('SELECT * FROM worker_config WHERE id = 1')
         row = cursor.fetchone()
     except sqlite3.Error as exc:
-        if getattr(exc, 'sqlite_errorcode', 0) & 0xFF == _SQLITE_INTERRUPT:
-            raise _SourceTimedOut from exc
-        raise _SourceUnreadable(str(exc)) from exc
+        raise _source_error(exc) from exc
     if row is None:
         return {}
     return {column[0]: value for column, value in zip(cursor.description, row, strict=True)}
@@ -268,12 +324,12 @@ def _parse_meta_ts(text: Any) -> float | None:
 
 @dataclass(frozen=True)
 class _FileSource:
-    """One file a build reads: its path, kind, worker, and the rows of this process it must leave out."""
+    """One file a build reads: its path, kind, worker, and how it leaves out the rows the memory store gave."""
 
     path: str
     kind: str
     worker: str | None = None
-    below_id: int | None = None
+    dedupe: str | None = None
 
 
 # --- The target file ---
@@ -374,6 +430,7 @@ class SliceWriter:
         self._cluster_scope = request.scope == SCOPE_CLUSTER
         self._postgres_workers: dict[str, int] = {}
         self.has_worker_config = False
+        self.has_memory_keys = False
         event_columns = ['worker_id', *SLICE_EVENT_COLUMNS] if self._cluster_scope else list(SLICE_EVENT_COLUMNS)
         self._event_insert = (
             f'INSERT INTO events ({", ".join(_quote(c) for c in event_columns)}) '
@@ -386,13 +443,19 @@ class SliceWriter:
         )
 
     def create_schema(self) -> None:
-        """The recorder file schema (worker scope) or the merge result schema (cluster scope), plus the slice tables."""
+        """The recorder file schema (worker scope) or the merge result schema (cluster scope), plus the slice tables.
+
+        A temp table (in the temp database, never in the file) keeps the id
+        and time of every memory row written, so later sources can leave
+        them out.
+        """
         if self._cluster_scope:
             self._conn.executescript(MERGED_SCHEMA)
         else:
             self._conn.executescript(SCHEMA_EVENTS + SCHEMA_WORKER_CONFIG + SCHEMA_WORKER_STATE)
         self._conn.execute(SLICE_TABLE_DDL)
         self._conn.execute(SLICE_SOURCES_TABLE_DDL)
+        self._conn.execute('CREATE TEMP TABLE slice_memory_keys (id INTEGER PRIMARY KEY, ts REAL NOT NULL)')
         self._conn.commit()
 
     def insert_events(self, rows: Sequence[Sequence[Any]], worker_id: int | None) -> None:
@@ -409,6 +472,24 @@ class SliceWriter:
         self._budget.rows += len(rows)
         if self._target.size_bytes() >= self._budget.max_bytes:
             self._budget.stop(TRUNCATED_BYTES)
+
+    def remember_memory_rows(self, keys: Sequence[tuple[int, float]]) -> None:
+        """Keep the ``(id, ts)`` of memory rows written, for the sources read after the store."""
+        self._conn.executemany('INSERT OR IGNORE INTO temp.slice_memory_keys (id, ts) VALUES (?, ?)', keys)
+        self._conn.commit()
+        self.has_memory_keys = self.has_memory_keys or bool(keys)
+
+    def memory_keys_among(self, ids: Sequence[int]) -> dict[int, float]:
+        """The ids among ``ids`` that a memory row had, with that row's time."""
+        found: dict[int, float] = {}
+        for start in range(0, len(ids), _KEY_LOOKUP_CHUNK):
+            chunk = ids[start : start + _KEY_LOOKUP_CHUNK]
+            found.update(
+                self._conn.execute(
+                    f'SELECT id, ts FROM temp.slice_memory_keys WHERE id IN ({", ".join("?" * len(chunk))})', chunk
+                ).fetchall()
+            )
+        return found
 
     def insert_states(self, rows: Sequence[Sequence[Any]], worker_id: int | None) -> None:
         """Write ``worker_state`` rows (worker scope) or ``worker_states`` rows (cluster scope)."""
@@ -490,18 +571,44 @@ class _Build:
     worker: SliceWorker
     writer: SliceWriter
     budget: SliceBudget
-    coverage: MemoryCoverage | None
     notes: list[str] = field(default_factory=list)
-    reads_memory: bool = False
+    # Memory rows written, and the largest id the store held when it was read.
+    memory_rows: int = 0
+    memory_cut: int | None = None
 
     @property
     def cluster_scope(self) -> bool:
         return self.request.scope == SCOPE_CLUSTER
 
+    def _note(self, note: str) -> None:
+        if note not in self.notes:
+            self.notes.append(note)
+
     # -- events in batches --
 
-    def _copy_batches(self, fetch: Callable[[int, int], list[tuple]], worker_id: int | None) -> int:
-        """Copy the rows ``fetch(after_id, limit)`` gives (``id`` first) in keyset batches; the rows written."""
+    def _left_out(self, rows: list[tuple], dedupe: str | None) -> list[tuple]:
+        """``rows`` (``id`` and ``ts`` first) without the rows the memory store gave."""
+        if dedupe is None or not self.writer.has_memory_keys or not rows:
+            return rows
+        known = self.writer.memory_keys_among([row[0] for row in rows])
+        if dedupe == DEDUPE_BY_ID:
+            return [row for row in rows if row[0] not in known]
+        return [row for row in rows if known.get(row[0]) != row[1]]
+
+    def _copy_batches(
+        self,
+        fetch: Callable[[int, int], tuple[list[tuple], bool]],
+        worker_id: int | None,
+        *,
+        dedupe: str | None = None,
+        remember: bool = False,
+    ) -> int:
+        """Copy the rows ``fetch(after_id, limit)`` gives (``id`` and ``ts`` first) in keyset batches; the rows written.
+
+        ``fetch`` also says whether the byte bound ended its batch early.
+        ``dedupe`` leaves out the rows the memory store gave; ``remember``
+        keeps the ``(id, ts)`` of each batch written (the memory read).
+        """
         written = 0
         after = _NO_ID
         while not self.budget.stopped:
@@ -510,35 +617,41 @@ class _Build:
                 break
             remaining = self.budget.remaining_rows()
             limit = min(SLICE_BATCH_ROWS, remaining + 1)
-            rows = fetch(after, limit)
+            rows, cut_by_bytes = fetch(after, limit)
             if not rows:
                 break
-            take = rows[:remaining]
+            kept = self._left_out(rows, dedupe)
+            take = kept[:remaining]
             if take:
                 self.writer.insert_events([row[1:] for row in take], worker_id)
+                if remember:
+                    self.writer.remember_memory_rows([(row[0], row[1]) for row in take])
                 written += len(take)
-            if len(rows) > remaining:
+            if len(kept) > remaining:
                 self.budget.stop(TRUNCATED_ROWS)
                 break
-            if len(rows) < limit:
+            if len(rows) < limit and not cut_by_bytes:
                 break
             after = rows[-1][0]
         return written
 
     def _event_fetcher(
-        self, conn: sqlite3.Connection, max_id: int, *, below_id: int | None
-    ) -> Callable[[int, int], list[tuple]]:
+        self, conn: sqlite3.Connection, max_id: int, arm: Callable[[], None] | None = None
+    ) -> Callable[[int, int], tuple[list[tuple], bool]]:
         present = _table_columns(conn, 'events')
         if 'id' not in present:
             raise _SourceUnreadable('no events table')
         nulled = frozenset() if self.request.output else _OUTPUT_COLUMNS
         select = _select_list(present, SLICE_EVENT_COLUMNS, nulled=nulled)
         where, params = sqlite_filters(self.request)
-        if below_id is not None:
-            where += ' AND id < ?'
-            params.append(below_id)
         sql = f'SELECT id, {select} FROM events WHERE id > ? AND id <= ? AND {where} ORDER BY id LIMIT ?'
-        return lambda after, limit: _run_source(conn, sql, [after, max_id, *params, limit])
+
+        def fetch(after: int, limit: int) -> tuple[list[tuple], bool]:
+            if arm is not None:
+                arm()
+            return _fetch_chunk(conn, sql, [after, max_id, *params, limit], SLICE_CHUNK_BYTES)
+
+        return fetch
 
     def _copy_states(self, conn: sqlite3.Connection, worker_id: int | None) -> None:
         """Copy the ``worker_state`` rows whose ``updated_at`` is in the range, in keyset batches."""
@@ -560,6 +673,55 @@ class _Build:
             if len(rows) < SLICE_BATCH_ROWS:
                 return
             after = rows[-1][0]
+
+    # -- memory --
+
+    def _arm(self, conn: sqlite3.Connection) -> None:
+        """Bound the next memory statement by the memory read limit and by the build's deadline."""
+        clock = self.budget.clock
+        deadline = min(clock() + MEMORY_READ_LIMIT_SECONDS, self.budget.deadline)
+        conn.set_progress_handler(_deadline_handler(deadline, clock), PROGRESS_HANDLER_STEPS)
+
+    def copy_memory(self, *, read: bool) -> None:
+        """Copy the memory store rows (with ``read``) and its config (worker scope). Blocking.
+
+        The rows go first, so the config comes from the store unless a file
+        read later replaces it. The ``(id, ts)`` of every row written is kept
+        for the sources read after the store.
+        """
+        opener = self.worker.open_memory
+        if opener is None:
+            return
+        with opener() as conn:
+            if conn is None:
+                if read:
+                    self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, 0)
+                return
+            written = 0
+            try:
+                if read:
+                    written = self._copy_memory_rows(conn)
+                if not self.cluster_scope:
+                    self._arm(conn)
+                    config = _source_config(conn)
+                    if config:
+                        self.writer.set_worker_config(config)
+            except _SourceTimedOut:
+                self.budget.stop(TRUNCATED_TIME)
+            except _SourceUnreadable:
+                self._note(NOTE_SOURCE_UNREADABLE)
+            if read:
+                self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, written)
+
+    def _copy_memory_rows(self, conn: sqlite3.Connection) -> int:
+        self._arm(conn)
+        max_id = _run_source(conn, 'SELECT MAX(id) FROM events')[0][0]
+        self.memory_cut = max_id
+        if max_id is None:
+            return 0
+        fetch = self._event_fetcher(conn, max_id, arm=lambda: self._arm(conn))
+        self.memory_rows = self._copy_batches(fetch, None, remember=True)
+        return self.memory_rows
 
     # -- files --
 
@@ -610,7 +772,7 @@ class _Build:
                 self.writer.set_worker_config(config)
             max_row = _run_source(conn, 'SELECT MAX(id) FROM events')
             max_id = max_row[0][0] if max_row and max_row[0][0] is not None else 0
-            written = self._copy_batches(self._event_fetcher(conn, max_id, below_id=source.below_id), worker_id)
+            written = self._copy_batches(self._event_fetcher(conn, max_id), worker_id, dedupe=source.dedupe)
             self._copy_states(conn, worker_id)
             self.writer.add_source(source.kind, name, worker, written)
         except _SourceTimedOut:
@@ -622,8 +784,7 @@ class _Build:
             conn.close()
 
     def _unreadable(self, source: _FileSource, name: str, written: int = 0) -> None:
-        if NOTE_SOURCE_UNREADABLE not in self.notes:
-            self.notes.append(NOTE_SOURCE_UNREADABLE)
+        self._note(NOTE_SOURCE_UNREADABLE)
         self.writer.add_source(source.kind, name, source.worker, written)
 
     def _sealed_range(self, path: str) -> tuple[float | None, float | None, dict[str, Any] | None]:
@@ -642,6 +803,14 @@ class _Build:
         finally:
             conn.close()
         return low, high, None
+
+    def _sealed_dedupe(self, meta: dict[str, Any] | None) -> str | None:
+        """How an own sealed file leaves out the memory rows: by id for this process, by id and time without a meta file."""
+        if self.cluster_scope:
+            return None
+        if meta is None:
+            return DEDUPE_BY_ID_AND_TS
+        return DEDUPE_BY_ID if meta.get('instance') == self.worker.instance else None
 
     def sealed_sources(self, unsealed_names: set[str]) -> list[_FileSource]:
         """The sealed files to read, oldest first: newest first up to the file budget, each overlapping the range.
@@ -674,19 +843,15 @@ class _Build:
                 self.budget.skip_files()
                 break
             worker = meta.get('worker') if meta else None
-            below_id = None
-            if (
-                self.coverage is not None
-                and meta is not None
-                and meta.get('instance') == self.worker.instance
-                and not self.cluster_scope
-            ):
-                below_id = self.coverage.floor_id
-            chosen.append(_FileSource(path, SOURCE_KIND_SEALED, worker if isinstance(worker, str) else None, below_id))
+            chosen.append(
+                _FileSource(
+                    path, SOURCE_KIND_SEALED, worker if isinstance(worker, str) else None, self._sealed_dedupe(meta)
+                )
+            )
         chosen.reverse()
         return chosen
 
-    def copy_files(self, plan: SlicePlan, *, dedupe: bool) -> None:
+    def copy_files(self, plan: SlicePlan) -> None:
         """Copy the file sources of a plan, oldest first: sealed, then backlog, then live."""
         unsealed: list[_FileSource] = []
         if plan.backlog or plan.live:
@@ -698,69 +863,26 @@ class _Build:
                 unsealed.append(_FileSource(live, SOURCE_KIND_LIVE, self.worker.worker))
         names = {os.path.basename(source.path) for source in unsealed}
         sealed = self.sealed_sources(names) if plan.sealed else []
-        if not dedupe:
-            sealed = [_FileSource(s.path, s.kind, s.worker) for s in sealed]
         done: set[str] = set()
         for source in [*sealed, *unsealed]:
             if self.budget.stopped:
                 break
             self.copy_file(source, history_dir=self.worker.history_dir, done=done)
 
-    # -- memory --
-
-    def copy_memory(self, *, read: bool) -> None:
-        """Copy the memory store rows (with ``read``), and its config when no file gave one. Blocking."""
-        opener = self.worker.open_memory
-        if opener is None:
-            return
-        with opener() as conn:
-            if conn is None:
-                if read:
-                    self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, 0)
-                return
-            written = 0
-            try:
-                if read:
-                    written = self._copy_memory_rows(conn)
-                if not self.cluster_scope and not self.writer.has_worker_config:
-                    self._arm(conn)
-                    config = _source_config(conn)
-                    if config:
-                        self.writer.set_worker_config(config)
-            except _SourceTimedOut:
-                self.budget.stop(TRUNCATED_TIME)
-            except _SourceUnreadable:
-                if NOTE_SOURCE_UNREADABLE not in self.notes:
-                    self.notes.append(NOTE_SOURCE_UNREADABLE)
-            if read:
-                self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, written)
-
-    def _arm(self, conn: sqlite3.Connection) -> None:
-        """Bound the next memory statement by the memory read limit and by the build's deadline."""
-        clock = self.budget.clock
-        deadline = min(clock() + MEMORY_READ_LIMIT_SECONDS, self.budget.deadline)
-        conn.set_progress_handler(_deadline_handler(deadline, clock), PROGRESS_HANDLER_STEPS)
-
-    def _copy_memory_rows(self, conn: sqlite3.Connection) -> int:
-        self._arm(conn)
-        max_id = _run_source(conn, 'SELECT MAX(id) FROM events')[0][0] or 0
-        self._arm(conn)
-        fetch = self._event_fetcher(conn, max_id, below_id=None)
-
-        def armed(after: int, limit: int) -> list[tuple]:
-            self._arm(conn)
-            return fetch(after, limit)
-
-        return self._copy_batches(armed, None)
-
     # -- postgres --
 
     def postgres_query(self) -> SliceQuery:
-        """The parameters of the ``slice`` statement for this build."""
+        """The parameters of the ``slice`` statement for this build.
+
+        Worker scope reads this worker's rows. After a memory read, the rows
+        of this process newer than the store's cut are left out (they were
+        recorded after the read), and the limit leaves room for the rows the
+        store gave already, which the build drops by key.
+        """
         own_instance = None
-        floor_id = None
-        if not self.cluster_scope and self.coverage is not None and self.reads_memory:
-            own_instance, floor_id = self.worker.instance, self.coverage.floor_id
+        cut_from = None
+        if not self.cluster_scope and self.memory_cut is not None:
+            own_instance, cut_from = self.worker.instance, self.memory_cut + 1
         return SliceQuery(
             cluster=self.worker.cluster,
             from_ts=self.request.from_ts,
@@ -774,32 +896,61 @@ class _Build:
             label_key=self.request.label_key,
             label_value=self.request.label_value,
             exclude_instance=own_instance,
-            exclude_from_id=floor_id,
-            limit=self.budget.remaining_rows() + 1,
+            exclude_from_id=cut_from,
+            limit=self.budget.remaining_rows() + self.memory_rows + 1,
         )
 
-    def write_postgres_rows(self, rows: Sequence[Any], counts: dict[str | None, int]) -> bool:
-        """Write one batch of table rows in their order; whether the build wants more. Blocking."""
+    def _postgres_values(self, row: Any) -> tuple:
+        return tuple(
+            None if (not self.request.output and col in _OUTPUT_COLUMNS) else row[col] for col in SLICE_EVENT_COLUMNS
+        )
+
+    def _postgres_kept(self, rows: Sequence[Any]) -> list[Any]:
+        """The table rows without the rows of this process the memory store gave."""
+        if not self.writer.has_memory_keys:
+            return list(rows)
+        own = [row['id'] for row in rows if row['instance'] == self.worker.instance]
+        known = self.writer.memory_keys_among(own) if own else {}
+        return [row for row in rows if not (row['instance'] == self.worker.instance and row['id'] in known)]
+
+    def write_postgres_rows(self, rows: Sequence[Any], counts: dict[str | None, int]) -> int:
+        """Write one batch of table rows in their order; the rows of the next fetch, 0 when the build wants no more.
+
+        The batch is written in parts of at most :data:`SLICE_CHUNK_BYTES`,
+        each part followed by the size check, and the next fetch is sized
+        from the bytes per row of this one. Blocking.
+        """
         remaining = self.budget.remaining_rows()
-        values: list[tuple] = []
-        for row in rows[:remaining]:
-            event = tuple(
-                None if (not self.request.output and col in _OUTPUT_COLUMNS) else row[col]
-                for col in SLICE_EVENT_COLUMNS
-            )
+        kept = self._postgres_kept(rows)
+        part: list[tuple] = []
+        part_bytes = 0
+        batch_bytes = 0
+        for row in kept[:remaining]:
+            event = self._postgres_values(row)
             worker = row['worker']
             counts[worker] = counts.get(worker, 0) + 1
+            size = row_bytes(event)
+            batch_bytes += size
             if self.cluster_scope:
                 # The rows of a cluster slice carry their worker_id first, in table order.
                 event = (self.writer.postgres_worker_id(worker, self.worker.cluster), *event)
-            values.append(event)
-        if values:
-            self.writer.insert_events(values, None)
-        if len(rows) > remaining:
+            part.append(event)
+            part_bytes += size
+            if part_bytes >= SLICE_CHUNK_BYTES:
+                self.writer.insert_events(part, None)
+                part, part_bytes = [], 0
+                if self.budget.stopped:
+                    return 0
+        if part:
+            self.writer.insert_events(part, None)
+        if len(kept) > remaining:
             self.budget.stop(TRUNCATED_ROWS)
         elif self.budget.out_of_time():
             self.budget.stop(TRUNCATED_TIME)
-        return not self.budget.stopped
+        if self.budget.stopped:
+            return 0
+        per_row = max(1, batch_bytes // max(1, len(kept))) if kept else 1
+        return max(1, min(SLICE_BATCH_ROWS, SLICE_CHUNK_BYTES // per_row))
 
     def add_postgres_sources(self, counts: dict[str | None, int]) -> None:
         if not counts:
@@ -819,26 +970,23 @@ async def _copy_postgres(build: _Build, *, connect: Any, on_failed: PostgresRead
     if settings is None:
         return
     counts: dict[str | None, int] = {}
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + build.budget.time_left()
-
     # A failure to write the slice file is not a failure of the table read:
     # it ends the read and is raised again below (a 500, not a 503).
     write_errors: list[BaseException] = []
 
-    async def on_batch(rows: list[Any]) -> bool:
+    async def on_batch(rows: list[Any]) -> int:
         try:
-            return await asyncio.to_thread(build.write_postgres_rows, rows, counts)
+            return await run_in_thread_to_end(build.write_postgres_rows, rows, counts)
         except (OSError, sqlite3.Error) as exc:
             write_errors.append(exc)
-            return False
+            return 0
 
     try:
         await read_postgres_slice(
             settings,
             build.postgres_query(),
-            deadline=deadline,
-            batch_rows=SLICE_BATCH_ROWS,
+            deadline=asyncio.get_running_loop().time() + build.budget.time_left(),
+            first_rows=SLICE_PG_FIRST_FETCH_ROWS,
             on_batch=on_batch,
             on_close_failed=lambda error: on_failed('close', error),
             connect=connect,
@@ -850,7 +998,7 @@ async def _copy_postgres(build: _Build, *, connect: Any, on_failed: PostgresRead
         await on_failed('timeout', exc.error)
     if write_errors:
         raise write_errors[0]
-    await asyncio.to_thread(build.add_postgres_sources, counts)
+    await run_in_thread_to_end(build.add_postgres_sources, counts)
 
 
 async def build_slice(
@@ -859,6 +1007,7 @@ async def build_slice(
     plan: SlicePlan,
     *,
     flush: Flush | None = None,
+    flush_postgres: Flush | None = None,
     flush_memory: Flush | None = None,
     on_postgres_failed: PostgresReadLog | None = None,
     connect: Any = None,
@@ -867,61 +1016,63 @@ async def build_slice(
 ) -> BuiltSlice:
     """Build the slice of ``request`` on ``worker`` along ``plan``; the open file and what it holds.
 
-    Asks for the recorder flush first when the plan reads the files, or for
-    the flush of the memory store when it reads the store (a flush that
-    does not end in time adds its note). Raises
-    :class:`PostgresHistoryError` when the table cannot be read, and
-    :class:`OSError` or :class:`sqlite3.Error` when the slice file cannot be
-    written; the temp file is removed then.
+    Asks for the flush the plan needs first (a flush that does not end in
+    time, or leaves rows waiting, adds its note). Then the memory store, the
+    files and the table, in that order. Raises :class:`PostgresHistoryError`
+    when the table cannot be read, and :class:`OSError` or
+    :class:`sqlite3.Error` when the slice file cannot be written; the temp
+    file is removed then, also when the build is cancelled.
     """
     notes: list[str] = []
-    flusher = flush if plan.flush else flush_memory if plan.flush_memory else None
+    flusher = (
+        flush if plan.flush else flush_postgres if plan.flush_postgres else flush_memory if plan.flush_memory else None
+    )
     if flusher is not None:
         note = await flusher()
         if note is not None:
             notes.append(note)
-    target, ram_reason = await asyncio.to_thread(open_target, worker.storage_dir, worker.worker)
-    if ram_reason is not None:
-        await logger.ainfo('debug_slice_in_ram', category='debug', reason=ram_reason)
-    budget = SliceBudget(
-        max_rows=request.max_rows,
-        max_bytes=SLICE_MAX_RAM_BYTES if target.in_ram else SLICE_MAX_FILE_BYTES,
-        deadline=clock() + SLICE_TIME_LIMIT_SECONDS,
-        clock=clock,
-    )
-    build = _Build(
-        request=request,
-        worker=worker,
-        writer=SliceWriter(target, request, budget),
-        budget=budget,
-        coverage=worker.coverage(),
-        notes=notes,
-        reads_memory=plan.memory,
+    target, ram_reason = await run_in_thread_to_end(
+        open_target, worker.storage_dir, worker.worker, on_cancelled_result=lambda opened: opened[0].discard()
     )
     try:
-        await asyncio.to_thread(build.writer.create_schema)
-        if plan.sealed or plan.backlog or plan.live:
-            await asyncio.to_thread(build.copy_files, plan, dedupe=plan.dedupe_memory)
+        if ram_reason is not None:
+            await logger.ainfo('debug_slice_in_ram', category='debug', reason=ram_reason)
+        budget = SliceBudget(
+            max_rows=request.max_rows,
+            max_bytes=SLICE_MAX_RAM_BYTES if target.in_ram else SLICE_MAX_FILE_BYTES,
+            deadline=clock() + SLICE_TIME_LIMIT_SECONDS,
+            clock=clock,
+        )
+        build = _Build(
+            request=request, worker=worker, writer=SliceWriter(target, request, budget), budget=budget, notes=notes
+        )
+        await run_in_thread_to_end(build.writer.create_schema)
+        if not build.cluster_scope:
+            await run_in_thread_to_end(functools.partial(build.copy_memory, read=plan.memory))
+        if (plan.sealed or plan.backlog or plan.live) and not budget.stopped:
+            await run_in_thread_to_end(build.copy_files, plan)
         if plan.postgres and not budget.stopped:
             await _copy_postgres(build, connect=connect, on_failed=on_postgres_failed or _ignore_failure)
-        if not build.cluster_scope:
-            await asyncio.to_thread(build.copy_memory, read=plan.memory and not budget.stopped)
-        await asyncio.to_thread(
+        finish = functools.partial(
             build.writer.finish, worker=worker.worker, cluster=worker.cluster, notes=notes, created_at=now()
         )
-        handle, size = await asyncio.to_thread(target.open_result)
+        await run_in_thread_to_end(finish)
+        # The name before the file is opened: nothing can fail between the open and the answer.
+        name = slice_file_name(
+            scope=request.scope,
+            worker=worker.worker,
+            cluster=worker.cluster,
+            from_ts=request.from_ts,
+            to_ts=request.to_ts,
+            truncated=budget.truncated,
+            compress=request.compress,
+        )
+        handle, size = await run_in_thread_to_end(
+            target.open_result, on_cancelled_result=lambda opened: opened[0].close()
+        )
     except BaseException:
-        await asyncio.to_thread(target.discard)
+        await run_in_thread_to_end(target.discard)
         raise
-    name = slice_file_name(
-        scope=request.scope,
-        worker=worker.worker,
-        cluster=worker.cluster,
-        from_ts=request.from_ts,
-        to_ts=request.to_ts,
-        truncated=budget.truncated,
-        compress=request.compress,
-    )
     return BuiltSlice(handle=handle, name=name, rows=budget.rows, truncated=budget.truncated, size_bytes=size)
 
 

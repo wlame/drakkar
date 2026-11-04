@@ -46,10 +46,28 @@ SLICE_MAX_FILE_BYTES = 1024 * 1024 * 1024
 SLICE_MAX_RAM_BYTES = 64 * 1024 * 1024
 # The whole build, checked between batches and by a progress handler.
 SLICE_TIME_LIMIT_SECONDS = 60.0
-# Rows per read and per insert.
+# Rows per read and per insert, at most.
 SLICE_BATCH_ROWS = 5000
-# The longest wait for the recorder flush before a build of the files.
+# Text bytes per read batch, at most: a batch ends at whichever of the two
+# limits comes first, so one batch holds at most this much (plus one row) in
+# memory. The file and RAM size limits are checked after each batch, so a
+# file ends at most one batch past its limit.
+SLICE_CHUNK_BYTES = 8 * 1024 * 1024
+# Rows of the first Postgres fetch; later fetches are sized from the bytes
+# per row seen so far, so each stays near SLICE_CHUNK_BYTES.
+SLICE_PG_FIRST_FETCH_ROWS = 100
+# The longest wait for the recorder flush before a build.
 SLICE_FLUSH_WAIT_SECONDS = 5.0
+# The longest wait for one run of the Postgres write stage before a build that
+# reads the table, so fewer rows of this worker sit only in its queue.
+SLICE_POSTGRES_FLUSH_SECONDS = 3.0
+# Bytes of finished slices that are still being sent (each an unlinked temp
+# file or a buffer in RAM), at most, per worker; a new request past it
+# answers 429.
+SLICE_OPEN_MAX_BYTES = 2 * 1024 * 1024 * 1024
+# A download whose client takes no chunk for this long is ended, so a stalled
+# client cannot hold its file for ever.
+SLICE_SEND_IDLE_SECONDS = 120.0
 # The ``Retry-After`` of a 429 answer.
 SLICE_RETRY_AFTER_SECONDS = 5
 
@@ -69,6 +87,10 @@ MAX_TASK_ID_CHARS = 256
 MAX_EVENTS = 40
 MAX_LABEL_KEY_CHARS = 128
 MAX_LABEL_VALUE_CHARS = 1024
+# The epoch seconds a bound may take: from 1970 to 9999-12-31 23:59:59 UTC,
+# the last second a file name can spell.
+MIN_EPOCH = 0
+MAX_EPOCH = 253402300799
 
 # The names of the query parameters, as the filters JSON spells them too.
 PARAM_FROM = 'from'
@@ -92,6 +114,10 @@ SOURCE_KIND_POSTGRES = 'postgres'
 NOTE_FLUSH_TIMED_OUT = 'flush_timed_out'
 NOTE_FLUSH_FAILED = 'flush_failed'
 NOTE_SOURCE_UNREADABLE = 'source_unreadable'
+# Rows of this worker were still waiting for the Postgres write stage after
+# its flush: a row that also left the memory store meanwhile is in neither
+# source, so it can be missing.
+NOTE_POSTGRES_QUEUE_WAITING = 'postgres_queue_waiting'
 
 SLICE_SCHEMA_VERSION = 1
 
@@ -121,6 +147,7 @@ NO_SOURCE_TEXT = 'none'
 # The other answers.
 CLUSTER_UNAVAILABLE_ERROR = 'scope cluster needs the shared history or the Postgres table'
 BUSY_ERROR = 'a slice is already being built on this worker'
+OPEN_BYTES_ERROR = 'slices still being sent hold 2 GiB on this worker; wait for one to end'
 POSTGRES_FAILED_ERROR = 'postgres read failed'
 FAILED_ERROR_PREFIX = 'Slice failed: '
 HEADER_ROWS = 'X-Drakkar-Slice-Rows'
@@ -263,7 +290,7 @@ def _epoch(params: Mapping[str, str], name: str) -> float:
     if text is None or not _NUMBER_RE.fullmatch(text):
         raise SliceRequestError(MSG_FROM_TO)
     value = float(text)
-    if not math.isfinite(value):
+    if not math.isfinite(value) or not MIN_EPOCH <= value <= MAX_EPOCH:
         raise SliceRequestError(MSG_FROM_TO)
     return value
 
@@ -382,19 +409,21 @@ def parse_slice_request(params: Mapping[str, str], sources: SliceSources) -> Sli
 
 @dataclass(frozen=True)
 class SlicePlan:
-    """What one build reads, in the order it writes.
+    """What one build reads.
 
-    ``flush``: ask the recorder for one flush (memory store and file) first;
-    ``flush_memory``: ask for a flush of the memory store only, so the events
-    still waiting in the recorder are in the store. ``sealed``: own sealed
-    files (worker scope) or every sealed file of the cluster folder (cluster
+    ``flush``: ask the recorder for one flush (memory store and file) first.
+    ``flush_postgres``: a flush of the memory store, then one bounded run of
+    the Postgres write stage. ``flush_memory``: a flush of the memory store
+    only, so the events still waiting in the recorder are in the store.
+    ``memory``: the memory store, read first. ``sealed``: own sealed files
+    (worker scope) or every sealed file of the cluster folder (cluster
     scope). ``backlog`` and ``live``: the own unsealed files. ``postgres``:
-    the table. ``memory``: the memory store. ``dedupe_memory``: leave out
-    rows of other sources that the memory store holds too (rows of this
-    process from the memory floor up).
+    the table, read last. ``dedupe_memory``: a row of a later source that the
+    memory store gave already is left out (the same process and id).
     """
 
     flush: bool = False
+    flush_postgres: bool = False
     flush_memory: bool = False
     sealed: bool = False
     backlog: bool = False
@@ -407,20 +436,20 @@ class SlicePlan:
 def plan_slice(request: SliceRequest, provider: str) -> SlicePlan:
     """The sources a build reads for ``request`` on a worker of recorder ``provider``.
 
-    A plan that reads the memory store first flushes the events still
-    waiting in the recorder into it. ``sqlite``, worker scope: flush, then
-    the files only. After the flush
-    every memory row is in the live file too, so ``memory`` adds nothing
-    when ``files`` is asked for. ``memory`` without ``files`` reads the
-    memory store, and own sealed files of this process then leave out the
-    rows the store holds. ``postgres``: the table for what the memory store
-    does not hold, then the memory store. Recorder off: the memory store.
-    Cluster scope: the sealed files of the cluster folder (``sqlite``) or the
-    table rows of the cluster (``postgres``).
+    Each row is written once. ``sqlite``, worker scope: flush, then the files
+    only; after the flush every memory row is in the live file too, so
+    ``memory`` adds nothing when ``files`` is asked for. ``memory`` without
+    ``files`` reads the memory store first (after a flush of the recorder
+    into it), then the own sealed files, leaving out the rows the store gave.
+    ``postgres``: one bounded run of the write stage, then the memory store,
+    then the table, leaving out the rows the store gave. Recorder off: the
+    memory store. Cluster scope: the sealed files of the cluster folder
+    (``sqlite``) or the table rows of the cluster (``postgres``).
     """
     asked = set(request.sources)
     if request.scope == SCOPE_CLUSTER:
-        return SlicePlan(sealed=SOURCE_HISTORY in asked, postgres=SOURCE_POSTGRES in asked)
+        postgres = SOURCE_POSTGRES in asked
+        return SlicePlan(flush_postgres=postgres, sealed=SOURCE_HISTORY in asked, postgres=postgres)
     files = SOURCE_FILES in asked
     memory = SOURCE_MEMORY in asked and not files
     if provider == PERSISTENCE_SQLITE:
@@ -435,7 +464,13 @@ def plan_slice(request: SliceRequest, provider: str) -> SlicePlan:
             dedupe_memory=memory and history,
         )
     postgres = SOURCE_POSTGRES in asked
-    return SlicePlan(flush_memory=memory, postgres=postgres, memory=memory, dedupe_memory=memory and postgres)
+    return SlicePlan(
+        flush_postgres=postgres,
+        flush_memory=memory and not postgres,
+        postgres=postgres,
+        memory=memory,
+        dedupe_memory=memory and postgres,
+    )
 
 
 # --- The attachment name ---

@@ -1,5 +1,5 @@
 {
-  "_comment": "Slice download contract (GET /api/v1/debug/slice). messages are the 400 texts in check order; the first rule a request breaks answers ({source}, {available}, {event} are filled in; available is the sorted list of the worker's sources for the scope joined with \", \", or none). validation_cases run a query (text values; every other parameter, a token too, is ignored) against the sources in available (a case may give its own); error null means the request is accepted. A cluster-scope request on a worker with no cluster source skips the source check, and the route answers 409 after every 400 check. filters_cases map a query to the filters column of the slice table: sorted compact JSON, UTF-8 not escaped, max_rows, output and sources always, every other filter only when given, events sorted without repeats, sources the sorted sources read (all available ones when none is asked for). file_names map a slice to its attachment name (UTC bounds, the fraction of a second dropped; the sanitized cluster, default when empty). ddl holds the two slice tables. limits pin the build limits; a limit marks the file truncated and never answers an error.",
+  "_comment": "Slice download contract (GET /api/v1/debug/slice). messages are the 400 texts in check order; the first rule a request breaks answers ({source}, {available}, {event} are filled in; available is the sorted list of the worker's sources for the scope joined with \", \", or none). validation_cases run a query (text values; every other parameter, a token too, is ignored) against the sources in available (a case may give its own); error null means the request is accepted. A cluster-scope request on a worker with no cluster source skips the source check, and the route answers 409 after every 400 check. filters_cases map a query to the filters column of the slice table: sorted compact JSON, UTF-8 not escaped, max_rows, output and sources always, every other filter only when given, events sorted without repeats, sources the sorted sources read (all available ones when none is asked for). file_names map a slice to its attachment name (UTC bounds, the fraction of a second dropped; the sanitized cluster, default when empty). ddl holds the two slice tables. limits pin the build limits; a limit marks the file truncated and never answers an error. A batch ends at batch_rows rows or chunk_bytes text bytes, whichever comes first, and the size limits are checked after each batch. from and to are epoch seconds from min_epoch to max_epoch (9999-12-31 23:59:59 UTC). open_bytes_full answers a request while finished slices still being sent hold open_max_bytes.",
   "schema": 1,
   "available": {
     "worker": [
@@ -102,6 +102,30 @@
       "error": "to must be greater than from"
     },
     {
+      "name": "from_negative",
+      "query": {
+        "from": "-1",
+        "to": "10"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "to_past_year_9999",
+      "query": {
+        "from": "253402300000",
+        "to": "253402300800"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "to_at_the_last_second_of_9999",
+      "query": {
+        "from": "253402300000",
+        "to": "253402300799"
+      },
+      "error": null
+    },
+    {
       "name": "range_over_168h",
       "query": {
         "from": "0",
@@ -151,6 +175,15 @@
         "sources": "files,disk"
       },
       "error": "source 'disk' is not available on this worker; available: files, history, memory"
+    },
+    {
+      "name": "duplicate_sources",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "files,files,memory"
+      },
+      "error": null
     },
     {
       "name": "empty_source",
@@ -306,6 +339,15 @@
       "error": "task_id must be 1 to 256 characters"
     },
     {
+      "name": "task_id_of_256",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "task_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "error": null
+    },
+    {
       "name": "task_id_too_long",
       "query": {
         "from": "1762000000",
@@ -380,6 +422,16 @@
       "error": "label_key must be 1 to 128 characters without \" or \\"
     },
     {
+      "name": "label_key_of_128",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        "label_value": "x"
+      },
+      "error": null
+    },
+    {
       "name": "label_key_too_long",
       "query": {
         "from": "1762000000",
@@ -424,6 +476,33 @@
         "from": "1762000000",
         "to": "1762000900",
         "max_rows": "0"
+      },
+      "error": "max_rows must be a whole number from 1 to 1000000"
+    },
+    {
+      "name": "max_rows_with_a_fraction",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "max_rows": "1.5"
+      },
+      "error": "max_rows must be a whole number from 1 to 1000000"
+    },
+    {
+      "name": "max_rows_with_a_plus_sign",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "max_rows": "+5"
+      },
+      "error": "max_rows must be a whole number from 1 to 1000000"
+    },
+    {
+      "name": "max_rows_with_a_space",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "max_rows": " 5"
       },
       "error": "max_rows must be a whole number from 1 to 1000000"
     },
@@ -509,6 +588,14 @@
         "scope": "cluster"
       },
       "filters": "{\"max_rows\":200000,\"output\":true,\"sources\":[\"history\"]}"
+    },
+    {
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "memory,files,memory"
+      },
+      "filters": "{\"max_rows\":200000,\"output\":true,\"sources\":[\"files\",\"memory\"]}"
     }
   ],
   "file_name_time_format": "%Y-%m-%d_%H-%M-%S",
@@ -568,6 +655,11 @@
       "error": "a slice is already being built on this worker",
       "retry_after_seconds": 5
     },
+    "open_bytes_full": {
+      "status": 429,
+      "error": "slices still being sent hold 2 GiB on this worker; wait for one to end",
+      "retry_after_seconds": 5
+    },
     "postgres_failed": {
       "status": 503,
       "error": "postgres read failed"
@@ -597,7 +689,8 @@
   "notes": [
     "flush_timed_out",
     "flush_failed",
-    "source_unreadable"
+    "source_unreadable",
+    "postgres_queue_waiting"
   ],
   "limits": {
     "max_range_seconds": 604800,
@@ -607,6 +700,13 @@
     "max_ram_bytes": 67108864,
     "time_limit_seconds": 60.0,
     "batch_rows": 5000,
+    "chunk_bytes": 8388608,
+    "postgres_first_fetch_rows": 100,
+    "postgres_flush_seconds": 3.0,
+    "open_max_bytes": 2147483648,
+    "send_idle_seconds": 120.0,
+    "min_epoch": 0,
+    "max_epoch": 253402300799,
     "flush_wait_seconds": 5.0,
     "max_events": 40,
     "builds_per_worker": 1

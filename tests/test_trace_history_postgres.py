@@ -603,3 +603,18 @@ async def test_trace_history_sqlite_reads_sealed_files(started, monkeypatch):
 
     assert (resp.status_code, resp.json()) == (200, [{'id': 1}])
     assert searched == [(rec.history_dir, 3, 42, 256, 5.0)]
+
+
+async def test_flush_postgres_runs_the_write_stage_and_answers_the_rows_left(started):
+    rec = await started('postgres')
+    rec._record({'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': 1})
+
+    left = await rec.flush_postgres(5.0)
+
+    assert left == 0
+
+
+async def test_flush_postgres_without_a_write_stage_answers_none(started):
+    rec = await started('sqlite')
+
+    assert await rec.flush_postgres(5.0) is None
