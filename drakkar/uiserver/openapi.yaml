@@ -691,6 +691,148 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/slice:
+    get:
+      tags: [debug-tools]
+      operationId: getDebugSlice
+      summary: Download a slice of the recorder events of one time range
+      description: >-
+        v1.30. Builds a SQLite file with the recorder events of one time
+        range, filtered, on the serving worker, and streams it as an
+        attachment (a navigation target: no CORS; the bearer token may ride
+        as ?token=). scope=worker has the tables of a recorder file
+        (events, worker_config, worker_state); scope=cluster those of a
+        merge result (workers, events with worker_id, worker_states). Both
+        add the tables slice and slice_sources. Every parameter is read as
+        text and checked in a fixed order; the first rule broken answers 400
+        with its message (see the contract, v1.30). A scope=cluster request
+        on a worker with no cluster source answers 409 after every 400
+        check, a request while another build runs 429 after that. A limit
+        (max_rows, 1 GiB on disk or 64 MiB in RAM, 60 s, the sealed-file
+        budget) never answers an error: the file is marked in
+        X-Drakkar-Slice-Truncated and its name ends in -partial.db. The
+        attachment is `<worker>-slice-<from>__<to>.db` or
+        `<cluster>-cluster-slice-<from>__<to>.db` (UTC, %Y-%m-%d_%H-%M-%S),
+        with .gz for compress=gzip.
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Start of the range in epoch seconds (included). Required; checked by the route (400).
+          schema: {type: string}
+        - name: to
+          in: query
+          required: false
+          description: End of the range in epoch seconds (left out); at most 604800 s after from.
+          schema: {type: string}
+        - name: scope
+          in: query
+          required: false
+          description: worker (default) or cluster.
+          schema: {type: string, enum: [worker, cluster]}
+        - name: sources
+          in: query
+          required: false
+          description: Comma list of memory, files, history, postgres; each must be a source of the scope on this worker. Default every source of the scope.
+          schema: {type: string}
+        - name: partition
+          in: query
+          required: false
+          description: A whole number from 0 to 2147483647.
+          schema: {type: string}
+        - name: offset_from
+          in: query
+          required: false
+          description: Lowest offset (signed 64-bit); needs partition.
+          schema: {type: string}
+        - name: offset_to
+          in: query
+          required: false
+          description: Highest offset (signed 64-bit); needs partition.
+          schema: {type: string}
+        - name: task_id
+          in: query
+          required: false
+          description: 1 to 256 characters.
+          schema: {type: string}
+        - name: events
+          in: query
+          required: false
+          description: Comma list of at most 40 recorder event types.
+          schema: {type: string}
+        - name: label_key
+          in: query
+          required: false
+          description: 1 to 128 characters without a double quote or a backslash; needs label_value.
+          schema: {type: string}
+        - name: label_value
+          in: query
+          required: false
+          description: 1 to 1024 characters; needs label_key.
+          schema: {type: string}
+        - name: output
+          in: query
+          required: false
+          description: 0 writes stdout and stderr as NULL; 1 (default) keeps them.
+          schema: {type: string, enum: ['0', '1']}
+        - name: max_rows
+          in: query
+          required: false
+          description: A whole number from 1 to 1000000; default 200000.
+          schema: {type: string}
+        - name: compress
+          in: query
+          required: false
+          description: gzip streams the file gzip-compressed (no Content-Length).
+          schema: {type: string, enum: [gzip]}
+      responses:
+        '200':
+          description: The slice file (it may hold 0 rows).
+          headers:
+            Content-Disposition:
+              description: attachment; filename="<name>"
+              schema: {type: string}
+            X-Drakkar-Slice-Rows:
+              description: The event rows in the file.
+              schema: {type: integer}
+            X-Drakkar-Slice-Truncated:
+              description: rows, bytes, time or files when a limit cut the file; absent when it is complete.
+              schema: {type: string, enum: [rows, bytes, time, files]}
+          content:
+            application/x-sqlite3:
+              schema: {type: string, format: binary}
+            application/gzip:
+              schema: {type: string, format: binary}
+        '400':
+          description: A parameter breaks a rule ("from and to must be finite numbers of epoch seconds", ...).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '409':
+          description: scope=cluster with no cluster source ("scope cluster needs the shared history or the Postgres table").
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429':
+          description: Another slice is building on this worker ("a slice is already being built on this worker").
+          headers:
+            Retry-After:
+              schema: {type: integer, enum: [5]}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '500':
+          description: 'The slice file could not be written ("Slice failed: <reason>").'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '503':
+          description: The Postgres read failed or found no free read slot ("postgres read failed").
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/archives:
     get:
       tags: [debug-tools]

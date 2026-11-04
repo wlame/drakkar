@@ -672,6 +672,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_cache import create_cache_router
     from drakkar.uiserver.routes_config_reference import create_config_reference_router
     from drakkar.uiserver.routes_consume_pause import create_consume_pause_router
+    from drakkar.uiserver.routes_databases import create_databases_router
     from drakkar.uiserver.routes_debug import create_debug_router
     from drakkar.uiserver.routes_docs import create_docs_router
     from drakkar.uiserver.routes_kafka_read import create_kafka_read_router
@@ -715,6 +716,7 @@ def create_ui_app(
         pages_gated,
         create_live_router(deps),
         create_debug_router(deps),
+        create_databases_router(deps),
         create_cache_router(deps),
         create_consume_pause_router(deps),
         create_kafka_read_router(deps),

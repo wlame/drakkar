@@ -1,4 +1,4 @@
-"""The history search of the ``postgres`` recorder mode: one trace over the events table.
+"""The UI reads of the ``postgres`` recorder table: the history search and the rows of a slice download.
 
 ``GET /api/v1/debug/trace?history=1`` on a worker whose recorder keeps its
 history in Postgres reads the rows of the worker's own cluster from the
@@ -6,6 +6,10 @@ events table, never the sealed files. The search runs on the API server's
 loop with a connection of its own (no pool), makes one attempt, and is
 bounded as a whole by ``recorder.search.timeout``: the client side by
 ``asyncio.timeout``, the server side by ``statement_timeout``.
+
+``GET /api/v1/debug/slice`` reads the rows of one time range the same way,
+with a server-side cursor, batch by batch, bounded by the time left of the
+build. Both reads share one small set of slots (:func:`postgres_read_slot`).
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import asyncio
 import math
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import asyncpg
@@ -34,8 +39,9 @@ MIN_STATEMENT_TIMEOUT_MS = 1
 # The longest a search may take; a larger or non-finite
 # ``recorder.search.timeout`` uses this limit.
 MAX_SEARCH_SECONDS = 3600.0
-# Searches that may hold a connection at once in one worker process. The debug
-# UI has no authentication, so this keeps a burst of requests from using up the
+# UI reads of the table (history searches and slice reads together) that may
+# hold a connection at once in one worker process. The debug UI has no
+# authentication, so this keeps a burst of requests from using up the
 # connections of a database that many writers share.
 POSTGRES_HISTORY_MAX_CONCURRENT = 2
 
@@ -46,7 +52,7 @@ CloseFailed = Callable[[str], Awaitable[None]]
 
 
 class PostgresHistoryError(Exception):
-    """A history search that failed (``reason`` ``'error'``), ran out of time (``'timeout'``) or found no free slot (``'busy'``).
+    """A UI read of the table that failed (``reason`` ``'error'``), ran out of time (``'timeout'``) or found no free slot (``'busy'``).
 
     ``error`` is a log-friendly text without credentials.
     """
@@ -57,25 +63,27 @@ class PostgresHistoryError(Exception):
         self.error = error
 
 
-# Searches now holding a slot. Read and changed only on the event loop with no
-# await in between, so a plain counter is enough and nothing ever blocks.
-_running_searches = 0
+# UI reads now holding a slot. Read and changed only on the API server's event
+# loop with no await in between, so a plain counter is enough and nothing ever
+# blocks.
+_running_reads = 0
 
 
 @contextmanager
-def _search_slot() -> Iterator[None]:
-    """Hold one of the :data:`POSTGRES_HISTORY_MAX_CONCURRENT` slots, or raise ``busy`` at once.
+def postgres_read_slot() -> Iterator[None]:
+    """Hold one of the :data:`POSTGRES_HISTORY_MAX_CONCURRENT` slots of UI table reads, or raise ``busy`` at once.
 
-    The slot is given back on every exit, a cancel included.
+    Shared by the history search and the slice read. The slot is given
+    back on every exit, a cancel included.
     """
-    global _running_searches
-    if _running_searches >= POSTGRES_HISTORY_MAX_CONCURRENT:
-        raise PostgresHistoryError('busy', f'{POSTGRES_HISTORY_MAX_CONCURRENT} history searches are already running')
-    _running_searches += 1
+    global _running_reads
+    if _running_reads >= POSTGRES_HISTORY_MAX_CONCURRENT:
+        raise PostgresHistoryError('busy', f'{POSTGRES_HISTORY_MAX_CONCURRENT} table reads are already running')
+    _running_reads += 1
     try:
         yield
     finally:
-        _running_searches -= 1
+        _running_reads -= 1
 
 
 def search_limit_seconds(max_seconds: float) -> float:
@@ -116,13 +124,13 @@ async def search_postgres_history(
     ``on_close_failed`` is awaited with the error text (no credentials).
 
     ``connect`` defaults to :func:`asyncpg.connect`, looked up at call time.
-    At most :data:`POSTGRES_HISTORY_MAX_CONCURRENT` searches run at once in
-    the process; another one does not wait and opens no connection.
+    At most :data:`POSTGRES_HISTORY_MAX_CONCURRENT` UI table reads run at
+    once in the process; another one does not wait and opens no connection.
     Raises :class:`PostgresHistoryError` when the search fails, does not end
     within ``max_seconds`` (connect included), or finds no free slot
     (``reason`` ``'busy'``).
     """
-    with _search_slot():
+    with postgres_read_slot():
         return await _search(settings, cluster, partition, offset, max_seconds, on_close_failed, connect)
 
 
@@ -187,3 +195,122 @@ async def _close_after_search(conn: Any, deadline: float) -> str | None:
     except Exception as exc:
         return describe_error(exc)
     return None
+
+
+@dataclass(frozen=True)
+class SliceQuery:
+    """The parameters of the ``slice`` statement; every filter is ``None`` when not asked for.
+
+    ``exclude_instance`` and ``exclude_from_id`` leave out the rows of one
+    process from one id up (the rows its memory store also holds).
+    """
+
+    cluster: str
+    from_ts: float
+    to_ts: float
+    worker: str | None
+    partition: int | None
+    offset_from: int | None
+    offset_to: int | None
+    task_id: str | None
+    events: list[str] | None
+    label_key: str | None
+    label_value: str | None
+    exclude_instance: str | None
+    exclude_from_id: int | None
+    limit: int
+
+    def args(self) -> tuple[Any, ...]:
+        """The 14 bind values, in statement order; the cluster with every NUL replaced, as the writer stores it."""
+        return (
+            replace_nul(self.cluster),
+            self.from_ts,
+            self.to_ts,
+            self.worker,
+            self.partition,
+            self.offset_from,
+            self.offset_to,
+            self.task_id,
+            self.events,
+            self.label_key,
+            self.label_value,
+            self.exclude_instance,
+            self.exclude_from_id,
+            self.limit,
+        )
+
+
+def time_left_ms(deadline: float, now: float) -> str:
+    """The time from ``now`` to ``deadline`` in whole milliseconds (rounded down, at least 1), as text."""
+    return str(max(MIN_STATEMENT_TIMEOUT_MS, math.floor((deadline - now) * MILLISECONDS_PER_SECOND)))
+
+
+async def read_postgres_slice(
+    settings: RecorderPostgresSettings,
+    query: SliceQuery,
+    *,
+    deadline: float,
+    batch_rows: int,
+    on_batch: Callable[[list[Any]], Awaitable[bool]],
+    on_close_failed: CloseFailed,
+    connect: Connect | None = None,
+) -> None:
+    """Read the ``slice`` rows of ``query`` with a server-side cursor; each batch goes to ``on_batch``.
+
+    ``on_batch`` answers whether it wants more. ``deadline`` is a time of the
+    running loop: the client side stops there, and the transaction sets
+    ``statement_timeout`` to the time left (and turns JIT off) before the
+    cursor opens. Takes one of the shared UI read slots for the whole read.
+
+    Raises :class:`PostgresHistoryError`: ``busy`` with no free slot,
+    ``timeout`` when the deadline or the server's statement timeout ended the
+    read (the batches given so far stay valid), ``error`` for any other
+    failure. A close that fails after a complete read is reported through
+    ``on_close_failed`` and does not fail the read.
+    """
+    with postgres_read_slot():
+        await _read_slice(settings, query, deadline, batch_rows, on_batch, on_close_failed, connect)
+
+
+async def _read_slice(
+    settings: RecorderPostgresSettings,
+    query: SliceQuery,
+    deadline: float,
+    batch_rows: int,
+    on_batch: Callable[[list[Any]], Awaitable[bool]],
+    on_close_failed: CloseFailed,
+    connect: Connect | None,
+) -> None:
+    """One slice read with a connection of its own; the caller holds the slot."""
+    connect = connect if connect is not None else asyncpg.connect
+    statement = render_recorder(RECORDER_STATEMENT_TEMPLATES['slice'], schema=settings.schema, table=settings.table)
+    set_local = RECORDER_STATEMENT_TEMPLATES['set_local']
+    loop = asyncio.get_running_loop()
+    conn: Any = None
+    close_error: str | None = None
+    try:
+        async with asyncio.timeout_at(deadline):
+            conn = await connect(dsn=settings.connection.dsn)
+            # Started and committed by hand, as in the history search.
+            transaction = conn.transaction()
+            await transaction.start()
+            await conn.execute(set_local, STATEMENT_TIMEOUT_SETTING, time_left_ms(deadline, loop.time()))
+            await conn.execute(set_local, SETTING_JIT, SET_LOCAL_VALUES[SETTING_JIT])
+            cursor = await conn.cursor(statement, *query.args())
+            while True:
+                rows = await cursor.fetch(batch_rows)
+                if not rows or not await on_batch(list(rows)) or len(rows) < batch_rows:
+                    break
+            await transaction.commit()
+        close_error = await _close_after_search(conn, deadline)
+    except (TimeoutError, asyncpg.QueryCanceledError) as exc:
+        # The only statement timeout this read sets is the time left of the
+        # build, so a cancel by the server is the build's time limit too.
+        raise PostgresHistoryError('timeout', describe_error(exc)) from exc
+    except Exception as exc:
+        raise PostgresHistoryError('error', describe_error(exc)) from exc
+    finally:
+        if conn is not None and not conn.is_closed():
+            conn.terminate()
+    if close_error is not None:
+        await on_close_failed(close_error)

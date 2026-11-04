@@ -1,0 +1,614 @@
+{
+  "_comment": "Slice download contract (GET /api/v1/debug/slice). messages are the 400 texts in check order; the first rule a request breaks answers ({source}, {available}, {event} are filled in; available is the sorted list of the worker's sources for the scope joined with \", \", or none). validation_cases run a query (text values; every other parameter, a token too, is ignored) against the sources in available (a case may give its own); error null means the request is accepted. A cluster-scope request on a worker with no cluster source skips the source check, and the route answers 409 after every 400 check. filters_cases map a query to the filters column of the slice table: sorted compact JSON, UTF-8 not escaped, max_rows, output and sources always, every other filter only when given, events sorted without repeats, sources the sorted sources read (all available ones when none is asked for). file_names map a slice to its attachment name (UTC bounds, the fraction of a second dropped; the sanitized cluster, default when empty). ddl holds the two slice tables. limits pin the build limits; a limit marks the file truncated and never answers an error.",
+  "schema": 1,
+  "available": {
+    "worker": [
+      "files",
+      "history",
+      "memory"
+    ],
+    "cluster": [
+      "history"
+    ]
+  },
+  "messages": [
+    "from and to must be finite numbers of epoch seconds",
+    "to must be greater than from",
+    "the time range is at most 168h",
+    "scope must be worker or cluster",
+    "source '{source}' is not available on this worker; available: {available}",
+    "partition must be a whole number from 0 to 2147483647",
+    "offset_from and offset_to need partition",
+    "offset_from and offset_to must be whole numbers from -9223372036854775808 to 9223372036854775807",
+    "offset_from must not be greater than offset_to",
+    "task_id must be 1 to 256 characters",
+    "events must name at most 40 event types",
+    "event '{event}' is not a recorder event type",
+    "give label_key and label_value together",
+    "label_key must be 1 to 128 characters without \" or \\",
+    "label_value must be 1 to 1024 characters",
+    "output must be 0 or 1",
+    "max_rows must be a whole number from 1 to 1000000",
+    "compress must be gzip"
+  ],
+  "no_source_text": "none",
+  "validation_cases": [
+    {
+      "name": "missing_from_and_to",
+      "query": {},
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "missing_to",
+      "query": {
+        "from": "1762000000"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "from_not_a_number",
+      "query": {
+        "from": "yesterday",
+        "to": "1762000900"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "from_infinite",
+      "query": {
+        "from": "1e999",
+        "to": "1762000900"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "from_with_spaces",
+      "query": {
+        "from": " 1762000000",
+        "to": "1762000900"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "from_with_underscore",
+      "query": {
+        "from": "1_762_000_000",
+        "to": "1762000900"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "from_nan",
+      "query": {
+        "from": "nan",
+        "to": "1762000900"
+      },
+      "error": "from and to must be finite numbers of epoch seconds"
+    },
+    {
+      "name": "to_equals_from",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000000"
+      },
+      "error": "to must be greater than from"
+    },
+    {
+      "name": "to_before_from",
+      "query": {
+        "from": "1762000900",
+        "to": "1762000000"
+      },
+      "error": "to must be greater than from"
+    },
+    {
+      "name": "range_over_168h",
+      "query": {
+        "from": "0",
+        "to": "604800.5"
+      },
+      "error": "the time range is at most 168h"
+    },
+    {
+      "name": "range_of_168h",
+      "query": {
+        "from": "0",
+        "to": "604800"
+      },
+      "error": null
+    },
+    {
+      "name": "decimal_bounds",
+      "query": {
+        "from": "1762000000.25",
+        "to": "1.7620009e9"
+      },
+      "error": null
+    },
+    {
+      "name": "bad_scope",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": "fleet"
+      },
+      "error": "scope must be worker or cluster"
+    },
+    {
+      "name": "empty_scope",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": ""
+      },
+      "error": "scope must be worker or cluster"
+    },
+    {
+      "name": "unknown_source",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "files,disk"
+      },
+      "error": "source 'disk' is not available on this worker; available: files, history, memory"
+    },
+    {
+      "name": "empty_source",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": ""
+      },
+      "error": "source '' is not available on this worker; available: files, history, memory"
+    },
+    {
+      "name": "source_of_another_mode",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "postgres"
+      },
+      "error": "source 'postgres' is not available on this worker; available: files, history, memory"
+    },
+    {
+      "name": "no_source_on_this_worker",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "memory"
+      },
+      "error": "source 'memory' is not available on this worker; available: none",
+      "available": {
+        "worker": [],
+        "cluster": []
+      }
+    },
+    {
+      "name": "cluster_source_checked_against_cluster",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": "cluster",
+        "sources": "files"
+      },
+      "error": "source 'files' is not available on this worker; available: history"
+    },
+    {
+      "name": "cluster_without_shared_source_skips_the_source_check",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": "cluster",
+        "sources": "memory"
+      },
+      "error": null,
+      "available": {
+        "worker": [
+          "memory"
+        ],
+        "cluster": []
+      }
+    },
+    {
+      "name": "partition_negative",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "-1"
+      },
+      "error": "partition must be a whole number from 0 to 2147483647"
+    },
+    {
+      "name": "partition_too_large",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "2147483648"
+      },
+      "error": "partition must be a whole number from 0 to 2147483647"
+    },
+    {
+      "name": "partition_not_whole",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "1.0"
+      },
+      "error": "partition must be a whole number from 0 to 2147483647"
+    },
+    {
+      "name": "partition_plus_sign",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "+3"
+      },
+      "error": "partition must be a whole number from 0 to 2147483647"
+    },
+    {
+      "name": "offsets_without_partition",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "offset_from": "5"
+      },
+      "error": "offset_from and offset_to need partition"
+    },
+    {
+      "name": "offset_not_whole",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "3",
+        "offset_to": "5.5"
+      },
+      "error": "offset_from and offset_to must be whole numbers from -9223372036854775808 to 9223372036854775807"
+    },
+    {
+      "name": "offset_below_int64",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "3",
+        "offset_from": "-9223372036854775809"
+      },
+      "error": "offset_from and offset_to must be whole numbers from -9223372036854775808 to 9223372036854775807"
+    },
+    {
+      "name": "offsets_int64_bounds",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "3",
+        "offset_from": "-9223372036854775808",
+        "offset_to": "9223372036854775807"
+      },
+      "error": null
+    },
+    {
+      "name": "offsets_reversed",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "partition": "3",
+        "offset_from": "9",
+        "offset_to": "8"
+      },
+      "error": "offset_from must not be greater than offset_to"
+    },
+    {
+      "name": "task_id_empty",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "task_id": ""
+      },
+      "error": "task_id must be 1 to 256 characters"
+    },
+    {
+      "name": "task_id_too_long",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "task_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "error": "task_id must be 1 to 256 characters"
+    },
+    {
+      "name": "events_more_than_40",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "events": "consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed,consumed"
+      },
+      "error": "events must name at most 40 event types"
+    },
+    {
+      "name": "event_unknown",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "events": "consumed,exploded"
+      },
+      "error": "event 'exploded' is not a recorder event type"
+    },
+    {
+      "name": "event_empty",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "events": ""
+      },
+      "error": "event '' is not a recorder event type"
+    },
+    {
+      "name": "label_key_alone",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "tenant"
+      },
+      "error": "give label_key and label_value together"
+    },
+    {
+      "name": "label_value_alone",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_value": "acme"
+      },
+      "error": "give label_key and label_value together"
+    },
+    {
+      "name": "label_key_with_quote",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "a\"b",
+        "label_value": "x"
+      },
+      "error": "label_key must be 1 to 128 characters without \" or \\"
+    },
+    {
+      "name": "label_key_with_backslash",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "a\\b",
+        "label_value": "x"
+      },
+      "error": "label_key must be 1 to 128 characters without \" or \\"
+    },
+    {
+      "name": "label_key_too_long",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        "label_value": "x"
+      },
+      "error": "label_key must be 1 to 128 characters without \" or \\"
+    },
+    {
+      "name": "label_value_empty",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "tenant",
+        "label_value": ""
+      },
+      "error": "label_value must be 1 to 1024 characters"
+    },
+    {
+      "name": "label_value_too_long",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "label_key": "tenant",
+        "label_value": "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+      },
+      "error": "label_value must be 1 to 1024 characters"
+    },
+    {
+      "name": "output_other",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "output": "no"
+      },
+      "error": "output must be 0 or 1"
+    },
+    {
+      "name": "max_rows_zero",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "max_rows": "0"
+      },
+      "error": "max_rows must be a whole number from 1 to 1000000"
+    },
+    {
+      "name": "max_rows_too_large",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "max_rows": "1000001"
+      },
+      "error": "max_rows must be a whole number from 1 to 1000000"
+    },
+    {
+      "name": "compress_other",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "compress": "zstd"
+      },
+      "error": "compress must be gzip"
+    },
+    {
+      "name": "first_rule_wins",
+      "query": {
+        "from": "1762000900",
+        "to": "1762000000",
+        "scope": "fleet",
+        "compress": "zstd"
+      },
+      "error": "to must be greater than from"
+    },
+    {
+      "name": "every_filter",
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": "worker",
+        "sources": "files,memory",
+        "partition": "3",
+        "offset_from": "10",
+        "offset_to": "20",
+        "task_id": "t-1",
+        "events": "task_failed,task_completed,task_failed",
+        "label_key": "tenant",
+        "label_value": "acme",
+        "output": "0",
+        "max_rows": "50",
+        "compress": "gzip",
+        "token": "ignored"
+      },
+      "error": null
+    }
+  ],
+  "filters_cases": [
+    {
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900"
+      },
+      "filters": "{\"max_rows\":200000,\"output\":true,\"sources\":[\"files\",\"history\",\"memory\"]}"
+    },
+    {
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "sources": "memory,files",
+        "partition": "3",
+        "offset_from": "10",
+        "offset_to": "20",
+        "task_id": "t-1",
+        "events": "task_failed,task_completed,task_failed",
+        "label_key": "tenant",
+        "label_value": "Ä",
+        "output": "0",
+        "max_rows": "50"
+      },
+      "filters": "{\"events\":[\"task_completed\",\"task_failed\"],\"label_key\":\"tenant\",\"label_value\":\"Ä\",\"max_rows\":50,\"offset_from\":10,\"offset_to\":20,\"output\":false,\"partition\":3,\"sources\":[\"files\",\"memory\"],\"task_id\":\"t-1\"}"
+    },
+    {
+      "query": {
+        "from": "1762000000",
+        "to": "1762000900",
+        "scope": "cluster"
+      },
+      "filters": "{\"max_rows\":200000,\"output\":true,\"sources\":[\"history\"]}"
+    }
+  ],
+  "file_name_time_format": "%Y-%m-%d_%H-%M-%S",
+  "file_names": [
+    {
+      "scope": "worker",
+      "worker": "w-2",
+      "cluster": "search",
+      "from": 1762000000.75,
+      "to": 1762000900,
+      "truncated": null,
+      "compress": null,
+      "name": "w-2-slice-2025-11-01_12-26-40__2025-11-01_12-41-40.db"
+    },
+    {
+      "scope": "worker",
+      "worker": "w-2",
+      "cluster": "search",
+      "from": 1762000000,
+      "to": 1762000900,
+      "truncated": "rows",
+      "compress": "gzip",
+      "name": "w-2-slice-2025-11-01_12-26-40__2025-11-01_12-41-40-partial.db.gz"
+    },
+    {
+      "scope": "cluster",
+      "worker": "w-2",
+      "cluster": "fast cluster/eu",
+      "from": 1762000000,
+      "to": 1762000900,
+      "truncated": null,
+      "compress": null,
+      "name": "fast_cluster_eu-cluster-slice-2025-11-01_12-26-40__2025-11-01_12-41-40.db"
+    },
+    {
+      "scope": "cluster",
+      "worker": "w-2",
+      "cluster": "",
+      "from": 1762000000,
+      "to": 1762000900,
+      "truncated": "files",
+      "compress": "gzip",
+      "name": "default-cluster-slice-2025-11-01_12-26-40__2025-11-01_12-41-40-partial.db.gz"
+    }
+  ],
+  "ddl": {
+    "slice": "CREATE TABLE slice (\n    id          INTEGER PRIMARY KEY CHECK (id = 1),\n    schema      INTEGER NOT NULL,\n    created_at  TEXT    NOT NULL,\n    scope       TEXT    NOT NULL,\n    worker      TEXT,\n    cluster     TEXT,\n    from_ts     REAL    NOT NULL,\n    to_ts       REAL    NOT NULL,\n    filters     TEXT    NOT NULL,\n    rows        INTEGER NOT NULL,\n    truncated   TEXT,\n    notes       TEXT    NOT NULL\n)",
+    "slice_sources": "CREATE TABLE slice_sources (\n    kind    TEXT    NOT NULL,\n    name    TEXT,\n    worker  TEXT,\n    rows    INTEGER NOT NULL\n)"
+  },
+  "answers": {
+    "cluster_unavailable": {
+      "status": 409,
+      "error": "scope cluster needs the shared history or the Postgres table"
+    },
+    "busy": {
+      "status": 429,
+      "error": "a slice is already being built on this worker",
+      "retry_after_seconds": 5
+    },
+    "postgres_failed": {
+      "status": 503,
+      "error": "postgres read failed"
+    },
+    "failed": {
+      "status": 500,
+      "error_prefix": "Slice failed: "
+    }
+  },
+  "headers": {
+    "rows": "X-Drakkar-Slice-Rows",
+    "truncated": "X-Drakkar-Slice-Truncated"
+  },
+  "truncated_values": [
+    "rows",
+    "bytes",
+    "time",
+    "files"
+  ],
+  "source_kinds": [
+    "memory",
+    "live",
+    "backlog",
+    "sealed",
+    "postgres"
+  ],
+  "notes": [
+    "flush_timed_out",
+    "flush_failed",
+    "source_unreadable"
+  ],
+  "limits": {
+    "max_range_seconds": 604800,
+    "max_rows": 1000000,
+    "default_max_rows": 200000,
+    "max_file_bytes": 1073741824,
+    "max_ram_bytes": 67108864,
+    "time_limit_seconds": 60.0,
+    "batch_rows": 5000,
+    "flush_wait_seconds": 5.0,
+    "max_events": 40,
+    "builds_per_worker": 1
+  }
+}

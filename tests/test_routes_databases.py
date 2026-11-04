@@ -7,27 +7,41 @@ test, a mocked app with a real config.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import gc
+import gzip
+import io
+import json
 import os
+import re
 import sqlite3
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
+from structlog.testing import capture_logs
 
+from drakkar import slice_build
 from drakkar.cache.sql import SCHEMA_CACHE_ENTRIES
 from drakkar.config import DrakkarConfig, PostgresConnectionConfig, RecorderConfig, ResilienceConfig, UIConfig
 from drakkar.fleet.service import FleetRegistry
 from drakkar.ownerlock import take_own_lock
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.postgres import RecorderPostgresSettings
+from drakkar.recorder.postgres_history import postgres_read_slot
 from drakkar.recorder.postgres_writer import PostgresStageStatus, UpkeepStatus, WriterStatus
-from drakkar.uiserver import databases_status, routes_debug
+from drakkar.slice_build import BuiltSlice, build_slice
+from drakkar.slices import SliceSources, parse_slice_request, plan_slice
+from drakkar.uiserver import databases_status, routes_databases, routes_debug
 from drakkar.uiserver.databases_status import count_cache_entries, parse_parts, recorder_block, storage_block
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
+from tests.slice_fakes import SliceFakePostgres, pg_row
 
 CLUSTER = 'search'
 WORKER = 'w-1'
@@ -501,3 +515,344 @@ def test_recorder_block_of_a_postgres_worker_without_settings_has_no_table():
     stub = SimpleNamespace(persistence='postgres', memory_store=None, postgres_settings=None)
 
     assert recorder_block(_config(provider='postgres'), stub, now=NOW)['postgres'] is None
+
+
+# --- GET /api/v1/debug/slice ---
+
+SLICE = '/api/v1/debug/slice'
+
+
+def _slice_drakkar_config() -> DrakkarConfig:
+    config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
+    config.ui.release.enabled = False
+    return config
+
+
+@pytest.fixture
+async def started_slice_recorder(tmp_path):
+    """Start a recorder built in the test (``sqlite`` or ``none``) with a few recorded events; stop it at the end."""
+    recorders: list[EventRecorder] = []
+
+    async def start(persistence: str, *, events: int = 3) -> EventRecorder:
+        storage = tmp_path / 'storage'
+        storage.mkdir(exist_ok=True)
+        shared = tmp_path / 'shared'
+        shared.mkdir(exist_ok=True)
+        rec = EventRecorder(
+            RecorderConfig(flush_interval='60s'),
+            worker_name=WORKER,
+            cluster_name=CLUSTER,
+            persistence=persistence,
+            storage_dir=str(storage) if persistence == 'sqlite' else '',
+            shared_dir=str(shared) if persistence == 'sqlite' else '',
+        )
+        await rec.start()
+        recorders.append(rec)
+        await rec.write_config(_slice_drakkar_config())
+        for offset in range(events):
+            rec._record({'ts': time.time(), 'event': 'consumed', 'partition': 0, 'offset': offset})
+        return rec
+
+    yield start
+    for rec in recorders:
+        await rec.stop()
+
+
+def _slice_client(recorder: EventRecorder) -> AsyncClient:
+    drakkar_app = MagicMock()
+    drakkar_app._config = _slice_drakkar_config()
+    app = create_ui_app(UIConfig(enabled=True), recorder, drakkar_app)
+    return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
+
+
+def _range(**extra: str) -> dict[str, str]:
+    now = time.time()
+    return {'from': str(now - 600), 'to': str(now + 60), **extra}
+
+
+def _dot_files(folder) -> list[str]:
+    return sorted(name for name in os.listdir(folder) if name.startswith('.'))
+
+
+def _save_body(content: bytes, tmp_path) -> str:
+    path = str(tmp_path / 'downloaded-slice.db')
+    with open(path, 'wb') as out:
+        out.write(content)
+    return path
+
+
+async def test_slice_answers_the_file_as_an_attachment_with_its_headers(tmp_path, started_slice_recorder):
+    rec = await started_slice_recorder('sqlite', events=3)
+
+    async with _slice_client(rec) as client:
+        resp = await client.get(SLICE, params=_range())
+
+    assert resp.status_code == 200
+    assert resp.headers['content-type'] == 'application/x-sqlite3'
+    assert re.fullmatch(
+        r'attachment; filename="w-1-slice-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}__\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.db"',
+        resp.headers['content-disposition'],
+    )
+    assert resp.headers['cache-control'] == 'no-store, private'
+    assert resp.headers['content-length'] == str(len(resp.content))
+    # The flush ran first: events recorded but not yet written are in the file.
+    assert resp.headers['x-drakkar-slice-rows'] == '3'
+    assert 'x-drakkar-slice-truncated' not in resp.headers
+    path = _save_body(resp.content, tmp_path)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute('SELECT id, "offset" FROM events ORDER BY id').fetchall() == [(1, 0), (2, 1), (3, 2)]
+        assert conn.execute('SELECT worker_name, cluster_name FROM worker_config').fetchone() == (WORKER, CLUSTER)
+        assert conn.execute('SELECT kind FROM slice_sources').fetchall() == [('live',)]
+        assert conn.execute('PRAGMA journal_mode').fetchone() == ('delete',)
+    finally:
+        conn.close()
+    # The temp file was unlinked before the first byte was sent.
+    assert _dot_files(rec.storage_dir) == []
+
+
+async def test_slice_marks_a_cut_file_in_its_name_and_headers(started_slice_recorder):
+    rec = await started_slice_recorder('sqlite', events=3)
+
+    async with _slice_client(rec) as client:
+        resp = await client.get(SLICE, params=_range(max_rows='2'))
+
+    assert resp.status_code == 200
+    assert resp.headers['x-drakkar-slice-rows'] == '2'
+    assert resp.headers['x-drakkar-slice-truncated'] == 'rows'
+    assert resp.headers['content-disposition'].endswith('-partial.db"')
+
+
+async def test_slice_streams_gzip_without_a_length(tmp_path, started_slice_recorder):
+    rec = await started_slice_recorder('sqlite', events=2)
+
+    async with _slice_client(rec) as client:
+        resp = await client.get(SLICE, params=_range(compress='gzip'))
+
+    assert resp.status_code == 200
+    assert resp.headers['content-type'] == 'application/gzip'
+    assert 'content-length' not in resp.headers
+    assert resp.headers['content-disposition'].endswith('.db.gz"')
+    path = _save_body(gzip.decompress(resp.content), tmp_path)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM events').fetchone() == (2,)
+
+
+async def test_slice_on_a_worker_without_a_folder_is_built_in_ram(tmp_path, started_slice_recorder):
+    rec = await started_slice_recorder('none', events=2)
+
+    with capture_logs() as logs:
+        async with _slice_client(rec) as client:
+            resp = await client.get(SLICE, params=_range())
+
+    assert resp.status_code == 200
+    assert resp.headers['x-drakkar-slice-rows'] == '2'
+    assert [entry['reason'] for entry in logs if entry['event'] == 'debug_slice_in_ram'] == ['storage_dir_unset']
+
+
+async def test_slice_without_filters_answers_400_before_409_and_429(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('none', events=1)
+    release = asyncio.Event()
+    monkeypatch.setattr(routes_databases, 'build_slice', _blocked_build(release))
+
+    async with _slice_client(rec) as client:
+        first = asyncio.ensure_future(client.get(SLICE, params=_range()))
+        await _until_building()
+        bare = await client.get(SLICE)
+        cluster_and_broken = await client.get(SLICE, params=_range(scope='cluster', compress='zstd'))
+        cluster = await client.get(SLICE, params=_range(scope='cluster'))
+        busy = await client.get(SLICE, params=_range())
+        release.set()
+        await first
+
+    # The UI's support probe sends no filters: the route exists when it answers 400.
+    assert (bare.status_code, bare.json()) == (400, {'error': 'from and to must be finite numbers of epoch seconds'})
+    assert (cluster_and_broken.status_code, cluster_and_broken.json()) == (400, {'error': 'compress must be gzip'})
+    assert (cluster.status_code, cluster.json()) == (
+        409,
+        {'error': 'scope cluster needs the shared history or the Postgres table'},
+    )
+    assert (busy.status_code, busy.json()) == (429, {'error': 'a slice is already being built on this worker'})
+    assert busy.headers['retry-after'] == '5'
+
+
+_BUILDING: list[bool] = []
+
+
+def _blocked_build(release: asyncio.Event, handles: list[io.BytesIO] | None = None):
+    """A build that waits for ``release``, then answers a small file."""
+
+    async def build(request, worker, plan, **_kwargs):
+        _BUILDING.append(True)
+        try:
+            await release.wait()
+        finally:
+            _BUILDING.pop()
+        handle = io.BytesIO(b'slice')
+        if handles is not None:
+            handles.append(handle)
+        return BuiltSlice(handle=handle, name='w-1-slice.db', rows=0, truncated=None, size_bytes=5)
+
+    return build
+
+
+async def _until_building() -> None:
+    for _ in range(500):
+        if _BUILDING:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError('the build did not start')
+
+
+async def test_slice_builds_one_at_a_time_and_frees_the_slot_when_the_build_ends(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('none', events=1)
+    release = asyncio.Event()
+    monkeypatch.setattr(routes_databases, 'build_slice', _blocked_build(release))
+
+    async with _slice_client(rec) as client:
+        first = asyncio.ensure_future(client.get(SLICE, params=_range()))
+        await _until_building()
+        second = await client.get(SLICE, params=_range())
+        release.set()
+        done = await first
+        third = await client.get(SLICE, params=_range())
+
+    assert second.status_code == 429
+    assert done.status_code == 200 and done.content == b'slice'
+    assert third.status_code == 200
+
+
+async def test_a_request_that_leaves_mid_build_keeps_the_slot_until_the_build_ends(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('none', events=1)
+    release = asyncio.Event()
+    handles: list[io.BytesIO] = []
+    monkeypatch.setattr(routes_databases, 'build_slice', _blocked_build(release, handles))
+
+    async with _slice_client(rec) as client:
+        leaving = asyncio.ensure_future(client.get(SLICE, params=_range()))
+        await _until_building()
+        leaving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await leaving
+        while_building = await client.get(SLICE, params=_range())
+        release.set()
+        for _ in range(100):
+            if handles and handles[0].closed:
+                break
+            await asyncio.sleep(0.01)
+        after = await client.get(SLICE, params=_range())
+
+    assert while_building.status_code == 429
+    # The file of the request that left is closed once its build ends.
+    assert handles[0].closed
+    assert after.status_code == 200
+
+
+async def test_a_stream_closed_early_leaves_no_temp_file(tmp_path, started_slice_recorder):
+    rec = await started_slice_recorder('sqlite', events=2)
+    request = parse_slice_request(_range(), routes_databases.slice_sources_of(rec))
+    built = await build_slice(request, routes_databases.slice_worker_of(rec), plan_slice(request, rec.persistence))
+    response = routes_databases._slice_response(built, None)
+
+    assert _dot_files(rec.storage_dir) == []
+    first_chunk = await response.body_iterator.__anext__()
+    await response.body_iterator.aclose()
+    del response
+    gc.collect()
+
+    assert first_chunk.startswith(b'SQLite format 3')
+    assert built.handle.closed
+    assert _dot_files(rec.storage_dir) == []
+
+
+async def test_a_slice_that_cannot_be_written_answers_500_and_logs(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('sqlite', events=2)
+
+    def broken(self, rows, worker_id):
+        raise sqlite3.OperationalError('database or disk is full')
+
+    monkeypatch.setattr(slice_build.SliceWriter, 'insert_events', broken)
+    with capture_logs() as logs:
+        async with _slice_client(rec) as client:
+            resp = await client.get(SLICE, params=_range())
+
+    assert (resp.status_code, resp.json()) == (500, {'error': 'Slice failed: database or disk is full'})
+    (line,) = [entry for entry in logs if entry['event'] == 'debug_slice_failed']
+    assert line['log_level'] == 'warning' and line['error_type'] == 'OperationalError'
+    assert _dot_files(rec.storage_dir) == []
+
+
+@pytest.mark.parametrize(('outcome', 'note'), [('hang', 'flush_timed_out'), ('raise', 'flush_failed')])
+async def test_slice_notes_a_flush_that_did_not_end(tmp_path, started_slice_recorder, monkeypatch, outcome, note):
+    rec = await started_slice_recorder('sqlite', events=1)
+    monkeypatch.setattr(routes_databases, 'SLICE_FLUSH_WAIT_SECONDS', 0.05)
+
+    async def stuck(coro, _loop):
+        coro.close()
+        if outcome == 'raise':
+            raise RuntimeError('stage failed')
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(routes_databases, 'dispatch_to_loop', stuck)
+    async with _slice_client(rec) as client:
+        resp = await client.get(SLICE, params=_range(sources='files'))
+
+    assert resp.status_code == 200
+    with contextlib.closing(sqlite3.connect(_save_body(resp.content, tmp_path))) as conn:
+        assert json.loads(conn.execute('SELECT notes FROM slice').fetchone()[0]) == [note]
+
+
+def test_slice_sources_and_worker_of_a_recorder_per_mode(tmp_path):
+    sqlite_rec = _recorder(persistence='sqlite', storage_dir=str(tmp_path), shared_dir=str(tmp_path / 'shared'))
+    postgres_rec = _recorder(persistence='postgres')
+    off = _recorder()
+
+    assert routes_databases.slice_sources_of(sqlite_rec) == SliceSources(
+        worker=('files', 'history'), cluster=('history',)
+    )
+    assert routes_databases.slice_sources_of(postgres_rec) == SliceSources(worker=('postgres',), cluster=('postgres',))
+    assert routes_databases.slice_sources_of(off) == SliceSources(worker=(), cluster=())
+    worker = routes_databases.slice_worker_of(sqlite_rec)
+    assert (worker.worker, worker.instance, worker.cluster, worker.provider) == (
+        WORKER,
+        '0123456789abcdef',
+        CLUSTER,
+        'sqlite',
+    )
+    assert worker.history_dir == str(tmp_path / 'shared' / 'history' / CLUSTER)
+    assert worker.max_files == RecorderConfig().search.max_files
+    assert routes_databases.slice_worker_of(postgres_rec).postgres is postgres_rec.postgres_settings
+
+
+async def test_slice_of_the_postgres_table(tmp_path, monkeypatch):
+    fake = SliceFakePostgres([pg_row(1, time.time() - 5, worker=WORKER), pg_row(2, time.time() - 4, worker='w-2')])
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+        resp = await client.get(SLICE, params=_range(scope='cluster'))
+
+    assert resp.status_code == 200
+    assert resp.headers['x-drakkar-slice-rows'] == '2'
+    assert resp.headers['content-disposition'].startswith('attachment; filename="search-cluster-slice-')
+    assert DSN not in resp.text
+    assert fake.cursor_calls()[0][2][0] == CLUSTER
+
+
+@pytest.mark.parametrize('cause', ['error', 'busy'])
+async def test_a_failed_postgres_read_answers_503_and_logs(monkeypatch, cause):
+    fake = SliceFakePostgres([])
+    fake.error = OSError('connection refused')
+    monkeypatch.setattr(asyncpg, 'connect', fake.connect)
+
+    with capture_logs() as logs:
+        async with _client(_recorder(persistence='postgres'), _config(provider='postgres')) as client:
+            if cause == 'busy':
+                with postgres_read_slot(), postgres_read_slot():
+                    resp = await client.get(SLICE, params=_range())
+            else:
+                resp = await client.get(SLICE, params=_range())
+
+    assert (resp.status_code, resp.json()) == (503, {'error': 'postgres read failed'})
+    (line,) = [entry for entry in logs if entry['event'] == 'ui_read_postgres_failed']
+    assert line['endpoint'] == SLICE and line['reason'] == cause and line['category'] == 'debug'
+    assert 'secret-password' not in line['error']

@@ -194,6 +194,21 @@ RECORDER_STATEMENT_TEMPLATES: dict[str, str] = {
         'FROM (SELECT DISTINCT ON (h.instance, h.id, h.ts) h.* FROM hits h ORDER BY h.instance, h.id, h.ts) d '
         'ORDER BY d.ts, d.worker, d.instance, d.id'
     ),
+    # The rows of one slice download: one fixed text for every filter, each
+    # filter a parameter that is NULL when not asked for. The ts bounds let
+    # the planner prune hour partitions. $12 and $13 leave out the rows of
+    # one process from one id up (the rows its memory store also holds).
+    'slice': (
+        'SELECT worker, instance, id, ts, dt, event, "partition", "offset", task_id, args, stdout_size, stdout, '
+        'stderr, exit_code, duration, output_topic, metadata, pid, labels, origin, client_name, request_id '
+        'FROM {schema}.{table} WHERE cluster = $1 AND ts >= $2 AND ts < $3 '
+        'AND ($4::text IS NULL OR worker = $4) AND ($5::int IS NULL OR "partition" = $5) '
+        'AND ($6::bigint IS NULL OR "offset" >= $6) AND ($7::bigint IS NULL OR "offset" <= $7) '
+        'AND ($8::text IS NULL OR task_id = $8) AND ($9::text[] IS NULL OR event = ANY($9)) '
+        'AND ($10::text IS NULL OR labels::jsonb ->> $10 = $11) '
+        'AND ($12::text IS NULL OR NOT (instance = $12 AND id >= $13)) '
+        'ORDER BY ts, worker, instance, id LIMIT $14'
+    ),
 }
 
 # The writer identity, the 20 recorder event columns in their pinned order,
