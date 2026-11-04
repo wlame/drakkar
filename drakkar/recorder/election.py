@@ -59,6 +59,8 @@ ELECTION_FEATURE = 'election'
 
 # The filesystem provider's file-call thread: this prefix plus the sanitized worker name.
 ELECTION_THREAD_PREFIX = 'drakkar-election-files-'
+# The filesystem provider's thread of the UI holder reads, apart from the slot path's thread.
+ELECTION_READER_THREAD_PREFIX = 'drakkar-election-reads-'
 
 # Why a lease is no longer held (``SlotLease.loss_reason``): the provider
 # answered that another token holds the scope, or no call could confirm it.
@@ -173,7 +175,9 @@ class FilesystemElection:
     a time, never on the shared ``asyncio.to_thread`` pool: a call stuck on a
     hung mount holds only that thread, and the next call times out while it
     waits for it. The event loop and every other ``to_thread`` user (sinks,
-    sources, handler code) keep their threads.
+    sources, handler code) keep their threads. The UI's :meth:`holder` reads
+    run on a second thread of their own, so a read stuck on the mount never
+    delays an acquire, refresh, check or release of a slot.
 
     ``stale_seconds`` replaces the ``lease_seconds`` of :meth:`acquire` as the
     age past which a lock is taken over.
@@ -184,6 +188,8 @@ class FilesystemElection:
         self._ctx: ElectionContext | None = None
         self._locks: dict[str, TaskLock] = {}
         self._runner: ProviderThread | None = None
+        # The thread of the UI holder reads; made by the first read.
+        self._reader: ProviderThread | None = None
         self._stopped = False
 
     async def start(self, ctx: ElectionContext) -> None:
@@ -219,10 +225,20 @@ class FilesystemElection:
         await self._run(self._lock(scope, token).release)
 
     async def holder(self, scope: str) -> LeaseHolder | None:
-        """The holder named by the lock file of ``scope``, with the age of its last refresh on the file server's clock."""
+        """The holder named by the lock file of ``scope``, with the approximate age of its last refresh.
+
+        Read-only: no marker, no change time. It runs on the reader thread,
+        never on the thread of the slot path; the caller's time limit ends
+        the wait, and a read stuck on the mount holds only the reader thread.
+        """
         path = self.lease_key(scope)
-        instance = self._context().instance
-        return await self._run(lambda: read_lock_holder(path, instance))
+        if self._stopped or self._runner is None:
+            raise RuntimeError('the filesystem election is stopped')
+        if self._reader is None:
+            self._reader = ProviderThread(
+                name=f'{ELECTION_READER_THREAD_PREFIX}{sanitize_worker_name(self._context().worker)}'
+            )
+        return await self._reader.run(lambda: read_lock_holder(path))
 
     def lease_key(self, scope: str) -> str:
         """The path of the lock file of ``scope``: ``<shared>/tasks/<cluster>/<task>.lock``."""
@@ -239,6 +255,8 @@ class FilesystemElection:
         self._stopped = True
         if self._runner is not None:
             self._runner.stop()
+        if self._reader is not None:
+            self._reader.stop()
 
     async def _run(self, call: Callable[[], Any]) -> Any:
         """Run one blocking file call on the provider thread."""

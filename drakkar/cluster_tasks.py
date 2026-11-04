@@ -41,6 +41,7 @@ from drakkar.periodic import SYSTEM_CLOCK, Clock, OnErrorPolicy, run_task_once, 
 from drakkar.providers.resilience import (
     OUTCOME_NOT_STARTED,
     OUTCOME_OK,
+    OUTCOME_SKIPPED_OPEN,
     CallResult,
     RateLimitedLog,
     ResilientCaller,
@@ -81,6 +82,16 @@ ARCHIVE_SCOPE_WORKER: ArchiveScope = 'worker'
 # The holder read of the Databases view: one attempt within this many seconds.
 HOLDER_READ_SECONDS = 2.0
 HOLDER_OP = 'holder'
+# The feature label of the UI's own caller for holder reads. It has a breaker
+# of its own, so a UI read never counts against the election's breaker.
+UI_READ_FEATURE = 'ui'
+# Holder reads of one batch that run at once, per provider (default for the
+# others). A ``postgres`` read borrows a connection of the pool the slot path
+# shares, so one at a time keeps the rest of the pool for the slot path.
+HOLDER_READS_AT_ONCE: Mapping[str, int] = MappingProxyType({'postgres': 1})
+DEFAULT_HOLDER_READS_AT_ONCE = 2
+# The answer of read_holders while another batch runs on this worker.
+HOLDER_READS_BUSY = 'busy'
 
 # A peer's definition hash counts only in this exact form; anything else is unknown.
 _CLUSTER_HASH = re.compile(r'[0-9a-f]{16}')
@@ -141,7 +152,10 @@ class ClusterElection:
 
     It also keeps, per task, the outcome of the last slot on this worker
     (:attr:`last_slots`), and reads who holds a scope for the Databases view
-    (:meth:`read_holder`), which never starts the provider.
+    (:meth:`read_holders`). Those reads never start the provider and go
+    through a caller of their own (:attr:`ui_caller`, feature ``ui``), so a
+    failed or slow UI read never counts against the election's breaker and
+    never makes a slot call ``skipped_open``.
     """
 
     def __init__(
@@ -152,9 +166,16 @@ class ClusterElection:
         provider_name: str,
         context: ElectionContext,
         clock: Clock = SYSTEM_CLOCK,
+        ui_caller: ResilientCaller | None = None,
     ) -> None:
         self.provider = provider
         self.caller = caller
+        # The UI's holder reads: same settings, its own breaker and the feature label ``ui``.
+        self.ui_caller = (
+            ui_caller
+            if ui_caller is not None
+            else ResilientCaller(caller.config, feature=UI_READ_FEATURE, provider=provider_name, category='debug')
+        )
         self.provider_name = provider_name
         self._context = context
         self._clock = clock
@@ -163,6 +184,8 @@ class ClusterElection:
         self._stopped = False
         # Task name -> its last slot. Replaced as a whole, never changed in place.
         self._last_slots: Mapping[str, SlotRecord] = MappingProxyType({})
+        # True while a batch of holder reads runs; a second batch is refused, not queued.
+        self._holder_batch_running = False
 
     @property
     def started(self) -> bool:
@@ -186,21 +209,50 @@ class ClusterElection:
         self._last_slots = MappingProxyType(updated)
 
     async def read_holder(self, scope: str) -> CallResult | None:
-        """Ask the provider who holds ``scope``, through the caller (op ``holder``, one attempt, 2 s).
+        """Ask the provider who holds ``scope``, through :attr:`ui_caller` (op ``holder``, one attempt, 2 s).
 
         ``None`` when the provider has not started or has stopped: the read
-        never starts it. An open breaker makes no call (outcome
-        ``skipped_open``). The provider metrics count the read like every
-        other call.
+        never starts it. While the election's breaker is open no call is made
+        (outcome ``skipped_open``, counted on the UI caller); the election's
+        breaker is only read, never fed.
         """
         if not self._started or self._stopped:
             return None
-        return await self.caller.call(
+        if self.caller.breaker_open:
+            self.ui_caller.skip(HOLDER_OP, OUTCOME_SKIPPED_OPEN)
+            return CallResult(ok=False, value=None, outcome=OUTCOME_SKIPPED_OPEN, attempts=0)
+        return await self.ui_caller.call(
             HOLDER_OP,
             lambda: self.provider.holder(scope),
             attempts=1,
             deadline_seconds=HOLDER_READ_SECONDS,
         )
+
+    async def read_holders(self, scopes: Sequence[str]) -> dict[str, CallResult | BaseException | None] | str:
+        """Read the holder of each scope; :data:`HOLDER_READS_BUSY` while another batch runs on this worker.
+
+        One batch at a time per worker, refused rather than queued, so open
+        pages cannot pile reads up. Inside a batch at most
+        :data:`HOLDER_READS_AT_ONCE` reads run at once. Every error is kept
+        as its scope's result, so one failure never hides the others. Runs on
+        the loop that owns the provider.
+        """
+        if self._holder_batch_running:
+            return HOLDER_READS_BUSY
+        self._holder_batch_running = True
+        gate = asyncio.Semaphore(HOLDER_READS_AT_ONCE.get(self.provider_name, DEFAULT_HOLDER_READS_AT_ONCE))
+
+        async def read(scope: str) -> tuple[str, CallResult | BaseException | None]:
+            async with gate:
+                try:
+                    return scope, await self.read_holder(scope)
+                except Exception as exc:
+                    return scope, exc
+
+        try:
+            return dict(await asyncio.gather(*(read(scope) for scope in scopes)))
+        finally:
+            self._holder_batch_running = False
 
     async def ensure_started(self, deadline_seconds: float) -> CallResult:
         """Start the provider unless it has started; the result of the start, or an ok one with no call.

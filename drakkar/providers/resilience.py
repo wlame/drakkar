@@ -214,6 +214,11 @@ class ResilientCaller:
         self._breaker_gauge.set(0)
 
     @property
+    def config(self) -> ResilienceConfig:
+        """The resilience settings this caller runs with."""
+        return self._config
+
+    @property
     def breaker_open(self) -> bool:
         """True while the breaker is open, until a probe operation succeeds."""
         return self._breaker.is_open

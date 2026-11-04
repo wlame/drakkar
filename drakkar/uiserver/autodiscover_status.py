@@ -35,6 +35,7 @@ LEASE_FREE = 'free'
 LEASE_NOT_STARTED = 'not_started'
 LEASE_BREAKER_OPEN = 'breaker_open'
 LEASE_FAILED = 'failed'
+LEASE_BUSY = 'busy'
 
 # Card fields sent as the card holds them, in this order.
 _CARD_FIELDS = ('worker', 'instance', 'cluster', 'state', 'backend', 'version', 'url', 'started_at', 'heartbeat_at')
@@ -48,15 +49,17 @@ def display_key(key: str | None, shared_dir: str) -> str | None:
     """A store key as the UI shows it: a path inside the shared folder becomes relative to it.
 
     The UI sends no absolute host path. The filesystem providers build their
-    paths from the same ``storage.shared_dir`` text, so a plain prefix test is
-    exact; nothing touches the file system, which may be a network mount (this
-    runs on the API server's event loop). A key of another provider (a row, a
-    Redis or Consul key) is kept as it is.
+    paths from the same ``storage.shared_dir`` text, some through
+    ``os.path.normpath``, so both sides are normalized before the prefix test;
+    that is pure text work, and nothing touches the file system, which may be
+    a network mount (this runs on the API server's event loop). A key of
+    another provider (a row, a Redis or Consul key) is kept as it is.
     """
     if key is None or not shared_dir:
         return key
-    prefix = os.path.join(shared_dir, '')
-    return key[len(prefix) :] if key.startswith(prefix) else key
+    prefix = os.path.join(os.path.normpath(shared_dir), '')
+    normalized = os.path.normpath(key)
+    return normalized[len(prefix) :] if normalized.startswith(prefix) else key
 
 
 def registry_header(status: RegistryStatus, *, connection: str | None, offline_after_seconds: float) -> dict[str, Any]:
@@ -159,6 +162,7 @@ def _holder_object(holder: LeaseHolder, lease_seconds: int) -> dict[str, Any]:
         'instance': holder.instance,
         'acquired_at': holder.acquired_at,
         'age_seconds': holder.age_seconds,
+        'age_approximate': holder.age_approximate,
         'expires_in_seconds': expires_in,
     }
 

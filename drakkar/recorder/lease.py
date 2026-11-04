@@ -23,8 +23,11 @@ class LeaseHolder:
     ``worker``, ``instance`` and ``acquired_at`` (text, as the store keeps
     it) are ``None`` when the store holds the lease with a body that names
     no holder. ``age_seconds`` is the time since the last refresh, on the
-    store's clock, when the store knows it. ``expires_in_seconds`` is the time
-    left before the store ends the lease by itself, when the store knows it.
+    store's clock, when the store knows it. ``age_approximate`` is true when
+    the age compares the store's time with this host's clock instead (a
+    read that may not write to the store cannot sample the store's clock).
+    ``expires_in_seconds`` is the time left before the store ends the lease
+    by itself, when the store knows it.
     """
 
     worker: str | None
@@ -32,6 +35,7 @@ class LeaseHolder:
     acquired_at: str | None
     age_seconds: float | None = None
     expires_in_seconds: float | None = None
+    age_approximate: bool = False
 
 
 def _text(value: Any) -> str | None:
@@ -43,6 +47,7 @@ def holder_from_body(
     *,
     age_seconds: float | None = None,
     expires_in_seconds: float | None = None,
+    age_approximate: bool = False,
 ) -> LeaseHolder:
     """The holder named by a lock body; a body that is not a JSON object names no holder.
 
@@ -64,4 +69,5 @@ def holder_from_body(
         acquired_at=_text(fields.get('acquired_at')),
         age_seconds=age_seconds,
         expires_in_seconds=expires_in_seconds,
+        age_approximate=age_approximate,
     )

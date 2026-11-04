@@ -30,6 +30,7 @@ import os
 import secrets
 import stat
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -296,13 +297,13 @@ def read_lock_body(path: str) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
-def read_lock_holder(path: str, instance: str) -> LeaseHolder | None:
-    """Who holds the lock file ``path``; ``None`` when there is none. Read-only for the lock; blocking.
+def read_lock_holder(path: str, *, now: Callable[[], float] = time.time) -> LeaseHolder | None:
+    """Who holds the lock file ``path``; ``None`` when there is none. Read-only and blocking.
 
-    The age is the time since the lock's last refresh (its mtime) on the file
-    server's clock, read in the lock's folder with the marker of
-    ``instance``; ``None`` when that clock cannot be read (a read-only
-    mount). A lock file whose body is not a lock names no holder, and a lock
+    It writes nothing to the lock folder: no clock marker, no change time.
+    So the age (time since the lock's last refresh, its mtime) is measured
+    against this host's clock (``now``) and is approximate; it is never
+    below 0. A lock file whose body is not a lock names no holder, and a lock
     older than its lease is still reported: the store keeps it until a taker
     moves it aside. An error of the read itself raises ``OSError``.
     """
@@ -313,8 +314,4 @@ def read_lock_holder(path: str, instance: str) -> LeaseHolder | None:
     if not stat.S_ISREG(info.st_mode):
         return None
     body = read_lock_body(path)
-    try:
-        age: float | None = max(0.0, folder_server_now(os.path.dirname(path), instance) - info.st_mtime)
-    except OSError:
-        age = None
-    return holder_from_body(body, age_seconds=age)
+    return holder_from_body(body, age_seconds=max(0.0, now() - info.st_mtime), age_approximate=True)

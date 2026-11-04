@@ -26,6 +26,7 @@ from prometheus_client import REGISTRY
 
 from drakkar import cluster_tasks
 from drakkar.cluster_tasks import (
+    HOLDER_READS_BUSY,
     SLOT_ELECTION_FAILED,
     SLOT_HELD_ELSEWHERE,
     SLOT_LATE,
@@ -1025,26 +1026,124 @@ async def test_cluster_election_holder_read_never_starts_the_provider():
     assert provider.calls['holder'] == 0
 
 
-async def test_cluster_election_holder_read_goes_through_the_caller_with_one_attempt_and_2s():
+async def test_cluster_election_holder_read_goes_through_the_ui_caller_with_one_attempt_and_2s():
     provider = ScriptedElection()
     election = make_election(provider, provider_name='holder_reads')
+    election.ui_caller = make_caller(provider='holder_reads')
     assert (await election.ensure_started(5.0)).ok
     scope = task_scope(CLUSTER, 'reader')
     await provider.acquire(scope, 'a' * 16, 60)
-    before = sample(
-        'drakkar_provider_calls_total', feature='election', provider='holder_reads', op='holder', outcome='ok'
-    )
 
     result = await election.read_holder(scope)
 
     assert result is not None and result.ok
     assert result.value.worker == CONTEXT.worker
     assert result.attempts == 1
-    assert ('holder', 2.0) in election.caller.deadlines
-    after = sample(
-        'drakkar_provider_calls_total', feature='election', provider='holder_reads', op='holder', outcome='ok'
+    assert ('holder', 2.0) in election.ui_caller.deadlines
+    assert all(op != 'holder' for op, _ in election.caller.deadlines)
+
+
+async def test_the_default_ui_caller_counts_holder_reads_under_the_ui_feature():
+    provider = ScriptedElection()
+    election = make_election(provider, provider_name='holder_metrics')
+    assert (await election.ensure_started(5.0)).ok
+    labels = {'provider': 'holder_metrics', 'op': 'holder', 'outcome': 'ok'}
+    before = sample('drakkar_provider_calls_total', feature='ui', **labels)
+
+    await election.read_holder(task_scope(CLUSTER, 'reader'))
+
+    assert sample('drakkar_provider_calls_total', feature='ui', **labels) == before + 1
+    assert sample('drakkar_provider_calls_total', feature='election', **labels) == 0
+
+
+class _SlowHolderElection(ScriptedElection):
+    """Slot calls answer at once; the UI holder read fails."""
+
+    async def holder(self, scope: str):
+        raise OSError('the store is slow for reads')
+
+
+async def test_failing_ui_holder_reads_never_open_the_election_breaker_and_a_slot_still_runs():
+    provider = _SlowHolderElection()
+    election = ClusterElection(
+        provider,
+        ResilientCaller(ResilienceConfig(max_retries=0), feature='election', provider='slow_reads', sleep=_no_sleep),
+        provider_name='slow_reads',
+        context=CONTEXT,
     )
-    assert after == before + 1
+    assert (await election.ensure_started(5.0)).ok
+    scope = task_scope(CLUSTER, 'archive_like')
+
+    reads = [await election.read_holder(scope) for _ in range(20)]
+    lease = SlotLease(election, scope=scope, lease_seconds=60)
+    outcome = await lease.acquire(5.0)
+    held = await lease.is_held()
+
+    assert {read.outcome for read in reads if read is not None} == {'error', 'skipped_open'}
+    assert election.ui_caller.breaker_open is True
+    assert election.caller.breaker_open is False
+    assert outcome == (SLOT_WON, None)
+    assert held is True
+
+
+async def test_a_second_batch_of_holder_reads_is_refused_while_one_runs():
+    release = asyncio.Event()
+
+    class Blocking(ScriptedElection):
+        async def holder(self, scope: str):
+            await release.wait()
+            return None
+
+    election = make_election(Blocking())
+    assert (await election.ensure_started(5.0)).ok
+    first = asyncio.ensure_future(election.read_holders([task_scope(CLUSTER, 'a')]))
+    await asyncio.sleep(0)
+
+    second = await election.read_holders([task_scope(CLUSTER, 'b')])
+    release.set()
+    answered = await first
+
+    assert second == HOLDER_READS_BUSY
+    assert list(answered) == [task_scope(CLUSTER, 'a')]
+    assert await election.read_holders([task_scope(CLUSTER, 'c')]) != HOLDER_READS_BUSY
+
+
+@pytest.mark.parametrize(('provider_name', 'at_once'), [('postgres', 1), ('redis', 2), ('filesystem', 2)])
+async def test_holder_reads_of_a_batch_run_at_most_the_provider_limit_at_once(provider_name, at_once):
+    running = 0
+    peak = 0
+
+    class Counting(ScriptedElection):
+        async def holder(self, scope: str):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.01)
+            running -= 1
+            return None
+
+    election = make_election(Counting(), provider_name=provider_name)
+    assert (await election.ensure_started(5.0)).ok
+
+    answered = await election.read_holders([task_scope(CLUSTER, f't{i}') for i in range(5)])
+
+    assert isinstance(answered, dict) and len(answered) == 5
+    assert peak == at_once
+
+
+async def test_a_holder_read_that_raises_is_kept_as_its_scope_result():
+    election = make_election(ScriptedElection())
+    assert (await election.ensure_started(5.0)).ok
+
+    async def broken(scope: str):
+        raise RuntimeError('broken before the caller')
+
+    election.read_holder = broken  # type: ignore[method-assign]
+
+    answered = await election.read_holders([task_scope(CLUSTER, 'a')])
+
+    assert isinstance(answered, dict)
+    assert isinstance(answered[task_scope(CLUSTER, 'a')], RuntimeError)
 
 
 async def test_cluster_election_holder_read_with_an_open_breaker_makes_no_call():

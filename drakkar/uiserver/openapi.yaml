@@ -931,10 +931,12 @@ paths:
       operationId: getAutodiscoverLeases
       summary: Holders of the cluster task leases
       description: >-
-        v1.30. One store read per cluster task through the election's own
-        provider caller (op holder, one attempt, 2 s, at most 4 at once);
-        never starts the provider. election is null when the worker runs no
-        cluster task.
+        v1.30. One store read per cluster task through a UI caller with a
+        breaker of its own (feature ui, op holder, one attempt, 2 s); one
+        batch per worker at a time (rows busy otherwise), at most 2 reads at
+        once (1 with postgres); never starts the provider and never counts
+        against the election's breaker. election is null when the worker runs
+        no cluster task.
       responses:
         '200':
           description: The election state and one row per cluster task.
@@ -2652,7 +2654,7 @@ components:
                 at: {type: string, format: date-time}
               required: [slot, outcome, at]
             - {type: 'null'}
-        status: {type: string, enum: [held, free, not_started, breaker_open, failed]}
+        status: {type: string, enum: [held, free, not_started, breaker_open, busy, failed]}
         holder:
           oneOf:
             - type: object
@@ -2661,8 +2663,9 @@ components:
                 instance: {type: [string, 'null']}
                 acquired_at: {type: [string, 'null']}
                 age_seconds: {type: [number, 'null']}
+                age_approximate: {type: boolean}
                 expires_in_seconds: {type: [number, 'null']}
-              required: [worker, instance, acquired_at, age_seconds, expires_in_seconds]
+              required: [worker, instance, acquired_at, age_seconds, age_approximate, expires_in_seconds]
             - {type: 'null'}
         key: {type: [string, 'null']}
       required: [task, scope, system, lease_seconds, next_slot_ts, last_slot, status, holder, key]

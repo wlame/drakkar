@@ -20,7 +20,6 @@ from structlog.testing import capture_logs
 from drakkar.config.resilience import ResilienceConfig
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
-from drakkar.recorder import task_lock
 from drakkar.recorder.election import (
     BUILTIN_ELECTIONS,
     ElectionContext,
@@ -409,7 +408,18 @@ def test_lease_refresh_seconds_follows_short_leases(lease_seconds, expected):
 # --- the filesystem holder read ---
 
 
-async def test_the_filesystem_holder_names_the_lock_body_and_the_age_on_the_server_clock(tmp_path):
+def _folder_state(folder: str) -> dict[str, tuple[float, float]]:
+    """Every name in ``folder`` with its mtime and ctime, and the folder's own times."""
+    state = {
+        name: (os.lstat(os.path.join(folder, name)).st_mtime_ns, os.lstat(os.path.join(folder, name)).st_ctime_ns)
+        for name in os.listdir(folder)
+    }
+    info = os.lstat(folder)
+    state['.'] = (info.st_mtime_ns, info.st_ctime_ns)
+    return state
+
+
+async def test_the_filesystem_holder_names_the_lock_body_and_an_approximate_age(tmp_path):
     holder = await _started_filesystem(tmp_path, worker='search-worker-3')
     reader = await _started_filesystem(tmp_path, worker='w-2')
     await holder.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS)
@@ -422,10 +432,57 @@ async def test_the_filesystem_holder_names_the_lock_body_and_the_age_on_the_serv
     assert found.instance == electiontest.INSTANCE_A
     assert isinstance(found.acquired_at, str)
     assert found.age_seconds == pytest.approx(40, abs=2)
+    assert found.age_approximate is True
     assert found.expires_in_seconds is None
-    # The clock marker is gone again, and the lock is untouched.
-    assert sorted(os.listdir(task_lock_dir(str(tmp_path), CLUSTER))) == [LOCK_FILE]
     assert await holder.is_held(SCOPE, electiontest.TOKEN_A) is True
+
+
+async def test_the_filesystem_holder_read_writes_nothing_to_the_lock_folder(tmp_path):
+    holder = await _started_filesystem(tmp_path, worker='w-1')
+    await holder.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS)
+    folder = task_lock_dir(str(tmp_path), CLUSTER)
+    before = _folder_state(folder)
+
+    for _ in range(3):
+        await holder.holder(SCOPE)
+
+    assert _folder_state(folder) == before
+
+
+async def test_a_hung_filesystem_holder_read_never_delays_a_slot_acquire(tmp_path, monkeypatch):
+    provider = await _started_filesystem(tmp_path, worker='w-1')
+    entered = threading.Event()
+    unblock = threading.Event()
+
+    def hung_read(path, **kwargs):
+        entered.set()
+        unblock.wait(10)
+
+    monkeypatch.setattr(election_mod, 'read_lock_holder', hung_read)
+    read = asyncio.ensure_future(provider.holder(SCOPE))
+    await asyncio.to_thread(entered.wait, 5)
+
+    try:
+        took = await asyncio.wait_for(provider.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS), timeout=2)
+        held = await asyncio.wait_for(provider.is_held(SCOPE, electiontest.TOKEN_A), timeout=2)
+    finally:
+        unblock.set()
+        await read
+    assert (took, held) == (True, True)
+
+
+async def test_the_filesystem_holder_read_after_stop_raises_and_the_reader_thread_ends(tmp_path):
+    provider = await _started_filesystem(tmp_path)
+    assert await provider.holder(SCOPE) is None
+    reader = provider._reader
+    assert reader is not None
+
+    await provider.stop()
+
+    with pytest.raises(RuntimeError):
+        await provider.holder(SCOPE)
+    reader.thread.join(timeout=5)
+    assert not reader.thread.is_alive()
 
 
 async def test_the_filesystem_holder_of_a_lock_that_is_not_a_lock_body_names_nobody(tmp_path):
@@ -452,22 +509,6 @@ async def test_the_filesystem_holder_of_a_free_scope_and_of_a_missing_folder_is_
     reader = await _started_filesystem(tmp_path)
 
     assert await reader.holder(SCOPE) is None
-
-
-async def test_the_filesystem_holder_reports_no_age_when_the_server_clock_cannot_be_read(tmp_path, monkeypatch):
-    holder = await _started_filesystem(tmp_path, worker='w-1')
-    await holder.acquire(SCOPE, electiontest.TOKEN_A, LEASE_SECONDS)
-
-    def read_only_mount(folder: str, instance: str) -> float:
-        raise PermissionError('read-only file system')
-
-    monkeypatch.setattr(task_lock, 'folder_server_now', read_only_mount)
-
-    found = await holder.holder(SCOPE)
-
-    assert found is not None
-    assert found.worker == 'w-1'
-    assert found.age_seconds is None
 
 
 async def test_the_filesystem_lease_key_is_the_lock_path(tmp_path):

@@ -34,7 +34,7 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from drakkar.cluster_tasks import HOLDER_OP, ClusterElection
+from drakkar.cluster_tasks import HOLDER_OP, HOLDER_READS_BUSY, ClusterElection
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.providers.resilience import CallResult, describe_error
 from drakkar.recorder.postgres_history import PostgresHistoryError, read_table_partitions
@@ -65,6 +65,7 @@ from drakkar.slices import (
 )
 from drakkar.uiserver.autodiscover_status import (
     AUTODISCOVER_OFF_ERROR,
+    LEASE_BUSY,
     LEASE_FAILED,
     card_rows,
     display_key,
@@ -88,8 +89,6 @@ POSTGRES_PARTITIONS_ENDPOINT = '/api/v1/debug/databases/postgres'
 AUTODISCOVER_ENDPOINT = '/api/v1/debug/autodiscover'
 LEASES_ENDPOINT = '/api/v1/debug/autodiscover/leases'
 NOT_POSTGRES_ERROR = 'the recorder provider is not postgres'
-# Lease holder reads that run at once on the main loop.
-MAX_HOLDER_READS = 4
 
 
 def slice_sources_of(recorder: EventRecorder) -> SliceSources:
@@ -405,9 +404,10 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
 
         The rows are built here from the roster and memory. Only the holder
         reads run on the main loop, where the provider lives, through the
-        election's caller (op ``holder``), at most :data:`MAX_HOLDER_READS`
-        at once and within the main-loop dispatch limit; a row whose read
-        did not answer is ``failed``.
+        election's UI caller (op ``holder``, a breaker of its own), one batch
+        per worker at a time and within the main-loop dispatch limit. A row
+        whose read did not answer is ``failed``; every row is ``busy`` while
+        another request's batch runs.
         """
         election = drakkar_app.cluster_election
         roster = drakkar_app.periodic_roster
@@ -421,17 +421,19 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
         )
         started = election.started and not election.stopped
         results: dict[str, Any] = {}
+        busy = False
         if started and skeletons:
             answered = await dispatch_bounded(
-                _read_holders(election, [skeleton.scope for skeleton in skeletons]), drakkar_app.main_loop
+                election.read_holders([skeleton.scope for skeleton in skeletons]), drakkar_app.main_loop
             )
+            busy = answered == HOLDER_READS_BUSY
             results = answered if isinstance(answered, dict) else {}
         shared_dir = drakkar_app._config.resolved_shared_dir
         rows = []
         failures: list[str] = []
         for skeleton in skeletons:
             result = results.get(skeleton.scope)
-            status, holder = lease_status(started, result)
+            status, holder = (LEASE_BUSY, None) if busy else lease_status(started, result)
             if status == LEASE_FAILED:
                 failures.append(_failure_text(result))
             key = _lease_key(election, skeleton.scope, shared_dir) if election.started else None
@@ -450,24 +452,6 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
         )
 
     return router
-
-
-async def _read_holders(election: ClusterElection, scopes: list[str]) -> dict[str, CallResult | BaseException | None]:
-    """Read the holder of each scope on the main loop, at most :data:`MAX_HOLDER_READS` at once.
-
-    Every error is kept as the scope's result, so one failure never hides
-    the others (the dispatch would swallow it into no answer at all).
-    """
-    gate = asyncio.Semaphore(MAX_HOLDER_READS)
-
-    async def read(scope: str) -> tuple[str, CallResult | BaseException | None]:
-        async with gate:
-            try:
-                return scope, await election.read_holder(scope)
-            except Exception as exc:
-                return scope, exc
-
-    return dict(await asyncio.gather(*(read(scope) for scope in scopes)))
 
 
 def _failure_text(result: Any) -> str:

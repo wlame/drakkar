@@ -202,6 +202,8 @@ def test_card_rows_stop_at_the_limit_and_say_so():
         ('/srv/shared/fleet/workers/w-1.json', 'fleet/workers/w-1.json'),
         ("drakkar.fleet_workers (worker = 'w-1')", "drakkar.fleet_workers (worker = 'w-1')"),
         ('/elsewhere/w-1.json', '/elsewhere/w-1.json'),
+        ('/srv//shared/./tasks/c/t.lock', 'tasks/c/t.lock'),
+        ('/srv/shared-other/x', '/srv/shared-other/x'),
     ],
 )
 def test_display_key_makes_a_path_in_the_shared_folder_relative(key, expected):
@@ -292,6 +294,7 @@ async def test_leases_name_the_holder_of_a_held_scope_and_a_free_one():
         'instance': 'fedcba9876543210',
         'acquired_at': None,
         'age_seconds': 15.0,
+        'age_approximate': False,
         'expires_in_seconds': 45.0,
     }
     assert archive['key'] == f'memory/task-locks/{ARCHIVE_SCOPE}'
@@ -462,3 +465,39 @@ async def test_a_holder_read_that_raises_marks_only_its_row_failed(monkeypatch):
     assert [row['status'] for row in body['leases']] == ['failed', 'free']
     errors = [entry['error'] for entry in logs if entry['event'] == 'ui_read_provider_failed']
     assert errors == ['the read broke before the caller']
+
+
+@pytest.mark.parametrize('shared_dir', ['/srv//shared', '/srv/shared/.', '/srv/shared/'])
+def test_display_key_matches_a_shared_folder_that_is_not_normalized(shared_dir):
+    assert display_key('/srv/shared/fleet/workers/w-1.json', shared_dir) == 'fleet/workers/w-1.json'
+
+
+async def test_leases_say_busy_while_another_batch_of_reads_runs(monkeypatch):
+    election = _election(MemoryElection(ElectionStore()))
+    assert (await election.ensure_started(5.0)).ok
+    election._holder_batch_running = True
+
+    async with _client(_config(), election=election, roster=_roster()) as client:
+        body = (await client.get(LEASES)).json()
+
+    assert {row['status'] for row in body['leases']} == {'busy'}
+    assert {row['holder'] for row in body['leases']} == {None}
+
+
+def test_lease_row_passes_on_an_approximate_age():
+    skeleton = lease_skeletons(
+        [ClusterTaskDefinition(name=TASK, interval=60, cron=None, lease_seconds=60)],
+        cluster=CLUSTER,
+        now=1_762_596_000.0,
+        last_slots={},
+    )[0]
+
+    row = lease_row(
+        skeleton,
+        status='held',
+        holder=LeaseHolder(worker='w-2', instance=None, acquired_at=None, age_seconds=10.0, age_approximate=True),
+        key=None,
+    )
+
+    assert row['holder']['age_approximate'] is True
+    assert row['holder']['expires_in_seconds'] == 50.0
