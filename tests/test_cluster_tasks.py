@@ -27,6 +27,7 @@ from prometheus_client import REGISTRY
 from drakkar import cluster_tasks
 from drakkar.cluster_tasks import (
     HOLDER_READS_BUSY,
+    HOLDER_UI_BREAKER_OPEN,
     SLOT_ELECTION_FAILED,
     SLOT_HELD_ELSEWHERE,
     SLOT_LATE,
@@ -1079,7 +1080,7 @@ async def test_failing_ui_holder_reads_never_open_the_election_breaker_and_a_slo
     outcome = await lease.acquire(5.0)
     held = await lease.is_held()
 
-    assert {read.outcome for read in reads if read is not None} == {'error', 'skipped_open'}
+    assert {read.outcome for read in reads if read is not None} == {'error', HOLDER_UI_BREAKER_OPEN}
     assert election.ui_caller.breaker_open is True
     assert election.caller.breaker_open is False
     assert outcome == (SLOT_WON, None)
@@ -1481,3 +1482,18 @@ def test_archive_next_slot_follows_the_archive_schedule(archive, now, expected):
 
 def test_archive_next_slot_is_none_when_no_pass_runs():
     assert cluster_tasks.archive_next_slot(_archive_config(enabled=False), 7200.0) is None
+
+
+async def test_a_read_refused_by_the_ui_breaker_is_told_apart_from_the_election_breaker():
+    provider = _SlowHolderElection()
+    election = make_election(provider)
+    assert (await election.ensure_started(5.0)).ok
+    scope = task_scope(CLUSTER, 'reader')
+
+    for _ in range(10):
+        await election.read_holder(scope)
+    refused = await election.read_holder(scope)
+
+    assert election.ui_caller.breaker_open is True
+    assert refused is not None
+    assert (refused.ok, refused.outcome, refused.attempts) == (False, HOLDER_UI_BREAKER_OPEN, 0)

@@ -92,6 +92,10 @@ HOLDER_READS_AT_ONCE: Mapping[str, int] = MappingProxyType({'postgres': 1})
 DEFAULT_HOLDER_READS_AT_ONCE = 2
 # The answer of read_holders while another batch runs on this worker.
 HOLDER_READS_BUSY = 'busy'
+# The outcome of a holder read that the UI caller's own breaker refused (not
+# a metric label: the caller already counted it as ``skipped_open``). It is
+# told apart from ``skipped_open``, which means the election's breaker.
+HOLDER_UI_BREAKER_OPEN = 'ui_breaker_open'
 
 # A peer's definition hash counts only in this exact form; anything else is unknown.
 _CLUSTER_HASH = re.compile(r'[0-9a-f]{16}')
@@ -214,19 +218,23 @@ class ClusterElection:
         ``None`` when the provider has not started or has stopped: the read
         never starts it. While the election's breaker is open no call is made
         (outcome ``skipped_open``, counted on the UI caller); the election's
-        breaker is only read, never fed.
+        breaker is only read, never fed. While the UI caller's own breaker is
+        open the outcome is :data:`HOLDER_UI_BREAKER_OPEN`.
         """
         if not self._started or self._stopped:
             return None
         if self.caller.breaker_open:
             self.ui_caller.skip(HOLDER_OP, OUTCOME_SKIPPED_OPEN)
             return CallResult(ok=False, value=None, outcome=OUTCOME_SKIPPED_OPEN, attempts=0)
-        return await self.ui_caller.call(
+        result = await self.ui_caller.call(
             HOLDER_OP,
             lambda: self.provider.holder(scope),
             attempts=1,
             deadline_seconds=HOLDER_READ_SECONDS,
         )
+        if result.outcome == OUTCOME_SKIPPED_OPEN:
+            return CallResult(ok=False, value=None, outcome=HOLDER_UI_BREAKER_OPEN, attempts=0)
+        return result
 
     async def read_holders(self, scopes: Sequence[str]) -> dict[str, CallResult | BaseException | None] | str:
         """Read the holder of each scope; :data:`HOLDER_READS_BUSY` while another batch runs on this worker.

@@ -817,7 +817,8 @@ and `drakkar_provider_breaker_open{feature="ui"}` shows the UI caller's own
 breaker. A failed or slow UI read never counts against the election's
 breaker, so it can never make a slot's acquire, refresh, fencing check or
 release `skipped_open`. While the election's breaker is open, no read is sent
-and the row says `breaker_open`.
+and the row says `breaker_open`. While the UI caller's own breaker is open
+after failed reads, no read is sent either and the row says `failed`.
 
 UI reads never compete with the slot path for the provider's resources:
 
