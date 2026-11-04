@@ -556,6 +556,48 @@ Stage P publishes these values as one unchangeable object after each chunk,
 each upkeep and each run, so the API server reads them without touching the
 writer's thread.
 
+### The partitions of the table
+
+The Postgres view of the Databases tab reads
+`GET /api/v1/debug/databases/postgres`, which asks the table itself:
+
+```json
+{
+  "server_now": 1762596000.25,
+  "stored_retention_hours": 24,
+  "partitions": [
+    {"name": "fast_recorder_events_p2026110804", "from_ts": 1762574400, "to_ts": 1762578000, "size_bytes": 8192}
+  ],
+  "total_bytes": 8192,
+  "next_drops": {"retention": [], "size": []}
+}
+```
+
+- `partitions` lists every hour partition of the table, oldest first, with
+  its hour bounds and its size (`pg_total_relation_size`); a child table
+  with another name is left out.
+- `stored_retention_hours` is the retention in the table comment, which the
+  upkeep uses; `null` when the comment holds none. It can differ from this
+  worker's `initial_retention` (see [Retention](#retention)).
+- `next_drops` says which partitions the next upkeep would drop at
+  `server_now`: by the stored retention, then by this worker's `max_size`
+  (see [The size cap](#the-size-cap)). The worker computes it with the same
+  rules as the upkeep and changes nothing.
+
+The read opens one connection of its own with the DSN of
+`recorder.postgres.connection` (never the write connection), and takes one
+of the two read slots that the history search and the slice download share.
+In one transaction it sets `statement_timeout` from `recorder.search.timeout`
+(at most one hour) and turns JIT off, then runs four statements that the
+upkeep already uses: `server_now`, `retention_read`, `partitions_list` and
+`partition_sizes`. The answer never holds the DSN. A worker whose provider is
+not `postgres` answers `404` `{"error": "the recorder provider is not
+postgres"}`. A read that fails, runs out of time or finds both slots busy
+answers `503` `{"error": "postgres read failed"}` and logs
+`ui_read_postgres_failed` (with `reason` `error`, `timeout` or `busy`), at
+most once a minute. The UI reads it only when the operator opens the view or
+presses Refresh; nothing polls it.
+
 ## The history search
 
 `GET /api/v1/debug/trace?partition=&offset=&history=1` on a `postgres` worker

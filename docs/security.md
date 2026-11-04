@@ -51,7 +51,7 @@ network access.
 | **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
 | **Cross-origin read rule** | Only three read paths answer cross-origin browser requests: `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI reads from every worker of the cluster. They use the same origin rule as `/ws`. The preflight needs no token; the read itself still needs one when a token is set. No other path sends CORS headers. See [below](#cross-origin-reads). |
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
-| **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
+| **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints that are on by default, whether or not a token is set. `ui.delete_enabled` (off by default) opens the third: `DELETE /api/v1/debug/files/{path}`, which deletes one merge result (`merged/<name>.db`) and nothing else. A sealed file, an archive or any other path answers `404`; a merge result this worker is sending or merging from answers `409`. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
 | **Path containment** | Database download and merge take paths relative to `storage.shared_dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `storage.shared_dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`), of its recorder memory store (`source=memory`) or of its cache file (`source=cache`, every cache value the worker holds), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `recorder.capture.output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. `GET /api/v1/debug/slice` takes no path either: it sends the recorder events of a time range (`args`, `stdout`, `stderr` and labels included unless `output=0`) from the worker's own sources or from the sealed history or Postgres rows of its cluster, behind the token, with the same owner-only temp file removed before the first byte. |
 | **Filtered peer rows** | The cache exchange applies only the rows a peer originated itself, in the scopes asked of that peer. Peer requests ignore the proxy environment variables and do not follow redirects. |
@@ -408,8 +408,8 @@ in order of how much they buy you:
 3. **Set a strong `ui.auth_token`** — and treat it as a shared secret with
    no revocation story, because that is what it is.
 4. **Close what you do not need**: `ui.probe.enabled: false`,
-   `ui.merge_enabled: false`, and `ui.enabled: false` entirely on workers
-   nobody debugs.
+   `ui.merge_enabled: false`, leave `ui.delete_enabled` off, and
+   `ui.enabled: false` entirely on workers nobody debugs.
 5. **Restrict `storage.dir` and `storage.shared_dir` permissions** to the worker
    user, on every host that mounts them.
 6. **Remember the public peer route.** The token does not cover

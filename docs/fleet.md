@@ -753,6 +753,67 @@ every worker of a cluster the same recorder settings. Workers with provider
 `postgres` keep their history in the Postgres table, so the trace with history
 on such a worker reads the table, and on a `sqlite` worker the sealed files.
 
+## The Autodiscover view {#autodiscover-view}
+
+The Autodiscover view of the Databases tab shows the registry and the
+leases of the cluster tasks. It reads two routes, only when the operator
+opens the view or presses Refresh.
+
+`GET /api/v1/debug/autodiscover` answers from memory, as the workers list
+does, and reads no store:
+
+- `registry`: the provider, the name of its connection entry (`null` for
+  `filesystem`; never a DSN, a URL or a token), whether the provider has
+  started, the time of the last successful refresh and of this worker's last
+  successful publish, whether the registry's breaker is open, and
+  `offline_after_seconds`.
+- `worker`: this worker and where the store keeps its card. The registry
+  leaves its own card out of the peer list, so it is not in `workers`.
+- `workers`: one row per card of the last refresh, the own cluster first:
+  the card fields, the age, the liveness verdict, the card's `features` and
+  `key`, where the store keeps the card. At most 1000 rows; `truncated` says
+  when more were listed.
+- 404 `{"error": "autodiscover is off"}` with autodiscover off.
+
+The `key` of a card, per provider: `fleet/workers/<worker>.json` relative to
+the shared folder (`filesystem`), `<schema>.fleet_workers (worker =
+'<worker>')` (`postgres`), `<prefix>fleet:workers:<worker>` (`redis`) and
+`<prefix>/fleet/workers/<worker>` (`consul`). It is `null` until the provider
+has started, because the schema or the prefix comes from the connection
+entry at the start.
+
+`GET /api/v1/debug/autodiscover/leases` answers one row per cluster task of
+this worker (`history.archive` included when it runs as one): the task, its
+scope, its lease length, its next slot, the outcome of its last slot on this
+worker (`won`, `held_elsewhere`, `late` or `election_failed`), and the holder
+as the store reports it. `election` is `null` on a worker with no cluster
+task.
+
+The holder read is part of every election provider: `holder(scope)` answers
+the worker, the instance and the `acquired_at` text of the stored lease, or
+nothing when the scope is free, and `lease_key(scope)` names where the store
+keeps it. Neither needs a token, and neither takes, refreshes or frees a
+lease. What each provider reads:
+
+| Provider | Read | Age of the last refresh | Time left |
+|---|---|---|---|
+| `filesystem` | the lock file body | the file's change time on the file server's clock | lease length minus the age |
+| `postgres` | the statement `holder` on `task_locks` | `now() - refreshed_at` on the database server | lease length minus the age |
+| `redis` | `GET` of the lock key (as the fencing check), then `PTTL` | not known | the key's time to live |
+| `consul` | the key read of the fencing check; held only while a session holds the key | not known | not known |
+
+A negative time left means the lease ran out and the store still keeps it
+(a lock file or a row stays until another worker takes the scope).
+
+Each read goes through the election's own caller as the operation `holder`:
+one attempt, at most 2 seconds, at most 4 reads at once, on the worker's main
+loop. So `drakkar_provider_calls_total{feature="election",op="holder"}`
+counts it, and a failed read counts against the election's breaker like any
+other call. While the breaker is open no read is sent and the row says
+`breaker_open`. The read never starts the provider: before the first slot
+the rows say `not_started`. A row whose read failed or did not answer within
+5 seconds says `failed`, and the worker logs `ui_read_provider_failed`.
+
 ## Connections {#connections}
 
 A provider that keeps its data in a service (Consul, Redis, Postgres) does
@@ -1031,6 +1092,7 @@ also counted by the three provider metrics:
 | `fleet_worker_name_probe_skipped` | warning | The provider did not start or list in time; the same-name check is skipped and the start goes on (fields `worker`, `provider`, `error`). |
 | `fleet_peer_request_failed` | warning | A request to a peer failed (fields `peer`, `url`, `endpoint`, `outcome`, `error`); once at the start of a run of failures of that peer. |
 | `fleet_peer_backoff` | info | A failed peer is skipped for the next cycles (fields `peer`, `skip_cycles`, `failures`); at each failure. |
+| `ui_read_provider_failed` | warning | A holder read of the [Autodiscover view](#autodiscover-view) failed or did not answer (fields `category` `debug`, `endpoint`, `provider`, `op` `holder`, `error`, `suppressed`); at most once a minute. |
 | `fleet_peer_rows_rejected` | warning | A peer served rows this worker did not accept (field `rejected`: counts by reason `scope` or `origin`); once per peer per cycle. |
 
 ## Settings

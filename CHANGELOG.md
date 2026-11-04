@@ -251,6 +251,28 @@ the steps of the upgrade and the changes of behaviour.
   slots. The `slice` statement is in `tests/fixtures/fleet_providers.json`, the
   messages, names and slice tables in `tests/fixtures/slice_contract.json`
   (contract v1.30).
+- **Postgres partitions of the Databases tab.** `GET /api/v1/debug/databases/postgres`
+  answers the hour partitions of the recorder's Postgres table with their sizes,
+  the stored retention and the partitions the next upkeep would drop by
+  retention and by `max_size`. It runs four statements the upkeep already uses,
+  on a connection of its own and one of the read slots the history search and
+  the slice share (contract v1.30).
+- **Delete a merge result.** `DELETE /api/v1/debug/files/merged/<name>.db`
+  deletes one merge result when the new key `ui.delete_enabled` is true (default
+  false, `403` otherwise). Any other path answers `404`; a file this worker is
+  sending or merging from answers `409`. `history.delete_enabled` of
+  `/api/v1/debug/databases` tells the UI whether to offer it. A merge result is
+  now sent as a stream with its length, ended after 120 s without a read.
+- **Autodiscover view.** `GET /api/v1/debug/autodiscover` answers the registry
+  state and its cards from memory, with the store key of each card.
+  `GET /api/v1/debug/autodiscover/leases` answers each cluster task with its
+  next slot, the outcome of its last slot on this worker and the holder of its
+  lease. Every election provider gains `holder(scope)` and `lease_key(scope)`,
+  and every registry provider `card_key(worker)`. The holder read goes through
+  the election's caller as the operation `holder` (one attempt, 2 s), never
+  starts the provider, and logs `ui_read_provider_failed` when it fails. The
+  Postgres statement `holder` and the Redis `PTTL` are in
+  `tests/fixtures/fleet_providers.json` (contract v1.30).
 - **A start waits out a short lock.** When the owner lock of its folder is held,
   a worker tries again for 2 s before it refuses to start, so the Databases tab
   of another worker, which tests the lock for a moment, never stops a restart.

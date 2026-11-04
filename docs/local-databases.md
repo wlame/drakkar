@@ -1448,7 +1448,8 @@ part '<p>'; known: history, own, recorder, storage"}`.
   to `storage.shared_dir`), `name`, `kind` (`sealed`, `archive` or `merged`),
   `size_bytes`, `modified_at`, and `meta`: the meta object of a sealed
   file, `null` for the other kinds. No sealed file is opened to build this
-  list.
+  list. `history.delete_enabled` is the value of `ui.delete_enabled`: the
+  UI offers the delete of a merge result only when it is true.
 - **`recorder`** says what the recorder runs, from the config and from
   values in memory; it reads no file. `provider` is `none` with the
   recorder off. `memory` holds the bounds of the memory store (time
@@ -1492,7 +1493,9 @@ Any other path, an unsafe path segment, a symlink, a path that resolves
 outside `storage.shared_dir`, or a missing file answers `404`. Own files in
 `storage.dir` are not downloadable by path: download a file once it is
 sealed, or download the events of a time range as a
-[slice](#slice-download).
+[slice](#slice-download). A merge result is sent as a stream with its
+`Content-Length`, so the worker knows when the send ends (see **Delete**
+below); a client that takes no chunk for 120 seconds is cut off.
 
 **Compressed downloads.** `compress=gzip` on `/api/v1/debug/download/{path}`
 and on `/api/v1/debug/download-live` sends the same bytes as a gzip stream,
@@ -1538,6 +1541,23 @@ files and merge results) and writes
 writes a temporary file and renames it, so the result appears only when it
 is complete. `merged/` is created with mode `0700`. The answer carries an
 extra `path` field with the result's path relative to `storage.shared_dir`.
+The merge reads each source in batches of at most 5000 rows or 8 MiB of
+text, so a large source never sits in memory at once; the archive pass
+merges the same way.
+
+**Delete.** `DELETE /api/v1/debug/files/{path}` deletes one merge result,
+`merged/<name>.db`. It is off by default: with `ui.delete_enabled: false` it
+answers `403` and names the key. Only merge results can be deleted: a
+sealed file or an archive is the only copy of the history and is removed
+only by the [archive pass](#merge-compress-publish-then-delete), so the
+route answers `404` `{"error": "File not found"}` for every other path, as
+the download does. While this worker sends the file to a client or reads it
+as the source of a merge, the route answers `409` `{"error": "the file is in
+use on this worker"}`. Another worker that reads the file at that moment is
+not known; on a local folder its read goes on, because the file goes away
+only when its last reader closes it. After the delete the route answers
+`204` and logs `debug_file_deleted` with the path. The Databases tab asks
+for a confirmation that names the file before it sends the request.
 
 ### Slice download
 
