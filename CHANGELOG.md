@@ -402,6 +402,11 @@ the steps of the upgrade and the changes of behaviour.
 
 ### Fixed
 
+- **A merge reads its sources in batches.** `POST /api/v1/debug/merge` and the
+  archive pass copied the events and the state rows of each source with one read
+  of the whole table, so a large sealed file was held in memory at once. They now
+  read batches of at most 5000 rows or 8 MiB of text, the same batches as the
+  slice download.
 - **A timeout kills the task's descendants also when the child already
   exited.** Before, a task whose child had exited while a background
   grandchild still held its pipes ran into the timeout, and the grandchild was

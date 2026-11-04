@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict
 from drakkar.config.recorder import PERSISTENCE_POSTGRES, PERSISTENCE_SQLITE
 from drakkar.recorder.schema import EventType
 from drakkar.schedule import sanitize_cluster
+from drakkar.sqlitebatch import BATCH_BYTES, BATCH_ROWS
 
 # --- Limits (constants, not config keys) ---
 
@@ -47,12 +48,12 @@ SLICE_MAX_RAM_BYTES = 64 * 1024 * 1024
 # The whole build, checked between batches and by a progress handler.
 SLICE_TIME_LIMIT_SECONDS = 60.0
 # Rows per read and per insert, at most.
-SLICE_BATCH_ROWS = 5000
+SLICE_BATCH_ROWS = BATCH_ROWS
 # Text bytes per read batch, at most: a batch ends at whichever of the two
 # limits comes first, so one batch holds at most this much (plus one row) in
 # memory. The file and RAM size limits are checked after each batch, so a
 # file ends at most one batch past its limit.
-SLICE_CHUNK_BYTES = 8 * 1024 * 1024
+SLICE_CHUNK_BYTES = BATCH_BYTES
 # Rows of the first Postgres fetch; later fetches are sized from the bytes
 # per row seen so far, so each stays near SLICE_CHUNK_BYTES.
 SLICE_PG_FIRST_FETCH_ROWS = 100

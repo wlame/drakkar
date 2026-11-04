@@ -1242,3 +1242,104 @@ def test_merge_atomic_publish_failure_leaves_no_temp_file(tmp_path):
         merge_databases_atomic([str(a), str(b)], str(out))
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ['a.db', 'b.db', 'merged.db']
+
+
+# ─── merge_databases — keyset batches ─────────────────────────
+
+
+def _record_batches(monkeypatch, batch_rows: int | None = None) -> list[int]:
+    """Record the size of every batch the merge reads; ``batch_rows`` makes the batches smaller."""
+    sizes: list[int] = []
+    real = merge_module.keyset_batches
+
+    def recording(conn, sql, **kwargs):
+        if batch_rows is not None:
+            kwargs['batch_rows'] = batch_rows
+        for rows in real(conn, sql, **kwargs):
+            sizes.append(len(rows))
+            yield rows
+
+    monkeypatch.setattr(merge_module, 'keyset_batches', recording)
+    return sizes
+
+
+def _bulk_events(path, worker_name: str, count: int, stdout: str | None = None) -> None:
+    """A recorder file with ``count`` events, written in one statement (fast for large sources)."""
+    _create_source_db(path, worker_name=worker_name, skip_state_table=True)
+    db = sqlite3.connect(str(path))
+    db.executemany(
+        "INSERT INTO events (ts, dt, event, partition, offset, stdout, origin) VALUES (?, ?, 'consumed', 0, ?, ?, 'kafka')",
+        [(1000.0 + i, format_dt(1000.0 + i), i, stdout) for i in range(count)],
+    )
+    db.commit()
+    db.close()
+
+
+def test_merge_copies_a_large_source_in_batches_of_at_most_5000_rows(tmp_path, monkeypatch):
+    sizes = _record_batches(monkeypatch)
+    source = tmp_path / 'big.db'
+    _bulk_events(source, 'worker-big', 12_001)
+    out = tmp_path / 'out.db'
+
+    result = merge_databases([str(source)], str(out))
+
+    assert sizes == [5000, 5000, 2001]
+    assert result.event_count == 12_001
+    assert result.merged_files == [str(source)]
+    merged = sqlite3.connect(str(out))
+    assert merged.execute(
+        'SELECT COUNT(*), COUNT(DISTINCT "offset"), MIN("offset"), MAX("offset") FROM events'
+    ).fetchone() == (
+        12_001,
+        12_001,
+        0,
+        12_000,
+    )
+    merged.close()
+
+
+def test_merge_ends_a_batch_at_its_byte_bound(tmp_path, monkeypatch):
+    sizes = _record_batches(monkeypatch)
+    source = tmp_path / 'wide.db'
+    # 1 MiB of output per row: a batch of 8 MiB holds 8 rows, never all 20.
+    _bulk_events(source, 'worker-wide', 20, stdout='x' * (1024 * 1024))
+    out = tmp_path / 'out.db'
+
+    result = merge_databases([str(source)], str(out))
+
+    assert result.event_count == 20
+    assert max(sizes) == 8
+    assert sum(sizes) == 20
+
+
+def test_merge_maps_owners_of_a_merged_source_in_every_batch(tmp_path, monkeypatch):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+    sizes = _record_batches(monkeypatch, batch_rows=1)
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert max(sizes) == 1
+    assert result.merged_files == [str(first), str(c)]
+    assert _worker_counts(out, 'events') == {'worker-a': 2, 'worker-b': 1, 'worker-c': 1}
+    assert _worker_counts(out, 'worker_states') == {'worker-a': 1, 'worker-b': 2, 'worker-c': 1}
+
+
+def test_merge_reads_a_table_without_an_id_column_by_rowid(tmp_path):
+    source = tmp_path / 'old.db'
+    db = sqlite3.connect(str(source))
+    db.execute('CREATE TABLE events (ts REAL, dt TEXT, event TEXT, partition INTEGER, offset INTEGER)')
+    db.executemany(
+        'INSERT INTO events VALUES (?, ?, ?, ?, ?)',
+        [(1.0, format_dt(1.0), 'consumed', 0, 1), (2.0, format_dt(2.0), 'consumed', 0, 2)],
+    )
+    db.commit()
+    db.close()
+    out = tmp_path / 'out.db'
+
+    result = merge_databases([str(source)], str(out))
+
+    assert result.event_count == 2
+    assert result.merged_files == [str(source)]

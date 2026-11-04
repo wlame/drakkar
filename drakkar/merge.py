@@ -20,6 +20,7 @@ import contextlib
 import os
 import secrets
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,7 @@ import structlog
 
 from drakkar.dbfiles import secure_db_file
 from drakkar.recorder.schema import WORKER_CONFIG_COLUMNS, WORKER_STATE_COLUMNS
+from drakkar.sqlitebatch import keyset_batches
 
 logger = structlog.get_logger()
 
@@ -239,23 +241,62 @@ def _copy_merged_workers(
     return ids
 
 
-def _owner_ids(
-    rows: list[dict],
-    db_path: str,
-    worker_map: dict[str, int],
-    merged_ids: dict[str, dict[int, int]],
-) -> list[int]:
-    """The output ``worker_id`` of each source row, in row order.
+def _source_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    """The column names of ``table`` in a source; empty when it has no such table."""
+    return {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
 
-    A recorder source has one worker, so every row maps to it. A merged
-    source maps each row's own ``worker_id`` through the ids its workers got
-    in the output. A row naming a worker the source does not list raises
-    ``KeyError``; the caller then treats the whole source as incomplete.
+
+def _batch_select(present: set[str], table: str, columns: Sequence[str], *, with_owner: bool) -> str:
+    """The keyset batch statement of ``table``: ``rowid``, the source's own ``worker_id`` (merged sources), then ``columns``.
+
+    ``rowid`` is the ``id`` column of both schemas, and it also exists in a
+    table that lacks one. A column the source lacks (a file written by an
+    older release) is read as NULL.
     """
+    owner = 'worker_id, ' if with_owner else ''
+    select = ', '.join(f'"{col}"' if col in present else 'NULL' for col in columns)
+    return f'SELECT rowid, {owner}{select} FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?'
+
+
+def _owner_of(db_path: str, worker_map: dict[str, int], merged_ids: dict[str, dict[int, int]]) -> int | dict[int, int]:
+    """The ``owner`` argument of :func:`_copy_table` for one source that phase 1 took."""
     ids = merged_ids.get(db_path)
-    if ids is None:
-        return [worker_map[db_path]] * len(rows)
-    return [ids[row['worker_id']] for row in rows]
+    return ids if ids is not None else worker_map[db_path]
+
+
+def _copy_table(
+    src: sqlite3.Connection,
+    out: sqlite3.Connection,
+    *,
+    source_table: str,
+    target_table: str,
+    columns: Sequence[str],
+    owner: int | dict[int, int],
+) -> int:
+    """Copy every row of ``source_table`` into ``target_table`` in keyset batches; the rows copied.
+
+    ``owner`` is the output ``worker_id`` of every row (a recorder source,
+    which has one worker), or the map of a merged source's own worker ids to
+    the ids its workers got in the output. A row naming a worker the source
+    does not list raises ``KeyError``; the caller then treats the whole
+    source as incomplete. At most one batch is held in memory.
+    """
+    present = _source_columns(src, source_table)
+    if not present:
+        return 0
+    sql = _batch_select(present, source_table, columns, with_owner=isinstance(owner, dict))
+    cols = ', '.join(['worker_id', *columns])
+    placeholders = ', '.join(['?'] * (1 + len(columns)))
+    insert_sql = f'INSERT INTO {target_table} ({cols}) VALUES ({placeholders})'
+    copied = 0
+    for rows in keyset_batches(src, sql):
+        if isinstance(owner, dict):
+            batch = [(owner[row[1]], *row[2:]) for row in rows]
+        else:
+            batch = [(owner, *row[1:]) for row in rows]
+        out.executemany(insert_sql, batch)
+        copied += len(batch)
+    return copied
 
 
 def scan_db(path: str) -> DbStats:
@@ -430,29 +471,24 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     # file: the archive pass deletes exactly what that list names.
     incomplete: set[str] = set()
 
-    # phase 2: copy events per source. No cross-source buffering or global
-    # sort — readers order via the ``ts`` index, so a globally sorted
-    # insertion order buys nothing and buffering every source's rows at
-    # once spiked memory on large merges. Peak memory is now one source.
-    event_cols = ', '.join(['worker_id', *_EVENT_COLUMNS])
-    event_placeholders = ', '.join(['?'] * (1 + len(_EVENT_COLUMNS)))
-    insert_event_sql = f'INSERT INTO events ({event_cols}) VALUES ({event_placeholders})'
-
+    # phase 2: copy events per source, in keyset batches by id. No
+    # cross-source buffering or global sort: readers order via the ``ts``
+    # index, so insertion order is not part of the contract. Peak memory is
+    # one batch of one source (``drakkar.sqlitebatch``), never a whole file.
     for db_path in db_paths:
         if db_path not in worker_map and db_path not in merged_ids:
             continue
         src: sqlite3.Connection | None = None
         try:
             src = _open_sealed(db_path)
-            src.row_factory = _dict_factory
-            if _table_exists(src, 'events'):
-                rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
-                owners = _owner_ids(rows, db_path, worker_map, merged_ids)
-                batch = [
-                    (owner, *(row.get(col) for col in _EVENT_COLUMNS)) for owner, row in zip(owners, rows, strict=True)
-                ]
-                out.executemany(insert_event_sql, batch)
-                result.event_count += len(batch)
+            result.event_count += _copy_table(
+                src,
+                out,
+                source_table='events',
+                target_table='events',
+                columns=_EVENT_COLUMNS,
+                owner=_owner_of(db_path, worker_map, merged_ids),
+            )
         except Exception as e:
             logger.warning('merge_source_skipped', path=db_path, phase='events', error=str(e))
             incomplete.add(db_path)
@@ -461,26 +497,23 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             if src is not None:
                 src.close()
 
-    # phase 3: merge worker_state rows
+    # phase 3: merge worker_state rows, in keyset batches too
     for db_path in db_paths:
         if db_path not in worker_map and db_path not in merged_ids:
             continue
         src: sqlite3.Connection | None = None
         try:
             src = _open_sealed(db_path)
-            src.row_factory = _dict_factory
             # A recorder file keeps snapshots in ``worker_state``; a merge
             # output keeps them, already worker-tagged, in ``worker_states``.
-            state_table = 'worker_states' if db_path in merged_ids else 'worker_state'
-            if _table_exists(src, state_table):
-                rows = src.execute(f'SELECT * FROM {state_table} ORDER BY updated_at').fetchall()
-                owners = _owner_ids(rows, db_path, worker_map, merged_ids)
-                cols = ', '.join(['worker_id', *WORKER_STATE_COLUMNS])
-                placeholders = ', '.join(['?'] * (1 + len(WORKER_STATE_COLUMNS)))
-                for owner, row in zip(owners, rows, strict=True):
-                    values = [row.get(col) for col in WORKER_STATE_COLUMNS]
-                    out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [owner, *values])
-                    result.state_count += 1
+            result.state_count += _copy_table(
+                src,
+                out,
+                source_table='worker_states' if db_path in merged_ids else 'worker_state',
+                target_table='worker_states',
+                columns=WORKER_STATE_COLUMNS,
+                owner=_owner_of(db_path, worker_map, merged_ids),
+            )
         except Exception as e:
             logger.warning('merge_source_skipped', path=db_path, phase='states', error=str(e))
             incomplete.add(db_path)

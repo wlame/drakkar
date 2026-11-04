@@ -35,7 +35,7 @@ import os
 import secrets
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -85,6 +85,7 @@ from drakkar.slices import (
     SliceRequest,
     slice_file_name,
 )
+from drakkar.sqlitebatch import NO_ID, fetch_rows, row_bytes
 from drakkar.timefmt import format_rfc3339_micro
 
 logger = structlog.get_logger()
@@ -105,9 +106,7 @@ IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
 IN_RAM_REASON_FOLDER_UNUSABLE = 'storage_dir_unusable'
 # The ``source_file`` of the ``workers`` rows of a cluster slice built from the table.
 POSTGRES_SOURCE_FILE = 'postgres'
-_NO_ID = -(2**63)
-# A row counts its text and blob bytes plus this much for each value.
-_VALUE_OVERHEAD_BYTES = 8
+_NO_ID = NO_ID
 # Ids asked at once from the temp table of memory keys (under SQLite's variable limit).
 _KEY_LOOKUP_CHUNK = 500
 # How a source leaves out the rows the memory store gave: by id (a source of
@@ -222,37 +221,12 @@ def _run_source(conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()) 
         raise _source_error(exc) from exc
 
 
-def row_bytes(values: Iterable[Any]) -> int:
-    """The bytes a row holds in memory, roughly: its text and blob lengths plus a small cost per value."""
-    total = 0
-    for value in values:
-        total += _VALUE_OVERHEAD_BYTES
-        if isinstance(value, str | bytes):
-            total += len(value)
-    return total
-
-
 def _fetch_chunk(conn: sqlite3.Connection, sql: str, params: Sequence[Any], max_bytes: int) -> tuple[list[tuple], bool]:
-    """Read rows of one statement until it ends or ``max_bytes`` is reached; the rows and whether the bytes cut them.
-
-    The statement is reset after the last row read, so no read is held
-    open between batches.
-    """
-    rows: list[tuple] = []
-    size = 0
+    """:func:`~drakkar.sqlitebatch.fetch_rows` on a source; a stop by the progress handler and every other error are told apart."""
     try:
-        cursor = conn.execute(sql, params)
-        try:
-            for row in cursor:
-                rows.append(row)
-                size += row_bytes(row)
-                if size >= max_bytes:
-                    return rows, True
-        finally:
-            cursor.close()
+        return fetch_rows(conn, sql, params, max_bytes)
     except sqlite3.Error as exc:
         raise _source_error(exc) from exc
-    return rows, False
 
 
 def _quote(column: str) -> str:
