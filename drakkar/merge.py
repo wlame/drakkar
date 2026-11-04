@@ -299,6 +299,43 @@ def _copy_table(
     return copied
 
 
+def _copy_source_rows(
+    db_path: str, out: sqlite3.Connection, owner: int | dict[int, int], *, merged: bool
+) -> tuple[int, int] | None:
+    """Copy one source's events and states inside a SAVEPOINT; the counts, or ``None`` when it failed and was rolled back.
+
+    A recorder file keeps snapshots in ``worker_state``; a merge output keeps
+    them, already worker-tagged, in ``worker_states``.
+    """
+    src: sqlite3.Connection | None = None
+    phase = 'events'
+    out.execute('SAVEPOINT merge_source')
+    try:
+        src = _open_sealed(db_path)
+        events = _copy_table(
+            src, out, source_table='events', target_table='events', columns=_EVENT_COLUMNS, owner=owner
+        )
+        phase = 'states'
+        states = _copy_table(
+            src,
+            out,
+            source_table='worker_states' if merged else 'worker_state',
+            target_table='worker_states',
+            columns=WORKER_STATE_COLUMNS,
+            owner=owner,
+        )
+    except Exception as e:
+        out.execute('ROLLBACK TO merge_source')
+        out.execute('RELEASE merge_source')
+        logger.warning('merge_source_skipped', path=db_path, phase=phase, error=str(e))
+        return None
+    finally:
+        if src is not None:
+            src.close()
+    out.execute('RELEASE merge_source')
+    return events, states
+
+
 def scan_db(path: str) -> DbStats:
     """Read statistics from a single debug database file."""
     stats = DbStats(
@@ -471,56 +508,26 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     # file: the archive pass deletes exactly what that list names.
     incomplete: set[str] = set()
 
-    # phase 2: copy events per source, in keyset batches by id. No
-    # cross-source buffering or global sort: readers order via the ``ts``
-    # index, so insertion order is not part of the contract. Peak memory is
-    # one batch of one source (``drakkar.sqlitebatch``), never a whole file.
+    # phase 2: copy each source's events and states, in keyset batches by
+    # rowid. No cross-source buffering or global sort: readers order via the
+    # ``ts`` index, so insertion order is not part of the contract. Peak memory
+    # is one batch of one source (``drakkar.sqlitebatch``), never a whole file.
+    # Each source runs inside a SAVEPOINT: a source that fails part way (a
+    # corrupt page, an unknown worker id) is rolled back whole, so an
+    # incomplete source contributes no rows. The archive pass keeps such a
+    # source and merges it again at its next pass; partial rows left behind
+    # would be added again at every pass.
     for db_path in db_paths:
         if db_path not in worker_map and db_path not in merged_ids:
             continue
-        src: sqlite3.Connection | None = None
-        try:
-            src = _open_sealed(db_path)
-            result.event_count += _copy_table(
-                src,
-                out,
-                source_table='events',
-                target_table='events',
-                columns=_EVENT_COLUMNS,
-                owner=_owner_of(db_path, worker_map, merged_ids),
-            )
-        except Exception as e:
-            logger.warning('merge_source_skipped', path=db_path, phase='events', error=str(e))
+        copied = _copy_source_rows(
+            db_path, out, _owner_of(db_path, worker_map, merged_ids), merged=db_path in merged_ids
+        )
+        if copied is None:
             incomplete.add(db_path)
             continue
-        finally:
-            if src is not None:
-                src.close()
-
-    # phase 3: merge worker_state rows, in keyset batches too
-    for db_path in db_paths:
-        if db_path not in worker_map and db_path not in merged_ids:
-            continue
-        src: sqlite3.Connection | None = None
-        try:
-            src = _open_sealed(db_path)
-            # A recorder file keeps snapshots in ``worker_state``; a merge
-            # output keeps them, already worker-tagged, in ``worker_states``.
-            result.state_count += _copy_table(
-                src,
-                out,
-                source_table='worker_states' if db_path in merged_ids else 'worker_state',
-                target_table='worker_states',
-                columns=WORKER_STATE_COLUMNS,
-                owner=_owner_of(db_path, worker_map, merged_ids),
-            )
-        except Exception as e:
-            logger.warning('merge_source_skipped', path=db_path, phase='states', error=str(e))
-            incomplete.add(db_path)
-            continue
-        finally:
-            if src is not None:
-                src.close()
+        result.event_count += copied[0]
+        result.state_count += copied[1]
 
     result.merged_files = [
         path for path in db_paths if (path in worker_map or path in merged_ids) and path not in incomplete

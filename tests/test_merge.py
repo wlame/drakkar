@@ -1343,3 +1343,41 @@ def test_merge_reads_a_table_without_an_id_column_by_rowid(tmp_path):
 
     assert result.event_count == 2
     assert result.merged_files == [str(source)]
+
+
+def test_a_source_that_fails_in_its_second_batch_leaves_none_of_its_rows(tmp_path, monkeypatch):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+    db = sqlite3.connect(str(first))
+    # The last event names a worker the source does not list: the copy fails after the first batch.
+    db.execute('UPDATE events SET worker_id = 99 WHERE id = (SELECT MAX(id) FROM events)')
+    db.commit()
+    db.close()
+    sizes = _record_batches(monkeypatch, batch_rows=1)
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert len(sizes) >= 2
+    assert result.merged_files == [str(c)]
+    assert result.event_count == 1
+    assert _worker_counts(out, 'events') == {'worker-a': 0, 'worker-b': 0, 'worker-c': 1}
+    assert _worker_counts(out, 'worker_states')['worker-a'] == 0
+
+
+def test_a_source_whose_states_fail_keeps_none_of_its_events(tmp_path):
+    a, b, c = _three_sources(tmp_path)
+    first = tmp_path / 'first.db'
+    merge_databases([str(a), str(b)], str(first))
+    db = sqlite3.connect(str(first))
+    db.execute('UPDATE worker_states SET worker_id = 99 WHERE id = (SELECT MAX(id) FROM worker_states)')
+    db.commit()
+    db.close()
+
+    out = tmp_path / 'second.db'
+    result = merge_databases([str(first), str(c)], str(out))
+
+    assert result.merged_files == [str(c)]
+    assert (result.event_count, result.state_count) == (1, 1)
+    assert _worker_counts(out, 'events') == {'worker-a': 0, 'worker-b': 0, 'worker-c': 1}
