@@ -47,17 +47,16 @@ def _epoch_text(epoch: float | None) -> str | None:
 def display_key(key: str | None, shared_dir: str) -> str | None:
     """A store key as the UI shows it: a path inside the shared folder becomes relative to it.
 
-    The UI sends no absolute host path. A key of another provider (a row, a
+    The UI sends no absolute host path. The filesystem providers build their
+    paths from the same ``storage.shared_dir`` text, so a plain prefix test is
+    exact; nothing touches the file system, which may be a network mount (this
+    runs on the API server's event loop). A key of another provider (a row, a
     Redis or Consul key) is kept as it is.
     """
     if key is None or not shared_dir:
         return key
-    root = os.path.join(os.path.realpath(shared_dir), '')
-    plain_root = os.path.join(shared_dir, '')
-    for prefix in (plain_root, root):
-        if key.startswith(prefix):
-            return key[len(prefix) :]
-    return key
+    prefix = os.path.join(shared_dir, '')
+    return key[len(prefix) :] if key.startswith(prefix) else key
 
 
 def registry_header(status: RegistryStatus, *, connection: str | None, offline_after_seconds: float) -> dict[str, Any]:

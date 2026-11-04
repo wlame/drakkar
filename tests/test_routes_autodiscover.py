@@ -208,12 +208,7 @@ def test_display_key_makes_a_path_in_the_shared_folder_relative(key, expected):
     assert display_key(key, '/srv/shared') == expected
 
 
-def test_display_key_resolves_a_shared_folder_given_through_a_link(tmp_path):
-    real = tmp_path / 'real'
-    real.mkdir()
-    os.symlink(real, tmp_path / 'link')
-
-    assert display_key(str(real / 'tasks' / 'c' / 't.lock'), str(tmp_path / 'link')) == 'tasks/c/t.lock'
+def test_display_key_without_a_shared_folder_keeps_the_key():
     assert display_key('/any/path', '') == '/any/path'
 
 
