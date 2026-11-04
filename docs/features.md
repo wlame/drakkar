@@ -21,6 +21,7 @@ Every feature is optional. A worker can run its main loop only: no API, no UI, n
 | Operator UI | `ui.enabled` | **on** (same port) | The pages, the bundle fetch, `/api/v1`, `/ws` and the docs; needs `api.enabled` |
 | Message probe endpoint | `ui.probe.enabled` | **on** | `POST /api/v1/debug/probe`: runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
 | Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge`: writes a `merged-<ts>-<token>.db` into `<storage.shared_dir>/merged/` per call, deleted after `recorder.archive.merged_retention` while archiving is on; `false` = 403, independently of `auth_token` |
+| Merge result delete | `ui.delete_enabled` | **off** | `DELETE /api/v1/debug/files/{path}`: deletes one merge result (`merged/<name>.db`) from the [Databases view](databases-view.md); nothing else can be deleted; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*`: pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Flight recorder, memory store | `recorder.enabled` and `ui.enabled` | **on** | Recent events in memory for the UI (`recorder.memory.window`) |

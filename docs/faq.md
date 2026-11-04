@@ -242,6 +242,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe.enabled: false`.
 - **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<storage.shared_dir>/merged/`. The archive pass deletes it after `recorder.archive.merged_retention` (default `32d`); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
+- **Delete removes a merge result.** `DELETE /api/v1/debug/files/merged/<name>.db` deletes one merge result, only with `ui.delete_enabled: true` (off by default). Sealed files and archives are never deleted from the UI.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -253,7 +254,7 @@ To a team of operators on a trusted network, yes -- that is what it is for. To a
 
 Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
-Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file into the shared folder. Set `ui.probe.enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
+Most endpoints are read-only, but three are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, `POST /api/v1/debug/merge` writes a file into the shared folder, and `DELETE /api/v1/debug/files/{path}` deletes a merge result (off by default). Set `ui.probe.enabled: false` / `ui.merge_enabled: false` to close the first two, and leave `ui.delete_enabled` at `false` — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
@@ -301,7 +302,7 @@ Size the database first: one busy worker writes about 9 GB per hour, so one data
 
 ### What happens to old recorder database files?
 
-They get archived, not deleted outright. At rotation each worker seals its finished file and moves it into `<storage.shared_dir>/history/<cluster>/`. A periodic pass merges each finished UTC time window's sealed files into one compressed `<cluster>-<from>__<to>.db.gz` in that folder and deletes only the sealed files it merged; with the defaults, that lands 48-72h after the data was recorded. `recorder.archive.retention` (default `30d`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `recorder.archive.enabled: false` if you'd rather prune the history folders yourself.
+They get archived, not deleted outright. At rotation each worker seals its finished file and moves it into `<storage.shared_dir>/history/<cluster>/`. A periodic pass merges each finished UTC time window's sealed files into one compressed `<cluster>-<from>__<to>.db.gz` in that folder and deletes only the sealed files it merged; with the defaults, that lands 48-72h after the data was recorded. `recorder.archive.retention` (default `30d`) expires old archives too; set it to `0` to keep them forever, which the worker warns about at startup because nothing else reclaims that disk. Download them from **Debug → Databases tab** (see [The Databases View](databases-view.md)), or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `recorder.archive.enabled: false` if you'd rather prune the history folders yourself.
 
 ### What does the shared folder need from the filesystem?
 

@@ -604,6 +604,7 @@ These keys have no old key. The defaults work for most deployments.
 | `executor.max_pending_tasks` | `2000` | New windows wait while this many tasks are created and not settled. At least `executor.max_executors`. |
 | `executor.max_pending_bytes` | `1GiB` | New windows wait while task stdin plus kept task output reach this size. At least `16MiB`. |
 | `sources.kafka.max_queued_messages` | `1000` | The Kafka fetch pauses at this many queued messages and resumes at half. At least `sources.kafka.max_poll_records`. |
+| `ui.delete_enabled` | `false` | Serves the delete of one merge result from the Databases view. Off: `403`. |
 
 ### 5. What changes in behaviour {#behaviour}
 
@@ -1160,6 +1161,14 @@ row answer 404. To run with no listener at all, set `api.enabled: false` and
 **In handler or test code:** `drakkar.uiserver.UIServer` is `APIServer`, and
 `DrakkarApp.ui_url` is `api_url`. `SideEffectingEndpoint.config_key` of the probe is
 `ui.probe.enabled`.
+
+**The Databases tab** has four views now (Files, Slice, Postgres and
+Autodiscover), keeps its state in the address, and reads another worker only
+when you pick it in the worker picker. It adds the slice download of a time
+range, gzip downloads, the cache snapshot, and the delete of a merge result
+behind the new key `ui.delete_enabled` (off by default). The startup warning
+of a UI without a token names the delete route when the key is on. See
+[The Databases View](databases-view.md).
 
 #### Names, executor, threads, cache and the rest {#remaining-sections}
 

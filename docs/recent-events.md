@@ -191,7 +191,8 @@ file have the same id. With `postgres`, the row in the table has the same id.
 `source=cache`. The default is `file` when a live file is open, else
 `memory`. The Databases tab shows a download button on the memory row, on
 the live row and on the cache file row, and a second button for the same
-copy gzip-compressed (`compress=gzip`).
+copy gzip-compressed (`compress=gzip`); see
+[The Databases View](databases-view.md#the-files-view).
 
 The memory snapshot is a recorder database of the same shape as a file,
 named `<worker>-memory-<YYYY-MM-DD__HH_MM_SS>.db` (UTC time of the snapshot).

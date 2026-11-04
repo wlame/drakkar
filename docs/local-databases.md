@@ -1414,6 +1414,10 @@ CLI or any tool that already reads a merged `.db`.
 
 ## The Databases page
 
+This section is the reference of the routes behind the Databases tab of the
+Debug page. What the tab shows and how to use it is in
+[The Databases View](databases-view.md).
+
 `GET /api/v1/debug/databases` answers the serving worker and four parts:
 
 ```json
@@ -1562,7 +1566,8 @@ for a confirmation that names the file before it sends the request.
 ### Slice download
 
 `GET /api/v1/debug/slice` builds a SQLite file with the recorder events of
-one time range, filtered, and sends it as an attachment. The worker that
+one time range, filtered, and sends it as an attachment (the Slice view of
+the tab is described in [The Databases View](databases-view.md#the-slice-view)). The worker that
 holds the data builds the file, also for events that are not sealed yet or
 are only in its memory store. The Slice view of the Databases tab builds
 the link; the link is a plain download, so it also works on another

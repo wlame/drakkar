@@ -241,8 +241,8 @@ autodiscover provider). The tab also shows the worker's own folder (the cache
 file, with a snapshot download, the crash marker, the owner lock), the other
 worker folders on the same host with their lock and registry state, when
 history files leave, and a second, gzip-compressed download for every file
-but an archive; see
-[The Databases page](local-databases.md#the-databases-page).
+but an archive; see [The Databases View](databases-view.md) and, for the
+routes, [The Databases page](local-databases.md#the-databases-page).
 
 ---
 

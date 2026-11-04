@@ -408,6 +408,9 @@ the steps of the upgrade and the changes of behaviour.
   a separate service and pauses it; new scenarios check the archive takeover
   after a killed holder, cluster tasks, the memory store, the Postgres recorder,
   the DLQ record and a worker with the UI off.
+- **Databases View docs page.** `docs/databases-view.md` describes the
+  Databases tab: its views, the address, the slice download, the limits, the
+  actions and their keys, and what cleans itself.
 - **Backpressure metrics:** `drakkar_pending_tasks`, `drakkar_pending_bytes`,
   `drakkar_window_admission_wait_seconds_total{limit}`,
   `drakkar_window_messages` and `drakkar_queued_messages_dropped_at_stop_total`.

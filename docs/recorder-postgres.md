@@ -558,8 +558,9 @@ writer's thread.
 
 ### The partitions of the table
 
-The Postgres view of the Databases tab reads
-`GET /api/v1/debug/databases/postgres`, which asks the table itself:
+The [Postgres view](databases-view.md#the-postgres-view) of the Databases
+tab reads `GET /api/v1/debug/databases/postgres`, which asks the table
+itself:
 
 ```json
 {

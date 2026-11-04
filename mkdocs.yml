@@ -83,6 +83,7 @@ nav:
   - Offload (CPU-bound hook work off the loop): offload.md
   - Threads & Pools (which mechanism for which work): threads.md
   - Local Databases: local-databases.md
+  - Databases View (files, slices, Postgres, autodiscover): databases-view.md
   - Recent Events in Memory (the recorder memory store): recent-events.md
   - Recorder History in Postgres: recorder-postgres.md
   - Fleet Registry (how workers find each other): fleet.md

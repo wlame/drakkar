@@ -755,8 +755,9 @@ on such a worker reads the table, and on a `sqlite` worker the sealed files.
 
 ## The Autodiscover view {#autodiscover-view}
 
-The Autodiscover view of the Databases tab shows the registry and the
-leases of the cluster tasks. It reads two routes, only when the operator
+The Autodiscover view of the Databases tab (see
+[The Databases View](databases-view.md#the-autodiscover-view)) shows the
+registry and the leases of the cluster tasks. It reads two routes, only when the operator
 opens the view or presses Refresh.
 
 `GET /api/v1/debug/autodiscover` answers from memory, as the workers list
