@@ -1554,7 +1554,7 @@ worker's address (no CORS).
 
 | Parameter | Meaning | Default |
 |---|---|---|
-| `from`, `to` | the range in epoch seconds (`from` included, `to` left out), at most 168 h | required |
+| `from`, `to` | the range in epoch seconds (`from` included, `to` left out), at most 168 h, from 0 to 253402300799 (the end of the year 9999) | required |
 | `scope` | `worker` (this worker) or `cluster` (the shared sources of the cluster) | `worker` |
 | `sources` | comma list of `memory`, `files`, `history`, `postgres`; only sources this worker has | every source it has |
 | `partition`, `offset_from`, `offset_to` | one partition and an offset range in it | none |
@@ -1568,7 +1568,11 @@ worker's address (no CORS).
 A parameter that breaks a rule answers `400` `{"error": "<message>"}`; the
 rules run in a fixed order and the first broken one answers. `scope=cluster`
 with the recorder off answers `409`. Only one slice builds at a time on a
-worker: a second request answers `429` with `Retry-After: 5`. A failed
+worker: a second request answers `429` with `Retry-After: 5`. A request
+also answers `429` while finished slices that are still being sent hold
+2 GiB on the worker (each pins its unlinked temp file, or its buffer in RAM,
+until its download ends). A download whose client takes no 1 MiB chunk for
+120 s is ended, so a stalled client cannot hold its file. A failed
 Postgres read answers `503` `{"error": "postgres read failed"}`, and a file
 that cannot be written `500` `{"error": "Slice failed: ..."}`.
 
@@ -1576,9 +1580,18 @@ that cannot be written `500` `{"error": "Slice failed: ..."}`.
 
 | Provider | `scope=worker` | `scope=cluster` |
 |---|---|---|
-| `sqlite` | `files`: the worker first asks the recorder for one flush (at most 5 s), then reads the live and backlog files; after the flush they hold every memory row too. `history`: this worker's own sealed files. `memory` alone reads the memory store. | every sealed file of `history/<cluster>/`, every worker |
-| `postgres` | `postgres`: the table rows of this worker that its memory store does not hold; `memory`: the memory store | the table rows of the cluster, every worker |
+| `sqlite` | `files`: the worker first asks the recorder for one flush (at most 5 s), then reads the live and backlog files; after the flush they hold every memory row too. `history`: this worker's own sealed files. `memory` without `files` reads the memory store first, and the sealed files then leave out each row the store gave. | every sealed file of `history/<cluster>/`, every worker |
+| `postgres` | the worker first runs its Postgres write stage once (at most 3 s), then reads `memory`, the memory store, and then `postgres`, the table rows of this worker, leaving out each row the store gave | the table rows of the cluster, every worker |
 | recorder off | `memory` | none (`409`) |
+
+The memory store is read first, and a later source leaves out a row the
+store gave: the same process and id (for an own sealed file without a meta
+file, the same id and time). So a row the store evicts while the build
+runs is still written once, from the table or the file. One gap is left
+with `postgres`: a row that left the memory store while it still waited in
+the queue of the write stage, after the write stage's run, is in neither
+source. The file then carries the note `postgres_queue_waiting` in its
+`slice` table, which says rows of this worker were still waiting.
 
 Archives (`.db.gz`) are never read: download the archive itself. With
 `sqlite` the whole-cluster file holds the sealed history only. The newest
@@ -1597,8 +1610,9 @@ filters as sorted JSON, the row count, the limit that cut the file and the
 notes, for example `flush_timed_out`) and `slice_sources` (one row per
 source read: `memory`, `live`, `backlog`, `sealed` or `postgres`, the file
 name, the worker and its rows). Event ids start at 1 in the order the rows
-were written, oldest source first; the source ids are not kept, because one
-worker's ids start at 1 again after a restart.
+were written (the memory store first, then the files oldest first, then
+the table); the source ids are not kept, because one worker's ids start at
+1 again after a restart.
 
 The attachment is `<worker>-slice-<from>__<to>.db` or
 `<cluster>-cluster-slice-<from>__<to>.db` (UTC,
@@ -1612,7 +1626,7 @@ the rows it has and marks it:
 | Limit | Value | Mark |
 |---|---|---|
 | rows | `max_rows` | `rows` |
-| file size | 1 GiB on disk; 64 MiB in RAM | `bytes` |
+| file size | 1 GiB on disk; 64 MiB in RAM; checked after each batch | `bytes` |
 | build time | 60 s, the Postgres read included | `time` |
 | sealed files | `recorder.search.max_files`, newest first | `files` |
 
@@ -1622,12 +1636,18 @@ worker removes before it sends the first byte; the start sweep of the own
 folder removes one that a crash left. With `storage.dir` empty (the
 recorder off, or `postgres`), in RAM, logged as `debug_slice_in_ram`. Every
 SQLite read and write runs in a worker thread, never on the API server's
-event loop. The files are read in batches of 5000 rows by `id`, each batch
-one statement, so the recorder's checkpoint is never held back for the
-whole build; the memory store is read under its 2 second read limit per
-batch. The Postgres rows come through a server-side cursor on a connection
-of its own, with `statement_timeout` set to the time left; the Postgres
-history search and the slice share two read slots per worker process.
+event loop, and a stop of the worker waits for the thread call in progress
+before it removes the temp file. The sources are read in batches by `id`:
+a batch ends at 5000 rows or 8 MiB of text, whichever comes first, so one
+batch is bounded in memory, and the file size is checked after each batch
+(a file ends at most one batch past its limit). Each batch is one
+statement, so the recorder's checkpoint is never held back for the whole
+build; the memory store is read under its 2 second read limit per batch. The Postgres rows come through a server-side cursor on a connection
+of its own, with `statement_timeout` set to the time left; each fetch is
+sized from the bytes per row seen so far, so it stays near 8 MiB. A batch
+that is being written when the time is spent is finished first. The
+Postgres history search and the slice share two read slots per worker
+process.
 
 ## Schema evolution
 

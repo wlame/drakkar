@@ -242,10 +242,12 @@ the steps of the upgrade and the changes of behaviour.
   recorder events of one time range, filtered by partition and offsets, task,
   event types and one label, and streams it: from this worker (its memory store,
   its files after one flush, its sealed files, or its Postgres rows) or from the
-  whole cluster (the sealed history, or the table rows of the cluster). Each event
-  is written once. A limit (rows, 1 GiB on disk or 64 MiB in RAM, 60 s, the sealed
-  file budget) marks the file `-partial` and never fails it; one build at a time
-  per worker (`429`). The Postgres history search and the slice share two read
+  whole cluster (the sealed history, or the table rows of the cluster). The memory
+  store is read first and each event is written once. A limit (rows, 1 GiB on disk
+  or 64 MiB in RAM checked after each batch of at most 5000 rows or 8 MiB, 60 s, the
+  sealed file budget) marks the file `-partial` and never fails it; one build at a
+  time per worker, and at most 2 GiB of finished slices still being sent (`429`); a
+  client that takes no chunk for 120 s ends its download. The Postgres history search and the slice share two read
   slots. The `slice` statement is in `tests/fixtures/fleet_providers.json`, the
   messages, names and slice tables in `tests/fixtures/slice_contract.json`
   (contract v1.30).
