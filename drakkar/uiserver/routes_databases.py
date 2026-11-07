@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -79,7 +79,13 @@ from drakkar.uiserver.autodiscover_status import (
     registry_header,
 )
 from drakkar.uiserver.server import dispatch_bounded
-from drakkar.uiserver.streaming import OPEN_LIMIT_BYTES, IdleLimitedStreamingResponse, OpenDownloads, stream_file
+from drakkar.uiserver.streaming import (
+    OPEN_LIMIT_BYTES,
+    IdleLimitedStreamingResponse,
+    OpenDownload,
+    OpenDownloads,
+    stream_file,
+)
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -125,13 +131,15 @@ def _error(status: int, message: str, headers: dict[str, str] | None = None) -> 
     return JSONResponse({'error': message}, status_code=status, headers=headers)
 
 
-def _slice_response(built: BuiltSlice, compress: str | None, release: Callable[[], None]) -> StreamingResponse:
+def _slice_response(built: BuiltSlice, compress: str | None, reservation: OpenDownload) -> StreamingResponse:
     """Stream a built slice as an attachment.
 
-    The file closes, and its bytes leave the open count, when the stream
-    ends, when the client goes away, or when the client takes no chunk for
-    :data:`SLICE_SEND_IDLE_SECONDS`.
+    ``reservation`` (taken when the request was admitted) gets the size of
+    the file. The file closes, and the reservation is released, when the
+    stream ends, when the client goes away, or when the client takes no
+    chunk for :data:`SLICE_SEND_IDLE_SECONDS`.
     """
+    reservation.set_size(built.size_bytes)
     headers = {
         'Content-Disposition': f'attachment; filename="{built.name}"',
         # The link may carry ?token=: keep the answer out of shared caches.
@@ -146,7 +154,7 @@ def _slice_response(built: BuiltSlice, compress: str | None, release: Callable[[
     return IdleLimitedStreamingResponse(
         stream_file(built.handle, gzip=gzip),
         idle_seconds=SLICE_SEND_IDLE_SECONDS,
-        on_close=release,
+        on_close=reservation.release,
         media_type='application/gzip' if gzip else 'application/x-sqlite3',
         headers=headers,
     )
@@ -239,15 +247,19 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
             return _error(400, str(exc))
         if slice_request.scope == SCOPE_CLUSTER and not sources.cluster:
             return _error(409, CLUSTER_UNAVAILABLE_ERROR)
+        # Read before the checks: nothing between the reservation and the
+        # handlers below that release it, nor between the slot take and its
+        # release callback, may raise.
+        worker = slice_worker_of(recorder)
+        plan = plan_slice(slice_request, recorder.persistence)
         retry = {'Retry-After': str(SLICE_RETRY_AFTER_SECONDS)}
         if build_slot.locked():
             return _error(429, BUSY_ERROR, retry)
         if (open_limit := open_slices.full_limit()) is not None:
             return _error(429, OPEN_BYTES_ERROR if open_limit == OPEN_LIMIT_BYTES else OPEN_COUNT_ERROR, retry)
-        # Read before the slot is taken: nothing between the take and the
-        # release callback below may raise, or the slot would stay held.
-        worker = slice_worker_of(recorder)
-        plan = plan_slice(slice_request, recorder.persistence)
+        # Taken with no await after the check, so concurrent requests cannot
+        # all pass it; counted from now, while the slice is built.
+        reservation = open_slices.reserve()
         await build_slot.acquire()
         build = asyncio.ensure_future(
             build_slice(
@@ -263,18 +275,25 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
         build.add_done_callback(_release)
         try:
             # Shielded: a request that goes away leaves the build running to
-            # its end (at most the build time limit), then its file is closed.
+            # its end (at most the build time limit), then its file is closed
+            # and the reservation released.
             built = await asyncio.shield(build)
         except asyncio.CancelledError:
             build.add_done_callback(_close_unsent)
+            build.add_done_callback(lambda _done: reservation.release())
             raise
         except PostgresHistoryError as exc:
+            reservation.release()
             await _log_postgres_failed(exc.reason, exc.error)
             return _error(503, POSTGRES_FAILED_ERROR)
         except (OSError, sqlite3.Error) as exc:
+            reservation.release()
             await logger.awarning('debug_slice_failed', category='debug', error=str(exc), error_type=type(exc).__name__)
             return _error(500, f'{FAILED_ERROR_PREFIX}{exc}')
-        return _slice_response(built, slice_request.compress, open_slices.hold(built.size_bytes))
+        except BaseException:
+            reservation.release()
+            raise
+        return _slice_response(built, slice_request.compress, reservation)
 
     # --- the Postgres partitions ---
 

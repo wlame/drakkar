@@ -1540,8 +1540,9 @@ value, and `500` `{"error": "Snapshot failed: ..."}` when the copy fails.
 One live-file copy runs at a time too; a second `source=file` download waits
 up to 30 seconds and then answers `500` with the reason `another file
 snapshot is still running`. Each snapshot holds its temp file (or a buffer
-in RAM) until its download ends, so the snapshots still being sent are
-bounded per worker: after the `400` checks and before any `404`, a request
+in RAM) until its download ends, so the snapshots being copied or still
+being sent are bounded per worker (a request counts from the moment it is
+admitted): after the `400` checks and before any `404`, a request
 answers `429` (with `Retry-After: 5`) `{"error": "snapshots still being sent
 hold 2 GiB on this worker; wait for one to end"}` while they hold 2 GiB, or
 `{"error": "16 snapshots are still being sent on this worker; wait for one
@@ -1605,7 +1606,7 @@ rules run in a fixed order and the first broken one answers. `scope=cluster`
 with the recorder off answers `409`. Only one slice builds at a time on a
 worker: a second request answers `429` with `Retry-After: 5`. A request
 also answers `429` while finished slices that are still being sent hold
-2 GiB on the worker, or number 16 (each pins its unlinked temp file, or its
+2 GiB on the worker, or while slices being built or sent number 16 (each pins its unlinked temp file, or its
 buffer in RAM, until its download ends). A download whose client takes no 1 MiB chunk for
 120 s is ended, so a stalled client cannot hold its file. A failed
 Postgres read answers `503` `{"error": "postgres read failed"}`, and a file

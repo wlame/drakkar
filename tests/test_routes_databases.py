@@ -40,7 +40,7 @@ from drakkar.slices import SliceSources, parse_slice_request, plan_slice
 from drakkar.uiserver import databases_status, routes_databases, routes_debug, streaming
 from drakkar.uiserver.databases_status import count_cache_entries, parse_parts, recorder_block, storage_block
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections
+from tests.conftest import kafka_connections, wait_for
 from tests.slice_fakes import SliceFakePostgres, pg_row
 
 CLUSTER = 'search'
@@ -752,8 +752,9 @@ async def test_a_stream_closed_early_closes_its_file_at_once_and_leaves_no_temp_
     rec = await started_slice_recorder('sqlite', events=2)
     request = parse_slice_request(_range(), routes_databases.slice_sources_of(rec))
     built = await build_slice(request, routes_databases.slice_worker_of(rec), plan_slice(request, rec.persistence))
-    released: list[bool] = []
-    response = routes_databases._slice_response(built, None, lambda: released.append(True))
+    response = routes_databases._slice_response(
+        built, None, streaming.OpenDownloads(max_bytes=1, max_count=1).reserve()
+    )
 
     assert _dot_files(rec.storage_dir) == []
     first_chunk = await response.body_iterator.__anext__()
@@ -768,9 +769,10 @@ async def test_a_stream_closed_early_closes_its_file_at_once_and_leaves_no_temp_
 async def test_a_client_that_takes_no_chunk_ends_the_stream_and_frees_its_bytes(tmp_path, monkeypatch):
     monkeypatch.setattr(routes_databases, 'SLICE_SEND_IDLE_SECONDS', 0.05)
     handle = io.BytesIO(b'x' * 10)
-    released: list[bool] = []
+    open_slices = streaming.OpenDownloads(max_bytes=100, max_count=4)
     built = BuiltSlice(handle=handle, name='w-1-slice.db', rows=0, truncated=None, size_bytes=10)
-    response = routes_databases._slice_response(built, None, lambda: released.append(True))
+    response = routes_databases._slice_response(built, None, open_slices.reserve())
+    held_while_sending = (open_slices.bytes, open_slices.count)
     sent: list[dict] = []
 
     async def stalled_send(message):
@@ -785,27 +787,31 @@ async def test_a_client_that_takes_no_chunk_ends_the_stream_and_frees_its_bytes(
         await response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, stalled_send)
 
     assert sent[0]['type'] == 'http.response.start'
+    assert held_while_sending == (10, 1)
     assert handle.closed
-    assert released == [True]
+    assert (open_slices.bytes, open_slices.count) == (0, 0)
 
 
-def test_open_downloads_count_bytes_and_number_until_release_and_release_once():
+def test_open_downloads_count_reservations_and_their_sizes_until_release_and_release_once():
     open_downloads = streaming.OpenDownloads(max_bytes=100, max_count=3)
-    release = open_downloads.hold(99)
+    first = open_downloads.reserve()
+    first.set_size(99)
     assert open_downloads.full_limit() is None
-    second = open_downloads.hold(1)
+    second = open_downloads.reserve()
+    second.set_size(1)
     assert open_downloads.full_limit() == streaming.OPEN_LIMIT_BYTES
-    second()
-    second()
+    second.release()
+    second.release()
+    second.set_size(50)
     assert (open_downloads.bytes, open_downloads.count) == (99, 1)
-    release()
+    first.release()
     assert (open_downloads.bytes, open_downloads.count) == (0, 0)
 
 
 def test_open_downloads_is_full_by_number_with_bytes_to_spare():
     open_downloads = streaming.OpenDownloads(max_bytes=100, max_count=2)
-    open_downloads.hold(0)
-    open_downloads.hold(0)
+    open_downloads.reserve()
+    open_downloads.reserve()
 
     assert open_downloads.full_limit() == streaming.OPEN_LIMIT_COUNT
 
@@ -839,16 +845,73 @@ async def test_slice_answers_429_while_slices_being_sent_fill_a_bound(started_sl
         # The whole body was sent: it left the count.
         after_send = (open_slices.bytes, open_slices.count)
         if fill == 'bytes':
-            open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES)
+            open_slices.reserve().set_size(routes_databases.SLICE_OPEN_MAX_BYTES)
         else:
             for _ in range(routes_databases.SLICE_OPEN_MAX_COUNT):
-                open_slices.hold(0)
+                open_slices.reserve()
         full = await client.get(SLICE, params=_range())
 
     assert done.status_code == 200
     assert after_send == (0, 0)
     assert (full.status_code, full.json()) == (429, {'error': error})
     assert full.headers['retry-after'] == '5'
+
+
+def _held_builds(monkeypatch) -> tuple[asyncio.Event, asyncio.Event, list[io.BytesIO]]:
+    """Replace the build with one that waits for ``may_end``; ``started`` is set when it runs. The handles it returns."""
+    started = asyncio.Event()
+    may_end = asyncio.Event()
+    handles: list[io.BytesIO] = []
+
+    async def held_build(*_args, **_kwargs) -> BuiltSlice:
+        started.set()
+        await may_end.wait()
+        handle = io.BytesIO(b'x' * 10)
+        handles.append(handle)
+        return BuiltSlice(handle=handle, name='w-1-slice.db', rows=0, truncated=None, size_bytes=10)
+
+    monkeypatch.setattr(routes_databases, 'build_slice', held_build)
+    return started, may_end, handles
+
+
+async def test_a_slice_is_counted_while_it_is_built_and_released_when_its_client_leaves(
+    started_slice_recorder, monkeypatch
+):
+    rec = await started_slice_recorder('none', events=1)
+    seen = _recorded_open_downloads(monkeypatch, routes_databases)
+    started, may_end, handles = _held_builds(monkeypatch)
+    async with _slice_client(rec) as client:
+        request = asyncio.create_task(client.get(SLICE, params=_range()))
+        await asyncio.wait_for(started.wait(), 5)
+        (open_slices,) = seen
+        counted_while_building = open_slices.count
+        request.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await request
+        # The build runs to its end; then its file is closed and its reservation released.
+        counted_after_leaving = open_slices.count
+        may_end.set()
+        await wait_for(lambda: open_slices.count == 0)
+
+    assert (counted_while_building, counted_after_leaving) == (1, 1)
+    assert handles[0].closed
+    assert open_slices.bytes == 0
+
+
+async def test_a_slice_that_fails_releases_its_reservation(started_slice_recorder, monkeypatch):
+    rec = await started_slice_recorder('none', events=1)
+    seen = _recorded_open_downloads(monkeypatch, routes_databases)
+
+    async def failed_build(*_args, **_kwargs) -> BuiltSlice:
+        raise sqlite3.OperationalError('database or disk is full')
+
+    monkeypatch.setattr(routes_databases, 'build_slice', failed_build)
+    async with _slice_client(rec) as client:
+        resp = await client.get(SLICE, params=_range())
+    (open_slices,) = seen
+
+    assert resp.status_code == 500
+    assert (open_slices.bytes, open_slices.count) == (0, 0)
 
 
 async def test_a_slice_that_cannot_be_written_answers_500_and_logs(started_slice_recorder, monkeypatch):

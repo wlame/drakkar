@@ -652,7 +652,7 @@ paths:
         "compress must be gzip"}` for another value, checked first. v1.30:
         one copy of each source runs at a time (a second request waits up to
         30 s, then answers 500 "Snapshot failed: another <source> snapshot is
-        still running"); snapshots still being sent are bounded per worker
+        still running"); snapshots being copied or still being sent are bounded per worker
         (2 GiB, 16 downloads; 429 after the 400 checks); a download whose
         client takes no chunk for 120 s is ended. The bearer token may ride
         as ?token= (v1.23).

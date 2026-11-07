@@ -9,12 +9,13 @@ a thread that a cancel waits for.
 from __future__ import annotations
 
 import asyncio
+import weakref
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any, BinaryIO
 
 from fastapi.responses import StreamingResponse
-from starlette.types import Message, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from drakkar.concurrency import run_in_thread_to_end
 
@@ -81,12 +82,17 @@ OPEN_LIMIT_COUNT = 'count'
 
 
 class OpenDownloads:
-    """Finished downloads still being sent: their bytes and their number, each bounded.
+    """Downloads being made or still being sent: their bytes and their number, each bounded.
 
     Each one pins an unlinked temp file or a buffer in RAM until its stream
     ends. The bytes bound keeps them from filling the disk; the count bound
     keeps many small ones from using up the open files of the process.
-    Changed only on the API server's loop.
+
+    A route checks :meth:`full_limit` and, when it is ``None``, calls
+    :meth:`reserve` with no ``await`` in between, so two requests can never
+    pass the check on the same room. The reservation counts from then on,
+    its bytes once :meth:`OpenDownload.set_size` knows them, and must be
+    released on every path. Changed only on the API server's loop.
     """
 
     def __init__(self, *, max_bytes: int, max_count: int) -> None:
@@ -103,27 +109,45 @@ class OpenDownloads:
             return OPEN_LIMIT_COUNT
         return None
 
-    def hold(self, size: int) -> Callable[[], None]:
-        """Count one download of ``size`` bytes until the returned release is called (once; later calls do nothing)."""
-        self.bytes += size
+    def reserve(self) -> OpenDownload:
+        """Count one download, of no bytes yet, until the returned reservation is released."""
         self.count += 1
-        released: list[bool] = []
+        return OpenDownload(self)
 
-        def release() -> None:
-            if not released:
-                released.append(True)
-                self.bytes -= size
-                self.count -= 1
 
-        return release
+class OpenDownload:
+    """One download counted in an :class:`OpenDownloads` holder; released once, later releases do nothing."""
+
+    def __init__(self, holder: OpenDownloads) -> None:
+        self._holder = holder
+        self._size = 0
+        self._released = False
+
+    def set_size(self, size: int) -> None:
+        """Count ``size`` bytes for this download (the size of its file, once it is made)."""
+        if self._released:
+            return
+        self._holder.bytes += size - self._size
+        self._size = size
+
+    def release(self) -> None:
+        """Stop counting this download."""
+        if self._released:
+            return
+        self._released = True
+        self._holder.bytes -= self._size
+        self._holder.count -= 1
 
 
 class IdleLimitedStreamingResponse(StreamingResponse):
-    """A stream that ends when the client takes no chunk for ``idle_seconds``, and calls ``on_close`` once at its end.
+    """A stream that ends when the client takes no chunk for ``idle_seconds``, and calls ``on_close`` once.
 
     A client that keeps the connection open without reading would otherwise
-    hold the file (and the bytes it pins) for ever. The stream is closed in
-    every case, so its file closes at once.
+    hold the file (and the bytes it pins) for ever. ``on_close`` runs when
+    the stream ends, when the response call ends on any path (a client that
+    left before the body started included), and, for a response that is
+    never called at all, when the response object is collected. The stream
+    is closed in every case where it started, so its file closes at once.
     """
 
     def __init__(
@@ -131,7 +155,15 @@ class IdleLimitedStreamingResponse(StreamingResponse):
     ) -> None:
         super().__init__(content, **kwargs)
         self._idle_seconds = idle_seconds
-        self._on_close = on_close
+        # A finalizer runs its function at most once: the call paths below
+        # and the collection of a response that was never sent share it.
+        self._close = weakref.finalize(self, on_close)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._close()
 
     async def stream_response(self, send: Send) -> None:
         idle_seconds = self._idle_seconds
@@ -149,4 +181,4 @@ class IdleLimitedStreamingResponse(StreamingResponse):
                 if aclose is not None:
                     await aclose()
             finally:
-                self._on_close()
+                self._close()

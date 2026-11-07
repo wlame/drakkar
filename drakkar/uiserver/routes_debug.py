@@ -75,6 +75,7 @@ from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 from drakkar.uiserver.streaming import (
     OPEN_LIMIT_BYTES,
     IdleLimitedStreamingResponse,
+    OpenDownload,
     OpenDownloads,
     gzip_chunks,
     stream_file,
@@ -362,15 +363,17 @@ def _stream_size(handle: BinaryIO) -> int:
 
 
 def _snapshot_response(
-    handle: BinaryIO, filename: str, open_snapshots: OpenDownloads, *, compress: str | None = None
+    handle: BinaryIO, filename: str, reservation: OpenDownload, *, compress: str | None = None
 ) -> StreamingResponse:
     """Stream a snapshot as an attachment named ``filename``, gzip-compressed with ``compress``.
 
-    The snapshot counts in ``open_snapshots`` until its stream ends, the
-    client goes away, or the client takes no chunk for
-    :data:`DOWNLOAD_SEND_IDLE_SECONDS`; the stream then closes ``handle``.
+    ``reservation`` (taken when the request was admitted) gets the size of
+    the snapshot and is released when its stream ends, the client goes away,
+    or the client takes no chunk for :data:`DOWNLOAD_SEND_IDLE_SECONDS`; the
+    stream then closes ``handle``.
     """
     size = _stream_size(handle)
+    reservation.set_size(size)
     gzip = compress == COMPRESS_GZIP
     attachment = f'{filename}.gz' if gzip else filename
     headers = {
@@ -383,7 +386,7 @@ def _snapshot_response(
     return IdleLimitedStreamingResponse(
         stream_file(handle, gzip=gzip),
         idle_seconds=DOWNLOAD_SEND_IDLE_SECONDS,
-        on_close=open_snapshots.hold(size),
+        on_close=reservation.release,
         media_type='application/gzip' if gzip else 'application/x-sqlite3',
         headers=headers,
     )
@@ -1405,13 +1408,28 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
                 status_code=429,
                 headers={'Retry-After': str(SNAPSHOT_RETRY_AFTER_SECONDS)},
             )
+        # Taken with no await after the check, so concurrent requests cannot
+        # all pass it; counted from now, while the copy is made.
+        reservation = open_snapshots.reserve()
+        try:
+            response = await _download_source(source, compress, reservation)
+        except BaseException:
+            reservation.release()
+            raise
+        if not isinstance(response, IdleLimitedStreamingResponse):
+            # An error answer: no snapshot is sent.
+            reservation.release()
+        return response
+
+    async def _download_source(source: str | None, compress: str | None, reservation: OpenDownload) -> Response:
+        """The answer of one admitted download-live request; a stream answer owns ``reservation``."""
         if source is None:
             source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
         if source == DOWNLOAD_SOURCE_FILE:
-            return await _download_live_file(compress)
+            return await _download_live_file(compress, reservation)
         if source == DOWNLOAD_SOURCE_MEMORY:
-            return await _download_memory_store(compress)
-        return await _download_cache_file(compress)
+            return await _download_memory_store(compress, reservation)
+        return await _download_cache_file(compress, reservation)
 
     async def _live_file_path() -> str:
         """The path of the open live file; ``''`` without a file or before the first one exists."""
@@ -1420,7 +1438,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             return ''
         return live_path
 
-    async def _download_live_file(compress: str | None):
+    async def _download_live_file(compress: str | None, reservation: OpenDownload) -> Response:
         live_path = await _live_file_path()
         if not live_path:
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
@@ -1433,7 +1451,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if snapshot is None:
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name, open_snapshots, compress=compress)
+        return _snapshot_response(handle, name, reservation, compress=compress)
 
     def _release_snapshot_slot(slot: asyncio.Lock, copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
         """Free ``slot`` once the copy thread has ended; mark its error as seen."""
@@ -1466,7 +1484,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
             copy.add_done_callback(_close_unsent_snapshot)
             raise
 
-    async def _download_memory_store(compress: str | None):
+    async def _download_memory_store(compress: str | None, reservation: OpenDownload) -> Response:
         try:
             snapshot = await _snapshot_alone(
                 memory_snapshot_slot, MEMORY_SNAPSHOT_BUSY_REASON, functools.partial(_snapshot_memory, recorder)
@@ -1478,9 +1496,9 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if snapshot is None:
             return JSONResponse({'error': NO_MEMORY_STORE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name, open_snapshots, compress=compress)
+        return _snapshot_response(handle, name, reservation, compress=compress)
 
-    async def _download_cache_file(compress: str | None):
+    async def _download_cache_file(compress: str | None, reservation: OpenDownload) -> Response:
         cache_path = await asyncio.to_thread(_cache_file_path, drakkar_app)
         if not cache_path:
             return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
@@ -1494,7 +1512,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if snapshot is None:
             return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name, open_snapshots, compress=compress)
+        return _snapshot_response(handle, name, reservation, compress=compress)
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():

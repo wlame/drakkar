@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import gzip
 import io
 import os
@@ -32,7 +33,7 @@ from drakkar.recorder import EventRecorder, memstore
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.uiserver import routes_debug, streaming
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections
+from tests.conftest import kafka_connections, wait_for
 
 LIVE_NAME = 'w-1-2026-10-14__09_00_00.db'
 
@@ -846,10 +847,10 @@ async def test_download_live_answers_429_while_snapshots_being_sent_fill_a_bound
         # The whole body was sent: it left the count.
         after_send = (open_snapshots.bytes, open_snapshots.count)
         if fill == 'bytes':
-            open_snapshots.hold(routes_debug.SNAPSHOT_OPEN_MAX_BYTES)
+            open_snapshots.reserve().set_size(routes_debug.SNAPSHOT_OPEN_MAX_BYTES)
         else:
             for _ in range(routes_debug.SNAPSHOT_OPEN_MAX_COUNT):
-                open_snapshots.hold(0)
+                open_snapshots.reserve()
         full = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
         bad_source = await client.get('/api/v1/debug/download-live', params={'source': 'disk'})
 
@@ -892,7 +893,7 @@ async def test_a_snapshot_client_that_takes_no_chunk_ends_the_stream_and_leaves_
     monkeypatch.setattr(routes_debug, 'DOWNLOAD_SEND_IDLE_SECONDS', 0.05)
     handle = io.BytesIO(b'x' * 10)
     open_snapshots = streaming.OpenDownloads(max_bytes=100, max_count=4)
-    response = routes_debug._snapshot_response(handle, 'w-1.db', open_snapshots)
+    response = routes_debug._snapshot_response(handle, 'w-1.db', open_snapshots.reserve())
     held_while_sending = (open_snapshots.bytes, open_snapshots.count)
     sent: list[dict] = []
 
@@ -910,4 +911,131 @@ async def test_a_snapshot_client_that_takes_no_chunk_ends_the_stream_and_leaves_
     assert held_while_sending == (10, 1)
     assert sent[0]['type'] == 'http.response.start'
     assert handle.closed
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+# --- the open-snapshot holder under concurrency and disconnects (security review) ---
+
+
+def _held_memory_copies(monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Make each memory copy wait for ``may_end``; ``started`` is set when the first one runs."""
+    real_snapshot = routes_debug._snapshot_memory
+    started_event = threading.Event()
+    may_end = threading.Event()
+
+    def held_snapshot(recorder):
+        started_event.set()
+        may_end.wait(timeout=10)
+        return real_snapshot(recorder)
+
+    monkeypatch.setattr(routes_debug, '_snapshot_memory', held_snapshot)
+    return started_event, may_end
+
+
+async def test_concurrent_downloads_over_the_count_bound_reserve_at_most_the_bound_and_the_rest_answer_429(
+    started, monkeypatch
+):
+    rec = await started('none', events=1)
+    monkeypatch.setattr(routes_debug, 'SNAPSHOT_OPEN_MAX_COUNT', 2)
+    seen = _recorded_snapshot_holders(monkeypatch)
+    copy_started, copy_may_end = _held_memory_copies(monkeypatch)
+
+    async with _client_of(rec) as client:
+        requests = [asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory')) for _ in range(6)]
+        assert await asyncio.to_thread(copy_started.wait, 5)
+        # Every request has passed or failed the check by now: the refused ones answered at once.
+        await wait_for(lambda: sum(task.done() for task in requests) == 4)
+        (open_snapshots,) = seen
+        reserved_while_copying = open_snapshots.count
+        copy_may_end.set()
+        answers = await asyncio.gather(*requests)
+
+    statuses = sorted(resp.status_code for resp in answers)
+    assert reserved_while_copying == 2
+    assert statuses == [200, 200, 429, 429, 429, 429]
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+async def test_a_download_whose_client_leaves_during_the_copy_releases_its_reservation(started, monkeypatch):
+    rec = await started('none', events=1)
+    seen = _recorded_snapshot_holders(monkeypatch)
+    copy_started, copy_may_end = _held_memory_copies(monkeypatch)
+
+    async with _client_of(rec) as client:
+        request = asyncio.create_task(client.get('/api/v1/debug/download-live?source=memory'))
+        assert await asyncio.to_thread(copy_started.wait, 5)
+        (open_snapshots,) = seen
+        reserved_while_copying = open_snapshots.count
+        request.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await request
+        copy_may_end.set()
+
+    assert reserved_while_copying == 1
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+# A memory-only worker never started: no live file and no memory store (404); its
+# cache path is a mock attribute, so the cache copy fails (500).
+@pytest.mark.parametrize(('source', 'status'), [('file', 404), ('memory', 404), ('cache', 500)])
+async def test_a_download_that_answers_an_error_releases_its_reservation(tmp_path, monkeypatch, source, status):
+    seen = _recorded_snapshot_holders(monkeypatch)
+    client, _recorder = _client(tmp_path, memory_only=True)
+    async with client:
+        resp = await client.get('/api/v1/debug/download-live', params={'source': source})
+    (open_snapshots,) = seen
+
+    assert resp.status_code == status
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+def test_a_snapshot_response_built_and_never_sent_releases_its_reservation():
+    open_snapshots = streaming.OpenDownloads(max_bytes=100, max_count=4)
+    response = routes_debug._snapshot_response(io.BytesIO(b'x' * 10), 'w-1.db', open_snapshots.reserve())
+    held = (open_snapshots.bytes, open_snapshots.count)
+
+    del response
+    gc.collect()
+
+    assert held == (10, 1)
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+async def _cancel_a_call_before_it_starts(open_snapshots: streaming.OpenDownloads) -> bool:
+    """Build a snapshot response and cancel its call before the call takes its first step; whether it was cancelled."""
+    response = routes_debug._snapshot_response(io.BytesIO(b'x' * 10), 'w-1.db', open_snapshots.reserve())
+
+    async def never(*_args):
+        await asyncio.sleep(3600)
+
+    call = asyncio.ensure_future(response({'type': 'http', 'asgi': {'spec_version': '2.0'}}, never, never))
+    call.cancel()
+    # Waited for, not awaited: the cancel is not raised into this frame.
+    await asyncio.wait({call})
+    return call.cancelled()
+
+
+async def test_a_snapshot_response_whose_call_is_cancelled_before_it_starts_releases_its_reservation():
+    open_snapshots = streaming.OpenDownloads(max_bytes=100, max_count=4)
+
+    # The call never ran a step, so only the collection of the response can release it.
+    assert await _cancel_a_call_before_it_starts(open_snapshots)
+    gc.collect()
+
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
+
+
+async def test_a_snapshot_client_that_left_before_the_body_starts_releases_its_reservation():
+    open_snapshots = streaming.OpenDownloads(max_bytes=100, max_count=4)
+    response = routes_debug._snapshot_response(io.BytesIO(b'x' * 10), 'w-1.db', open_snapshots.reserve())
+
+    async def disconnected():
+        return {'type': 'http.disconnect'}
+
+    async def send_refused(_message):
+        raise OSError('the client is gone')
+
+    with contextlib.suppress(Exception):
+        await response({'type': 'http', 'asgi': {'spec_version': '2.0'}}, disconnected, send_refused)
+
     assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
