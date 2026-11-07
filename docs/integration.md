@@ -181,7 +181,7 @@ Each search message flows through:
 
 Same source topic, different consumer group. Each message:
 
-1. `arrange()` -- creates a symbol-count task
+1. `arrange()` -- creates one symbol-count task per file path of the message (the producer sends one or two)
 2. Executor runs `count-symbols.sh` (character counter)
 3. `on_task_complete()` -- sends count to `symbol-counts` Kafka topic
 

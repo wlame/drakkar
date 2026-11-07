@@ -50,25 +50,28 @@ class SymbolCountHandler(dk.BaseDrakkarHandler[CountRequest, CountResult]):
             if req is None:
                 continue
 
-            task_id = dk.make_task_id('cnt')
-            if task_id in pending.pending_task_ids:
-                continue
+            # One task per path: a producer message with two paths fans
+            # out to two tasks.
+            for file_path in req.paths():
+                task_id = dk.make_task_id('cnt')
+                if task_id in pending.pending_task_ids:
+                    continue
 
-            tasks.append(
-                dk.ExecutorTask(
-                    task_id=task_id,
-                    args=[req.file_path],
-                    stdin=json.dumps({'file_path': req.file_path}),
-                    metadata={
-                        'request_id': req.request_id,
-                        'file_path': req.file_path,
-                    },
-                    labels={
-                        'request_id': req.request_id,
-                    },
-                    source_offsets=[msg.offset],
+                tasks.append(
+                    dk.ExecutorTask(
+                        task_id=task_id,
+                        args=[file_path],
+                        stdin=json.dumps({'file_path': file_path}),
+                        metadata={
+                            'request_id': req.request_id,
+                            'file_path': file_path,
+                        },
+                        labels={
+                            'request_id': req.request_id,
+                        },
+                        source_offsets=[msg.offset],
+                    )
                 )
-            )
         return tasks
 
     @staticmethod
