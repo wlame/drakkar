@@ -358,7 +358,14 @@ integration-matrix profile='quick':
         echo "=== matrix: ${provider} (profile ${profile}) ==="
         # The shared folder is a bind mount that `integration-down` does not
         # clear: one provider's archive, lock or work file must not reach the next.
-        find integration/shared -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+        # It is cleared through a container: the Docker VM of a macOS host can
+        # still list a folder that the host just deleted, and a worker that
+        # starts at once then fails to create its own folder in it. A delete
+        # from inside also removes the files the containers wrote as root on
+        # a Linux host. The host-side delete is the fallback.
+        docker run --rm -v "$PWD/integration/shared:/shared" "${HARNESS_PYTHON_IMAGE:-python:3.13-slim}" \
+            find /shared -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} + \
+            || find integration/shared -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
         if ! just integration-up "provider=${provider}" "profile=${profile}"; then
             echo "integration-up failed for ${provider}" >&2
             any_failed=true

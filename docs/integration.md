@@ -688,7 +688,8 @@ just integration-matrix profile=quick
 
 For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
-`integration-down` does not clear), starts the harness with
+`integration-down` does not clear) from inside a container, so the Docker VM
+of a macOS host sees the delete at once, starts the harness with
 `integration-up`, waits with `wait-ready.sh`, runs the twelve scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
