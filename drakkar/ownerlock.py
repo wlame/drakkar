@@ -110,11 +110,26 @@ def take_own_lock(folder: str) -> OwnerLock:
         FolderInUseError: another live process holds the lock.
     """
     give_up_at = time.monotonic() + OWN_LOCK_WAIT_SECONDS
-    while (lock := _try_lock(folder, create=True)) is None:
+    while (lock := _try_own_lock(folder)) is None:
         if time.monotonic() >= give_up_at:
             raise FolderInUseError(FOLDER_IN_USE_MESSAGE.format(folder=folder))
         time.sleep(OWN_LOCK_RETRY_SECONDS)
     return lock
+
+
+def _try_own_lock(folder: str) -> OwnerLock | None:
+    """One try of :func:`take_own_lock`; a folder that is gone is created again first.
+
+    Another worker's orphan pass may hold this folder's lock while it judges
+    the folder, and then rename it away (to an orphan staging name) between
+    two tries. The folder is then made again, empty, and the lock taken in
+    it: the files that were moved are the orphan pass's to seal.
+    """
+    try:
+        return _try_lock(folder, create=True)
+    except FileNotFoundError:
+        _make_folder(folder)
+        return _try_lock(folder, create=True)
 
 
 def try_sibling_lock(folder: str) -> OwnerLock | None:

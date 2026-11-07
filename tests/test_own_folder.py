@@ -3,7 +3,6 @@
 import fcntl
 import os
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -80,30 +79,66 @@ def short_lock_wait(monkeypatch):
     monkeypatch.setattr(ownerlock, 'OWN_LOCK_RETRY_SECONDS', 0.01)
 
 
-def test_take_own_lock_waits_out_a_short_shared_probe(tmp_path):
+def test_take_own_lock_waits_out_a_short_shared_probe(tmp_path, monkeypatch):
     take_own_lock(str(tmp_path)).release()
     probe_holds = threading.Event()
+    refused_once = threading.Event()
+    real_try_lock = ownerlock._try_lock
+    tries: list[bool] = []
+
+    def counting_try_lock(folder, *, create):
+        lock = real_try_lock(folder, create=create)
+        tries.append(lock is not None)
+        if lock is None:
+            refused_once.set()
+        return lock
+
+    monkeypatch.setattr(ownerlock, '_try_lock', counting_try_lock)
 
     def probe() -> None:
-        # What the Databases view does to a sibling folder, held long enough to be seen.
+        # What the Databases view does to a sibling folder, held until the start was refused once.
         fd = os.open(tmp_path / OWNER_LOCK_NAME, os.O_RDONLY)
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             probe_holds.set()
-            time.sleep(0.3)
+            refused_once.wait(5)
         finally:
             os.close(fd)
 
     thread = threading.Thread(target=probe)
     thread.start()
     assert probe_holds.wait(5)
-    started = time.monotonic()
     lock = take_own_lock(str(tmp_path))
-    waited = time.monotonic() - started
     thread.join()
     try:
         assert lock.held
-        assert waited >= 0.1
+        assert tries[0] is False
+        assert tries[-1] is True
+        assert len(tries) >= 2
+    finally:
+        lock.release()
+
+
+def test_take_own_lock_makes_the_folder_again_when_an_orphan_pass_renamed_it_away(tmp_path, monkeypatch):
+    folder = tmp_path / 'own'
+    folder.mkdir()
+    real_try_lock = ownerlock._try_lock
+    calls: list[int] = []
+
+    def held_then_renamed(path, *, create):
+        calls.append(1)
+        if len(calls) == 1:
+            # The orphan pass holds the lock, then moves the folder to its staging name.
+            folder.rename(tmp_path / '.orphan-own-0123')
+            return None
+        return real_try_lock(path, create=create)
+
+    monkeypatch.setattr(ownerlock, '_try_lock', held_then_renamed)
+    lock = take_own_lock(str(folder))
+    try:
+        assert lock.held
+        assert (folder / OWNER_LOCK_NAME).is_file()
+        assert (tmp_path / '.orphan-own-0123').is_dir()
     finally:
         lock.release()
 
