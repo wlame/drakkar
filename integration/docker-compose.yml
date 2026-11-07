@@ -578,6 +578,11 @@ services:
       # has admitted few, so the stop drains them well within the drain
       # timeout; the messages not yet admitted are dropped at the stop.
       DK_EXECUTOR__MAX_PENDING_TASKS: "8"
+      # The backlog holds messages whose path is a large folder (/project);
+      # counting one runs for many seconds. The short task timeout ends such
+      # a task well before the drain timeout, so the stop keeps time to move
+      # the sealed file.
+      DK_EXECUTOR__TASK_TIMEOUT: "5s"
       DK_RECORDER__ENABLED: "true"
       DK_RECORDER__ARCHIVE__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
@@ -608,8 +613,10 @@ services:
       DK_API__ENABLED: "false"
       DK_UI__ENABLED: "false"
       DK_EXECUTOR__DRAIN_TIMEOUT: "30s"
-      # The same small task cap as headless-recorder (see there).
+      # The same small task cap and short task timeout as headless-recorder
+      # (see there).
       DK_EXECUTOR__MAX_PENDING_TASKS: "8"
+      DK_EXECUTOR__TASK_TIMEOUT: "5s"
       DK_RECORDER__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
     ports:

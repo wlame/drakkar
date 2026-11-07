@@ -413,7 +413,9 @@ the steps of the upgrade and the changes of behaviour.
   restart seals. The fast harness worker reads the producer's file paths
   again (it parsed no producer message since the fan-out change) and counts
   each path in its own task; the headless workers, which now find that
-  backlog, run with a small task cap so their stop drains in time.
+  backlog, run with a small task cap and a 5 s task timeout so their stop
+  drains in time. The matrix clears the shared folder from inside a
+  container.
 - **Databases View docs page.** `docs/databases-view.md` describes the
   Databases tab: its views, the address, the slice download, the limits, the
   actions and their keys, and what cleans itself.
