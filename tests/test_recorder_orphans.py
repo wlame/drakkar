@@ -519,10 +519,12 @@ async def test_run_file_ahead_of_the_clock_is_logged_once_and_keeps_the_folder(t
 
 async def test_run_cancelled_while_taking_a_lock_releases_it_later(tmp_path, cluster_dir, monkeypatch):
     folder = _orphan_folder(cluster_dir)
+    entered = threading.Event()
     go_on = threading.Event()
     taken = threading.Event()
 
     def slow_lock(path):
+        entered.set()
         go_on.wait(5)
         lock = try_sibling_lock(path)
         taken.set()
@@ -530,12 +532,13 @@ async def test_run_cancelled_while_taking_a_lock_releases_it_later(tmp_path, clu
 
     monkeypatch.setattr(orphans, 'try_sibling_lock', slow_lock)
     task = asyncio.create_task(_sealer(tmp_path, cluster_dir).run(OLD_ENOUGH_SECONDS / 3))
-    await asyncio.sleep(0.05)
+    # Cancel only once the pass is inside the lock call, or nothing is tested.
+    assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     go_on.set()
-    await asyncio.to_thread(taken.wait, 5)
+    assert await asyncio.to_thread(taken.wait, 5)
     for _ in range(100):
         await asyncio.sleep(0.01)
         lock = try_sibling_lock(str(folder))
