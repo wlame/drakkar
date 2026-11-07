@@ -3,7 +3,8 @@
 This module owns ``dispatch_to_loop(coro, target_loop)`` — the single
 shared mechanism the framework uses to bridge work between two
 ``asyncio`` event loops running on different threads — and
-``run_in_thread_to_end``, a ``to_thread`` whose cancel waits for the thread.
+``run_in_thread_to_end``, a ``to_thread`` whose cancel waits for the thread,
+with its daemon-thread twin ``run_in_daemon_thread_to_end``.
 
 Why this helper exists
 ----------------------
@@ -68,8 +69,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
+
+# The name of the daemon thread of one run_in_daemon_thread_to_end call.
+DAEMON_CALL_THREAD_NAME = 'drakkar-daemon-call'
 
 
 async def dispatch_to_loop(coro: Coroutine[Any, Any, Any], target_loop: Any) -> Any:
@@ -128,6 +134,52 @@ async def run_in_thread_to_end[T](
     gets it, so the caller can close what the call opened.
     """
     future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    return await _await_to_end(future, on_cancelled_result)
+
+
+async def run_in_daemon_thread_to_end[T](
+    fn: Callable[..., T], /, *args: Any, on_cancelled_result: Callable[[T], None] | None = None
+) -> T:
+    """:func:`run_in_thread_to_end` on a daemon thread of its own, for a call that may hang on a network mount.
+
+    The loop's default executor is joined at interpreter exit, so a read
+    that hangs on a hung mount there would hold the process past its stop.
+    A daemon thread is not joined: the process can exit, and the thread's
+    late result is dropped. A cancel still waits for the thread, so the
+    caller never closes a file under a read. One thread per call: for
+    calls that each do real I/O (a file copy, a 1 MiB read), not for many
+    tiny ones.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[T] = loop.create_future()
+    context = contextvars.copy_context()
+
+    def settle_with_result(result: T) -> None:
+        if not future.done():
+            future.set_result(result)
+
+    def settle_with_error(error: BaseException) -> None:
+        if not future.done():
+            future.set_exception(error)
+
+    def run() -> None:
+        # The loop is closed when the process is already stopping; the
+        # outcome then has nowhere to go and the thread just ends.
+        try:
+            result = context.run(fn, *args)
+        except BaseException as exc:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(settle_with_error, exc)
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle_with_result, result)
+
+    threading.Thread(target=run, name=DAEMON_CALL_THREAD_NAME, daemon=True).start()
+    return await _await_to_end(future, on_cancelled_result)
+
+
+async def _await_to_end[T](future: asyncio.Future[T], on_cancelled_result: Callable[[T], None] | None) -> T:
+    """Await ``future``; on a cancel, wait for it to end, hand a late result to ``on_cancelled_result``, re-raise."""
     try:
         return await asyncio.shield(future)
     except asyncio.CancelledError:

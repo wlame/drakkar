@@ -17,7 +17,7 @@ from typing import Any, BinaryIO
 from fastapi.responses import StreamingResponse
 from starlette.types import Message, Receive, Scope, Send
 
-from drakkar.concurrency import run_in_thread_to_end
+from drakkar.concurrency import run_in_daemon_thread_to_end
 
 # A download is streamed in chunks of this size.
 CHUNK_BYTES = 1024 * 1024
@@ -58,14 +58,15 @@ def _read_part(handle: BinaryIO, compressor: Any) -> bytes | None:
 async def stream_file(handle: BinaryIO, *, gzip: bool) -> AsyncIterator[bytes]:
     """Stream ``handle`` chunk by chunk (as one gzip member with ``gzip``); the file closes when the stream ends.
 
-    Each chunk is read (and compressed) in a thread; a cancel waits for that
-    thread, so the file is never closed under a read. The file closes as soon
+    Each chunk is read (and compressed) on a daemon thread, so a read that
+    hangs on a network mount cannot hold the process at exit; a cancel waits
+    for that thread, so the file is never closed under a read. The file closes as soon
     as the stream ends, is closed, or is cancelled, not when it is collected.
     """
     compressor = zlib.compressobj(level=GZIP_LEVEL, wbits=GZIP_WBITS) if gzip else None
     try:
         while True:
-            part = await run_in_thread_to_end(_read_part, handle, compressor)
+            part = await run_in_daemon_thread_to_end(_read_part, handle, compressor)
             if part is None:
                 break
             if part:

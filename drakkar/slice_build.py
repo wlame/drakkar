@@ -43,7 +43,7 @@ from typing import Any, BinaryIO
 
 import structlog
 
-from drakkar.concurrency import run_in_thread_to_end
+from drakkar.concurrency import run_in_daemon_thread_to_end, run_in_thread_to_end
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import MERGED_SCHEMA
 from drakkar.recorder.archive import is_own_sealed_name, parse_db_start_ts
@@ -1024,7 +1024,8 @@ async def build_slice(
         if not build.cluster_scope:
             await run_in_thread_to_end(functools.partial(build.copy_memory, read=plan.memory))
         if (plan.sealed or plan.backlog or plan.live) and not budget.stopped:
-            await run_in_thread_to_end(build.copy_files, plan)
+            # The sealed files are on the shared folder, which may be a hung mount.
+            await run_in_daemon_thread_to_end(build.copy_files, plan)
         if plan.postgres and not budget.stopped:
             await _copy_postgres(build, connect=connect, on_failed=on_postgres_failed or _ignore_failure)
         finish = functools.partial(
