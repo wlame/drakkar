@@ -1,6 +1,7 @@
 """Lifecycle orchestration of input sources, with stub sources."""
 
 import asyncio
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -159,6 +160,21 @@ async def test_sources_started_in_order_and_worker_ready(monkeypatch):
     # idempotent by contract.
     assert a.calls[3:] == ['signal_stop', 'signal_stop', 'drain', 'stop']
     assert b.calls[3:] == ['signal_stop', 'signal_stop', 'drain', 'stop']
+
+
+async def test_shutdown_stops_the_exit_watcher_off_the_event_loop(monkeypatch):
+    a = StubSource('a')
+    app = _app(monkeypatch, a)
+    stopped_on: list[threading.Thread] = []
+    app._executor_pool.stop_exit_watcher = lambda: stopped_on.append(threading.current_thread())
+    run = asyncio.create_task(app._lifecycle._async_run())
+    await _wait_ready(app)
+    app._lifecycle._handle_signal()
+    await asyncio.wait_for(run, timeout=5)
+
+    # The stop joins the watcher's thread, so it must not run on the loop's thread.
+    assert len(stopped_on) == 1
+    assert stopped_on[0] is not threading.current_thread()
 
 
 async def test_sources_bound_with_worker_context(monkeypatch):

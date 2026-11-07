@@ -1373,9 +1373,10 @@ class AppLifecycle:
 
             # Every task has settled once the sources stopped, so the exit
             # watcher has nothing left to time. Its thread wakes and ends at
-            # once; a task that still runs is timed on the loop.
+            # once; a task that still runs is timed on the loop. The stop
+            # joins the thread (up to 1 s), so it runs off the loop.
             if app._executor_pool is not None:
-                app._executor_pool.stop_exit_watcher()
+                await asyncio.to_thread(app._executor_pool.stop_exit_watcher)
 
             # Shut the offload pool down first among the observability-
             # adjacent subsystems: hooks have finished draining by now, so
