@@ -246,7 +246,7 @@ the steps of the upgrade and the changes of behaviour.
   store is read first and each event is written once. A limit (rows, 1 GiB on disk
   or 64 MiB in RAM checked after each batch of at most 5000 rows or 8 MiB, 60 s, the
   sealed file budget) marks the file `-partial` and never fails it; one build at a
-  time per worker, and at most 2 GiB of finished slices still being sent (`429`); a
+  time per worker, and at most 2 GiB and 16 finished slices still being sent (`429`); a
   client that takes no chunk for 120 s ends its download. The Postgres history search and the slice share two read
   slots. The `slice` statement is in `tests/fixtures/fleet_providers.json`, the
   messages, names and slice tables in `tests/fixtures/slice_contract.json`
@@ -437,6 +437,13 @@ the steps of the upgrade and the changes of behaviour.
   includes the time the event loop took to handle the exit, so a busy loop
   does not stretch task bars or `drakkar_executor_duration_seconds`; the help
   text of that metric says so.
+- **Snapshot downloads are bounded.** `/api/v1/debug/download-live` copies the
+  live file one at a time, as it does the memory store and the cache file. The
+  snapshots still being sent hold at most 2 GiB and 16 downloads per worker;
+  past either a request answers `429` with `Retry-After: 5`. A client that takes
+  no chunk for 120 s is cut off. Before, a client that read nothing kept its
+  copy on `storage.dir` for as long as its connection stayed open (contract
+  v1.30).
 
 ### Fixed
 

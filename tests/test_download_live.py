@@ -812,3 +812,102 @@ async def test_open_for_stream_closes_the_file_of_a_request_cancelled_during_the
         await asyncio.sleep(0.01)
 
     assert opened.closed
+
+
+def _recorded_snapshot_holders(monkeypatch) -> list[streaming.OpenDownloads]:
+    """Record the holder of snapshots still being sent that the debug routes build."""
+    seen: list[streaming.OpenDownloads] = []
+
+    class Recorded(streaming.OpenDownloads):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            seen.append(self)
+
+    monkeypatch.setattr(routes_debug, 'OpenDownloads', Recorded)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ('fill', 'error'),
+    [
+        ('bytes', 'snapshots still being sent hold 2 GiB on this worker; wait for one to end'),
+        ('count', '16 snapshots are still being sent on this worker; wait for one to end'),
+    ],
+)
+async def test_download_live_answers_429_while_snapshots_being_sent_fill_a_bound(
+    storage, started, monkeypatch, fill, error
+):
+    rec = await started('sqlite', storage_dir=str(storage), events=2)
+    seen = _recorded_snapshot_holders(monkeypatch)
+
+    async with _client_of(rec) as client:
+        done = await client.get('/api/v1/debug/download-live')
+        (open_snapshots,) = seen
+        # The whole body was sent: it left the count.
+        after_send = (open_snapshots.bytes, open_snapshots.count)
+        if fill == 'bytes':
+            open_snapshots.hold(routes_debug.SNAPSHOT_OPEN_MAX_BYTES)
+        else:
+            for _ in range(routes_debug.SNAPSHOT_OPEN_MAX_COUNT):
+                open_snapshots.hold(0)
+        full = await client.get('/api/v1/debug/download-live', params={'source': 'cache'})
+        bad_source = await client.get('/api/v1/debug/download-live', params={'source': 'disk'})
+
+    assert done.status_code == 200
+    assert after_send == (0, 0)
+    assert (full.status_code, full.json()) == (429, {'error': error})
+    assert full.headers['retry-after'] == '5'
+    # The source check comes first.
+    assert bad_source.status_code == 400
+
+
+async def test_a_second_file_download_answers_500_while_the_first_copy_holds_its_slot(storage, started, monkeypatch):
+    rec = await started('sqlite', storage_dir=str(storage), events=1)
+    monkeypatch.setattr(memstore, 'SNAPSHOT_LIMIT_SECONDS', 0.1)
+    real_copy = routes_debug._snapshot_live_file
+    copy_started = threading.Event()
+    copy_may_end = threading.Event()
+
+    def held_copy(live_path):
+        copy_started.set()
+        copy_may_end.wait(timeout=10)
+        return real_copy(live_path)
+
+    monkeypatch.setattr(routes_debug, '_snapshot_live_file', held_copy)
+    async with _client_of(rec) as client:
+        first = asyncio.create_task(client.get('/api/v1/debug/download-live?source=file'))
+        assert await asyncio.to_thread(copy_started.wait, 5)
+        second = await client.get('/api/v1/debug/download-live?source=file')
+        copy_may_end.set()
+        first_resp = await first
+
+    assert (second.status_code, second.json()) == (
+        500,
+        {'error': 'Snapshot failed: another file snapshot is still running'},
+    )
+    assert first_resp.status_code == 200
+
+
+async def test_a_snapshot_client_that_takes_no_chunk_ends_the_stream_and_leaves_the_count(monkeypatch):
+    monkeypatch.setattr(routes_debug, 'DOWNLOAD_SEND_IDLE_SECONDS', 0.05)
+    handle = io.BytesIO(b'x' * 10)
+    open_snapshots = streaming.OpenDownloads(max_bytes=100, max_count=4)
+    response = routes_debug._snapshot_response(handle, 'w-1.db', open_snapshots)
+    held_while_sending = (open_snapshots.bytes, open_snapshots.count)
+    sent: list[dict] = []
+
+    async def stalled_send(message):
+        sent.append(message)
+        if message['type'] == 'http.response.body':
+            await asyncio.sleep(3600)
+
+    async def receive():
+        await asyncio.sleep(3600)
+
+    with pytest.raises(Exception):  # noqa: B017 - the server turns the timeout into a disconnect
+        await response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, stalled_send)
+
+    assert held_while_sending == (10, 1)
+    assert sent[0]['type'] == 'http.response.start'
+    assert handle.closed
+    assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)

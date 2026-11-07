@@ -1,4 +1,4 @@
-"""Streaming of downloads: chunked file streams, gzip streams, and the slice stream with its idle limit.
+"""Streaming of downloads: chunked file streams, gzip streams, the stream with an idle limit, and the open-download bound.
 
 The download routes send a file that is already open (often unlinked) in
 chunks, so a large file never sits in memory. The sync generators run in
@@ -25,13 +25,6 @@ GZIP_WBITS = 31
 # The fastest level: most of the size gain on SQLite pages for a small part
 # of the CPU of the default level, so a download takes little from the tasks.
 GZIP_LEVEL = 1
-
-
-def read_chunks(handle: BinaryIO) -> Iterator[bytes]:
-    """Stream ``handle`` to the client and close it after the last chunk."""
-    with handle:
-        while chunk := handle.read(CHUNK_BYTES):
-            yield chunk
 
 
 def gzip_chunks(handle: BinaryIO) -> Iterator[bytes]:
@@ -80,6 +73,49 @@ async def stream_file(handle: BinaryIO, *, gzip: bool) -> AsyncIterator[bytes]:
             yield compressor.flush()
     finally:
         handle.close()
+
+
+# The limit an :class:`OpenDownloads` holder is full at.
+OPEN_LIMIT_BYTES = 'bytes'
+OPEN_LIMIT_COUNT = 'count'
+
+
+class OpenDownloads:
+    """Finished downloads still being sent: their bytes and their number, each bounded.
+
+    Each one pins an unlinked temp file or a buffer in RAM until its stream
+    ends. The bytes bound keeps them from filling the disk; the count bound
+    keeps many small ones from using up the open files of the process.
+    Changed only on the API server's loop.
+    """
+
+    def __init__(self, *, max_bytes: int, max_count: int) -> None:
+        self.max_bytes = max_bytes
+        self.max_count = max_count
+        self.bytes = 0
+        self.count = 0
+
+    def full_limit(self) -> str | None:
+        """The limit a new download must wait for (:data:`OPEN_LIMIT_BYTES` first), or ``None`` when there is room."""
+        if self.bytes >= self.max_bytes:
+            return OPEN_LIMIT_BYTES
+        if self.count >= self.max_count:
+            return OPEN_LIMIT_COUNT
+        return None
+
+    def hold(self, size: int) -> Callable[[], None]:
+        """Count one download of ``size`` bytes until the returned release is called (once; later calls do nothing)."""
+        self.bytes += size
+        self.count += 1
+        released: list[bool] = []
+
+        def release() -> None:
+            if not released:
+                released.append(True)
+                self.bytes -= size
+                self.count -= 1
+
+        return release
 
 
 class IdleLimitedStreamingResponse(StreamingResponse):

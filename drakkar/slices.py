@@ -66,6 +66,10 @@ SLICE_POSTGRES_FLUSH_SECONDS = 3.0
 # file or a buffer in RAM), at most, per worker; a new request past it
 # answers 429.
 SLICE_OPEN_MAX_BYTES = 2 * 1024 * 1024 * 1024
+# Finished slices that are still being sent, at most, per worker: each holds
+# an open file, so many small ones must not use up the open files of the
+# process. A new request past it answers 429.
+SLICE_OPEN_MAX_COUNT = 16
 # A download whose client takes no chunk for this long is ended, so a stalled
 # client cannot hold its file for ever.
 SLICE_SEND_IDLE_SECONDS = 120.0
@@ -149,6 +153,7 @@ NO_SOURCE_TEXT = 'none'
 CLUSTER_UNAVAILABLE_ERROR = 'scope cluster needs the shared history or the Postgres table'
 BUSY_ERROR = 'a slice is already being built on this worker'
 OPEN_BYTES_ERROR = 'slices still being sent hold 2 GiB on this worker; wait for one to end'
+OPEN_COUNT_ERROR = '16 slices are still being sent on this worker; wait for one to end'
 POSTGRES_FAILED_ERROR = 'postgres read failed'
 FAILED_ERROR_PREFIX = 'Slice failed: '
 HEADER_ROWS = 'X-Drakkar-Slice-Rows'

@@ -137,6 +137,11 @@ def test_ddl_answers_headers_and_limits_are_pinned():
             'error': slices.OPEN_BYTES_ERROR,
             'retry_after_seconds': slices.SLICE_RETRY_AFTER_SECONDS,
         },
+        'open_count_full': {
+            'status': 429,
+            'error': slices.OPEN_COUNT_ERROR,
+            'retry_after_seconds': slices.SLICE_RETRY_AFTER_SECONDS,
+        },
         'postgres_failed': {'status': 503, 'error': slices.POSTGRES_FAILED_ERROR},
         'failed': {'status': 500, 'error_prefix': slices.FAILED_ERROR_PREFIX},
     }
@@ -159,6 +164,7 @@ def test_ddl_answers_headers_and_limits_are_pinned():
         'postgres_first_fetch_rows': 100,
         'postgres_flush_seconds': 3.0,
         'open_max_bytes': 2 * 1024**3,
+        'open_max_count': 16,
         'send_idle_seconds': 120.0,
         'min_epoch': 0,
         'max_epoch': 253402300799,
@@ -173,6 +179,7 @@ def test_ddl_answers_headers_and_limits_are_pinned():
     assert FIXTURE['limits']['batch_rows'] == slices.SLICE_BATCH_ROWS
     assert FIXTURE['limits']['chunk_bytes'] == slices.SLICE_CHUNK_BYTES
     assert FIXTURE['limits']['open_max_bytes'] == slices.SLICE_OPEN_MAX_BYTES
+    assert FIXTURE['limits']['open_max_count'] == slices.SLICE_OPEN_MAX_COUNT
     assert FIXTURE['limits']['max_epoch'] == slices.MAX_EPOCH
 
 

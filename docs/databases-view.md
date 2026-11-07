@@ -211,6 +211,7 @@ it.
 | Build time | 60 seconds |
 | Sealed files | `recorder.search.max_files`, newest first |
 | Builds at once | one per worker; a second request answers `429` |
+| Finished slices still being sent | 2 GiB and 16 slices per worker; past either a request answers `429` |
 
 Archives are never read by a slice: download the archive itself. What each
 source holds, the tables of the file and where it is built are in

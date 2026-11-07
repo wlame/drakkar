@@ -15,7 +15,8 @@ The answer is a navigation target (a plain link, also to a peer), so the
 route takes only query parameters and answers no CORS. The check order is
 fixed: every 400 rule first, then 409 (no shared source for the whole
 cluster), then 429 (a build already runs on this worker, or finished slices
-still being sent hold :data:`SLICE_OPEN_MAX_BYTES`), then the build (503
+still being sent hold :data:`SLICE_OPEN_MAX_BYTES` or number
+:data:`SLICE_OPEN_MAX_COUNT`), then the build (503
 when the Postgres table cannot be read, 500 when the file cannot be
 written). A limit never answers an error: it marks the file truncated. A
 download whose client takes no chunk for :data:`SLICE_SEND_IDLE_SECONDS`
@@ -50,10 +51,12 @@ from drakkar.slices import (
     NOTE_FLUSH_TIMED_OUT,
     NOTE_POSTGRES_QUEUE_WAITING,
     OPEN_BYTES_ERROR,
+    OPEN_COUNT_ERROR,
     POSTGRES_FAILED_ERROR,
     SCOPE_CLUSTER,
     SLICE_FLUSH_WAIT_SECONDS,
     SLICE_OPEN_MAX_BYTES,
+    SLICE_OPEN_MAX_COUNT,
     SLICE_POSTGRES_FLUSH_SECONDS,
     SLICE_RETRY_AFTER_SECONDS,
     SLICE_SEND_IDLE_SECONDS,
@@ -76,7 +79,7 @@ from drakkar.uiserver.autodiscover_status import (
     registry_header,
 )
 from drakkar.uiserver.server import dispatch_bounded
-from drakkar.uiserver.streaming import IdleLimitedStreamingResponse, stream_file
+from drakkar.uiserver.streaming import OPEN_LIMIT_BYTES, IdleLimitedStreamingResponse, OpenDownloads, stream_file
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -122,34 +125,6 @@ def _error(status: int, message: str, headers: dict[str, str] | None = None) -> 
     return JSONResponse({'error': message}, status_code=status, headers=headers)
 
 
-class OpenSlices:
-    """The bytes of finished slices that are still being sent on this worker.
-
-    Each one pins an unlinked temp file or a buffer in RAM until its stream
-    ends, so their total is bounded (:data:`SLICE_OPEN_MAX_BYTES`). Changed
-    only on the API server's loop.
-    """
-
-    def __init__(self) -> None:
-        self.bytes = 0
-
-    def is_full(self) -> bool:
-        """Whether a new slice must wait for one being sent to end."""
-        return self.bytes >= SLICE_OPEN_MAX_BYTES
-
-    def hold(self, size: int) -> Callable[[], None]:
-        """Count ``size`` bytes until the returned release is called (once; later calls do nothing)."""
-        self.bytes += size
-        released: list[bool] = []
-
-        def release() -> None:
-            if not released:
-                released.append(True)
-                self.bytes -= size
-
-        return release
-
-
 def _slice_response(built: BuiltSlice, compress: str | None, release: Callable[[], None]) -> StreamingResponse:
     """Stream a built slice as an attachment.
 
@@ -192,7 +167,7 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
     # request gets 429. An asyncio lock, so the check and the take happen
     # with no await in between.
     build_slot = asyncio.Lock()
-    open_slices = OpenSlices()
+    open_slices = OpenDownloads(max_bytes=SLICE_OPEN_MAX_BYTES, max_count=SLICE_OPEN_MAX_COUNT)
 
     def _release(build: asyncio.Future[BuiltSlice]) -> None:
         """Free the build slot when the build ends (not when its request ends); mark its error as seen."""
@@ -267,8 +242,8 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
         retry = {'Retry-After': str(SLICE_RETRY_AFTER_SECONDS)}
         if build_slot.locked():
             return _error(429, BUSY_ERROR, retry)
-        if open_slices.is_full():
-            return _error(429, OPEN_BYTES_ERROR, retry)
+        if (open_limit := open_slices.full_limit()) is not None:
+            return _error(429, OPEN_BYTES_ERROR if open_limit == OPEN_LIMIT_BYTES else OPEN_COUNT_ERROR, retry)
         # Read before the slot is taken: nothing between the take and the
         # release callback below may raise, or the slot would stay held.
         worker = slice_worker_of(recorder)

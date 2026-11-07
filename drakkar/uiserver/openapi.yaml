@@ -649,8 +649,13 @@ paths:
         "source must be memory, file or cache"}` for any other value.
         v1.30: compress=gzip sends the snapshot as a gzip stream named
         `<name>.gz` (application/gzip, no Content-Length); 400 `{"error":
-        "compress must be gzip"}` for another value, checked first. The
-        bearer token may ride as ?token= (v1.23).
+        "compress must be gzip"}` for another value, checked first. v1.30:
+        one copy of each source runs at a time (a second request waits up to
+        30 s, then answers 500 "Snapshot failed: another <source> snapshot is
+        still running"); snapshots still being sent are bounded per worker
+        (2 GiB, 16 downloads; 429 after the 400 checks); a download whose
+        client takes no chunk for 120 s is ended. The bearer token may ride
+        as ?token= (v1.23).
       parameters:
         - name: source
           in: query
@@ -681,6 +686,18 @@ paths:
             No live file on this worker ("No live recorder file on this
             worker"), no memory store ("No memory store on this worker") or
             no cache file ("No cache on this worker").
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429':
+          description: >-
+            v1.30. Snapshots still being sent hold 2 GiB on this worker
+            ("snapshots still being sent hold 2 GiB on this worker; wait for
+            one to end") or number 16 ("16 snapshots are still being sent on
+            this worker; wait for one to end").
+          headers:
+            Retry-After:
+              schema: {type: integer, enum: [5]}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
@@ -819,7 +836,8 @@ paths:
             Another slice is building on this worker ("a slice is already being
             built on this worker"), or finished slices still being sent hold 2 GiB
             on it ("slices still being sent hold 2 GiB on this worker; wait for one
-            to end").
+            to end") or number 16 ("16 slices are still being sent on this worker;
+            wait for one to end").
           headers:
             Retry-After:
               schema: {type: integer, enum: [5]}

@@ -219,7 +219,9 @@ Answers:
 |---|---|
 | `source=file` and no live file | `404 {"error": "No live recorder file on this worker"}` |
 | `source=memory` and no open memory store | `404 {"error": "No memory store on this worker"}` |
-| any other `source` value | `400 {"error": "source must be memory or file"}` |
+| `source=cache` and no cache file | `404 {"error": "No cache on this worker"}` |
+| any other `source` value | `400 {"error": "source must be memory, file or cache"}` |
+| snapshots still being sent hold 2 GiB, or number 16, on this worker | `429`, `Retry-After: 5`; see [Live file, memory store and cache file](local-databases.md) |
 | a failed copy | `500 {"error": "Snapshot failed: <reason>"}` |
 
 The route is behind `ui.auth_token` like the other debug routes. See

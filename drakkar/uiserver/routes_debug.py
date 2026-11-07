@@ -72,7 +72,13 @@ from drakkar.uiserver.databases_status import (
 )
 from drakkar.uiserver.files_in_use import FilesInUse
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
-from drakkar.uiserver.streaming import IdleLimitedStreamingResponse, gzip_chunks, read_chunks, stream_file
+from drakkar.uiserver.streaming import (
+    OPEN_LIMIT_BYTES,
+    IdleLimitedStreamingResponse,
+    OpenDownloads,
+    gzip_chunks,
+    stream_file,
+)
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -138,10 +144,22 @@ BAD_SOURCE_ERROR = 'source must be memory, file or cache'
 DOWNLOAD_SOURCE_MEMORY = 'memory'
 DOWNLOAD_SOURCE_FILE = 'file'
 DOWNLOAD_SOURCE_CACHE = 'cache'
+_DOWNLOAD_SOURCES = frozenset({DOWNLOAD_SOURCE_MEMORY, DOWNLOAD_SOURCE_FILE, DOWNLOAD_SOURCE_CACHE})
 # The reasons of the 500 answer of a memory or a cache download that waited
 # the whole snapshot limit for the copy of the same source already running.
 MEMORY_SNAPSHOT_BUSY_REASON = 'another memory snapshot is still running'
 CACHE_SNAPSHOT_BUSY_REASON = 'another cache snapshot is still running'
+FILE_SNAPSHOT_BUSY_REASON = 'another file snapshot is still running'
+# Snapshots that are still being sent (each an unlinked temp file in the own
+# folder or a buffer in RAM), at most, per worker, in bytes and in number; a
+# new download-live request past either answers 429, so the open debug UI
+# cannot fill storage.dir or use up the open files of the process.
+SNAPSHOT_OPEN_MAX_BYTES = 2 * 1024 * 1024 * 1024
+SNAPSHOT_OPEN_MAX_COUNT = 16
+OPEN_SNAPSHOT_BYTES_ERROR = 'snapshots still being sent hold 2 GiB on this worker; wait for one to end'
+OPEN_SNAPSHOT_COUNT_ERROR = '16 snapshots are still being sent on this worker; wait for one to end'
+# The ``Retry-After`` of that 429 answer.
+SNAPSHOT_RETRY_AFTER_SECONDS = 5
 # The longest a cache copy may run, the same limit as a memory copy. The
 # cache file has no size bound, so a copy that would take longer is stopped.
 CACHE_SNAPSHOT_LIMIT_SECONDS = memstore.SNAPSHOT_LIMIT_SECONDS
@@ -153,8 +171,9 @@ COMPRESS_GZIP = 'gzip'
 BAD_COMPRESS_ERROR = 'compress must be gzip'
 ALREADY_COMPRESSED_ERROR = 'the file is already compressed'
 FILE_IN_USE_ERROR = 'the file is in use on this worker'
-# A merge result download whose client takes no chunk for this long is ended,
-# so a stalled client cannot keep the file in use (and undeletable) for ever.
+# A merge result or snapshot download whose client takes no chunk for this
+# long is ended, so a stalled client cannot keep the file in use (and
+# undeletable) or keep a snapshot's copy on disk for ever.
 DOWNLOAD_SEND_IDLE_SECONDS = 120.0
 # The ``reason`` of ``debug_download_live_in_ram``: why the memory copy is made in RAM.
 IN_RAM_REASON_NO_FOLDER = 'storage_dir_unset'
@@ -321,8 +340,13 @@ class _SnapshotBusyError(Exception):
     """Another copy of the same source held its slot for the whole snapshot limit."""
 
 
+def _snapshot_live_file_named(live_path: str) -> tuple[BinaryIO, str]:
+    """:func:`_snapshot_live_file` and its attachment name, the name of the live file. Blocking."""
+    return _snapshot_live_file(live_path), os.path.basename(live_path)
+
+
 def _close_unsent_snapshot(copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
-    """Close the copy of a memory or cache download whose request went away before the copy ended."""
+    """Close the copy of a snapshot download whose request went away before the copy ended."""
     if copy.cancelled() or copy.exception() is not None:
         return
     snapshot = copy.result()
@@ -337,19 +361,31 @@ def _stream_size(handle: BinaryIO) -> int:
     return size
 
 
-def _snapshot_response(handle: BinaryIO, filename: str, *, compress: str | None = None) -> StreamingResponse:
-    """Stream a snapshot as an attachment named ``filename``, gzip-compressed with ``compress``; the stream closes ``handle``."""
-    if compress == COMPRESS_GZIP:
-        return _gzip_response(handle, filename)
-    return StreamingResponse(
-        read_chunks(handle),
-        media_type='application/x-sqlite3',
-        headers={
-            'Content-Disposition': f'attachment; filename="{filename}"',
-            'Content-Length': str(_stream_size(handle)),
-            # Same reason as /debug/download: the URL may carry ?token=.
-            'Cache-Control': 'no-store, private',
-        },
+def _snapshot_response(
+    handle: BinaryIO, filename: str, open_snapshots: OpenDownloads, *, compress: str | None = None
+) -> StreamingResponse:
+    """Stream a snapshot as an attachment named ``filename``, gzip-compressed with ``compress``.
+
+    The snapshot counts in ``open_snapshots`` until its stream ends, the
+    client goes away, or the client takes no chunk for
+    :data:`DOWNLOAD_SEND_IDLE_SECONDS`; the stream then closes ``handle``.
+    """
+    size = _stream_size(handle)
+    gzip = compress == COMPRESS_GZIP
+    attachment = f'{filename}.gz' if gzip else filename
+    headers = {
+        'Content-Disposition': f'attachment; filename="{attachment}"',
+        # Same reason as /debug/download: the URL may carry ?token=.
+        'Cache-Control': 'no-store, private',
+    }
+    if not gzip:
+        headers['Content-Length'] = str(size)
+    return IdleLimitedStreamingResponse(
+        stream_file(handle, gzip=gzip),
+        idle_seconds=DOWNLOAD_SEND_IDLE_SECONDS,
+        on_close=open_snapshots.hold(size),
+        media_type='application/gzip' if gzip else 'application/x-sqlite3',
+        headers=headers,
     )
 
 
@@ -932,11 +968,15 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
     # One memory snapshot at a time on this recorder: a copy in RAM costs
     # one more image of the store, so parallel downloads must not multiply
-    # it. One cache copy at a time, in a slot of its own, so a slow cache
-    # copy never makes a memory download wait. asyncio locks, so a waiting
-    # request holds no thread.
+    # it. One cache copy and one live-file copy at a time, each in a slot of
+    # its own, so a slow copy of one source never makes another wait, and
+    # parallel requests cannot copy the same file beside each other. asyncio
+    # locks, so a waiting request holds no thread.
     memory_snapshot_slot = asyncio.Lock()
     cache_snapshot_slot = asyncio.Lock()
+    file_snapshot_slot = asyncio.Lock()
+    # Snapshots still being sent; a request past either bound answers 429.
+    open_snapshots = OpenDownloads(max_bytes=SNAPSHOT_OPEN_MAX_BYTES, max_count=SNAPSHOT_OPEN_MAX_COUNT)
     # Merge results this worker sends or merges from now; the delete refuses them.
     files_in_use = FilesInUse()
     config = deps.config
@@ -1344,25 +1384,34 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         ``file`` when a live file is open, else ``memory`` (so a worker
         before its first file serves the memory store). 400 for another
         value, and for a ``compress`` other than ``gzip`` (checked first);
-        404 without a live file (``file``), without an open memory store
-        (``memory``) or without a cache file (``cache``); 500 when the
-        snapshot fails or is stopped at its limit, or when another copy of
-        the same source still runs after the snapshot limit (one memory copy
-        and one cache copy run at a time). See
+        429 while the snapshots still being sent hold
+        :data:`SNAPSHOT_OPEN_MAX_BYTES` or number
+        :data:`SNAPSHOT_OPEN_MAX_COUNT`; 404 without a live file (``file``),
+        without an open memory store (``memory``) or without a cache file
+        (``cache``); 500 when the snapshot fails or is stopped at its limit,
+        or when another copy of the same source still runs after the
+        snapshot limit (one copy of each source runs at a time). See
         :func:`_snapshot_live_file`, :func:`_snapshot_memory` and
         :func:`_snapshot_cache_file`.
         """
         if (error := _compress_error(compress)) is not None:
             return error
+        if source is not None and source not in _DOWNLOAD_SOURCES:
+            return JSONResponse({'error': BAD_SOURCE_ERROR}, status_code=400)
+        if (open_limit := open_snapshots.full_limit()) is not None:
+            message = OPEN_SNAPSHOT_BYTES_ERROR if open_limit == OPEN_LIMIT_BYTES else OPEN_SNAPSHOT_COUNT_ERROR
+            return JSONResponse(
+                {'error': message},
+                status_code=429,
+                headers={'Retry-After': str(SNAPSHOT_RETRY_AFTER_SECONDS)},
+            )
         if source is None:
             source = DOWNLOAD_SOURCE_FILE if await _live_file_path() else DOWNLOAD_SOURCE_MEMORY
         if source == DOWNLOAD_SOURCE_FILE:
             return await _download_live_file(compress)
         if source == DOWNLOAD_SOURCE_MEMORY:
             return await _download_memory_store(compress)
-        if source == DOWNLOAD_SOURCE_CACHE:
-            return await _download_cache_file(compress)
-        return JSONResponse({'error': BAD_SOURCE_ERROR}, status_code=400)
+        return await _download_cache_file(compress)
 
     async def _live_file_path() -> str:
         """The path of the open live file; ``''`` without a file or before the first one exists."""
@@ -1375,12 +1424,16 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         live_path = await _live_file_path()
         if not live_path:
             return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
+        copy = functools.partial(_snapshot_live_file_named, live_path)
         try:
-            handle = await asyncio.to_thread(_snapshot_live_file, live_path)
-        except (OSError, sqlite3.Error) as exc:
+            snapshot = await _snapshot_alone(file_snapshot_slot, FILE_SNAPSHOT_BUSY_REASON, copy)
+        except (OSError, sqlite3.Error, _SnapshotBusyError) as exc:
             await logger.awarning('debug_download_live_failed', category='debug', db_path=live_path, error=str(exc))
             return JSONResponse({'error': f'Snapshot failed: {exc}'}, status_code=500)
-        return _snapshot_response(handle, os.path.basename(live_path), compress=compress)
+        if snapshot is None:
+            return JSONResponse({'error': NO_LIVE_FILE_ERROR}, status_code=404)
+        handle, name = snapshot
+        return _snapshot_response(handle, name, open_snapshots, compress=compress)
 
     def _release_snapshot_slot(slot: asyncio.Lock, copy: asyncio.Future[tuple[BinaryIO, str] | None]) -> None:
         """Free ``slot`` once the copy thread has ended; mark its error as seen."""
@@ -1425,7 +1478,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if snapshot is None:
             return JSONResponse({'error': NO_MEMORY_STORE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name, compress=compress)
+        return _snapshot_response(handle, name, open_snapshots, compress=compress)
 
     async def _download_cache_file(compress: str | None):
         cache_path = await asyncio.to_thread(_cache_file_path, drakkar_app)
@@ -1441,7 +1494,7 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         if snapshot is None:
             return JSONResponse({'error': NO_CACHE_ERROR}, status_code=404)
         handle, name = snapshot
-        return _snapshot_response(handle, name, compress=compress)
+        return _snapshot_response(handle, name, open_snapshots, compress=compress)
 
     @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():

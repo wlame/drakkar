@@ -37,7 +37,7 @@ from drakkar.recorder.postgres_history import postgres_read_slot, statement_time
 from drakkar.recorder.postgres_writer import PostgresStageStatus, UpkeepStatus, WriterStatus
 from drakkar.slice_build import BuiltSlice, build_slice
 from drakkar.slices import SliceSources, parse_slice_request, plan_slice
-from drakkar.uiserver import databases_status, routes_databases, routes_debug
+from drakkar.uiserver import databases_status, routes_databases, routes_debug, streaming
 from drakkar.uiserver.databases_status import count_cache_entries, parse_parts, recorder_block, storage_block
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
@@ -789,43 +789,65 @@ async def test_a_client_that_takes_no_chunk_ends_the_stream_and_frees_its_bytes(
     assert released == [True]
 
 
-def test_open_slices_count_until_release_and_release_once():
-    open_slices = routes_databases.OpenSlices()
-    release = open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES - 1)
-    assert not open_slices.is_full()
-    second = open_slices.hold(1)
-    assert open_slices.is_full()
+def test_open_downloads_count_bytes_and_number_until_release_and_release_once():
+    open_downloads = streaming.OpenDownloads(max_bytes=100, max_count=3)
+    release = open_downloads.hold(99)
+    assert open_downloads.full_limit() is None
+    second = open_downloads.hold(1)
+    assert open_downloads.full_limit() == streaming.OPEN_LIMIT_BYTES
     second()
     second()
-    assert open_slices.bytes == routes_databases.SLICE_OPEN_MAX_BYTES - 1
+    assert (open_downloads.bytes, open_downloads.count) == (99, 1)
     release()
-    assert open_slices.bytes == 0
+    assert (open_downloads.bytes, open_downloads.count) == (0, 0)
 
 
-async def test_slice_answers_429_while_slices_being_sent_hold_the_open_bytes(started_slice_recorder, monkeypatch):
-    rec = await started_slice_recorder('none', events=1)
-    seen: list[routes_databases.OpenSlices] = []
+def test_open_downloads_is_full_by_number_with_bytes_to_spare():
+    open_downloads = streaming.OpenDownloads(max_bytes=100, max_count=2)
+    open_downloads.hold(0)
+    open_downloads.hold(0)
 
-    class Recorded(routes_databases.OpenSlices):
-        def __init__(self) -> None:
-            super().__init__()
+    assert open_downloads.full_limit() == streaming.OPEN_LIMIT_COUNT
+
+
+def _recorded_open_downloads(monkeypatch, module) -> list[streaming.OpenDownloads]:
+    """Record every holder ``module`` builds, so a test can fill it."""
+    seen: list[streaming.OpenDownloads] = []
+
+    class Recorded(streaming.OpenDownloads):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
             seen.append(self)
 
-    monkeypatch.setattr(routes_databases, 'OpenSlices', Recorded)
+    monkeypatch.setattr(module, 'OpenDownloads', Recorded)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ('fill', 'error'),
+    [
+        ('bytes', 'slices still being sent hold 2 GiB on this worker; wait for one to end'),
+        ('count', '16 slices are still being sent on this worker; wait for one to end'),
+    ],
+)
+async def test_slice_answers_429_while_slices_being_sent_fill_a_bound(started_slice_recorder, monkeypatch, fill, error):
+    rec = await started_slice_recorder('none', events=1)
+    seen = _recorded_open_downloads(monkeypatch, routes_databases)
     async with _slice_client(rec) as client:
         done = await client.get(SLICE, params=_range())
         (open_slices,) = seen
-        # The whole body was sent: its bytes left the count.
-        after_send = open_slices.bytes
-        open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES)
+        # The whole body was sent: it left the count.
+        after_send = (open_slices.bytes, open_slices.count)
+        if fill == 'bytes':
+            open_slices.hold(routes_databases.SLICE_OPEN_MAX_BYTES)
+        else:
+            for _ in range(routes_databases.SLICE_OPEN_MAX_COUNT):
+                open_slices.hold(0)
         full = await client.get(SLICE, params=_range())
 
     assert done.status_code == 200
-    assert after_send == 0
-    assert (full.status_code, full.json()) == (
-        429,
-        {'error': 'slices still being sent hold 2 GiB on this worker; wait for one to end'},
-    )
+    assert after_send == (0, 0)
+    assert (full.status_code, full.json()) == (429, {'error': error})
     assert full.headers['retry-after'] == '5'
 
 

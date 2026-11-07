@@ -1,5 +1,5 @@
 {
-  "_comment": "Slice download contract (GET /api/v1/debug/slice). messages are the 400 texts in check order; the first rule a request breaks answers ({source}, {available}, {event} are filled in; available is the sorted list of the worker's sources for the scope joined with \", \", or none). validation_cases run a query (text values; every other parameter, a token too, is ignored) against the sources in available (a case may give its own); error null means the request is accepted. A cluster-scope request on a worker with no cluster source skips the source check, and the route answers 409 after every 400 check. filters_cases map a query to the filters column of the slice table: sorted compact JSON, UTF-8 not escaped, max_rows, output and sources always, every other filter only when given, events sorted without repeats, sources the sorted sources read (all available ones when none is asked for). file_names map a slice to its attachment name (UTC bounds, the fraction of a second dropped; the sanitized cluster, default when empty). ddl holds the two slice tables. limits pin the build limits; a limit marks the file truncated and never answers an error. A batch ends at batch_rows rows or chunk_bytes text bytes, whichever comes first, and the size limits are checked after each batch. from and to are epoch seconds from min_epoch to max_epoch (9999-12-31 23:59:59 UTC). open_bytes_full answers a request while finished slices still being sent hold open_max_bytes.",
+  "_comment": "Slice download contract (GET /api/v1/debug/slice). messages are the 400 texts in check order; the first rule a request breaks answers ({source}, {available}, {event} are filled in; available is the sorted list of the worker's sources for the scope joined with \", \", or none). validation_cases run a query (text values; every other parameter, a token too, is ignored) against the sources in available (a case may give its own); error null means the request is accepted. A cluster-scope request on a worker with no cluster source skips the source check, and the route answers 409 after every 400 check. filters_cases map a query to the filters column of the slice table: sorted compact JSON, UTF-8 not escaped, max_rows, output and sources always, every other filter only when given, events sorted without repeats, sources the sorted sources read (all available ones when none is asked for). file_names map a slice to its attachment name (UTC bounds, the fraction of a second dropped; the sanitized cluster, default when empty). ddl holds the two slice tables. limits pin the build limits; a limit marks the file truncated and never answers an error. A batch ends at batch_rows rows or chunk_bytes text bytes, whichever comes first, and the size limits are checked after each batch. from and to are epoch seconds from min_epoch to max_epoch (9999-12-31 23:59:59 UTC). open_bytes_full answers a request while finished slices still being sent hold open_max_bytes, open_count_full while they number open_max_count (the bytes are checked first).",
   "schema": 1,
   "available": {
     "worker": [
@@ -660,6 +660,11 @@
       "error": "slices still being sent hold 2 GiB on this worker; wait for one to end",
       "retry_after_seconds": 5
     },
+    "open_count_full": {
+      "status": 429,
+      "error": "16 slices are still being sent on this worker; wait for one to end",
+      "retry_after_seconds": 5
+    },
     "postgres_failed": {
       "status": 503,
       "error": "postgres read failed"
@@ -704,6 +709,7 @@
     "postgres_first_fetch_rows": 100,
     "postgres_flush_seconds": 3.0,
     "open_max_bytes": 2147483648,
+    "open_max_count": 16,
     "send_idle_seconds": 120.0,
     "min_epoch": 0,
     "max_epoch": 253402300799,

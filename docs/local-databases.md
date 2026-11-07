@@ -1536,8 +1536,18 @@ worker"}` for `source=file` with no live file, `404` `{"error": "No memory
 store on this worker"}` for `source=memory` with no memory store, `404`
 `{"error": "No cache on this worker"}` for `source=cache` with no cache
 file, `400` `{"error": "source must be memory, file or cache"}` for another
-value, and `500` `{"error": "Snapshot failed: ..."}` when the copy fails. It is behind `ui.auth_token`
-like the other debug routes.
+value, and `500` `{"error": "Snapshot failed: ..."}` when the copy fails.
+One live-file copy runs at a time too; a second `source=file` download waits
+up to 30 seconds and then answers `500` with the reason `another file
+snapshot is still running`. Each snapshot holds its temp file (or a buffer
+in RAM) until its download ends, so the snapshots still being sent are
+bounded per worker: after the `400` checks and before any `404`, a request
+answers `429` (with `Retry-After: 5`) `{"error": "snapshots still being sent
+hold 2 GiB on this worker; wait for one to end"}` while they hold 2 GiB, or
+`{"error": "16 snapshots are still being sent on this worker; wait for one
+to end"}` while there are 16 of them. A client that takes no chunk for 120
+seconds is cut off, and its snapshot leaves the count. The route is behind
+`ui.auth_token` like the other debug routes.
 
 **Merge.** `POST /api/v1/debug/merge` takes the same `.db` paths (sealed
 files and merge results) and writes
@@ -1595,8 +1605,8 @@ rules run in a fixed order and the first broken one answers. `scope=cluster`
 with the recorder off answers `409`. Only one slice builds at a time on a
 worker: a second request answers `429` with `Retry-After: 5`. A request
 also answers `429` while finished slices that are still being sent hold
-2 GiB on the worker (each pins its unlinked temp file, or its buffer in RAM,
-until its download ends). A download whose client takes no 1 MiB chunk for
+2 GiB on the worker, or number 16 (each pins its unlinked temp file, or its
+buffer in RAM, until its download ends). A download whose client takes no 1 MiB chunk for
 120 s is ended, so a stalled client cannot hold its file. A failed
 Postgres read answers `503` `{"error": "postgres read failed"}`, and a file
 that cannot be written `500` `{"error": "Slice failed: ..."}`.
