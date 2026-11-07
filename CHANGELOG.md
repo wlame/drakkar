@@ -407,7 +407,12 @@ the steps of the upgrade and the changes of behaviour.
   table; `provider=postgres|redis|consul` runs the registry and the election on
   a separate service and pauses it; new scenarios check the archive takeover
   after a killed holder, cluster tasks, the memory store, the Postgres recorder,
-  the DLQ record and a worker with the UI off.
+  the DLQ record, a worker with the UI off, the backpressure caps of a fast
+  worker under load, a refused twin worker name, and the Databases view routes;
+  the unclean-exit scenario also checks the own folder and the leftover a
+  restart seals. The fast harness worker reads the producer's file paths
+  again (it parsed no producer message since the fan-out change) and counts
+  each path in its own task.
 - **Databases View docs page.** `docs/databases-view.md` describes the
   Databases tab: its views, the address, the slice download, the limits, the
   actions and their keys, and what cleans itself.

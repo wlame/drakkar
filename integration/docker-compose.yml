@@ -426,6 +426,41 @@ services:
       - ..:/project:ro
       - ./shared:/shared
 
+  # --- A twin of worker-3 (profile twin) ---
+  #
+  # The same worker name as worker-3 in the same cluster, as if a second
+  # worker-3 started on another host: its own storage.dir inside the
+  # container (so the owner lock of the own folder does not see worker-3),
+  # the shared folder and the registry of the main cluster. The registry's
+  # same-name check must refuse its start while worker-3 runs.
+  # scenario-twin-name.sh starts it and removes it; a plain
+  # `just integration-up` does not start it. The recorder is off, so the
+  # refused start seals no recorder file into the history folder under
+  # worker-3's name. No host ports: it never serves.
+  worker-3-twin:
+    profiles: ["twin"]
+    build:
+      context: ..
+      dockerfile: integration/worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    environment:
+      WORKER_ID: worker-3
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9093"
+      DK_API__PORT: "8083"
+      DK_STORAGE__DIR: "/tmp/twin-storage"
+      DK_RECORDER__ENABLED: "false"
+      # Same provider, DSN, Redis URL and Consul token as worker-1 (see there).
+      DK_AUTODISCOVER__PROVIDER: ${HARNESS_PROVIDER:-filesystem}
+      DK_CONNECTIONS__POSTGRES__MAIN__DSN: "postgresql://drakkar:drakkar@postgres-fleet:5432/drakkar_fleet"
+      DK_CONNECTIONS__REDIS__MAIN__URL: "redis://drakkar:drakkar@redis-fleet:6379/3"
+      DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+
   # --- Fast Workers (symbol counting) ---
 
   fast-worker-1:
@@ -457,6 +492,13 @@ services:
       # A value over 1KiB is cut to its two halves; the failed-task check of
       # scenario-recorder-postgres.sh relies on it.
       DK_RECORDER__POSTGRES__MAX_OUTPUT: "1KiB"
+      # Small backpressure caps: the burst and flood phases of the producer
+      # fill them, and scenario-backpressure.sh checks from the metrics that
+      # the pending tasks stay at most one message's fan-out above the cap.
+      # The task cap must be at least executor.max_executors (2); the byte
+      # cap is the least the config allows.
+      DK_EXECUTOR__MAX_PENDING_TASKS: "4"
+      DK_EXECUTOR__MAX_PENDING_BYTES: "16MiB"
     ports:
       - "9094:9094"
       - "8084:8084"

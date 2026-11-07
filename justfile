@@ -264,7 +264,7 @@ integration-up provider='filesystem' profile='full':
 
 # Tear the integration environment down, including volumes
 integration-down:
-    docker compose -f integration/docker-compose.yml --profile=headless down -v
+    docker compose -f integration/docker-compose.yml --profile=headless --profile=twin down -v
 
 # Tail logs from the integration environment (just integration-logs worker-1)
 integration-logs *args:
@@ -301,7 +301,7 @@ chaos:
 # Needs the harness up with the same provider. Stops at the first failing
 # scenario; each script prints one verdict line.
 #
-# Wait for the workers, then run the nine harness scenarios (just integration-scenarios provider=postgres)
+# Wait for the workers, then run the twelve harness scenarios (just integration-scenarios provider=postgres)
 integration-scenarios provider='filesystem':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -313,7 +313,7 @@ integration-scenarios provider='filesystem':
     esac
     export HARNESS_PROVIDER="$provider"
     integration/wait-ready.sh
-    for scenario in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record headless; do
+    for scenario in backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
         integration/scenario-${scenario}.sh
     done
 
@@ -328,7 +328,7 @@ integration-matrix profile='quick':
         *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
     esac
     providers=(filesystem postgres redis consul)
-    steps=(service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record headless drain-delivery)
+    steps=(backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless drain-delivery)
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     any_failed=false
@@ -367,7 +367,7 @@ integration-matrix profile='quick':
             continue
         fi
         if integration/wait-ready.sh; then
-            for step in service-outage worker-cut-off unclean-exit secrets cluster-tasks recorder-memory recorder-postgres dlq-record headless; do
+            for step in backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
                 run_step "$provider" "$step" "integration/scenario-${step}.sh"
             done
             run_step "$provider" drain-delivery integration/verify-after-drain.sh

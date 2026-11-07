@@ -31,6 +31,28 @@
 #
 # With every style, worker-1 and worker-3 did not restart.
 #
+# Own folder and leftover, with every provider:
+#   - before the kill, worker-2's own folder <storage.dir>/<cluster>/<worker>/
+#     exists on the host (integration/shared/main_cluster/worker-2/, the
+#     shared bind mount is storage.dir), holds the owner lock .owner.lock
+#     and the live recorder file that worker-2's
+#     /api/v1/debug/databases?parts=own,storage names, and the answer's
+#     storage.own_folder is main_cluster/worker-2,
+#   - at the end of the scenario, the live file of the killed process is a
+#     leftover: the restarted worker-2 seals it and publishes it into
+#     history/main_cluster/ with its meta file (the meta names worker-2), it
+#     is gone from the own folder, and worker-2 logged
+#     recorder_leftover_sealed for it. A leftover is sealed once it is idle
+#     for 300 s, by the pass 300 s after the start (the pass at the start
+#     finds it still fresh), so the check waits up to LEFTOVER_LIMIT_SECONDS
+#     after the last start of worker-2 (the election half may kill and start
+#     worker-2 again). With consul worker-2 starts again at once, so the
+#     file is only a few seconds past the idle limit at that pass; when the
+#     check fails on consul alone, look there first.
+# Delivery after the kills is checked by the drain-delivery step of the run
+# matrix (verify-after-drain.sh), after every scenario: a drain here would
+# leave the later scenarios without load.
+#
 # Archive-election half, with every provider, after worker-2 is back. The
 # archive is a cluster task: a slot every 30 s of epoch time, a 40 s lease,
 # on worker-2 and worker-3 (worker-1 is the observer: its compose
@@ -133,6 +155,15 @@ HOLDER_LIMIT_SECONDS=$ACQUIRE_WINDOW_SECONDS
 ELECTION_TAKEOVER_LIMIT_SECONDS=150
 # The workers that run the archive: the holder must be one of them.
 ARCHIVE_WORKERS="worker-2 worker-3"
+# The UI port of the killed worker.
+KILLED_WORKER_UI_PORT=8082
+# The killed worker's own folder, relative to storage.dir (the shared bind
+# mount), and its history folder in the shared folder.
+KILLED_OWN_FOLDER="main_cluster/${KILLED_WORKER}"
+KILLED_HISTORY_FOLDER="history/main_cluster"
+# A leftover is sealed by the pass 300 s after the start; the limit adds
+# room for a busy host.
+LEFTOVER_LIMIT_SECONDS=390
 
 step "Scenario: unclean exit of ${KILLED_WORKER}"
 
@@ -144,6 +175,33 @@ case "$instance_before" in
 esac
 before=$(restart_snapshot worker-1 worker-3)
 ok "${KILLED_WORKER} online with instance ${instance_before}"
+
+# The own folder of the worker before the kill, and the name of its live
+# recorder file, which the kill leaves behind as a leftover.
+own_answer=$(curl -sf --connect-timeout 2 --max-time 10 \
+    "http://localhost:${KILLED_WORKER_UI_PORT}/api/v1/debug/databases?parts=own,storage") \
+    || fail "${KILLED_WORKER} /api/v1/debug/databases?parts=own,storage did not answer"
+own_facts=$(python3 -c '
+import json, sys
+answer = json.load(sys.stdin)
+live = [row.get("filename") for row in answer.get("own", []) if row.get("kind") == "live"]
+print(answer.get("storage", {}).get("own_folder"), live[0] if live else "")
+' <<<"$own_answer")
+read -r answered_own_folder leftover_name <<<"$own_facts"
+[ "$answered_own_folder" = "$KILLED_OWN_FOLDER" ] \
+    || fail "${KILLED_WORKER} answers storage.own_folder '${answered_own_folder}', expected '${KILLED_OWN_FOLDER}'"
+[ -n "${leftover_name:-}" ] || fail "${KILLED_WORKER} lists no live recorder file in its own rows"
+own_folder_path="${SCENARIO_DIR}/shared/${KILLED_OWN_FOLDER}"
+[ -d "$own_folder_path" ] || fail "the own folder ${own_folder_path} of ${KILLED_WORKER} does not exist"
+[ -f "${own_folder_path}/.owner.lock" ] || fail "the own folder of ${KILLED_WORKER} has no .owner.lock"
+[ -f "${own_folder_path}/${leftover_name}" ] \
+    || fail "the live file ${leftover_name} of ${KILLED_WORKER} is not in its own folder ${own_folder_path} ($(ls -A "$own_folder_path" | tr '\n' ' '))"
+leftover_since=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+ok "own folder ${KILLED_OWN_FOLDER} with .owner.lock and the live file ${leftover_name}"
+
+# SECONDS at the last start of the killed worker; the leftover check waits
+# from there.
+last_start_of_killed=$SECONDS
 
 # Every service this scenario killed and has not started again; the EXIT
 # trap starts them, so a failed check leaves no worker down for the next
@@ -219,6 +277,7 @@ offline_flow() {
     log "starting ${KILLED_WORKER}"
     "${COMPOSE[@]}" start "$KILLED_WORKER"
     mark_started "$KILLED_WORKER"
+    last_start_of_killed=$SECONDS
 
     wait_until "$RESTART_LIMIT_SECONDS" back_with_new_instance \
         || fail "worker-1 does not list ${KILLED_WORKER} online with a new instance ${RESTART_LIMIT_SECONDS}s after the start (online: $(peer_field "$WORKER_1_UI_PORT" "$KILLED_WORKER" online), instance: $(peer_field "$WORKER_1_UI_PORT" "$KILLED_WORKER" instance))"
@@ -262,6 +321,7 @@ takeover_flow() {
     docker start "$(container_id "$KILLED_WORKER")" >/dev/null
     start_done_at=$(epoch_now)
     mark_started "$KILLED_WORKER"
+    last_start_of_killed=$SECONDS
     timings="start issued $(seconds_between "$kill_at" "$start_at")s after the kill, returned after $(seconds_between "$start_at" "$start_done_at")s"
 
     POLL_SECONDS=1 wait_until "$TAKEOVER_LIMIT_SECONDS" back_with_new_instance \
@@ -501,6 +561,9 @@ esac
 log "starting ${holder}"
 "${COMPOSE[@]}" start "$holder"
 mark_started "$holder"
+if [ "$holder" = "$KILLED_WORKER" ]; then
+    last_start_of_killed=$SECONDS
+fi
 wait_until "$RESTART_LIMIT_SECONDS" peer_online_is "$WORKER_1_UI_PORT" "$holder" true \
     || fail "worker-1 does not list ${holder} online ${RESTART_LIMIT_SECONDS}s after the start (online: $(peer_field "$WORKER_1_UI_PORT" "$holder" online))"
 ok "${holder} online ${WAITED}s after the start"
@@ -518,4 +581,50 @@ doubled=$(doubled_tick_slots <<<"$ticks")
     || fail "slots of harness_cluster_tick ran twice from the plant to the end of the half (slot workers): $(tr '\n' ' ' <<<"$doubled")"
 ok "no slot of harness_cluster_tick ran twice from the plant to the end of the half ($(grep -c . <<<"$ticks" || true) ticks)"
 
-pass "${outcome}; plant ${plant_seconds}s; archive lock of ${holder} taken over by ${taker} ${takeover_after}s after the kill, archive published ${published_after}s after the kill"
+# ---------------------------------------------------------------------------
+# The leftover of the first kill: sealed and published by the restarted
+# worker under its own name.
+# ---------------------------------------------------------------------------
+
+step "Leftover: the restarted ${KILLED_WORKER} seals the live file of the killed process"
+
+leftover_history_path="${SCENARIO_DIR}/shared/${KILLED_HISTORY_FOLDER}/${leftover_name}"
+
+leftover_published() {
+    [ -f "$leftover_history_path" ] && [ -f "${leftover_history_path}.meta.json" ] \
+        && [ ! -e "${own_folder_path}/${leftover_name}" ]
+}
+
+# True when the log of the killed worker since the first kill has
+# recorder_leftover_sealed with a field that ends with the leftover's name.
+leftover_logged() {
+    "${COMPOSE[@]}" logs --no-color --no-log-prefix --since="$leftover_since" "$KILLED_WORKER" 2>/dev/null \
+        | LEFTOVER="/${leftover_name}" python3 -c '
+import json, os, sys
+found = False
+for line in sys.stdin:
+    start = line.find("{")
+    if found or start < 0:
+        continue
+    try:
+        record = json.loads(line[start:])
+    except ValueError:
+        continue
+    if isinstance(record, dict) and record.get("event") == "recorder_leftover_sealed":
+        found = any(isinstance(value, str) and value.endswith(os.environ["LEFTOVER"]) for value in record.values())
+sys.exit(0 if found else 1)
+'
+}
+
+leftover_left=$((LEFTOVER_LIMIT_SECONDS - (SECONDS - last_start_of_killed)))
+[ "$leftover_left" -gt 0 ] || leftover_left=1
+log "waiting up to ${leftover_left}s (${LEFTOVER_LIMIT_SECONDS}s after the last start of ${KILLED_WORKER}) for ${leftover_name} in ${KILLED_HISTORY_FOLDER}/"
+wait_until "$leftover_left" leftover_published \
+    || fail "${leftover_name} is not published into ${KILLED_HISTORY_FOLDER}/ with its meta file ${LEFTOVER_LIMIT_SECONDS}s after the last start of ${KILLED_WORKER} (in history: $([ -f "$leftover_history_path" ] && echo yes || echo no); meta: $([ -f "${leftover_history_path}.meta.json" ] && echo yes || echo no); still in the own folder: $([ -e "${own_folder_path}/${leftover_name}" ] && echo yes || echo no); own folder: $(ls -A "$own_folder_path" 2>&1 | tr '\n' ' '))"
+leftover_after=$((SECONDS - last_start_of_killed))
+meta_worker=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("worker"))' "${leftover_history_path}.meta.json")
+[ "$meta_worker" = "$KILLED_WORKER" ] || fail "the meta file of ${leftover_name} names the worker '${meta_worker}', expected ${KILLED_WORKER}"
+leftover_logged || fail "the log of ${KILLED_WORKER} has no recorder_leftover_sealed line for ${leftover_name}"
+ok "${leftover_name} published into ${KILLED_HISTORY_FOLDER}/ with a meta file naming ${KILLED_WORKER}, ${leftover_after}s after its last start; recorder_leftover_sealed logged"
+
+pass "${outcome}; own folder ${KILLED_OWN_FOLDER}, leftover ${leftover_name} sealed ${leftover_after}s after the last start; plant ${plant_seconds}s; archive lock of ${holder} taken over by ${taker} ${takeover_after}s after the kill, archive published ${published_after}s after the kill"
